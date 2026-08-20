@@ -29,10 +29,6 @@ current_gap = MIN_GAP
 last_request_ts = 0.0
 rate_lock = threading.Lock()
 
-class TiingoRateLimitPause(Exception):
-    """Stop the current scan immediately on Tiingo HTTP 429; checkpoint is kept for resume."""
-    pass
-
 UNIVERSE = sorted(set("""
 AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR
 AMZN TSLA HD LOW BKNG TJX SBUX MCD NKE CMG ORLY AZO ROST MAR
@@ -144,11 +140,11 @@ def tiingo_history(ticker, start="2006-01-01", retries=4):
         except HTTPError as ex:
             if ex.code == 429:
                 _slow_down()
-                # Do not keep hammering Tiingo. Stop this scan immediately and let
-                # the next scan resume from the persistent checkpoint.
-                raise TiingoRateLimitPause(
-                    f"{ticker}: Tiingo HTTP 429；本轮已自动暂停，进度已保存；当前间隔 {current_gap:.0f}s"
-                ) from ex
+                write_state(message=f"Tiingo 限流：冷却 {COOLDOWN_429} 秒后重试；当前间隔 {current_gap:.0f}s",
+                            gap_seconds=current_gap)
+                if attempt < retries:
+                    time.sleep(COOLDOWN_429)
+                    continue
             raise
         except (URLError, TimeoutError):
             if attempt < retries:
@@ -324,7 +320,7 @@ def run_scan():
     remaining = [t for t in ALL_SYMBOLS if t not in done]
     try:
         write_state(status="updating",
-                    message=f"增量更新/断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
+                    message=f"断点已恢复：从 {len(done)}/{len(ALL_SYMBOLS)} 继续；剩余 {len(remaining)}",
                     updated=len(done), total=len(ALL_SYMBOLS), error=None,
                     success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
 
@@ -339,14 +335,6 @@ def run_scan():
                 done.add(t)
                 failed.discard(t)
                 success_count = len(done)
-            except TiingoRateLimitPause as ex:
-                # Current symbol stays unfinished; do not mark it as a data failure.
-                save_checkpoint(done, failed)
-                write_state(status="paused",
-                            message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
-                            error=str(ex), updated=len(done), success_count=len(done),
-                            fail_count=len(failed), gap_seconds=current_gap)
-                return
             except Exception as ex:
                 failed.add(t)
                 fail_count = len(failed)
@@ -364,13 +352,6 @@ def run_scan():
                     update_one(t)
                     done.add(t)
                     failed.discard(t)
-                except TiingoRateLimitPause as ex:
-                    save_checkpoint(done, failed)
-                    write_state(status="paused",
-                                message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
-                                error=str(ex), updated=len(done), success_count=len(done),
-                                fail_count=len(failed), gap_seconds=current_gap)
-                    return
                 except Exception as ex:
                     write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
                 save_checkpoint(done, failed)
@@ -410,15 +391,32 @@ def run_scan():
     finally:
         scan_thread = None
 
-def start_scan():
+def start_scan(manual=False):
     global scan_thread
-    if scan_thread is not None and scan_thread.is_alive(): return False
-    scan_thread=threading.Thread(target=run_scan,daemon=True); scan_thread.start(); return True
+    if scan_thread is not None and scan_thread.is_alive():
+        return False
+    cp = read_checkpoint()
+    done = set(cp.get("done", []))
+    failed = set(cp.get("failed", []))
+    if manual:
+        write_state(
+            status="resuming" if done else "updating",
+            message=f"正在从断点继续：已完成 {len(done)}/{len(ALL_SYMBOLS)}" if done else "开始更新",
+            updated=len(done),
+            total=len(ALL_SYMBOLS),
+            success_count=len(done),
+            fail_count=len(failed),
+            error=None,
+            gap_seconds=current_gap
+        )
+    scan_thread=threading.Thread(target=run_scan,daemon=True)
+    scan_thread.start()
+    return True
 
 def scheduler_loop():
     time.sleep(8)
     s=read_state()
-    if AUTO_SCAN and not s.get("last_scan"): start_scan()
+    if AUTO_SCAN and not s.get("last_scan") and s.get("status") != "paused": start_scan()
     last_day=None
     while True:
         now=datetime.now(timezone.utc); day=now.date().isoformat()
@@ -535,7 +533,10 @@ def home():
 
 @APP.post("/scan")
 def scan():
-    start_scan(); return redirect(url_for("home"))
+    started = start_scan(manual=True)
+    if not started:
+        write_state(message="扫描任务已经在运行，请稍候")
+    return redirect(url_for("home"))
 
 @APP.get("/api/status")
 def api_status(): return jsonify(read_state())
@@ -552,6 +553,6 @@ def api_results():
 @APP.get("/health")
 def health():
     info=storage_info()
-    return jsonify({"ok":True,"version":"volume-ready-1.4-429-pause","data_dir":info["data_dir"],"writable":info["writable"]})
+    return jsonify({"ok":True,"version":"volume-ready-1.3","data_dir":info["data_dir"],"writable":info["writable"]})
 
 threading.Thread(target=scheduler_loop, daemon=True).start()
