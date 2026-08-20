@@ -16,10 +16,12 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 MARKET_DIR = DATA_DIR / "market"; MARKET_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 RESULT_FILE = DATA_DIR / "latest_scan.csv"
+CHECKPOINT_FILE = DATA_DIR / "scan_checkpoint.json"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
-MAX_GAP = float(os.environ.get("TIINGO_MAX_GAP_SECONDS", "90"))
+MAX_GAP = float(os.environ.get("TIINGO_MAX_GAP_SECONDS", "18"))
+COOLDOWN_429 = int(os.environ.get("TIINGO_429_COOLDOWN_SECONDS", "60"))
 AUTO_REFRESH_SECONDS = int(os.environ.get("AUTO_REFRESH_SECONDS", "5"))
 current_gap = MIN_GAP
 last_request_ts = 0.0
@@ -125,9 +127,10 @@ def tiingo_history(ticker, start="2006-01-01", retries=4):
         except HTTPError as ex:
             if ex.code == 429:
                 _slow_down()
-                write_state(message=f"Tiingo 限流，自动降速至 {current_gap:.0f}s/请求", gap_seconds=current_gap)
+                write_state(message=f"Tiingo 限流：冷却 {COOLDOWN_429} 秒后重试；当前间隔 {current_gap:.0f}s",
+                            gap_seconds=current_gap)
                 if attempt < retries:
-                    time.sleep(min(120, current_gap))
+                    time.sleep(COOLDOWN_429)
                     continue
             raise
         except (URLError, TimeoutError):
@@ -241,49 +244,110 @@ def score_symbol(t, spy):
             "volume_dry":volume_dry,"near_pivot":near_pivot,"breakout":breakout,
             "reason":"；".join(reasons)}
 
+def read_checkpoint():
+    if not CHECKPOINT_FILE.exists():
+        return {"done":[], "failed":[]}
+    try:
+        x=json.loads(CHECKPOINT_FILE.read_text(encoding="utf-8"))
+        return {"done":list(x.get("done",[])), "failed":list(x.get("failed",[]))}
+    except Exception:
+        return {"done":[], "failed":[]}
+
+def save_checkpoint(done, failed):
+    CHECKPOINT_FILE.write_text(json.dumps({"done":sorted(set(done)),
+        "failed":sorted(set(failed)),"saved_at":datetime.now(timezone.utc).isoformat()},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+
+def clear_checkpoint():
+    try:
+        CHECKPOINT_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 def run_scan():
     global scan_thread
-    success_count = 0
-    fail_count = 0
+    cp = read_checkpoint()
+    done = set(cp.get("done", []))
+    failed = set(cp.get("failed", []))
+    # If prior run was complete, begin a fresh cycle.
+    if len(done) >= len(ALL_SYMBOLS):
+        done.clear(); failed.clear(); clear_checkpoint()
+
+    success_count = len(done)
+    fail_count = len(failed)
+    remaining = [t for t in ALL_SYMBOLS if t not in done]
     try:
-        write_state(status="updating",message="正在更新 Tiingo 数据",updated=0,total=len(ALL_SYMBOLS),
-                    error=None,success_count=0,fail_count=0,gap_seconds=current_gap)
-        for i,t in enumerate(ALL_SYMBOLS,1):
-            write_state(last_symbol=t,updated=i-1,message=f"正在更新 {t} ({i}/{len(ALL_SYMBOLS)})",
-                        success_count=success_count,fail_count=fail_count,gap_seconds=current_gap)
+        write_state(status="updating",
+                    message=f"断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
+                    updated=len(done), total=len(ALL_SYMBOLS), error=None,
+                    success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
+
+        # First pass: continue only unfinished symbols.
+        for t in remaining:
+            i = len(done) + 1
+            write_state(last_symbol=t, updated=len(done),
+                        message=f"正在更新 {t}（已完成 {len(done)}/{len(ALL_SYMBOLS)}）",
+                        success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
             try:
                 update_one(t)
-                success_count += 1
+                done.add(t)
+                failed.discard(t)
+                success_count = len(done)
             except Exception as ex:
-                fail_count += 1
+                failed.add(t)
+                fail_count = len(failed)
                 write_state(error=f"{t}: {type(ex).__name__}: {str(ex)[:160]}")
-            write_state(updated=i,success_count=success_count,fail_count=fail_count,gap_seconds=current_gap)
+            save_checkpoint(done, failed)
+            write_state(updated=len(done), success_count=success_count,
+                        fail_count=len(failed), gap_seconds=current_gap)
 
-        spy=load_cached("SPY")
-        if spy is None or len(spy)<260:
+        # Retry failures once at the end instead of blocking the whole scan.
+        retry_list = [t for t in list(failed) if t not in done]
+        if retry_list:
+            write_state(message=f"主扫描完成，正在重试失败股票：{len(retry_list)}只")
+            for t in retry_list:
+                try:
+                    update_one(t)
+                    done.add(t)
+                    failed.discard(t)
+                except Exception as ex:
+                    write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
+                save_checkpoint(done, failed)
+                write_state(updated=len(done), success_count=len(done),
+                            fail_count=len(failed), gap_seconds=current_gap)
+
+        spy = load_cached("SPY")
+        if spy is None or len(spy) < 260:
             raise RuntimeError("SPY 数据不足，无法评分")
 
-        rows=[]
+        rows = []
         for t in UNIVERSE:
-            r=score_symbol(t,spy)
-            if r: rows.append(r)
+            r = score_symbol(t, spy)
+            if r:
+                rows.append(r)
 
-        out=pd.DataFrame(rows)
+        out = pd.DataFrame(rows)
         if len(out):
-            out=out.sort_values(["score","rs","vcp_quality"],ascending=False)
-            out.to_csv(RESULT_FILE,index=False)
+            out = out.sort_values(["score","rs","vcp_quality"], ascending=False)
+            out.to_csv(RESULT_FILE, index=False)
 
         regime = market_regime(spy)
-        write_state(status="ready",message=f"扫描完成：{len(rows)} 只",
-                    last_scan=datetime.now(timezone.utc).isoformat(),error=None,
-                    success_count=success_count,fail_count=fail_count,gap_seconds=current_gap,
-                    market_label=regime["label"],market_text=regime["text"],market_emoji=regime["emoji"])
+        status = "ready" if not failed else "ready"
+        msg = f"扫描完成：{len(rows)}只；失败 {len(failed)}只" if failed else f"扫描完成：{len(rows)}只"
+        write_state(status=status, message=msg, updated=len(done), total=len(ALL_SYMBOLS),
+                    last_scan=datetime.now(timezone.utc).isoformat(), error=None if not failed else f"仍有失败：{', '.join(sorted(failed))}",
+                    success_count=len(done), fail_count=len(failed), gap_seconds=current_gap,
+                    market_label=regime["label"], market_text=regime["text"], market_emoji=regime["emoji"])
+        if not failed:
+            clear_checkpoint()
     except Exception as ex:
-        write_state(status="error",message="扫描失败",error=f"{type(ex).__name__}: {ex}",
-                    success_count=success_count,fail_count=fail_count,gap_seconds=current_gap)
+        save_checkpoint(done, failed)
+        write_state(status="error", message="扫描暂停，进度已保存",
+                    error=f"{type(ex).__name__}: {ex}", updated=len(done),
+                    success_count=len(done), fail_count=len(failed), gap_seconds=current_gap)
         traceback.print_exc()
     finally:
-        scan_thread=None
+        scan_thread = None
 
 def start_scan():
     global scan_thread
@@ -420,6 +484,6 @@ def api_results():
         return jsonify([])
 
 @APP.get("/health")
-def health(): return jsonify({"ok":True,"version":"final-1.0"})
+def health(): return jsonify({"ok":True,"version":"final-resume-1.1"})
 
 threading.Thread(target=scheduler_loop, daemon=True).start()
