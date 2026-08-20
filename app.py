@@ -10,9 +10,11 @@ from flask import Flask, jsonify, render_template_string, redirect, url_for
 
 APP = Flask(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-if not DATA_DIR.exists():
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
     DATA_DIR = Path(__file__).resolve().parent / "cloud_data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 MARKET_DIR = DATA_DIR / "market"; MARKET_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 RESULT_FILE = DATA_DIR / "latest_scan.csv"
@@ -65,6 +67,17 @@ ALL_SYMBOLS = sorted(set(UNIVERSE + ["SPY"] + list(set(SECTOR.values()))))
 
 lock = threading.Lock()
 scan_thread = None
+
+def storage_info():
+    try:
+        test = DATA_DIR / ".vcp_write_test"
+        test.write_text("ok", encoding="utf-8")
+        ok = test.exists()
+        try: test.unlink()
+        except Exception: pass
+        return {"data_dir": str(DATA_DIR), "writable": bool(ok)}
+    except Exception:
+        return {"data_dir": str(DATA_DIR), "writable": False}
 
 def read_state():
     s = {}
@@ -146,14 +159,25 @@ def load_cached(ticker):
     except Exception: return None
 
 def update_one(ticker):
+    """
+    Incremental mode:
+    - First run: full history download from 2006-01-01
+    - Later runs: request only a tiny recent window, then merge into local /data cache
+    """
     p = MARKET_DIR / f"{ticker}.csv"
     old = load_cached(ticker)
+
     if old is not None and len(old):
-        start = max(pd.Timestamp("2006-01-01"), old.index.max() - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
-        new = tiingo_history(ticker, start)
-        d = pd.concat([old, new]); d = d[~d.index.duplicated(keep="last")].sort_index()
+        last_dt = pd.Timestamp(old.index.max()).normalize()
+        # Only ask Tiingo for a short recent window. This keeps payload tiny and avoids re-downloading history.
+        # 7 calendar days covers weekends/holidays; duplicate rows are replaced on merge.
+        start_dt = max(pd.Timestamp("2006-01-01"), last_dt - pd.Timedelta(days=7))
+        new = tiingo_history(ticker, start_dt.strftime("%Y-%m-%d"))
+        d = pd.concat([old, new])
+        d = d[~d.index.duplicated(keep="last")].sort_index()
     else:
         d = tiingo_history(ticker, "2006-01-01")
+
     d.to_csv(p, index_label="Date")
     return d
 
@@ -167,6 +191,24 @@ def band_q(v, lo, midlo, midhi, hi):
     if v < midlo: return (v-lo)/(midlo-lo)
     if v <= midhi: return 1.0
     return (hi-v)/(hi-midhi)
+
+def cache_summary():
+    total = 0
+    cached = 0
+    latest = None
+    for t in ALL_SYMBOLS:
+        total += 1
+        d = load_cached(t)
+        if d is not None and len(d):
+            cached += 1
+            dt = pd.Timestamp(d.index.max())
+            if latest is None or dt > latest:
+                latest = dt
+    return {
+        "cached_count": cached,
+        "cache_total": total,
+        "cache_latest": latest.strftime("%Y-%m-%d") if latest is not None else "无"
+    }
 
 def market_regime(spy):
     if spy is None or len(spy) < 200:
@@ -278,7 +320,7 @@ def run_scan():
     remaining = [t for t in ALL_SYMBOLS if t not in done]
     try:
         write_state(status="updating",
-                    message=f"断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
+                    message=f"增量更新/断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
                     updated=len(done), total=len(ALL_SYMBOLS), error=None,
                     success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
 
@@ -286,7 +328,7 @@ def run_scan():
         for t in remaining:
             i = len(done) + 1
             write_state(last_symbol=t, updated=len(done),
-                        message=f"正在更新 {t}（已完成 {len(done)}/{len(ALL_SYMBOLS)}）",
+                        message=f"增量更新 {t}（已完成 {len(done)}/{len(ALL_SYMBOLS)}）",
                         success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
             try:
                 update_one(t)
@@ -378,11 +420,13 @@ button.alt{background:#eef2f7;color:#17202a}.warn{color:#a35b00}.kpi{font-size:2
 table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:10px;border-bottom:1px solid #edf0f4;text-align:left}
 th{font-size:12px;color:#667085}.scroll{overflow-x:auto}.score{font-size:20px;font-weight:800}.detail{background:#f8fafc;border-radius:12px;padding:12px;line-height:1.7}
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · Final</h1><div class="muted">Tiingo统一数据 · V2.2冻结评分 · 自动限流 · 手机版</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · Final</h1><div class="muted">Tiingo统一数据 · V2.2冻结评分 · 增量更新 · 本地缓存 · 手机版</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
+<div class="card"><div class="muted">持久储存</div><div class="kpi">{{storage_dir}}</div><div class="muted">可写：{{"是" if storage_writable else "否"}}</div></div>
 <div class="card"><div class="muted">市场环境</div><div class="kpi">{{market_emoji}} {{market_text}}</div></div>
+<div class="card"><div class="muted">本地缓存</div><div class="kpi">{{cached_count}} / {{cache_total}}</div><div class="muted">最新：{{cache_latest}}</div></div>
 <div class="card"><div class="muted">90+ 顶级候选</div><div class="kpi">{{count90}}</div></div>
 <div class="card"><div class="muted">严格 VCP</div><div class="kpi">{{count_strict}}</div></div>
 <div class="card"><div class="muted">突破候选</div><div class="kpi">{{count_breakout}}</div></div>
@@ -464,8 +508,11 @@ def home():
             rows=df.head(TOP_N).to_dict("records")
         except Exception:
             rows=[]
+    cs=cache_summary()
+    si=storage_info()
     return render_template_string(HTML,rows=rows,sector_rows=sector_rows,
-        count90=count90,count_strict=count_strict,count_breakout=count_breakout,**s)
+        count90=count90,count_strict=count_strict,count_breakout=count_breakout,
+        cached_count=cs["cached_count"],cache_total=cs["cache_total"],cache_latest=cs["cache_latest"],storage_dir=si["data_dir"],storage_writable=si["writable"],**s)
 
 @APP.post("/scan")
 def scan():
@@ -484,6 +531,8 @@ def api_results():
         return jsonify([])
 
 @APP.get("/health")
-def health(): return jsonify({"ok":True,"version":"final-resume-1.1"})
+def health():
+    info=storage_info()
+    return jsonify({"ok":True,"version":"volume-ready-1.3","data_dir":info["data_dir"],"writable":info["writable"]})
 
 threading.Thread(target=scheduler_loop, daemon=True).start()
