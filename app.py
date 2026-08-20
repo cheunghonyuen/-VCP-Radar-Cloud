@@ -29,6 +29,10 @@ current_gap = MIN_GAP
 last_request_ts = 0.0
 rate_lock = threading.Lock()
 
+class TiingoRateLimitPause(Exception):
+    """Stop the current scan immediately on Tiingo HTTP 429; checkpoint is kept for resume."""
+    pass
+
 UNIVERSE = sorted(set("""
 AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR
 AMZN TSLA HD LOW BKNG TJX SBUX MCD NKE CMG ORLY AZO ROST MAR
@@ -140,11 +144,11 @@ def tiingo_history(ticker, start="2006-01-01", retries=4):
         except HTTPError as ex:
             if ex.code == 429:
                 _slow_down()
-                write_state(message=f"Tiingo 限流：冷却 {COOLDOWN_429} 秒后重试；当前间隔 {current_gap:.0f}s",
-                            gap_seconds=current_gap)
-                if attempt < retries:
-                    time.sleep(COOLDOWN_429)
-                    continue
+                # Do not keep hammering Tiingo. Stop this scan immediately and let
+                # the next scan resume from the persistent checkpoint.
+                raise TiingoRateLimitPause(
+                    f"{ticker}: Tiingo HTTP 429；本轮已自动暂停，进度已保存；当前间隔 {current_gap:.0f}s"
+                ) from ex
             raise
         except (URLError, TimeoutError):
             if attempt < retries:
@@ -335,6 +339,14 @@ def run_scan():
                 done.add(t)
                 failed.discard(t)
                 success_count = len(done)
+            except TiingoRateLimitPause as ex:
+                # Current symbol stays unfinished; do not mark it as a data failure.
+                save_checkpoint(done, failed)
+                write_state(status="paused",
+                            message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
+                            error=str(ex), updated=len(done), success_count=len(done),
+                            fail_count=len(failed), gap_seconds=current_gap)
+                return
             except Exception as ex:
                 failed.add(t)
                 fail_count = len(failed)
@@ -352,6 +364,13 @@ def run_scan():
                     update_one(t)
                     done.add(t)
                     failed.discard(t)
+                except TiingoRateLimitPause as ex:
+                    save_checkpoint(done, failed)
+                    write_state(status="paused",
+                                message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
+                                error=str(ex), updated=len(done), success_count=len(done),
+                                fail_count=len(failed), gap_seconds=current_gap)
+                    return
                 except Exception as ex:
                     write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
                 save_checkpoint(done, failed)
@@ -533,6 +552,6 @@ def api_results():
 @APP.get("/health")
 def health():
     info=storage_info()
-    return jsonify({"ok":True,"version":"volume-ready-1.3","data_dir":info["data_dir"],"writable":info["writable"]})
+    return jsonify({"ok":True,"version":"volume-ready-1.4-429-pause","data_dir":info["data_dir"],"writable":info["writable"]})
 
 threading.Thread(target=scheduler_loop, daemon=True).start()
