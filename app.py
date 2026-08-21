@@ -1,4 +1,4 @@
-import os, json, time, threading, traceback
+import os, json, time, threading, traceback, io, math
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -6,7 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify, render_template_string, redirect, url_for
+from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file
 
 APP = Flask(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -792,6 +792,236 @@ def scheduler_loop():
             if start_scan(): last_day=day
         time.sleep(30)
 
+
+def _pdf_escape(s):
+    s=str(s)
+    return s.replace("\\","\\\\").replace("(","\\(").replace(")","\\)")
+
+def _ascii_cell(v):
+    """Keep the exported PDF font-safe and compact."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s=str(v)
+    # Common Chinese labels/reasons -> compact ASCII where helpful.
+    repl={
+        "是":"Y","否":"N","完整回测":"FULL","快速验证":"QUICK",
+        "科技":"TECH","金融":"FIN","医疗":"HLTH","工业":"IND",
+        "能源":"ENERGY","材料":"MAT","通信":"COMM","房地产":"RE",
+        "可选消费":"DISC","必需消费":"STAP","公用事业":"UTIL",
+    }
+    for a,b in repl.items():
+        s=s.replace(a,b)
+    # PDF built-in Courier is ASCII-safe. Replace remaining non-ASCII.
+    return s.encode("ascii","replace").decode("ascii")
+
+def _fmt_num(v, pct=False, digits=2):
+    try:
+        x=float(v)
+        if math.isnan(x) or math.isinf(x):
+            return ""
+        if pct:
+            return f"{x*100:.{digits}f}%"
+        return f"{x:.{digits}f}"
+    except Exception:
+        return _ascii_cell(v)
+
+def _table_lines(df, cols, widths, headers=None, transforms=None):
+    if df is None or df.empty:
+        return ["(no rows)"]
+    headers=headers or cols
+    transforms=transforms or {}
+    def clip(s,w):
+        s=_ascii_cell(s)
+        return s[:w].ljust(w)
+    out=[" ".join(clip(h,w) for h,w in zip(headers,widths))]
+    out.append("-"*min(145, sum(widths)+len(widths)-1))
+    for _,r in df.iterrows():
+        vals=[]
+        for c,w in zip(cols,widths):
+            v=r.get(c,"")
+            if c in transforms:
+                try:v=transforms[c](v)
+                except Exception:v=""
+            vals.append(clip(v,w))
+        out.append(" ".join(vals))
+    return out
+
+def _make_text_pdf(lines, title="VCP Radar Export"):
+    """Tiny dependency-free multi-page PDF using built-in Courier."""
+    # A4 landscape points
+    W,H=842,595
+    left=24; top=H-30; bottom=24
+    font_size=6.2
+    leading=7.4
+    per_page=max(1,int((top-bottom)/leading))
+    pages=[lines[i:i+per_page] for i in range(0,len(lines),per_page)] or [["(empty report)"]]
+
+    objects=[]
+    # 1 catalog, 2 pages root, 3 font
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(None)  # pages root filled later
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+
+    page_ids=[]
+    for page_no, plines in enumerate(pages,1):
+        content_id=len(objects)+2
+        page_id=len(objects)+1
+        page_ids.append(page_id)
+
+        content=["BT",f"/F1 {font_size:.1f} Tf",f"{leading:.1f} TL",f"{left} {top} Td"]
+        for idx,line in enumerate(plines):
+            if idx:
+                content.append("T*")
+            content.append(f"({_pdf_escape(line)}) Tj")
+        # page footer
+        content += ["ET","BT","/F1 6 Tf",f"{W-105} 12 Td",
+                    f"({_pdf_escape(f'Page {page_no}/{len(pages)}')}) Tj","ET"]
+        stream="\n".join(content).encode("latin-1","replace")
+        page_obj=f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W} {H}] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+        content_obj=b"<< /Length "+str(len(stream)).encode()+b" >>\nstream\n"+stream+b"\nendstream"
+        objects.append(page_obj)
+        objects.append(content_obj)
+
+    kids=" ".join(f"{pid} 0 R" for pid in page_ids)
+    objects[1]=f"<< /Type /Pages /Count {len(page_ids)} /Kids [ {kids} ] >>"
+
+    buf=io.BytesIO()
+    buf.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets=[0]
+    for i,obj in enumerate(objects,1):
+        offsets.append(buf.tell())
+        buf.write(f"{i} 0 obj\n".encode())
+        if isinstance(obj,bytes):
+            buf.write(obj)
+        else:
+            buf.write(str(obj).encode("latin-1","replace"))
+        buf.write(b"\nendobj\n")
+    xref=buf.tell()
+    buf.write(f"xref\n0 {len(objects)+1}\n".encode())
+    buf.write(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        buf.write(f"{off:010d} 00000 n \n".encode())
+    buf.write(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode())
+    buf.seek(0)
+    return buf
+
+def build_v3_export_pdf():
+    base=v3_result_dir()
+    st=read_v3_status()
+    lines=[]
+    lines += [
+        "VCP RADAR CLOUD - V3.2 ANALYSIS EXPORT",
+        f"Generated UTC: {datetime.now(timezone.utc).isoformat()}",
+        f"Mode: {_ascii_cell(st.get('mode',''))}   Status: {_ascii_cell(st.get('status',''))}",
+        f"Stocks: {st.get('stocks',0)}   Processed: {st.get('processed',0)}",
+        f"Result folder: {_ascii_cell(str(base))}",
+        "",
+    ]
+
+    # Gate funnel
+    p=base/"jlaw_v3_funnel_total.csv"
+    lines += ["=== GATE FUNNEL ==="]
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            if len(d):
+                r=d.iloc[0]
+                order=["checks","market","stage2","rs","sector","group","supply","leader","breakout"]
+                lines.append(" -> ".join(f"{k.upper()}={int(r.get(k,0))}" for k in order))
+        except Exception as e:
+            lines.append(f"read error: {_ascii_cell(e)}")
+    else:
+        lines.append("(missing)")
+    lines.append("")
+
+    # Supply distribution
+    lines += ["=== SUPPLY DISTRIBUTION ==="]
+    p=base/"jlaw_v3_supply_stats.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["metric","min","p10","p25","median","p75","p90","max"] if c in d.columns]
+            if not cols: cols=list(d.columns)
+            widths=[18]+[11]*(len(cols)-1)
+            lines += _table_lines(d,cols,widths)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    # V3 summary
+    lines += ["=== V3 BASE SUMMARY ==="]
+    p=base/"jlaw_v3_summary.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["grade","trades","win_rate","avg_return","avg_win","avg_loss","payoff_ratio","profit_factor","target_hit_rate","stop_rate","avg_hold"] if c in d.columns]
+            widths=[7,7,9,10,10,10,9,8,10,9,9][:len(cols)]
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=True) if _c in ["win_rate","avg_return","avg_win","avg_loss","target_hit_rate","stop_rate"] else _fmt_num(v)) for c in cols}
+            lines += _table_lines(d,cols,widths,transforms=tr)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    # Shadow summary - the most important table for model comparison
+    lines += ["=== V3.2 SHADOW SUMMARY ==="]
+    p=base/"jlaw_v3_shadow_summary.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["mode","trades","win_rate","avg_return","profit_factor","avg_win","avg_loss","avg_hold","target_hit_rate","stop_rate","be_rate","avg_stop","avg_target","avg_mfe","avg_mae"] if c in d.columns]
+            widths=[12,7,9,10,7,10,10,8,9,9,8,9,9,9,9][:len(cols)]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss","target_hit_rate","stop_rate","be_rate","avg_stop","avg_target","avg_mfe","avg_mae"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(d,cols,widths,transforms=tr)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    # Full signal list
+    lines += ["=== ALL BREAKOUT SIGNALS ==="]
+    p=base/"jlaw_v3_signals.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["ticker","date","grade","entry","pivot","volratio","rs","sector_score","leader_score","supply_score","quality"] if c in d.columns]
+            widths=[7,11,5,9,9,8,5,7,7,7,7][:len(cols)]
+            lines += _table_lines(d,cols,widths)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    # Full executed trades
+    lines += ["=== ALL BASE TRADES ==="]
+    p=base/"jlaw_v3_trades.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["ticker","date","grade","entry","pivot","volratio","rs","supply_score","quality","return_pct","reason","hold_days","mfe","mae"] if c in d.columns]
+            widths=[7,11,5,9,9,7,5,7,7,9,13,7,9,9][:len(cols)]
+            pctcols={"return_pct","mfe","mae"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(d,cols,widths,transforms=tr)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    # Full shadow trades: large, but intentionally complete for sharing/analysis.
+    lines += ["=== ALL SHADOW TRADES (COMPLETE) ==="]
+    p=base/"jlaw_v3_shadow_trades.csv"
+    if p.exists():
+        try:
+            d=pd.read_csv(p)
+            cols=[c for c in ["ticker","date","mode","volratio","atr_pct","stop_pct","target_pct","mfe","mae","hold_days","reason","return_pct","be_armed"] if c in d.columns]
+            widths=[7,11,12,7,8,8,8,8,8,7,13,9,5][:len(cols)]
+            pctcols={"atr_pct","stop_pct","target_pct","mfe","mae","return_pct"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(d,cols,widths,transforms=tr)
+        except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+    lines.append("END OF EXPORT")
+    return _make_text_pdf(lines)
+
+
 HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VCP Radar Cloud Final</title><style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#f3f6fb;color:#17202a;margin:0}
@@ -804,6 +1034,35 @@ button.alt{background:#eef2f7;color:#17202a}.warn{color:#a35b00}.kpi{font-size:2
 .progress{height:11px;background:#edf1f7;border-radius:999px;overflow:hidden;margin:12px 0}.progress>div{height:100%;background:#111827}
 table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:10px;border-bottom:1px solid #edf0f4;text-align:left}
 th{font-size:12px;color:#667085}.scroll{overflow-x:auto}.score{font-size:20px;font-weight:800}.detail{background:#f8fafc;border-radius:12px;padding:12px;line-height:1.7}
+
+details.section-fold{
+  margin-top:14px;
+  border:1px solid #e6eaf0;
+  border-radius:16px;
+  background:#fff;
+  overflow:hidden;
+}
+details.section-fold > summary{
+  list-style:none;
+  cursor:pointer;
+  padding:16px 18px;
+  font-weight:800;
+  font-size:20px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:#f8fafc;
+}
+details.section-fold > summary::-webkit-details-marker{display:none}
+details.section-fold > summary:after{
+  content:"＋";
+  font-size:24px;
+  font-weight:700;
+  color:#64748b;
+}
+details.section-fold[open] > summary:after{content:"－"}
+details.section-fold .fold-body{padding:14px 18px 18px}
+
 </style></head><body><div class="wrap">
 <div class="top"><div><h1>VCP Radar Cloud · Final</h1><div class="muted">Tiingo统一数据 · V2.2冻结评分 · 增量更新 · 本地缓存 · 手机版</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
@@ -922,6 +1181,7 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 <button {% if v3_status in ["running","stopping"] %}disabled style="opacity:.45"{% endif %}>
 {% if v3_status in ["running","stopping"] and v3_mode=="full" %}完整回测中…{% else %}完整回测 122只{% endif %}
 </button></form>
+<a href="/v3/export-pdf" style="text-decoration:none"><button type="button" class="alt" {% if v3_status!="done" %}disabled style="opacity:.45"{% endif %}>导出PDF报告</button></a>
 {% if v3_status in ["running","stopping"] %}
 <form method="post" action="/v3/stop" style="display:inline">
 <button style="background:#7f1d1d">■ 停止回测</button>
@@ -956,7 +1216,7 @@ Leader {{v3_diag.funnel.get("leader_pass",0)}} →
 
 {% if v3_diag.supply_stats %}
 <div style="margin-top:12px">
-<b>Supply 分布诊断：</b>
+<details class="section-fold"><summary>Supply 分布诊断</summary><div class="fold-body"><b>Supply 分布诊断：</b>
 <div class="scroll"><table style="min-width:760px">
 <tr><th>指标</th><th>P10</th><th>P25</th><th>中位数</th><th>P75</th><th>P90</th><th>最大</th></tr>
 {% for r in v3_diag.supply_stats %}
@@ -985,7 +1245,7 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 </table></div>{% endif %}
 
 {% if v3_trades %}
-<h3 style="margin-top:18px">突破交易逐笔诊断</h3>
+<details class="section-fold"><summary>突破交易逐笔诊断</summary><div class="fold-body"><h3 style="margin-top:0">突破交易逐笔诊断</h3>
 <div class="muted" style="margin-bottom:8px">直接读取刚才已经完成的回测结果，不需要重新跑。重点看这几笔为什么在约5天内止损。</div>
 <div class="scroll"><table style="min-width:1400px">
 <tr>
@@ -1018,6 +1278,7 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 </table></div>
 {% endif %}
 
+</div></details>
 {% if v3_signals and (v3_signals|length) > (v3_trades|length) %}
 <div style="margin-top:14px;background:#f6f8fb;padding:12px;border-radius:12px">
 <b>信号数多于实际交易：</b>本轮有 {{v3_signals|length}} 个突破信号、{{v3_trades|length}} 笔实际交易。
@@ -1027,7 +1288,7 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 
 
 {% if v3_shadow %}
-<h3 style="margin-top:20px">V3.2 Shadow Test · 同一信号并排测试</h3>
+<details class="section-fold" open><summary>V3.2 Shadow Test · 同一信号并排测试</summary><div class="fold-body"><h3 style="margin-top:0">V3.2 Shadow Test · 同一信号并排测试</h3>
 <div class="muted" style="margin-bottom:8px">
 不改变前面的 Market / Stage 2 / RS / Group / Supply 筛选，只比较突破量门槛、Breakeven 利润保护和 ATR 自适应止损/止盈。
 </div>
@@ -1057,7 +1318,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 {% if v3_shadow_trades %}
-<h3 style="margin-top:18px">Shadow Test · 逐笔结果</h3>
+</div></details>
+<details class="section-fold"><summary>Shadow Test · 逐笔结果</summary><div class="fold-body"><h3 style="margin-top:0">Shadow Test · 逐笔结果</h3>
 <div class="muted" style="margin-bottom:8px">
 这张表直接解释为什么某个模型改善/没有改善。尤其看 AVGO 的 BE 是否已触发，以及 ATR 到底把哪一笔变成盈利。
 </div>
@@ -1080,6 +1342,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endfor %}
 </table></div>
 {% endif %}
+</div></details>
 {% endif %}
 
 <div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
@@ -1156,6 +1419,17 @@ def v3_full_start():
 def v3_stop():
     stop_v3()
     return redirect(url_for("home"))
+
+@APP.get("/v3/export-pdf")
+def v3_export_pdf():
+    try:
+        pdf=build_v3_export_pdf()
+        mode=read_v3_status().get("mode","full")
+        stamp=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        name=f"VCP_Radar_V3_2_{mode}_{stamp}.pdf"
+        return send_file(pdf,mimetype="application/pdf",as_attachment=True,download_name=name)
+    except Exception as e:
+        return f"PDF export failed: {e}",500
 
 @APP.get("/api/v3-status")
 def api_v3_status():
