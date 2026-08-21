@@ -538,6 +538,122 @@ def v3_shadow_trade_details():
     except Exception:
         return []
 
+
+V4_WEIGHT_SCHEMES = {
+    # supply, setup(quality), volume, leader, sector, rs
+    "SUPPLY_HEAVY":      dict(supply=0.30, setup=0.20, volume=0.15, leader=0.15, sector=0.10, rs=0.10),
+    "VOLUME_HEAVY":      dict(supply=0.20, setup=0.15, volume=0.30, leader=0.15, sector=0.10, rs=0.10),
+    "SUPPLY_VOLUME":     dict(supply=0.27, setup=0.16, volume=0.27, leader=0.14, sector=0.10, rs=0.06),
+    "SETUP_LEADER":      dict(supply=0.23, setup=0.24, volume=0.16, leader=0.22, sector=0.10, rs=0.05),
+    "BALANCED_ELITE":    dict(supply=0.25, setup=0.20, volume=0.20, leader=0.15, sector=0.10, rs=0.10),
+}
+
+def _v4_factor_frame():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return pd.DataFrame()
+    try:
+        d=pd.read_csv(p)
+        if d.empty:return d
+        for c in ["supply_score","quality","volratio","leader_score","sector_score","rs","return_pct","hold_days"]:
+            if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+        need=["supply_score","quality","volratio","leader_score","sector_score","rs","return_pct"]
+        if any(c not in d.columns for c in need):
+            return pd.DataFrame()
+
+        # Fixed, pre-declared transforms. No outcome variable is used to score a trade.
+        d["f_supply"]=d["supply_score"].clip(0,100)
+        d["f_setup"]=d["quality"].clip(0,100)
+
+        # Volume confirmation: 1.2x is the old floor; 2.5x+ gets max score.
+        d["f_volume"]=((d["volratio"]-1.20)/(2.50-1.20)*100).clip(0,100)
+
+        d["f_leader"]=d["leader_score"].clip(0,100)
+        d["f_sector"]=d["sector_score"].clip(0,100)
+        d["f_rs"]=d["rs"].clip(0,100)
+
+        for name,w in V4_WEIGHT_SCHEMES.items():
+            d["score_"+name]=(
+                d["f_supply"]*w["supply"] +
+                d["f_setup"]*w["setup"] +
+                d["f_volume"]*w["volume"] +
+                d["f_leader"]*w["leader"] +
+                d["f_sector"]*w["sector"] +
+                d["f_rs"]*w["rs"]
+            )
+        return d
+    except Exception:
+        return pd.DataFrame()
+
+def _v4_metrics(g):
+    if g is None or g.empty:
+        return dict(trades=0, win_rate=np.nan, avg_return=np.nan, pf=np.nan,
+                    avg_win=np.nan, avg_loss=np.nan, avg_hold=np.nan, max_losing_streak=0)
+    r=pd.to_numeric(g["return_pct"],errors="coerce").dropna()
+    if r.empty:
+        return dict(trades=0, win_rate=np.nan, avg_return=np.nan, pf=np.nan,
+                    avg_win=np.nan, avg_loss=np.nan, avg_hold=np.nan, max_losing_streak=0)
+    wins=r[r>0]; losses=r[r<0]
+    pf=(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (np.inf if len(wins) else 0)
+    # sequence-based losing streak in original trade order
+    streak=mx=0
+    for x in r.tolist():
+        if x<0:
+            streak+=1; mx=max(mx,streak)
+        else:
+            streak=0
+    return dict(
+        trades=len(r),
+        win_rate=(r>0).mean(),
+        avg_return=r.mean(),
+        pf=pf,
+        avg_win=wins.mean() if len(wins) else np.nan,
+        avg_loss=losses.mean() if len(losses) else np.nan,
+        avg_hold=pd.to_numeric(g.get("hold_days"),errors="coerce").mean() if "hold_days" in g.columns else np.nan,
+        max_losing_streak=mx
+    )
+
+def v4_weight_sweep():
+    d=_v4_factor_frame()
+    if d.empty:return []
+    rows=[]
+    # Compare exactly the sample sizes the user asked for, plus 100 and all.
+    cuts=[10,20,30,50,100]
+    for name in V4_WEIGHT_SCHEMES:
+        sc="score_"+name
+        ranked=d.sort_values(sc,ascending=False,kind="mergesort")
+        for n in cuts:
+            g=ranked.head(min(n,len(ranked)))
+            m=_v4_metrics(g)
+            rows.append(dict(
+                scheme=name, selection=f"TOP{n}", cutoff=float(g[sc].min()) if len(g) else np.nan,
+                **m
+            ))
+        # Also include score threshold slices so future weights can be tuned without code changes.
+        for th in [60,65,70,75]:
+            g=d[d[sc]>=th].sort_values(sc,ascending=False)
+            if len(g)==0: continue
+            m=_v4_metrics(g)
+            rows.append(dict(
+                scheme=name, selection=f"SCORE>={th}", cutoff=th, **m
+            ))
+    return rows
+
+def v4_best_by_size():
+    rows=v4_weight_sweep()
+    if not rows:return []
+    d=pd.DataFrame(rows)
+    out=[]
+    for sel in ["TOP10","TOP20","TOP30","TOP50","TOP100"]:
+        g=d[d.selection==sel].copy()
+        if g.empty:continue
+        # Primary rank = avg return, tie-break PF then win rate.
+        g=g.sort_values(["avg_return","pf","win_rate"],ascending=False)
+        r=g.iloc[0].to_dict()
+        out.append(r)
+    return out
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -979,6 +1095,22 @@ def build_v3_export_pdf():
         except Exception as e: lines.append(f"read error: {_ascii_cell(e)}")
     lines.append("")
 
+
+    # V4 Elite weight sweep
+    lines += ["=== V4 ELITE WEIGHT SWEEP ==="]
+    try:
+        vs=pd.DataFrame(v4_weight_sweep())
+        if not vs.empty:
+            cols=["scheme","selection","trades","win_rate","avg_return","pf","avg_win","avg_loss","avg_hold","max_losing_streak","cutoff"]
+            cols=[c for c in cols if c in vs.columns]
+            widths=[16,11,7,9,10,7,10,10,8,8,8][:len(cols)]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(vs,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
     # Full signal list
     lines += ["=== ALL BREAKOUT SIGNALS ==="]
     p=base/"jlaw_v3_signals.csv"
@@ -1345,6 +1477,63 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div></details>
 {% endif %}
 
+
+{% if v4_sweep %}
+<details class="section-fold" open>
+<summary>V4 Elite Score · 权重压力测试</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4 Elite Score · 多套权重并排测试</h3>
+<div class="muted" style="margin-bottom:10px">
+不改原V3发动机、不重新回测。直接用已有交易在入场前可见的 Supply、Setup/Quality、Volume、Leader、Sector、RS 重新打分。
+这是参数研究，不是最终规则；同一历史样本上挑权重会有过拟合风险，最终还要做年份/样本外验证。
+</div>
+
+{% if v4_best %}
+<h4>每个交易数量下，目前表现最佳的权重方案</h4>
+<div class="scroll"><table style="min-width:980px">
+<tr><th>精选数量</th><th>最佳权重</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>最大连亏</th><th>最低Elite分</th></tr>
+{% for r in v4_best %}
+<tr>
+<td><b>{{r.selection}}</b></td>
+<td><b>{{r.scheme}}</b></td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{r.max_losing_streak}}</td>
+<td>{{"%.1f"|format(r.cutoff or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+<h4 style="margin-top:16px">全部权重方案</h4>
+<div class="scroll"><table style="min-width:1180px">
+<tr><th>方案</th><th>选择</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>平均持有</th><th>最大连亏</th><th>门槛分</th></tr>
+{% for r in v4_sweep %}
+<tr>
+<td><b>{{r.scheme}}</b></td><td>{{r.selection}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{"%.1f"|format(r.avg_hold or 0)}}天</td>
+<td>{{r.max_losing_streak}}</td>
+<td>{{"%.1f"|format(r.cutoff or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+<div class="muted" style="margin-top:10px">
+SUPPLY_HEAVY=Supply 30%；VOLUME_HEAVY=Volume 30%；SUPPLY_VOLUME=Supply/Volume 各27%；
+SETUP_LEADER=Setup 24% + Leader 22%；BALANCED_ELITE=Supply25/Setup20/Volume20/Leader15/Sector10/RS10。
+</div>
+</div>
+</details>
+{% endif %}
+
 <div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
 </div>
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
@@ -1398,7 +1587,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),
         **s)
 
 @APP.post("/scan")
