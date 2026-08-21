@@ -77,6 +77,7 @@ lock = threading.Lock()
 scan_thread = None
 backtest_thread = None
 v3_thread = None
+v3_stop_event = threading.Event()
 
 def storage_info():
     try:
@@ -540,24 +541,79 @@ def v3_diagnostics():
         "trades":count_csv("jlaw_v3_trades.csv"),
     }
 
-def run_v3():
+def run_v3(mode="full"):
     global v3_thread
     try:
         from jlaw_v3_phase1 import run as v3run
-        write_v3_status(status="running",message="正在运行 J Law V3 Phase 1 A+ Filter",started_at=datetime.now(timezone.utc).isoformat(),finished_at=None,error=None,processed=0)
+        v3_stop_event.clear()
+        quick = (mode == "quick")
+        label = "快速验证 22只" if quick else "完整回测 122只"
+        write_v3_status(
+            status="running", mode=mode,
+            message=f"正在运行 J Law V3 Phase 1 · {label}",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,error=None,processed=0,current=""
+        )
         def prog(done,total,t):
-            write_v3_status(status="running",message=f"正在筛选/回测 {done}/{total}: {t}",stocks=total,processed=done,current=t)
-        v3run(str(MARKET_DIR),str(V3_DIR),progress_cb=prog)
+            if v3_stop_event.is_set():
+                raise RuntimeError("__V3_STOPPED__")
+            write_v3_status(
+                status="running",mode=mode,
+                message=f"{label}：{done}/{total} · {t}",
+                stocks=total,processed=done,current=t
+            )
+        v3run(
+            str(MARKET_DIR), str(V3_DIR),
+            progress_cb=prog,
+            quick=quick, quick_n=22, quick_lookback=420
+        )
         s=read_v3_status()
-        write_v3_status(status="done",message="J Law V3 Phase 1 完成",stocks=s.get("stocks",0),processed=s.get("stocks",0),current="",finished_at=datetime.now(timezone.utc).isoformat())
+        write_v3_status(
+            status="done",mode=mode,
+            message=f"J Law V3 Phase 1 · {label}完成",
+            stocks=s.get("stocks",0),processed=s.get("stocks",0),
+            current="",finished_at=datetime.now(timezone.utc).isoformat(),error=None
+        )
     except Exception as ex:
-        traceback.print_exc();write_v3_status(status="error",message="V3 回测失败",error=f"{type(ex).__name__}: {ex}",finished_at=datetime.now(timezone.utc).isoformat())
-    finally:v3_thread=None
+        if str(ex) == "__V3_STOPPED__":
+            s=read_v3_status()
+            write_v3_status(
+                status="stopped",mode=mode,
+                message="已停止当前 V3 回测",
+                stocks=s.get("stocks",0),processed=s.get("processed",0),
+                current="",finished_at=datetime.now(timezone.utc).isoformat(),error=None
+            )
+        else:
+            traceback.print_exc()
+            write_v3_status(
+                status="error",mode=mode,message="V3 回测失败",
+                error=f"{type(ex).__name__}: {ex}",
+                finished_at=datetime.now(timezone.utc).isoformat()
+            )
+    finally:
+        v3_thread=None
+        v3_stop_event.clear()
 
-def start_v3():
+def start_v3(mode="full"):
     global v3_thread
-    if v3_thread is not None and v3_thread.is_alive():return False
-    v3_thread=threading.Thread(target=run_v3,daemon=True);v3_thread.start();return True
+    if v3_thread is not None and v3_thread.is_alive():
+        return False
+    v3_thread=threading.Thread(target=run_v3,args=(mode,),daemon=True)
+    v3_thread.start()
+    return True
+
+def stop_v3():
+    if v3_thread is not None and v3_thread.is_alive():
+        v3_stop_event.set()
+        s=read_v3_status()
+        write_v3_status(
+            status="stopping",
+            mode=s.get("mode","full"),
+            message="正在停止…会在当前股票处理完成后停止",
+            stocks=s.get("stocks",0),processed=s.get("processed",0),current=s.get("current","")
+        )
+        return True
+    return False
 
 def scheduler_loop():
     time.sleep(8)
@@ -691,8 +747,22 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 <div class="card">
 <div class="top"><div><h2 style="margin:0">J Law V3 Phase 1 · A+ Trade Filter</h2>
 <div class="muted">只测试选股质量：Market Gate + Stage 2 + Sector/Group + Leader + Supply Dry-Up + Tight Pivot；退出固定沿用 -7% / +30% / 60日</div></div>
-<form method="post" action="/v3"><button {% if v3_status=="running" %}disabled style="opacity:.45"{% endif %}>{% if v3_status=="running" %}V3 正在回测…{% else %}开始 V3 回测{% endif %}</button></form></div>
-{% if v3_status=="running" %}<div class="progress"><div style="width:{{((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%"></div></div>
+<div>
+<form method="post" action="/v3/quick" style="display:inline">
+<button {% if v3_status in ["running","stopping"] %}disabled style="opacity:.45"{% endif %}>
+{% if v3_status in ["running","stopping"] and v3_mode=="quick" %}⚡ 快速验证中…{% else %}⚡ 快速验证 22只{% endif %}
+</button></form>
+<form method="post" action="/v3/full" style="display:inline">
+<button {% if v3_status in ["running","stopping"] %}disabled style="opacity:.45"{% endif %}>
+{% if v3_status in ["running","stopping"] and v3_mode=="full" %}完整回测中…{% else %}完整回测 122只{% endif %}
+</button></form>
+{% if v3_status in ["running","stopping"] %}
+<form method="post" action="/v3/stop" style="display:inline">
+<button style="background:#7f1d1d">■ 停止回测</button>
+</form>
+{% endif %}
+</div></div>
+{% if v3_status in ["running","stopping"] %}<div class="progress"><div style="width:{{((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%"></div></div>
 <div><b>{{v3_processed}} / {{v3_stocks}}</b> · {{"%.0f"|format((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%</div>{% endif %}
 <p><b>状态：</b>{{v3_status}}　{{v3_message}}</p>
 {% if v3_error %}<p class="warn">{{v3_error}}</p>{% endif %}
@@ -723,7 +793,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();if(s.status==='updating'||bs.status==='running'||vs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping'))setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -762,16 +832,26 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_results=v3_rows(),v3_diag=v3_diagnostics(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),
         **s)
 
 @APP.post("/scan")
 def scan():
     start_scan(); return redirect(url_for("home"))
 
-@APP.post("/v3")
-def v3_start():
-    start_v3()
+@APP.post("/v3/quick")
+def v3_quick_start():
+    start_v3("quick")
+    return redirect(url_for("home"))
+
+@APP.post("/v3/full")
+def v3_full_start():
+    start_v3("full")
+    return redirect(url_for("home"))
+
+@APP.post("/v3/stop")
+def v3_stop():
+    stop_v3()
     return redirect(url_for("home"))
 
 @APP.get("/api/v3-status")
