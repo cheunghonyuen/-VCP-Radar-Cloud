@@ -19,7 +19,7 @@ MARKET_DIR = DATA_DIR / "market"; MARKET_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 RESULT_FILE = DATA_DIR / "latest_scan.csv"
 CHECKPOINT_FILE = DATA_DIR / "scan_checkpoint.json"
-BACKTEST_DIR = DATA_DIR / "jlaw_backtest_results"
+BACKTEST_DIR = DATA_DIR / "jlaw_backtest_results_v2"
 BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
@@ -422,27 +422,24 @@ def start_scan():
 JLAW_EXCLUDED = {"NEE","SO","DUK","AEP","SRE","EXC"}
 
 def read_backtest_status():
-    defaults = {
-        "status":"idle","message":"尚未运行","started_at":None,
-        "finished_at":None,"stocks":0,"error":None
+    defaults={
+        "status":"idle","message":"尚未运行","started_at":None,"finished_at":None,
+        "stocks":0,"processed":0,"current":"","error":None
     }
     if BACKTEST_STATUS_FILE.exists():
         try:
             x=json.loads(BACKTEST_STATUS_FILE.read_text(encoding="utf-8"))
             defaults.update(x)
-        except Exception:
-            pass
+        except Exception: pass
     return defaults
 
 def write_backtest_status(**kw):
-    BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
+    BACKTEST_DIR.mkdir(parents=True,exist_ok=True)
     s=read_backtest_status(); s.update(kw)
-    BACKTEST_STATUS_FILE.write_text(
-        json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8"
-    )
+    BACKTEST_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
 
 def backtest_summary_rows():
-    p=BACKTEST_DIR/"jlaw_summary.csv"
+    p=BACKTEST_DIR/"jlaw_summary_v2.csv"
     if not p.exists(): return []
     try:
         d=pd.read_csv(p)
@@ -453,47 +450,37 @@ def backtest_summary_rows():
 def run_jlaw_backtest():
     global backtest_thread
     try:
-        write_backtest_status(
-            status="running",
-            message="正在读取现有 /data/market 缓存并执行 J Law 历史回测",
-            started_at=datetime.now(timezone.utc).isoformat(),
-            finished_at=None,error=None,stocks=0
-        )
-        from jlaw_backtest_v1 import run as jlaw_run
-
+        from jlaw_backtest_v2 import run as jlaw_run
         spy_path=MARKET_DIR/"SPY.csv"
-        if not spy_path.exists():
-            raise RuntimeError("找不到 /data/market/SPY.csv")
-
+        if not spy_path.exists(): raise RuntimeError("找不到 /data/market/SPY.csv")
         stock_paths=[]
         for t in UNIVERSE:
-            if t in JLAW_EXCLUDED:
-                continue
+            if t in JLAW_EXCLUDED: continue
             p=MARKET_DIR/f"{t}.csv"
-            if p.exists():
-                stock_paths.append(str(p))
-
-        if not stock_paths:
-            raise RuntimeError("没有找到可用于 J Law 回测的股票缓存")
-
+            if p.exists(): stock_paths.append(str(p))
+        total=len(stock_paths)
+        if not total: raise RuntimeError("没有找到可用于 J Law 回测的缓存股票")
         write_backtest_status(
-            status="running",
-            message=f"正在回测 {len(stock_paths)} 只股票；不调用 Tiingo",
-            stocks=len(stock_paths)
+            status="running",message=f"准备回测 {total} 只股票；不调用 Tiingo",
+            started_at=datetime.now(timezone.utc).isoformat(),finished_at=None,
+            stocks=total,processed=0,current="",error=None
         )
-        BACKTEST_DIR.mkdir(parents=True,exist_ok=True)
-        jlaw_run(str(spy_path),stock_paths,str(BACKTEST_DIR))
+        def progress(done,total,ticker):
+            write_backtest_status(
+                status="running",
+                message=f"正在回测 {done}/{total}：{ticker}",
+                stocks=total,processed=done,current=ticker
+            )
+        jlaw_run(str(spy_path),stock_paths,str(BACKTEST_DIR),progress_cb=progress)
         write_backtest_status(
-            status="done",
-            message=f"J Law 回测完成：{len(stock_paths)} 只股票",
+            status="done",message=f"J Law V2 回测完成：{total} 只股票",
             finished_at=datetime.now(timezone.utc).isoformat(),
-            stocks=len(stock_paths),error=None
+            stocks=total,processed=total,current="",error=None
         )
     except Exception as ex:
         traceback.print_exc()
         write_backtest_status(
-            status="error",
-            message="J Law 回测失败",
+            status="error",message="J Law V2 回测失败",
             finished_at=datetime.now(timezone.utc).isoformat(),
             error=f"{type(ex).__name__}: {ex}"
         )
@@ -502,8 +489,7 @@ def run_jlaw_backtest():
 
 def start_jlaw_backtest():
     global backtest_thread
-    if backtest_thread is not None and backtest_thread.is_alive():
-        return False
+    if backtest_thread is not None and backtest_thread.is_alive(): return False
     backtest_thread=threading.Thread(target=run_jlaw_backtest,daemon=True)
     backtest_thread.start()
     return True
@@ -584,34 +570,56 @@ th{font-size:12px;color:#667085}.scroll{overflow-x:auto}.score{font-size:20px;fo
 
 <div class="card">
 <div class="top">
-  <div>
-    <h2 style="margin:0">J Law 历史回测</h2>
-    <div class="muted">直接使用现有 /data/market 缓存 · 不重新下载 · 不调用 Tiingo</div>
-  </div>
-  <form method="post" action="/backtest"><button>开始回测</button></form>
+<div>
+<h2 style="margin:0">J Law 历史回测 V2</h2>
+<div class="muted">使用现有 /data/market 缓存 · 不下载 · 不调用 Tiingo</div>
 </div>
+<form method="post" action="/backtest">
+<button id="bt-btn" {% if bt_status=="running" %}disabled style="opacity:.45;cursor:not-allowed"{% endif %}>
+{% if bt_status=="running" %}正在回测…{% else %}开始回测{% endif %}
+</button>
+</form>
+</div>
+
+{% if bt_status=="running" %}
+<div class="progress"><div style="width:{{ ((bt_processed/bt_stocks*100) if bt_stocks else 0) }}%"></div></div>
+<div><b>{{bt_processed}} / {{bt_stocks}}</b>　{{"%.0f"|format((bt_processed/bt_stocks*100) if bt_stocks else 0)}}%</div>
+{% endif %}
 <p><b>状态：</b>{{bt_status}}　{{bt_message}}</p>
 {% if bt_error %}<p class="warn">回测错误：{{bt_error}}</p>{% endif %}
-{% if bt_started_at %}<div class="muted">开始：{{bt_started_at}}{% if bt_finished_at %} ｜ 完成：{{bt_finished_at}}{% endif %} ｜ 股票：{{bt_stocks}}</div>{% endif %}
+{% if bt_started_at %}<div class="muted">开始：{{bt_started_at}}{% if bt_finished_at %} ｜ 完成：{{bt_finished_at}}{% endif %}</div>{% endif %}
+
 {% if bt_rows %}
-<div class="scroll"><table style="min-width:900px">
-<tr><th>止盈</th><th>止损</th><th>交易数</th><th>胜率</th><th>目标命中率</th><th>止损率</th><th>平均收益</th><th>Profit Factor</th><th>平均持有</th></tr>
+<div class="scroll"><table style="min-width:1250px">
+<tr>
+<th>模型</th><th>止盈/退出</th><th>止损</th><th>交易数</th><th>胜率</th>
+<th>平均盈利</th><th>平均亏损</th><th>盈亏比</th><th>平均收益</th>
+<th>PF</th><th>止损率</th><th>平均持有</th><th>最大连亏</th>
+</tr>
 {% for b in bt_rows %}
 <tr>
-<td>{{"%.0f%%"|format((b.target_pct or 0)*100)}}</td>
-<td>{{"%.0f%%"|format((b.stop_pct or 0)*100)}}</td>
+<td><b>{{b.model}}</b></td>
+<td>{{b.target_label}}</td>
+<td>{% if b.stop_pct is not none %}{{"%.1f%%"|format(b.stop_pct*100)}}{% else %}—{% endif %}</td>
 <td>{{b.trades}}</td>
 <td>{{"%.1f%%"|format((b.win_rate or 0)*100)}}</td>
-<td>{{"%.1f%%"|format((b.target_hit_rate or 0)*100)}}</td>
-<td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((b.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((b.avg_loss or 0)*100)}}</td>
+<td>{{"%.2f"|format(b.payoff_ratio or 0)}}</td>
 <td>{{"%.2f%%"|format((b.avg_return or 0)*100)}}</td>
 <td>{{"%.2f"|format(b.profit_factor or 0)}}</td>
+<td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td>
 <td>{{"%.1f"|format(b.avg_hold or 0)}}天</td>
+<td>{{b.max_consecutive_losses}}</td>
 </tr>
 {% endfor %}
 </table></div>
 {% endif %}
-<div class="muted" style="margin-top:10px">V1 对比固定 -7% 止损与 +15% / +20% / +25% / +30% 止盈，最长持有 60 个交易日。历史 point-in-time 销售增长数据尚未伪造加入。</div>
+
+<div class="muted" style="margin-top:10px">
+本轮同时测试：固定 -7% / +15,+20,+25,+30,+40,+50；J Law 中位数 -4.5%/+13%；以及 Native V1（结构止损≤8%、+20%卖一半、余仓跟30周趋势/Stage 2）。
+Native V1 是公开规则的量化近似，不假装等同于全部主观判断。
+</div>
 </div>
 
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
@@ -626,7 +634,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();if(s.status==='updating')setTimeout(()=>location.reload(),5000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();if(s.status==='updating'||bs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -660,8 +668,9 @@ def home():
     return render_template_string(HTML,rows=rows,sector_rows=sector_rows,
         count90=count90,count_strict=count_strict,count_breakout=count_breakout,
         cached_count=cs["cached_count"],cache_total=cs["cache_total"],cache_latest=cs["cache_latest"],storage_dir=si["data_dir"],storage_writable=si["writable"],
-        bt_status=bt.get("status","idle"),bt_message=bt.get("message","尚未运行"),bt_error=bt.get("error"),
-        bt_started_at=bt.get("started_at"),bt_finished_at=bt.get("finished_at"),bt_stocks=bt.get("stocks",0),bt_rows=bt_rows,
+        bt_status=bt.get("status","idle"),bt_message=bt.get("message","尚未运行"),
+        bt_error=bt.get("error"),bt_started_at=bt.get("started_at"),bt_finished_at=bt.get("finished_at"),
+        bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         **s)
 
 @APP.post("/scan")
