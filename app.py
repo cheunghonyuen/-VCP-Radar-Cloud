@@ -1367,6 +1367,78 @@ def v462_deploy_probe():
         imported=imported
     )
 
+
+def v47_true_engine_threshold_sweep():
+    """Threshold robustness using REAL V4.6 engine trades, not app-side re-ranking."""
+    base=v3_result_dir()
+    p=base/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:
+        d=pd.read_csv(p)
+    except Exception:
+        return []
+    if d.empty or "v46_score" not in d.columns:return []
+    d["v46_score"]=pd.to_numeric(d["v46_score"],errors="coerce")
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    rows=[]
+    for th in [70,72.5,75,77.5,80,82.5,85,87.5,90,92.5,95]:
+        g=d[d["v46_score"]>=th].copy().sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        old=g[g["date"].dt.year<=2021]
+        rec=g[g["date"].dt.year>=2022]
+        om=_v41_metrics(old) if not old.empty else {}
+        rm=_v41_metrics(rec) if not rec.empty else {}
+        rows.append(dict(
+            threshold=th,**m,
+            old_trades=om.get("trades",0),old_win=om.get("win_rate",np.nan),
+            old_avg=om.get("avg_return",np.nan),old_pf=om.get("pf",np.nan),
+            recent_trades=rm.get("trades",0),recent_win=rm.get("win_rate",np.nan),
+            recent_avg=rm.get("avg_return",np.nan),recent_pf=rm.get("pf",np.nan)
+        ))
+    return rows
+
+def v47_true_engine_periods():
+    base=v3_result_dir()
+    p=base/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty:return []
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    d["v46_score"]=pd.to_numeric(d.get("v46_score"),errors="coerce")
+    rows=[]
+    for th in [70,85,90]:
+        x=d[d["v46_score"]>=th].copy()
+        for lo,hi,label in [(2007,2011,"2007-2011"),(2012,2016,"2012-2016"),
+                            (2017,2021,"2017-2021"),(2022,2026,"2022-2026")]:
+            g=x[(x["date"].dt.year>=lo)&(x["date"].dt.year<=hi)].sort_values("date")
+            if g.empty:continue
+            m=_v41_metrics(g)
+            rows.append(dict(threshold=th,period=label,**m))
+    return rows
+
+def v47_threshold_plateau():
+    """A conservative plateau detector: prefer thresholds with >=30 trades and PF>=1.5."""
+    rows=v47_true_engine_threshold_sweep()
+    if not rows:return dict(status="NO_DATA",note="No V4.6 trades")
+    z=pd.DataFrame(rows)
+    eligible=z[(z.trades>=30)&(z.pf>=1.5)&(z.avg_return>0)].copy()
+    if eligible.empty:
+        return dict(status="NO_STABLE_PLATEAU",note="No threshold has >=30 trades, PF>=1.5 and positive average return.")
+    # Reward PF/return but penalize tiny samples.
+    eligible["robust_score"]=(eligible["avg_return"]*100)+np.minimum(eligible["pf"],4)*0.7+np.minimum(eligible["trades"],100)/100*0.4
+    best=eligible.sort_values(["robust_score","trades"],ascending=[False,False]).iloc[0]
+    return dict(
+        status="CANDIDATE",
+        threshold=float(best.threshold),
+        trades=int(best.trades),
+        win_rate=float(best.win_rate),
+        avg_return=float(best.avg_return),
+        pf=float(best.pf),
+        note="Candidate only; use neighboring thresholds and period table to judge plateau, not a single best point."
+    )
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1837,6 +1909,34 @@ def build_v3_export_pdf():
                   "stocks_with_v46_signal","stocks_with_v46_trade","signals_csv_exists","signals_csv_size",
                   "trades_csv_exists","trades_csv_size","summary_csv_exists","summary_csv_size","last_error"]:
             lines.append(f"{k}: {_ascii_cell(dg.get(k,''))}")
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+
+    lines += ["=== V4.7 TRUE ENGINE THRESHOLD SWEEP ==="]
+    try:
+        sw=pd.DataFrame(v47_true_engine_threshold_sweep())
+        if not sw.empty:
+            cols=["threshold","trades","win_rate","avg_return","pf","max_losing_streak",
+                  "old_trades","old_win","old_avg","old_pf","recent_trades","recent_win","recent_avg","recent_pf"]
+            widths=[8,7,9,10,7,8,8,9,9,7,8,9,9,7]
+            pctcols={"win_rate","avg_return","old_win","old_avg","recent_win","recent_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(sw,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.7 TRUE ENGINE PERIOD CHECK ==="]
+    try:
+        pp=pd.DataFrame(v47_true_engine_periods())
+        if not pp.empty:
+            cols=["threshold","period","trades","win_rate","avg_return","pf","max_losing_streak"]
+            widths=[8,12,7,9,10,7,8]
+            pctcols={"win_rate","avg_return"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(pp,cols,widths,transforms=tr)
     except Exception as e:
         lines.append(f"read error: {_ascii_cell(e)}")
     lines.append("")
@@ -2438,6 +2538,56 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 {% endif %}
 
+
+{% if v47_sweep %}
+<details class="section-fold" open>
+<summary>V4.7 True Engine Robustness · 真发动机门槛稳定性</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.7 True Engine Threshold Sweep</h3>
+<div class="muted" style="margin-bottom:10px">
+这里只读取真正由 V4.6 发动机生成的 jlaw_v46_trades.csv。
+不再使用旧385笔做 App 端模拟。
+</div>
+<div style="margin:8px 0 14px"><b>Plateau判断：</b> {{v47_plateau.status}}
+{% if v47_plateau.threshold is defined %} — 候选门槛 {{v47_plateau.threshold}}, {{v47_plateau.trades}}笔,
+胜率 {{"%.1f%%"|format((v47_plateau.win_rate or 0)*100)}},
+平均 {{"%.2f%%"|format((v47_plateau.avg_return or 0)*100)}},
+PF {{"%.2f"|format(v47_plateau.pf or 0)}}{% endif %}
+</div>
+<div class="scroll"><table style="min-width:1320px">
+<tr><th>门槛</th><th>总笔数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th>
+<th>≤2021笔数</th><th>≤2021胜率</th><th>≤2021平均</th><th>≤2021 PF</th>
+<th>2022+笔数</th><th>2022+胜率</th><th>2022+平均</th><th>2022+ PF</th></tr>
+{% for r in v47_sweep %}
+<tr>
+<td><b>{{r.threshold}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td><b>{{"%.2f"|format(r.pf or 0)}}</b></td><td>{{r.max_losing_streak}}</td>
+<td>{{r.old_trades}}</td><td>{{"%.1f%%"|format((r.old_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.old_avg or 0)*100)}}</td><td>{{"%.2f"|format(r.old_pf or 0)}}</td>
+<td>{{r.recent_trades}}</td><td>{{"%.1f%%"|format((r.recent_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.recent_avg or 0)*100)}}</td><td>{{"%.2f"|format(r.recent_pf or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+{% if v47_periods %}
+<h4 style="margin-top:16px">70 / 85 / 90 分年代稳定性</h4>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>门槛</th><th>时期</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v47_periods %}
+<tr><td><b>{{r.threshold}}</b></td><td>{{r.period}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+</details>
+{% endif %}
+
 {% if v46_engine %}
 <details class="section-fold" open>
 <summary>V4.6 Shadow Gate · 发动机真实重跑结果</summary>
@@ -2850,7 +3000,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),
         **s)
 
 @APP.post("/scan")
