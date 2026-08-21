@@ -512,9 +512,33 @@ def write_v3_status(**kw):
 
 def v3_rows():
     p=V3_DIR/"jlaw_v3_summary.csv"
-    if not p.exists():return []
-    try:return pd.read_csv(p).replace({np.nan:None}).to_dict("records")
-    except Exception:return []
+    if not p.exists(): return []
+    try:
+        d=pd.read_csv(p)
+        return d.where(pd.notnull(d), None).to_dict("records")
+    except Exception:
+        return []
+
+def v3_diagnostics():
+    def count_csv(name):
+        p=V3_DIR/name
+        if not p.exists():
+            return {"exists":False,"rows":None,"size":0}
+        try:
+            size=p.stat().st_size
+            if size==0:
+                return {"exists":True,"rows":0,"size":0}
+            d=pd.read_csv(p)
+            return {"exists":True,"rows":len(d),"size":size}
+        except pd.errors.EmptyDataError:
+            return {"exists":True,"rows":0,"size":p.stat().st_size}
+        except Exception as ex:
+            return {"exists":True,"rows":None,"size":p.stat().st_size,"error":str(ex)}
+    return {
+        "summary":count_csv("jlaw_v3_summary.csv"),
+        "signals":count_csv("jlaw_v3_signals.csv"),
+        "trades":count_csv("jlaw_v3_trades.csv"),
+    }
 
 def run_v3():
     global v3_thread
@@ -672,6 +696,15 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 <div><b>{{v3_processed}} / {{v3_stocks}}</b> · {{"%.0f"|format((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%</div>{% endif %}
 <p><b>状态：</b>{{v3_status}}　{{v3_message}}</p>
 {% if v3_error %}<p class="warn">{{v3_error}}</p>{% endif %}
+{% if v3_status=="done" %}
+<div style="background:#f6f8fb;border-radius:12px;padding:12px;margin:10px 0">
+<b>本次结果文件：</b>
+信号 {{v3_diag.signals.rows if v3_diag.signals.rows is not none else "读取失败"}} 条 ｜ 
+交易 {{v3_diag.trades.rows if v3_diag.trades.rows is not none else "读取失败"}} 笔 ｜ 
+汇总 {{v3_diag.summary.rows if v3_diag.summary.rows is not none else "读取失败"}} 行
+{% if (v3_diag.trades.rows==0) %}<div class="warn" style="margin-top:8px">V3 本轮经过 A+ Gate 后为 0 笔交易，所以没有成绩表。这不是结果丢失，而是筛选条件过严。</div>{% endif %}
+</div>
+{% endif %}
 {% if v3_results %}
 <div class="scroll"><table style="min-width:1050px"><tr><th>等级</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>平均盈利</th><th>平均亏损</th><th>盈亏比</th><th>PF</th><th>目标命中率</th><th>止损率</th><th>平均持有</th></tr>
 {% for b in v3_results %}<tr><td><b>{{b.grade}}</b></td><td>{{b.trades}}</td><td>{{"%.1f%%"|format((b.win_rate or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_return or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_win or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_loss or 0)*100)}}</td><td>{{"%.2f"|format(b.payoff_ratio or 0)}}</td><td>{{"%.2f"|format(b.profit_factor or 0)}}</td><td>{{"%.1f%%"|format((b.target_hit_rate or 0)*100)}}</td><td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td><td>{{"%.1f"|format(b.avg_hold or 0)}}天</td></tr>{% endfor %}
@@ -729,7 +762,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_results=v3_rows(),
+        v3_processed=read_v3_status().get("processed",0),v3_results=v3_rows(),v3_diag=v3_diagnostics(),
         **s)
 
 @APP.post("/scan")
