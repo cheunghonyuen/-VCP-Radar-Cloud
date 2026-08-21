@@ -39,32 +39,39 @@ class TiingoRateLimitPause(Exception):
     pass
 
 UNIVERSE = sorted(set("""
-AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR
-AMZN TSLA HD LOW BKNG TJX SBUX MCD NKE CMG ORLY AZO ROST MAR
-GOOGL META NFLX DIS T VZ TMUS CHTR
-JPM BAC WFC GS MS C AXP SCHW BLK SPGI CME ICE COF USB PNC
-LLY UNH JNJ ABBV MRK TMO ABT DHR AMGN GILD ISRG VRTX REGN BSX MDT SYK
-WMT COST PG KO PEP PM MO CL MDLZ KMB GIS
-GE CAT DE ETN PH HON RTX LMT NOC GD UPS FDX UNP CSX WM RSG UBER
-XOM CVX COP EOG SLB MPC PSX VLO OXY
-NEE SO DUK AEP SRE EXC
-LIN APD SHW ECL FCX NEM NUE
-AMT PLD EQIX WELL SPG O
+A AAL AAPL ABBV ABNB ABT ACGL ACN ADBE ADI ADM AEE AEP AES AFL AJG ALB ALGN ALL AMAT AMCR AMD AMGN AMP AMT
+AMZN ANET AON APA APD APH APO APP APTV ARE ARES ARM AVB AVGO AVY AWK AXON AXP AZO BA BAC BALL BAX BBY BDX BG
+BIIB BK BKNG BKR BLK BMY BSX BWA BX BXP C CAG CAH CARR CASY CAT CB CBRE CCI CCK CCL CDNS CE CEG CELH CF CFG
+CHD CHRD CHRW CHTR CHWY CI CIEN CINF CL CLX CME CMG CMI CMS CNC CNP CNX COF COHR COIN COO COP COR COST CPB CPT
+CRM CRWD CSCO CSGP CSX CTRA CVNA CVS CVX D DAL DASH DD DDOG DE DECK DELL DFS DG DHI DHR DIS DLR DLTR DOC DOV
+DOW DPZ DRI DTE DUK DVN DXCM EA EBAY ECL ED EIX EL ELV EMN EMR EOG EQIX EQR EQT ES ESS ETN ETR ETSY EVRG EW
+EXC EXPD EXPE EXR F FANG FAST FCX FDX FE FI FIS FITB FIX FMC FOX FOXA FRT FSLR FTNT GD GE GEHC GEN GEV GILD
+GIS GLW GM GOOG GOOGL GPC GPN GS GWW HAL HAS HBAN HCA HD HEI HES HIG HOLX HON HOOD HPE HPQ HRL HST HSY HUBB
+HUBS HUM HWM IBM ICE IDXX IEX IFF ILMN INCY INTU INVH IP IPG IQV IR IRM ISRG ITW JBHT JCI JNJ JNPR JPM KDP KEY
+KEYS KHC KIM KKR KLAC KMB KMI KO KR KVUE LCID LDOS LEN LIN LITE LLY LMT LNG LOW LRCX LUV LVS LW LYV MA MAA MAR
+MAT MCD MCHP MCK MDB MDLZ MDT MET META MGM MKC MKTX MLM MMC MMM MNST MO MOH MOS MPC MPWR MRK MRNA MRO MS MSFT
+MSI MTB MTCH MU NCLH NDAQ NDSN NEE NEM NET NFLX NI NKE NOC NOV NOW NUE NVDA NWS NWSA NXPI O ODFL OKE OMC ON
+ORCL ORLY OTIS OXY PANW PARA PCAR PCG PEG PEP PFE PG PGR PH PHM PINS PKG PLD PLTR PM PNC PODD POOL PPG PPL PR
+PRU PSA PSX PWR PYPL QCOM RBLX RCL RDDT REG REGN RF RH RIVN RMD ROK ROST RS RSG RTX SAIC SBAC SBUX SCHW SHW
+SJM SLB SMCI SNAP SNPS SO SOLV SPG SPGI SPOT SRE STE STLD STT STX STZ SWK SWKS SYF SYK SYY T TAP TDG TEAM TECH
+TEL TER TGT TJX TMO TMUS TOL TRGP TROW TRV TSLA TSN TT TTWO TXN TXT TYLER UAL UBER UHS ULTA UNH UNP UPS URI
+USB V VEEV VICI VLO VMC VRT VRTX VST VZ W WAB WAT WBD WDC WEC WELL WFC WM WMB WMT WRB WSM WYNN XEL XOM XYL YUM
+ZS ZTS
 """.split()))
 
 SECTOR = {}
 for sec, names in {
-"XLK":"AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR",
-"XLY":"AMZN TSLA HD LOW BKNG TJX SBUX MCD NKE CMG ORLY AZO ROST MAR",
-"XLC":"GOOGL META NFLX DIS T VZ TMUS CHTR",
-"XLF":"JPM BAC WFC GS MS C AXP SCHW BLK SPGI CME ICE COF USB PNC",
-"XLV":"LLY UNH JNJ ABBV MRK TMO ABT DHR AMGN GILD ISRG VRTX REGN BSX MDT SYK",
-"XLP":"WMT COST PG KO PEP PM MO CL MDLZ KMB GIS",
-"XLI":"GE CAT DE ETN PH HON RTX LMT NOC GD UPS FDX UNP CSX WM RSG UBER",
-"XLE":"XOM CVX COP EOG SLB MPC PSX VLO OXY",
-"XLU":"NEE SO DUK AEP SRE EXC",
-"XLB":"LIN APD SHW ECL FCX NEM NUE",
-"XLRE":"AMT PLD EQIX WELL SPG O"
+"XLK":"AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR ACN IBM CSCO ANET CDNS SNPS MSI APH GLW TEL MPWR MCHP ON NXPI ADI FSLR STX WDC DELL HPQ HPE FTNT ZS DDOG NET MDB HUBS TEAM APP ARM SMCI VRT CIEN LITE COHR KEYS TER SWKS JNPR GEN TYLER",
+"XLY":"AMZN TSLA HD LOW BKNG TJX SBUX MCD NKE CMG ORLY AZO ROST MAR ABNB DASH CVNA RCL CCL NCLH DRI YUM DPZ TGT EBAY ETSY WSM RH DECK ULTA BBY GPC LEN DHI PHM TOL GM F RIVN LCID BWA APTV MGM LVS WYNN HAS MAT POOL EXPE CHWY W",
+"XLC":"GOOGL GOOG META NFLX DIS T VZ TMUS CHTR TTWO EA WBD FOX FOXA PARA SPOT PINS SNAP RDDT RBLX MTCH OMC IPG LYV NWS NWSA",
+"XLF":"JPM BAC WFC GS MS C AXP SCHW BLK SPGI CME ICE COF USB PNC BK STT TROW AMP AJG MMC AON CB TRV ALL PGR ACGL AFL MET PRU HIG CINF WRB RF HBAN CFG KEY FITB MTB SYF DFS V MA PYPL FI FIS GPN COIN HOOD ARES BX KKR APO NDAQ MKTX",
+"XLV":"LLY UNH JNJ ABBV MRK TMO ABT DHR AMGN GILD ISRG VRTX REGN BSX MDT SYK BMY PFE ZTS CI CVS HUM ELV HCA MCK COR CAH CNC EW BDX IDXX IQV A ALGN DXCM PODD HOLX RMD BIIB MRNA BAX GEHC STE WAT COO TECH ILMN INCY UHS MOH SOLV VEEV",
+"XLP":"WMT COST PG KO PEP PM MO CL MDLZ KMB GIS KR SYY KHC HSY MKC CHD CLX CAG CPB SJM HRL TSN TAP STZ ADM BG LW CELH MNST KDP EL KVUE DG DLTR CASY",
+"XLI":"GE CAT DE ETN PH HON RTX LMT NOC GD UPS FDX UNP CSX WM RSG UBER BA MMM EMR ITW ROK IR CMI PWR JCI TT OTIS CARR GEV URI FAST GWW WAB HUBB XYL IEX DOV SWK NDSN PCAR ODFL JBHT EXPD CHRW DAL UAL LUV AAL TXT TDG HWM HEI AXON LDOS SAIC FIX",
+"XLE":"XOM CVX COP EOG SLB MPC PSX VLO OXY WMB KMI TRGP HAL BKR FANG DVN APA MRO EQT CTRA HES OKE LNG PR CNX CHRD NOV",
+"XLU":"NEE SO DUK AEP SRE EXC D DTE XEL ED PEG WEC ES AWK ETR PPL FE AEE CNP CMS NI EVRG AES PCG EIX VST CEG",
+"XLB":"LIN APD SHW ECL FCX NEM NUE DD DOW PPG MLM VMC CF MOS IFF BALL AVY PKG IP AMCR CE ALB STLD RS CCK EMN FMC",
+"XLRE":"AMT PLD EQIX WELL SPG O PSA DLR CCI VICI EXR AVB EQR ESS MAA INVH ARE BXP KIM REG FRT CPT HST IRM CBRE CSGP DOC SBAC"
 }.items():
     for t in names.split(): SECTOR[t] = sec
 SECTOR_NAME = {
@@ -73,6 +80,8 @@ SECTOR_NAME = {
 }
 TOP_N = int(os.environ.get("TOP_N", "40"))
 ALL_SYMBOLS = sorted(set(UNIVERSE + ["SPY"] + list(set(SECTOR.values()))))
+V5_ORIGINAL_122=set("""AAPL ABBV ABT ADBE AMAT AMD AMGN AMT AMZN APD AVGO AXP AZO BAC BKNG BLK BSX C CAT CHTR CL CME CMG COF COP COST CRM CRWD CSX CVX DE DHR DIS ECL EOG EQIX ETN FCX FDX GD GE GILD GIS GOOGL GS HD HON ICE INTU ISRG JNJ JPM KLAC KMB KO LIN LLY LMT LOW LRCX MAR MCD MDLZ MDT META MO MPC MRK MS MSFT MU NEM NFLX NKE NOC NOW NUE NVDA O ORCL ORLY OXY PANW PEP PG PH PLD PLTR PM PNC PSX QCOM REGN ROST RSG RTX SBUX SCHW SHW SLB SPG SPGI SYK T TJX TMO TMUS TSLA TXN UBER UNH UNP UPS USB VLO VRTX VZ WELL WFC WM WMT XOM""".split())
+V5_VALIDATION=set(UNIVERSE)-V5_ORIGINAL_122
 
 lock = threading.Lock()
 scan_thread = None
@@ -1493,6 +1502,33 @@ def v48_score_bins():
         rows.append(dict(score_band=f"{lo:g}-{hi:g}",**m))
     return rows
 
+
+def v50_expanded_universe_status():
+    cached=[t for t in UNIVERSE if (MARKET_DIR/f"{t}.csv").exists()]
+    missing=[t for t in UNIVERSE if not (MARKET_DIR/f"{t}.csv").exists()]
+    return dict(universe=len(UNIVERSE),original=len(V5_ORIGINAL_122),validation=len(V5_VALIDATION),
+                cached=len(cached),missing=len(missing),
+                original_cached=sum((MARKET_DIR/f"{t}.csv").exists() for t in V5_ORIGINAL_122),
+                validation_cached=sum((MARKET_DIR/f"{t}.csv").exists() for t in V5_VALIDATION),
+                ready=(len(missing)==0),next_missing=" ".join(missing[:30]))
+
+def v50_validation_results():
+    p=v3_result_dir()/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty or "v5_cohort" not in d.columns:return []
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    d["v46_score"]=pd.to_numeric(d.get("v46_score"),errors="coerce")
+    rows=[]
+    for cohort in ["ORIGINAL_122","NEW_VALIDATION"]:
+        x=d[d["v5_cohort"]==cohort].copy()
+        for th in [70,87.5,90]:
+            g=x[x["v46_score"]>=th].sort_values("date")
+            if g.empty:continue
+            rows.append(dict(cohort=cohort,threshold=th,**_v41_metrics(g)))
+    return rows
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -2622,6 +2658,31 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v50_status %}
+<details class="section-fold" open>
+<summary>V5.0 Expanded Universe · 扩大股票池验证</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V5.0 Expanded Universe</h3>
+<div class="muted" style="margin-bottom:10px">冻结 V4.8 规则；新增股票只做独立验证，不拿来重新调参。</div>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>总股票池</th><th>原研究组</th><th>新增验证组</th><th>已缓存</th><th>未缓存</th><th>原组缓存</th><th>验证组缓存</th><th>Ready</th></tr>
+<tr><td><b>{{v50_status.universe}}</b></td><td>{{v50_status.original}}</td><td>{{v50_status.validation}}</td><td>{{v50_status.cached}}</td><td>{{v50_status.missing}}</td><td>{{v50_status.original_cached}}</td><td>{{v50_status.validation_cached}}</td><td><b>{{v50_status.ready}}</b></td></tr>
+</table></div>
+{% if v50_status.missing %}<div style="margin-top:10px"><b>下一批未缓存：</b> {{v50_status.next_missing}}</div>{% endif %}
+{% if v50_results %}
+<h4 style="margin-top:16px">冻结规则验证：原组 vs 新增验证组</h4>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>组别</th><th>门槛</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v50_results %}
+<tr><td><b>{{r.cohort}}</b></td><td>{{r.threshold}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td><td>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</td><td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+</details>
+{% endif %}
+
 {% if v48_tiers %}
 <details class="section-fold" open>
 <summary>V4.8 Dual Tier · CORE + ELITE 双层筛选</summary>
@@ -3123,7 +3184,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),
         **s)
 
 @APP.post("/scan")
