@@ -1027,6 +1027,113 @@ def v43_factor_policy():
              action="研究层默认不推送"),
     ]
 
+
+def _v44_candidate_scores(d):
+    """Return candidate score columns already defined before outcomes are evaluated."""
+    cands=[]
+    for name in ["SWEET_CORE","VOLUME_SECTOR","QUALITY_LEADER","ROBUST_BALANCED"]:
+        col="v41_"+name
+        if col in d.columns:
+            cands.append((name,col))
+    if "v43_score" in d.columns:
+        cands.append(("ADAPTIVE","v43_score"))
+    return cands
+
+def v44_walk_forward():
+    """
+    Anchored walk-forward research:
+      1) choose the best model + score cutoff using ONLY the training window,
+      2) freeze it,
+      3) evaluate the next period.
+    Candidate model definitions themselves were created during prior research, so this is
+    a robustness check, not a pristine untouched holdout.
+    """
+    d=v43_adaptive_candidates()
+    if d.empty or "date" not in d.columns:return []
+    d=d.copy()
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    d["year"]=d["date"].dt.year
+
+    windows=[
+        (2016,2017,2019,"<=2016 -> 2017-2019"),
+        (2019,2020,2022,"<=2019 -> 2020-2022"),
+        (2022,2023,2024,"<=2022 -> 2023-2024"),
+        (2024,2025,2026,"<=2024 -> 2025-2026"),
+    ]
+    rows=[]
+    candidates=_v44_candidate_scores(d)
+    for train_end,test_start,test_end,label in windows:
+        train=d[d.year<=train_end].copy()
+        test=d[(d.year>=test_start)&(d.year<=test_end)].copy()
+        if train.empty or test.empty:continue
+
+        best=None
+        # Use cutoffs broad enough to avoid tiny in-sample tricks.
+        for name,col in candidates:
+            for th in [65,70,75,80,85]:
+                tr=train[train[col]>=th].copy()
+                if len(tr)<25:continue
+                m=_v41_metrics(tr.sort_values("date"))
+                # conservative objective: require PF>1 and reward return, PF, sample size
+                obj=(m["avg_return"]*100) + min(m["pf"],3.0)*0.8 + min(len(tr),150)/150*0.35
+                cand=dict(model=name,col=col,threshold=th,train_trades=len(tr),
+                          train_win=m["win_rate"],train_avg=m["avg_return"],train_pf=m["pf"],objective=obj)
+                if best is None or cand["objective"]>best["objective"]:
+                    best=cand
+
+        if best is None:continue
+        te=test[test[best["col"]]>=best["threshold"]].copy()
+        tm=_v41_metrics(te.sort_values("date"))
+        rows.append(dict(
+            window=label,model=best["model"],threshold=best["threshold"],
+            train_trades=best["train_trades"],train_win=best["train_win"],
+            train_avg=best["train_avg"],train_pf=best["train_pf"],
+            test_trades=tm["trades"],test_win=tm["win_rate"],
+            test_avg=tm["avg_return"],test_pf=tm["pf"],
+            test_max_losing_streak=tm["max_losing_streak"]
+        ))
+    return rows
+
+def v44_score_band_check():
+    """Check whether higher score bands are monotonically better; useful against score overfit."""
+    d=v43_adaptive_candidates()
+    if d.empty:return []
+    rows=[]
+    bands=[(0,60),(60,70),(70,80),(80,85),(85,90),(90,101)]
+    for name,col in _v44_candidate_scores(d):
+        for lo,hi in bands:
+            g=d[(d[col]>=lo)&(d[col]<hi)].copy()
+            if g.empty:continue
+            m=_v41_metrics(g.sort_values("date"))
+            rows.append(dict(model=name,band=f"{lo}-{hi}",**m))
+    return rows
+
+def v44_recent_validation():
+    """
+    Fixed-rule validation on the recent era only. No retuning inside 2022-2026.
+    Compare a few predeclared rules side by side.
+    """
+    d=v43_adaptive_candidates()
+    if d.empty:return []
+    d=d.copy()
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    recent=d[d["date"].dt.year>=2022].copy()
+    if recent.empty:return []
+    rules=[
+        ("ADAPTIVE>=85", recent["v43_score"]>=85),
+        ("ADAPTIVE>=90", recent["v43_score"]>=90),
+        ("VOL_SECTOR>=80", recent.get("v41_VOLUME_SECTOR",0)>=80),
+        ("ROBUST>=85", recent.get("v41_ROBUST_BALANCED",0)>=85),
+        ("QUALITY_LEADER>=85", recent.get("v41_QUALITY_LEADER",0)>=85),
+    ]
+    rows=[]
+    for name,mask in rules:
+        g=recent[mask].copy().sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        rows.append(dict(rule=name,**m))
+    return rows
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1471,6 +1578,33 @@ def build_v3_export_pdf():
 
 
 
+
+
+    lines += ["=== V4.4 WALK FORWARD ==="]
+    try:
+        wf=pd.DataFrame(v44_walk_forward())
+        if not wf.empty:
+            cols=["window","model","threshold","train_trades","train_win","train_avg","train_pf","test_trades","test_win","test_avg","test_pf","test_max_losing_streak"]
+            widths=[19,15,8,8,9,9,7,8,9,9,7,8]
+            pctcols={"train_win","train_avg","test_win","test_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(wf,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.4 RECENT 2022-2026 ==="]
+    try:
+        rv=pd.DataFrame(v44_recent_validation())
+        if not rv.empty:
+            cols=["rule","trades","win_rate","avg_return","pf","avg_win","avg_loss","max_losing_streak"]
+            widths=[20,7,9,10,7,10,10,8]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(rv,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.3 ADAPTIVE ELITE ==="]
     try:
@@ -1937,6 +2071,73 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v44_walk %}
+<details class="section-fold" open>
+<summary>V4.4 Walk-Forward Lab · 滚动验证</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.4 Walk-Forward Lab</h3>
+<div class="muted" style="margin-bottom:10px">
+每一轮只用过去数据挑“模型 + 分数门槛”，随后冻结规则，再测试后面的年份。
+注意：候选模型本身来自前几轮研究，所以这是强度/稳定性检查，不是完全未碰过的终极样本外测试。
+</div>
+<div class="scroll"><table style="min-width:1180px">
+<tr><th>窗口</th><th>训练选中模型</th><th>门槛</th><th>训练笔数</th><th>训练胜率</th><th>训练平均</th><th>训练PF</th><th>测试笔数</th><th>测试胜率</th><th>测试平均</th><th>测试PF</th><th>测试最大连亏</th></tr>
+{% for r in v44_walk %}
+<tr>
+<td><b>{{r.window}}</b></td><td>{{r.model}}</td><td>{{r.threshold}}</td><td>{{r.train_trades}}</td>
+<td>{{"%.1f%%"|format((r.train_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.train_avg or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.train_pf or 0)}}</td>
+<td>{{r.test_trades}}</td>
+<td><b>{{"%.1f%%"|format((r.test_win or 0)*100)}}</b></td>
+<td><b>{{"%.2f%%"|format((r.test_avg or 0)*100)}}</b></td>
+<td><b>{{"%.2f"|format(r.test_pf or 0)}}</b></td>
+<td>{{r.test_max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
+{% if v44_recent %}
+<details class="section-fold" open>
+<summary>V4.4 Recent Era · 2022-2026 固定规则对比</summary>
+<div class="fold-body">
+<div class="scroll"><table style="min-width:860px">
+<tr><th>规则</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>最大连亏</th></tr>
+{% for r in v44_recent %}
+<tr><td><b>{{r.rule}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
+{% if v44_bands %}
+<details class="section-fold">
+<summary>V4.4 Score Bands · 分数区间是否真的越高越好</summary>
+<div class="fold-body">
+<div class="scroll"><table style="min-width:900px">
+<tr><th>模型</th><th>分数区间</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v44_bands %}
+<tr><td><b>{{r.model}}</b></td><td>{{r.band}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v43_rows %}
 <details class="section-fold" open>
 <summary>V4.3 Adaptive Elite · Regime 自适应精选</summary>
@@ -2211,7 +2412,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),
         **s)
 
 @APP.post("/scan")
