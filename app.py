@@ -512,8 +512,12 @@ def write_v3_status(**kw):
     s=read_v3_status();s.update(kw)
     V3_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
 
+def v3_result_dir():
+    s=read_v3_status()
+    return (V3_DIR/"quick") if s.get("mode")=="quick" else V3_DIR
+
 def v3_rows():
-    p=V3_DIR/"jlaw_v3_summary.csv"
+    p=v3_result_dir()/"jlaw_v3_summary.csv"
     if not p.exists(): return []
     try:
         d=pd.read_csv(p)
@@ -522,8 +526,9 @@ def v3_rows():
         return []
 
 def v3_diagnostics():
+    base=v3_result_dir()
     def count_csv(name):
-        p=V3_DIR/name
+        p=base/name
         if not p.exists():
             return {"exists":False,"rows":None,"size":0}
         try:
@@ -536,10 +541,23 @@ def v3_diagnostics():
             return {"exists":True,"rows":0,"size":p.stat().st_size}
         except Exception as ex:
             return {"exists":True,"rows":None,"size":p.stat().st_size,"error":str(ex)}
+
+    funnel={}
+    fp=base/"jlaw_v3_funnel_total.csv"
+    if fp.exists():
+        try:
+            fd=pd.read_csv(fp)
+            if len(fd):
+                funnel={k:(int(v) if pd.notna(v) else 0) for k,v in fd.iloc[0].to_dict().items()}
+        except Exception:
+            funnel={}
+
     return {
         "summary":count_csv("jlaw_v3_summary.csv"),
         "signals":count_csv("jlaw_v3_signals.csv"),
         "trades":count_csv("jlaw_v3_trades.csv"),
+        "funnel":funnel,
+        "folder":"quick" if base.name=="quick" else "full"
     }
 
 def run_v3(mode="full"):
@@ -801,9 +819,24 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 {% if v3_status=="done" %}
 <div style="background:#f6f8fb;border-radius:12px;padding:12px;margin:10px 0">
 <b>本次结果文件：</b>
+{% if v3_diag.folder=="quick" %}⚡ 22只快速验证{% else %}完整回测{% endif %} ｜
 信号 {{v3_diag.signals.rows if v3_diag.signals.rows is not none else "读取失败"}} 条 ｜ 
 交易 {{v3_diag.trades.rows if v3_diag.trades.rows is not none else "读取失败"}} 笔 ｜ 
 汇总 {{v3_diag.summary.rows if v3_diag.summary.rows is not none else "读取失败"}} 行
+{% if v3_diag.funnel %}
+<div style="margin-top:10px;line-height:1.8">
+<b>Gate 漏斗：</b>
+历史检查 {{v3_diag.funnel.get("bars_checked",0)}} →
+市场 {{v3_diag.funnel.get("market_pass",0)}} →
+Stage 2 {{v3_diag.funnel.get("stage2_pass",0)}} →
+RS {{v3_diag.funnel.get("rs_pass",0)}} →
+板块 {{v3_diag.funnel.get("sector_pass",0)}} →
+Group {{v3_diag.funnel.get("group_pass",0)}} →
+Supply {{v3_diag.funnel.get("supply_pass",0)}} →
+Leader {{v3_diag.funnel.get("leader_pass",0)}} →
+突破 {{v3_diag.funnel.get("breakout_pass",0)}}
+</div>
+{% endif %}
 {% if (v3_diag.trades.rows==0) %}<div class="warn" style="margin-top:8px">V3 本轮经过 A+ Gate 后为 0 笔交易，所以没有成绩表。这不是结果丢失，而是筛选条件过严。</div>{% endif %}
 </div>
 {% endif %}
