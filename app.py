@@ -788,6 +788,144 @@ def v41_regime_check():
             rows.append(dict(scheme=name,period=label,**m))
     return rows
 
+
+def _v42_spy_regimes():
+    """Historical SPY regime table using only information available on each date."""
+    try:
+        spy=load_cached("SPY")
+        if spy is None or len(spy)<220:
+            return pd.DataFrame()
+        s=spy.copy().sort_index()
+        s["ma20"]=s.Close.rolling(20).mean()
+        s["ma50"]=s.Close.rolling(50).mean()
+        s["ma200"]=s.Close.rolling(200).mean()
+        s["ma50_old"]=s["ma50"].shift(20)
+        s["ma200_old"]=s["ma200"].shift(20)
+        s["ret20"]=s.Close/s.Close.shift(20)-1
+        s["ret60"]=s.Close/s.Close.shift(60)-1
+
+        def classify(r):
+            vals=[r.Close,r.ma20,r.ma50,r.ma200,r.ma50_old,r.ma200_old]
+            if any(pd.isna(v) for v in vals): return "UNKNOWN"
+            strong=(r.Close>r.ma20>r.ma50>r.ma200 and
+                    r.ma50>r.ma50_old and r.ma200>r.ma200_old and
+                    (r.ret20 if pd.notna(r.ret20) else 0)>0)
+            if strong:return "STRONG_BULL"
+            bull=(r.Close>r.ma200 and r.ma200>r.ma200_old)
+            if bull:return "BULL"
+            weak=(r.Close>r.ma200 or r.ma50>r.ma200)
+            if weak:return "TRANSITION"
+            return "DEFENSIVE"
+
+        s["regime"]=s.apply(classify,axis=1)
+        s["spy_ret20"]=s["ret20"]
+        s["spy_ret60"]=s["ret60"]
+        return s[["regime","spy_ret20","spy_ret60"]].copy()
+    except Exception:
+        return pd.DataFrame()
+
+def _v42_frame():
+    d=_v41_frame()
+    if d.empty or "date" not in d.columns:return pd.DataFrame()
+    d=d.copy()
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    rg=_v42_spy_regimes()
+    if rg.empty:
+        d["regime"]="UNKNOWN"; d["spy_ret20"]=np.nan; d["spy_ret60"]=np.nan
+        return d
+    # Match each trade to the latest SPY session on/before entry date.
+    left=d.sort_values("date").copy()
+    right=rg.reset_index().rename(columns={rg.index.name or "index":"date"})
+    if "date" not in right.columns:
+        right=right.rename(columns={right.columns[0]:"date"})
+    right["date"]=pd.to_datetime(right["date"],errors="coerce")
+    right=right.sort_values("date")
+    return pd.merge_asof(left,right,on="date",direction="backward")
+
+def v42_regime_summary():
+    d=_v42_frame()
+    if d.empty:return []
+    rows=[]
+    for regime in ["STRONG_BULL","BULL","TRANSITION","DEFENSIVE","UNKNOWN"]:
+        g=d[d["regime"]==regime].copy()
+        if g.empty:continue
+        m=_v41_metrics(g.sort_values("date"))
+        rows.append(dict(regime=regime,selection="ALL_BASE",**m))
+        for name in V41_SCHEMES:
+            col="v41_"+name
+            if col not in g.columns:continue
+            for n in [10,20,30,50]:
+                h=g.sort_values(col,ascending=False).head(min(n,len(g))).sort_values("date")
+                if h.empty:continue
+                mm=_v41_metrics(h)
+                rows.append(dict(regime=regime,selection=f"{name}_TOP{n}",**mm))
+    return rows
+
+def v42_regime_best():
+    rows=v42_regime_summary()
+    if not rows:return []
+    z=pd.DataFrame(rows)
+    out=[]
+    for regime in ["STRONG_BULL","BULL","TRANSITION","DEFENSIVE"]:
+        g=z[(z.regime==regime)&(z.selection!="ALL_BASE")].copy()
+        # Avoid tiny selections when regime itself is small: require >=10.
+        g=g[g.trades>=10]
+        if g.empty:continue
+        # Prefer a robust blend, not just tiny-sample return.
+        g["robust_rank"]=(g["avg_return"]*100) + np.minimum(g["pf"],5)*0.8 + g["win_rate"]*2
+        r=g.sort_values(["robust_rank","trades"],ascending=[False,False]).iloc[0].to_dict()
+        out.append(r)
+    return out
+
+def v42_drop_one_ablation():
+    """Score-only ablation on the same 385 trades.
+    This does NOT claim to be a full gate ablation because rejected candidates are not in the trade CSV.
+    """
+    d=_v42_frame()
+    if d.empty:return []
+    # Start from ROBUST_BALANCED sweet scores, then remove one component and re-normalize weights.
+    cfg=V41_SCHEMES["ROBUST_BALANCED"]
+    comps={}
+    comps["volume"]=d["volratio"].apply(lambda x:_sweet_score(x,cfg["volume"]))
+    comps["quality"]=d["quality"].apply(lambda x:_sweet_score(x,cfg["quality"]))
+    comps["sector"]=d["sector_score"].apply(lambda x:_sweet_score(x,cfg["sector"]))
+    comps["leader"]=d["leader_score"].apply(lambda x:_sweet_score(x,cfg["leader"]))
+    comps["supply"]=d["supply_score"].apply(lambda x:_sweet_score(x,cfg["supply"]))
+    w=cfg["weights"]
+
+    rows=[]
+    variants=["NONE","volume","quality","sector","leader","supply"]
+    for drop in variants:
+        active=[k for k in w if k!=drop]
+        denom=sum(w[k] for k in active)
+        score=sum(comps[k]*(w[k]/denom) for k in active)
+        tmp=d.copy()
+        tmp["_score"]=score
+        for n in [30,50,100,150]:
+            g=tmp.sort_values("_score",ascending=False).head(min(n,len(tmp))).sort_values("date")
+            m=_v41_metrics(g)
+            rows.append(dict(drop=("FULL" if drop=="NONE" else f"DROP_{drop.upper()}"),
+                             selection=f"TOP{n}",**m))
+    return rows
+
+def v42_ablation_best():
+    rows=v42_drop_one_ablation()
+    if not rows:return []
+    z=pd.DataFrame(rows)
+    out=[]
+    for sel in ["TOP30","TOP50","TOP100","TOP150"]:
+        g=z[z.selection==sel].copy()
+        if g.empty:continue
+        full=g[g["drop"]=="FULL"]
+        base_avg=float(full.iloc[0].avg_return) if len(full) else np.nan
+        base_pf=float(full.iloc[0].pf) if len(full) else np.nan
+        for _,r in g.iterrows():
+            rr=r.to_dict()
+            rr["delta_avg"]=float(r.avg_return-base_avg) if pd.notna(base_avg) else np.nan
+            rr["delta_pf"]=float(r.pf-base_pf) if pd.notna(base_pf) else np.nan
+            out.append(rr)
+    return out
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1231,6 +1369,33 @@ def build_v3_export_pdf():
 
 
 
+
+    lines += ["=== V4.2 REGIME LAB ==="]
+    try:
+        rg=pd.DataFrame(v42_regime_summary())
+        if not rg.empty:
+            cols=["regime","selection","trades","win_rate","avg_return","pf","max_losing_streak"]
+            widths=[14,28,7,9,10,7,8]
+            pctcols={"win_rate","avg_return"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(rg,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.2 SCORE ABLATION ==="]
+    try:
+        ab=pd.DataFrame(v42_ablation_best())
+        if not ab.empty:
+            cols=["drop","selection","trades","win_rate","avg_return","pf","delta_avg","delta_pf","max_losing_streak"]
+            widths=[14,10,7,9,10,7,10,8,8]
+            pctcols={"win_rate","avg_return","delta_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(ab,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
     # V4.1 Sweet Spot nonlinear factor sweep
     lines += ["=== V4.1 SWEET SPOT SWEEP ==="]
     try:
@@ -1642,6 +1807,58 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v42_regime %}
+<details class="section-fold" open>
+<summary>V4.2 Regime Lab · 市场环境 × Sweet Spot</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.2 Regime Lab</h3>
+<div class="muted" style="margin-bottom:10px">
+按每笔交易当时的 SPY 日线状态划分 STRONG_BULL / BULL / TRANSITION / DEFENSIVE。
+只使用当时及以前的数据，不读取未来行情。
+</div>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>Regime</th><th>选择</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v42_regime %}
+<tr>
+<td><b>{{r.regime}}</b></td><td>{{r.selection}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
+{% if v42_ablation %}
+<details class="section-fold">
+<summary>V4.2 Score Ablation · 逐个拿掉 factor</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">ROBUST_BALANCED 逐因子消融</h3>
+<div class="muted" style="margin-bottom:10px">
+这是“评分层”的消融：分别拿掉 Volume / Quality / Sector / Leader / Supply，再重排 Top30/50/100/150。
+注意：它不是完整 Gate 消融，因为被旧 Gate 拒绝的候选不在当前385笔交易表里；完整 Gate 消融以后需要发动机重新跑。
+</div>
+<div class="scroll"><table style="min-width:980px">
+<tr><th>版本</th><th>选择</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均收益变化</th><th>PF变化</th><th>最大连亏</th></tr>
+{% for r in v42_ablation %}
+<tr>
+<td><b>{{r.drop}}</b></td><td>{{r.selection}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%+.2f%%"|format((r.delta_avg or 0)*100)}}</td>
+<td>{{"%+.2f"|format(r.delta_pf or 0)}}</td>
+<td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v41_rows %}
 <details class="section-fold" open>
 <summary>V4.1 Sweet Spot Engine · 非线性区间测试</summary>
@@ -1815,7 +2032,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),
         **s)
 
 @APP.post("/scan")
