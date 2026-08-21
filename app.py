@@ -1235,6 +1235,75 @@ def v46_engine_summary():
         rows.append(dict(selection=label,**m))
     return rows
 
+
+def v461_diag():
+    base=v3_result_dir()
+    p=base/"jlaw_v46_diag.json"
+    out=dict(
+        engine_version="NOT_DETECTED",
+        base_signal_rows=0,
+        regime_tradeable_rows=0,
+        score_ge70_rows=0,
+        v46_pass_rows=0,
+        v46_signal_rows=0,
+        v46_trade_rows=0,
+        stocks_with_v46_signal=0,
+        stocks_with_v46_trade=0,
+        csv_signals_written=False,
+        csv_trades_written=False,
+        csv_summary_written=False,
+        signals_csv_size=0,
+        trades_csv_size=0,
+        summary_csv_size=0,
+        result_folder=str(base),
+        last_error="",
+        diag_file_exists=p.exists()
+    )
+    if p.exists():
+        try:
+            import json
+            got=json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(got,dict): out.update(got)
+        except Exception as e:
+            out["last_error"]=f"diag read error: {type(e).__name__}: {e}"
+
+    # Independently inspect physical files so we can detect stale/missing engine output.
+    for key,fn in [
+        ("signals_csv","jlaw_v46_signals.csv"),
+        ("trades_csv","jlaw_v46_trades.csv"),
+        ("summary_csv","jlaw_v46_summary.csv"),
+    ]:
+        fp=base/fn
+        out[key+"_exists"]=fp.exists()
+        out[key+"_size"]=fp.stat().st_size if fp.exists() else 0
+
+    # Human-readable status.
+    if out.get("engine_version")=="NOT_DETECTED":
+        out["status"]="ENGINE_NOT_ACTIVE"
+        out["diagnosis"]="当前结果目录没有 V4.6.1 诊断文件：很可能发动机代码未生效，或本次并未真正执行新版发动机。"
+    elif int(out.get("base_signal_rows",0))==0:
+        out["status"]="NO_BASE_SIGNALS"
+        out["diagnosis"]="新版发动机已生效，但它本次看到的 BASE signals 为0。需要检查历史信号生成链路。"
+    elif int(out.get("regime_tradeable_rows",0))==0:
+        out["status"]="REGIME_BLOCKED_ALL"
+        out["diagnosis"]="有 BASE signals，但没有任何 STRONG_BULL/BULL 行，问题集中在 Regime 判定。"
+    elif int(out.get("score_ge70_rows",0))==0:
+        out["status"]="SCORE_BLOCKED_ALL"
+        out["diagnosis"]="Regime 有可交易信号，但 V4.6 score 没有任何一笔达到70，问题集中在评分计算。"
+    elif int(out.get("v46_pass_rows",0))==0:
+        out["status"]="PASS_FLAG_ERROR"
+        out["diagnosis"]="score>=70 已经存在，但 v46_pass 仍为0，说明 pass flag 逻辑有问题。"
+    elif int(out.get("v46_signal_rows",0))>0 and int(out.get("v46_trade_rows",0))==0:
+        out["status"]="TRADE_SIM_EMPTY"
+        out["diagnosis"]="V4.6 signals 已生成，但 trade() 没有产生交易，问题集中在交易模拟/索引匹配。"
+    elif not out.get("trades_csv_exists",False):
+        out["status"]="CSV_WRITE_MISSING"
+        out["diagnosis"]="内存中有 V4.6 结果，但 trades CSV 不存在，问题集中在文件写出。"
+    else:
+        out["status"]="OK"
+        out["diagnosis"]="V4.6.1 发动机与诊断链路正常，可读取真实 Challenger 结果。"
+    return out
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1682,6 +1751,19 @@ def build_v3_export_pdf():
 
 
 
+
+
+    lines += ["=== V4.6.1 SELF CHECK ==="]
+    try:
+        dg=v461_diag()
+        for k in ["status","diagnosis","engine_version","base_signal_rows","regime_tradeable_rows",
+                  "score_ge70_rows","v46_pass_rows","v46_signal_rows","v46_trade_rows",
+                  "stocks_with_v46_signal","stocks_with_v46_trade","signals_csv_exists","signals_csv_size",
+                  "trades_csv_exists","trades_csv_size","summary_csv_exists","summary_csv_size","last_error"]:
+            lines.append(f"{k}: {_ascii_cell(dg.get(k,''))}")
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.6 SHADOW GATE ENGINE ==="]
     try:
@@ -2216,6 +2298,41 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v461_diag %}
+<details class="section-fold" open>
+<summary>V4.6.1 Self Check · 发动机自检</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.6.1 Self Check</h3>
+<div style="margin:8px 0 12px">
+<b>状态：</b> {{v461_diag.status}}<br>
+<b>诊断：</b> {{v461_diag.diagnosis}}
+</div>
+<div class="scroll"><table style="min-width:1080px">
+<tr>
+<th>Engine</th><th>BASE signals</th><th>Regime可交易</th><th>Score≥70</th><th>Pass</th>
+<th>V4.6 signals</th><th>V4.6 trades</th><th>有信号股票</th><th>有交易股票</th>
+<th>signals CSV</th><th>trades CSV</th><th>错误</th>
+</tr>
+<tr>
+<td><b>{{v461_diag.engine_version}}</b></td>
+<td>{{v461_diag.base_signal_rows}}</td>
+<td>{{v461_diag.regime_tradeable_rows}}</td>
+<td>{{v461_diag.score_ge70_rows}}</td>
+<td>{{v461_diag.v46_pass_rows}}</td>
+<td>{{v461_diag.v46_signal_rows}}</td>
+<td>{{v461_diag.v46_trade_rows}}</td>
+<td>{{v461_diag.stocks_with_v46_signal}}</td>
+<td>{{v461_diag.stocks_with_v46_trade}}</td>
+<td>{{v461_diag.signals_csv_exists}} / {{v461_diag.signals_csv_size}} B</td>
+<td>{{v461_diag.trades_csv_exists}} / {{v461_diag.trades_csv_size}} B</td>
+<td>{{v461_diag.last_error}}</td>
+</tr>
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v46_engine %}
 <details class="section-fold" open>
 <summary>V4.6 Shadow Gate · 发动机真实重跑结果</summary>
@@ -2628,7 +2745,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),
         **s)
 
 @APP.post("/scan")

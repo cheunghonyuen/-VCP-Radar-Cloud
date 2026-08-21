@@ -509,6 +509,21 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     if quick: stocks=stocks[:max(1,int(quick_n))]
     breakout_sanity_check()
     sigs=[]; trades=[]; funnels=[]; supply_diags=[]; shadow_frames=[]; v46_sigs=[]; v46_trades=[]
+    v46_diag=dict(
+        engine_version="V4.6.1-DIAG",
+        base_signal_rows=0,
+        regime_tradeable_rows=0,
+        score_ge70_rows=0,
+        v46_pass_rows=0,
+        v46_signal_rows=0,
+        v46_trade_rows=0,
+        stocks_with_v46_signal=0,
+        stocks_with_v46_trade=0,
+        csv_signals_written=False,
+        csv_trades_written=False,
+        csv_summary_written=False,
+        last_error=""
+    )
     for n,t in enumerate(stocks,1):
         if stop_file and Path(stop_file).exists():
             raise RuntimeError("__V3_STOPPED__")
@@ -528,12 +543,26 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
             sigs.append(s); tr=trade(d,s)
             if not tr.empty: trades.append(tr)
 
-            # V4.6 Challenger: same original signal universe, but adaptive score >=70.
-            s46=s[s.get("v46_pass",False)==True].copy() if "v46_pass" in s.columns else pd.DataFrame()
+            # V4.6 diagnostics on the exact signal rows seen by the engine.
+            v46_diag["base_signal_rows"] += int(len(s))
+            if "regime" in s.columns:
+                v46_diag["regime_tradeable_rows"] += int(s["regime"].isin(["STRONG_BULL","BULL"]).sum())
+            if "v46_score" in s.columns:
+                v46_diag["score_ge70_rows"] += int((pd.to_numeric(s["v46_score"],errors="coerce")>=70).sum())
+            if "v46_pass" in s.columns:
+                v46_diag["v46_pass_rows"] += int((s["v46_pass"]==True).sum())
+
+            # V4.6 Challenger: same original signal universe, adaptive score >=70.
+            s46=s[s["v46_pass"]==True].copy() if "v46_pass" in s.columns else pd.DataFrame()
             if not s46.empty:
                 v46_sigs.append(s46)
+                v46_diag["stocks_with_v46_signal"] += 1
+                v46_diag["v46_signal_rows"] += int(len(s46))
                 tr46=trade(d,s46)
-                if not tr46.empty: v46_trades.append(tr46)
+                if not tr46.empty:
+                    v46_trades.append(tr46)
+                    v46_diag["stocks_with_v46_trade"] += 1
+                    v46_diag["v46_trade_rows"] += int(len(tr46))
 
             sh=shadow_tests(d,s)
             if not sh.empty: shadow_frames.append(sh)
@@ -544,12 +573,38 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
 
     S46=pd.concat(v46_sigs,ignore_index=True) if v46_sigs else pd.DataFrame()
     T46=pd.concat(v46_trades,ignore_index=True) if v46_trades else pd.DataFrame()
-    S46.to_csv(out/"jlaw_v46_signals.csv",index=False)
-    T46.to_csv(out/"jlaw_v46_trades.csv",index=False)
-    if not T46.empty:
-        pd.DataFrame([summary(T46)]).to_csv(out/"jlaw_v46_summary.csv",index=False)
-    else:
-        pd.DataFrame().to_csv(out/"jlaw_v46_summary.csv",index=False)
+
+    # Persist diagnostics even if V4.6 has zero rows. This prevents another blind full run.
+    try:
+        S46.to_csv(out/"jlaw_v46_signals.csv",index=False)
+        v46_diag["csv_signals_written"]=(out/"jlaw_v46_signals.csv").exists()
+        T46.to_csv(out/"jlaw_v46_trades.csv",index=False)
+        v46_diag["csv_trades_written"]=(out/"jlaw_v46_trades.csv").exists()
+        if not T46.empty:
+            pd.DataFrame([summary(T46)]).to_csv(out/"jlaw_v46_summary.csv",index=False)
+        else:
+            pd.DataFrame(columns=["trades","win_rate","avg_return","profit_factor"]).to_csv(out/"jlaw_v46_summary.csv",index=False)
+        v46_diag["csv_summary_written"]=(out/"jlaw_v46_summary.csv").exists()
+    except Exception as e:
+        v46_diag["last_error"]=f"V46 write error: {type(e).__name__}: {e}"
+
+    # Reconcile final row counts from actual in-memory frames.
+    v46_diag["v46_signal_rows"]=int(len(S46))
+    v46_diag["v46_trade_rows"]=int(len(T46))
+    v46_diag["signals_csv_size"]=int((out/"jlaw_v46_signals.csv").stat().st_size) if (out/"jlaw_v46_signals.csv").exists() else 0
+    v46_diag["trades_csv_size"]=int((out/"jlaw_v46_trades.csv").stat().st_size) if (out/"jlaw_v46_trades.csv").exists() else 0
+    v46_diag["summary_csv_size"]=int((out/"jlaw_v46_summary.csv").stat().st_size) if (out/"jlaw_v46_summary.csv").exists() else 0
+    v46_diag["result_folder"]=str(out)
+
+    try:
+        import json as _json
+        (out/"jlaw_v46_diag.json").write_text(_json.dumps(v46_diag,indent=2,default=str),encoding="utf-8")
+    except Exception as e:
+        # last-resort plain text file
+        try:
+            (out/"jlaw_v46_diag.txt").write_text(str(v46_diag)+"\nDIAG_WRITE_ERROR="+repr(e),encoding="utf-8")
+        except Exception:
+            pass
 
     F=pd.DataFrame(funnels)
     F.to_csv(out/"jlaw_v3_funnel.csv",index=False)
