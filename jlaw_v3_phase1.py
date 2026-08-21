@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np, pandas as pd
 
 STOP=0.07; TARGET=0.30; MAX_HOLD=60
-ENGINE_VERSION="V3.1_STRUCTURE"
+ENGINE_VERSION="V3.2.1_NO_LOOKAHEAD"
 
 SECTORS={
 "XLK":"AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR",
@@ -259,9 +259,13 @@ def trade(d,sigs):
         exi=None; px=None; why=None; mfe=0.; mae=0.
         for j in range(i+1,min(i+1+MAX_HOLD,len(d))):
             o,h,l=map(float,[d.loc[j,"open"],d.loc[j,"high"],d.loc[j,"low"]])
-            mfe=max(mfe,h/en-1); mae=min(mae,l/en-1)
+            # Opening gap exits happen before any intraday high/low can belong to the trade.
             if o<=st: exi=j;px=o;why="STOP_GAP";break
             if o>=tg: exi=j;px=o;why="TARGET_GAP";break
+
+            # Conservative daily-OHLC ordering: if both stop and target are touched
+            # in the same bar, count the stop first because intraday sequence is unknown.
+            mfe=max(mfe,h/en-1); mae=min(mae,l/en-1)
             if l<=st: exi=j;px=st;why="STOP";break
             if h>=tg: exi=j;px=tg;why="TARGET";break
         if exi is None:
@@ -313,21 +317,28 @@ def _simulate_exit(d, i, entry, mode):
 
     for j in range(i+1,min(i+1+MAX_HOLD,len(d))):
         o=float(d.loc[j,"open"]); h=float(d.loc[j,"high"]); l=float(d.loc[j,"low"])
-        mfe=max(mfe,h/entry-1); mae=min(mae,l/entry-1)
 
-        # Arm breakeven once threshold has been reached on a prior/intraday high.
-        if be_trigger is not None and h >= entry*(1+be_trigger):
-            be_armed=True
-            live_stop=max(live_stop,entry)
-
+        # 1) Opening gap is known first. If it exits the trade, do NOT count
+        # that day's later high/low in MFE/MAE.
         if o<=live_stop:
-            return j,o,"STOP_GAP",o/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+            return j,o,"STOP_GAP_BE" if be_armed and live_stop>=entry else "STOP_GAP",o/entry-1,mfe,mae,stop_pct,target_pct,be_armed
         if o>=target:
             return j,o,"TARGET_GAP",o/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+
+        # 2) Existing stop/target are evaluated using this bar.
+        # With daily OHLC we do not know whether high or low happened first,
+        # so use a conservative stop-first assumption.
+        mfe=max(mfe,h/entry-1); mae=min(mae,l/entry-1)
         if l<=live_stop:
             return j,live_stop,"STOP_BE" if be_armed and live_stop>=entry else "STOP",live_stop/entry-1,mfe,mae,stop_pct,target_pct,be_armed
         if h>=target:
             return j,target,"TARGET",target/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+
+        # 3) Breakeven trigger becomes active only for the NEXT bar.
+        # This avoids pretending we know the intraday sequence from daily OHLC.
+        if be_trigger is not None and h >= entry*(1+be_trigger):
+            be_armed=True
+            live_stop=max(live_stop,entry)
 
     j=min(i+MAX_HOLD,len(d)-1)
     px=float(d.loc[j,"close"])
