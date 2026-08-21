@@ -62,7 +62,11 @@ def supply(x):
         lo=float(q.low.min()); hi=float(q.high.max()); c.append((hi-lo)/lo if lo>0 else np.nan)
     c1,c2,c3=c
     base=float(x.volume.iloc[-50:-10].mean()); dry=float(x.volume.iloc[-10:].mean()/base) if base>0 else np.nan
-    pivot=float(x.high.iloc[-15:].max()); plow=float(x.low.iloc[-15:].min())
+    # IMPORTANT: pivot must be based on PRIOR bars only.
+    # Including today's high makes close > pivot mathematically impossible
+    # on a normal OHLC bar (close <= high), which would create 0 signals.
+    prior=x.iloc[-16:-1] if len(x)>=16 else x.iloc[:-1]
+    pivot=float(prior.high.max()); plow=float(prior.low.min())
     tight=(pivot-plow)/plow if plow>0 else np.nan
     vr=float(x.volume.iloc[-1]/x.v50.iloc[-1]) if x.v50.iloc[-1]>0 else np.nan
     s=0
@@ -72,22 +76,49 @@ def supply(x):
     if np.isfinite(tight): s+=18 if tight<.06 else (10 if tight<.10 else 0)
     return min(s,100),pivot,tight,vr,c1,c2,c3,dry
 
+
+def breakout_sanity_check():
+    """Tiny mathematical sanity check: a current close can exceed a prior pivot."""
+    prior_highs=pd.Series([100.0]*15)
+    pivot=float(prior_highs.max())
+    close=101.0
+    assert close>pivot, "Pivot sanity check failed"
+
+def empty_funnel():
+    return {
+        "bars_checked":0,
+        "market_pass":0,
+        "stage2_pass":0,
+        "rs_pass":0,
+        "sector_pass":0,
+        "group_pass":0,
+        "supply_pass":0,
+        "leader_pass":0,
+        "breakout_pass":0,
+    }
+
 def historical_signals(t,raw,spy,secdf,all_data):
-    d=ind(raw); out=[]
+    d=ind(raw); out=[]; funnel=empty_funnel()
     peers=[p for p,s in T2S.items() if s==T2S.get(t) and p in all_data]
     for i in range(260,len(d)):
+        funnel["bars_checked"]+=1
         date=d.loc[i,"date"]; x=d.iloc[:i+1]
         sp=spy[spy.date<=date]
         ok,ms=market_ok(sp)
-        if not ok or not stage2(x): continue
+        if not ok: continue
+        funnel["market_pass"]+=1
+        if not stage2(x): continue
+        funnel["stage2_pass"]+=1
         rsv=rs(x,sp)
         if rsv<72: continue
+        funnel["rs_pass"]+=1
 
         secscore=50
         if secdf is not None:
             sd=secdf[secdf.date<=date]
             if len(sd)>=260: secscore=rs(sd,sp)
         if secscore<58: continue
+        funnel["sector_pass"]+=1
 
         strong=top=valid=0
         for p in peers:
@@ -96,22 +127,26 @@ def historical_signals(t,raw,spy,secdf,all_data):
             valid+=1; pr=rs(ps,sp); strong+=pr>=70; top+=pr>=85
         breadth=100*strong/valid if valid else 0
         if breadth<30: continue
+        funnel["group_pass"]+=1
 
         ss,piv,tight,vr,c1,c2,c3,dry=supply(x)
         if ss<55 or not np.isfinite(tight) or tight>=.12: continue
+        funnel["supply_pass"]+=1
 
         leader=min(100,int(round(min(40,max(0,(rsv-60)*1.5))+min(25,max(0,secscore-55))+min(20,breadth*.2)+(15 if top>=2 else (8 if top>=1 else 0)))))
         if leader<55: continue
+        funnel["leader_pass"]+=1
 
         prev=float(x.close.iloc[-2]); close=float(x.close.iloc[-1]); ext=close/piv-1
         if not(prev<=piv and close>piv and ext<=.03 and vr>=1.20): continue
+        funnel["breakout_pass"]+=1
 
         quality=int(round(.20*(ms/4*100)+.20*secscore+.25*leader+.25*ss+.10*100))
         grade="A+" if quality>=78 else "A"
         out.append(dict(ticker=t,date=date,idx=i,entry=close,pivot=piv,grade=grade,quality=quality,
                         rs=rsv,sector_score=secscore,leader_score=leader,supply_score=ss,
                         group_breadth=breadth,volratio=vr))
-    return d,pd.DataFrame(out)
+    return d,pd.DataFrame(out),funnel
 
 def trade(d,sigs):
     rows=[]; last=-1
@@ -143,8 +178,8 @@ def summary(g):
                 target_hit_rate=g.reason.astype(str).str.startswith("TARGET").mean(),
                 stop_rate=g.reason.astype(str).str.startswith("STOP").mean(),avg_hold=g.hold_days.mean())
 
-def run(market_dir,outdir,progress_cb=None):
-    md=Path(market_dir); out=Path(outdir); out.mkdir(parents=True,exist_ok=True)
+def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback=420):
+    md=Path(market_dir); out=Path(outdir); out=(out/"quick" if quick else out); out.mkdir(parents=True,exist_ok=True)
     files={p.stem.upper():p for p in md.glob("*.csv")}
     spy=load(files["SPY"])
     all_data={}
@@ -152,10 +187,21 @@ def run(market_dir,outdir,progress_cb=None):
         try: all_data[t]=load(p)
         except: pass
     stocks=[t for t in T2S if t in all_data]
-    sigs=[]; trades=[]
+    if quick: stocks=stocks[:max(1,int(quick_n))]
+    breakout_sanity_check()
+    sigs=[]; trades=[]; funnels=[]
     for n,t in enumerate(stocks,1):
         sd=all_data.get(T2S.get(t))
-        d,s=historical_signals(t,all_data[t],spy,sd,all_data)
+        raw_t=all_data[t]; spy_t=spy; sd_t=sd
+        if quick:
+            raw_t=raw_t.tail(max(300,int(quick_lookback))).reset_index(drop=True)
+            if len(raw_t):
+                start_date=raw_t["date"].iloc[0]
+                spy_t=spy[spy["date"]>=start_date].reset_index(drop=True)
+                if sd is not None:
+                    sd_t=sd[sd["date"]>=start_date].reset_index(drop=True)
+        d,s,f=historical_signals(t,raw_t,spy_t,sd_t,all_data)
+        f={"ticker":t,**f}; funnels.append(f)
         if not s.empty:
             sigs.append(s); tr=trade(d,s)
             if not tr.empty: trades.append(tr)
@@ -163,6 +209,11 @@ def run(market_dir,outdir,progress_cb=None):
     S=pd.concat(sigs,ignore_index=True) if sigs else pd.DataFrame()
     T=pd.concat(trades,ignore_index=True) if trades else pd.DataFrame()
     S.to_csv(out/"jlaw_v3_signals.csv",index=False);T.to_csv(out/"jlaw_v3_trades.csv",index=False)
+    F=pd.DataFrame(funnels)
+    F.to_csv(out/"jlaw_v3_funnel.csv",index=False)
+    if not F.empty:
+        totals={c:int(F[c].sum()) for c in F.columns if c!="ticker"}
+        pd.DataFrame([totals]).to_csv(out/"jlaw_v3_funnel_total.csv",index=False)
     rows=[]
     if not T.empty:
         for grade,g in T.groupby("grade"):
