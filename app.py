@@ -30,7 +30,11 @@ MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
 MAX_GAP = float(os.environ.get("TIINGO_MAX_GAP_SECONDS", "18"))
 COOLDOWN_429 = int(os.environ.get("TIINGO_429_COOLDOWN_SECONDS", "60"))
 AUTO_REFRESH_SECONDS = int(os.environ.get("AUTO_REFRESH_SECONDS", "5"))
-current_gap = MIN_GAP
+# V5.1: Tiingo Starter-friendly overnight mode.
+# 75s ~= 48 requests/hour, leaving a little headroom under the 50/hour free-tier cap.
+FREE_TIER_GAP = float(os.environ.get("TIINGO_FREE_TIER_GAP_SECONDS", "75"))
+AUTO_429_WAIT = int(os.environ.get("TIINGO_AUTO_429_WAIT_SECONDS", "3900"))  # 65 minutes
+current_gap = max(MIN_GAP, FREE_TIER_GAP)
 last_request_ts = 0.0
 rate_lock = threading.Lock()
 
@@ -327,72 +331,108 @@ def clear_checkpoint():
     except Exception:
         pass
 
+
+def _cache_exists_good(ticker):
+    p = MARKET_DIR / f"{ticker}.csv"
+    return p.exists() and p.stat().st_size > 100
+
+def _sleep_with_countdown(seconds, done_count, total_count, symbol):
+    """Sleep in the background while keeping the dashboard informative."""
+    end = time.time() + max(0, seconds)
+    while True:
+        left = int(end - time.time())
+        if left <= 0:
+            break
+        mins = max(1, (left + 59) // 60)
+        write_state(
+            status="waiting_rate_limit",
+            message=f"Tiingo 免费版限流；自动等待约 {mins} 分钟后继续，无需手动点击",
+            last_symbol=symbol,
+            updated=done_count,
+            total=total_count,
+            gap_seconds=current_gap,
+            error=f"{symbol}: HTTP 429；系统会自动续跑"
+        )
+        time.sleep(min(60, left))
+
+def _update_with_auto_429(ticker, done_count, total_count):
+    """Retry the same symbol automatically after a 429 cooldown."""
+    while True:
+        try:
+            return update_one(ticker)
+        except TiingoRateLimitPause:
+            _sleep_with_countdown(AUTO_429_WAIT, done_count, total_count, ticker)
+            # After cooldown, retry the SAME ticker. No user action required.
+            continue
+
 def run_scan():
     global scan_thread
     cp = read_checkpoint()
     done = set(cp.get("done", []))
     failed = set(cp.get("failed", []))
-    # If prior run was complete, begin a fresh cycle.
-    if len(done) >= len(ALL_SYMBOLS):
-        done.clear(); failed.clear(); clear_checkpoint()
+
+    # V5.1 bootstrap mode:
+    # If the expanded universe is not fully cached yet, existing cache files are
+    # accepted as completed WITHOUT making another Tiingo request.
+    cached_now = {t for t in ALL_SYMBOLS if _cache_exists_good(t)}
+    bootstrap_mode = len(cached_now) < len(ALL_SYMBOLS)
+    if bootstrap_mode:
+        done |= cached_now
+        failed -= cached_now
+    elif len(done) >= len(ALL_SYMBOLS):
+        # Once the universe is fully cached, a new manual scan means a normal
+        # incremental refresh of every symbol.
+        done.clear()
+        failed.clear()
+        clear_checkpoint()
 
     success_count = len(done)
     fail_count = len(failed)
     remaining = [t for t in ALL_SYMBOLS if t not in done]
-    try:
-        write_state(status="updating",
-                    message=f"增量更新/断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
-                    updated=len(done), total=len(ALL_SYMBOLS), error=None,
-                    success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
 
-        # First pass: continue only unfinished symbols.
+    try:
+        mode_text = "补齐缺失缓存" if bootstrap_mode else "正常增量更新"
+        write_state(
+            status="updating",
+            message=f"{mode_text}：已缓存/完成 {len(done)}，剩余 {len(remaining)}；免费版自动限速，无需守着页面",
+            updated=len(done), total=len(ALL_SYMBOLS), error=None,
+            success_count=success_count, fail_count=fail_count, gap_seconds=current_gap
+        )
+        save_checkpoint(done, failed)
+
         for t in remaining:
-            i = len(done) + 1
-            write_state(last_symbol=t, updated=len(done),
-                        message=f"增量更新 {t}（已完成 {len(done)}/{len(ALL_SYMBOLS)}）",
-                        success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
+            write_state(
+                status="updating", last_symbol=t, updated=len(done),
+                message=f"{mode_text} {t}（总进度 {len(done)}/{len(ALL_SYMBOLS)}）",
+                success_count=len(done), fail_count=len(failed), gap_seconds=current_gap,
+                error=None
+            )
             try:
-                update_one(t)
+                _update_with_auto_429(t, len(done), len(ALL_SYMBOLS))
                 done.add(t)
                 failed.discard(t)
-                success_count = len(done)
-            except TiingoRateLimitPause as ex:
-                # Current symbol stays unfinished; do not mark it as a data failure.
-                save_checkpoint(done, failed)
-                write_state(status="paused",
-                            message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
-                            error=str(ex), updated=len(done), success_count=len(done),
-                            fail_count=len(failed), gap_seconds=current_gap)
-                return
             except Exception as ex:
                 failed.add(t)
-                fail_count = len(failed)
                 write_state(error=f"{t}: {type(ex).__name__}: {str(ex)[:160]}")
             save_checkpoint(done, failed)
-            write_state(updated=len(done), success_count=success_count,
-                        fail_count=len(failed), gap_seconds=current_gap)
+            write_state(
+                status="updating", updated=len(done),
+                success_count=len(done), fail_count=len(failed),
+                gap_seconds=current_gap
+            )
 
-        # Retry failures once at the end instead of blocking the whole scan.
-        retry_list = [t for t in list(failed) if t not in done]
-        if retry_list:
-            write_state(message=f"主扫描完成，正在重试失败股票：{len(retry_list)}只")
-            for t in retry_list:
-                try:
-                    update_one(t)
-                    done.add(t)
-                    failed.discard(t)
-                except TiingoRateLimitPause as ex:
-                    save_checkpoint(done, failed)
-                    write_state(status="paused",
-                                message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
-                                error=str(ex), updated=len(done), success_count=len(done),
-                                fail_count=len(failed), gap_seconds=current_gap)
-                    return
-                except Exception as ex:
-                    write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
-                save_checkpoint(done, failed)
-                write_state(updated=len(done), success_count=len(done),
-                            fail_count=len(failed), gap_seconds=current_gap)
+        # Retry non-rate-limit failures once.
+        retry_list = [t for t in sorted(failed) if t not in done]
+        for t in retry_list:
+            try:
+                _update_with_auto_429(t, len(done), len(ALL_SYMBOLS))
+                done.add(t)
+                failed.discard(t)
+            except Exception as ex:
+                write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
+            save_checkpoint(done, failed)
+            write_state(updated=len(done), success_count=len(done),
+                        fail_count=len(failed), gap_seconds=current_gap)
 
         spy = load_cached("SPY")
         if spy is None or len(spy) < 260:
@@ -410,22 +450,30 @@ def run_scan():
             out.to_csv(RESULT_FILE, index=False)
 
         regime = market_regime(spy)
-        status = "ready" if not failed else "ready"
-        msg = f"扫描完成：{len(rows)}只；失败 {len(failed)}只" if failed else f"扫描完成：{len(rows)}只"
-        write_state(status=status, message=msg, updated=len(done), total=len(ALL_SYMBOLS),
-                    last_scan=datetime.now(timezone.utc).isoformat(), error=None if not failed else f"仍有失败：{', '.join(sorted(failed))}",
-                    success_count=len(done), fail_count=len(failed), gap_seconds=current_gap,
-                    market_label=regime["label"], market_text=regime["text"], market_emoji=regime["emoji"])
+        msg = (f"缓存/扫描完成：{len(done)}/{len(ALL_SYMBOLS)}；候选 {len(rows)}只；失败 {len(failed)}只"
+               if failed else
+               f"缓存/扫描完成：{len(done)}/{len(ALL_SYMBOLS)}；候选 {len(rows)}只")
+        write_state(
+            status="ready", message=msg, updated=len(done), total=len(ALL_SYMBOLS),
+            last_scan=datetime.now(timezone.utc).isoformat(),
+            error=None if not failed else f"仍有失败：{', '.join(sorted(failed))}",
+            success_count=len(done), fail_count=len(failed), gap_seconds=current_gap,
+            market_label=regime["label"], market_text=regime["text"], market_emoji=regime["emoji"]
+        )
         if not failed:
             clear_checkpoint()
+
     except Exception as ex:
         save_checkpoint(done, failed)
-        write_state(status="error", message="扫描暂停，进度已保存",
-                    error=f"{type(ex).__name__}: {ex}", updated=len(done),
-                    success_count=len(done), fail_count=len(failed), gap_seconds=current_gap)
+        write_state(
+            status="error", message="扫描异常，进度已保存",
+            error=f"{type(ex).__name__}: {ex}", updated=len(done),
+            success_count=len(done), fail_count=len(failed), gap_seconds=current_gap
+        )
         traceback.print_exc()
     finally:
         scan_thread = None
+
 
 def start_scan():
     global scan_thread
@@ -3245,7 +3293,7 @@ def api_results():
 @APP.get("/health")
 def health():
     info=storage_info()
-    return jsonify({"ok":True,"version":"volume-ready-1.4-429-pause","data_dir":info["data_dir"],"writable":info["writable"]})
+    return jsonify({"ok":True,"version":"v5.1-free-tier-auto-resume","data_dir":info["data_dir"],"writable":info["writable"]})
 
 recover_stale_v3_status()
 threading.Thread(target=scheduler_loop, daemon=True).start()
