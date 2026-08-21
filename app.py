@@ -654,6 +654,140 @@ def v4_best_by_size():
         out.append(r)
     return out
 
+
+V41_SCHEMES = {
+    "SWEET_CORE": dict(
+        volume=[(1.60,2.50,100),(1.50,1.60,70),(2.50,3.00,35),(1.20,1.50,30),(3.00,99,10)],
+        quality=[(76,82,100),(73,76,55),(82,85,35),(0,73,25),(85,101,10)],
+        sector=[(65,80,100),(60,65,50),(80,101,15),(0,60,25)],
+        leader=[(70,90,100),(60,70,50),(90,101,45),(0,60,25)],
+        supply=[(50,75,100),(40,50,55),(75,90,70),(90,101,35),(0,40,20)],
+        weights=dict(volume=.25,quality=.22,sector=.20,leader=.18,supply=.15)
+    ),
+    "VOLUME_SECTOR": dict(
+        volume=[(1.60,2.50,100),(1.50,1.60,70),(2.50,3.00,30),(1.20,1.50,25),(3.00,99,5)],
+        quality=[(76,82,90),(73,76,50),(82,85,30),(0,73,20),(85,101,10)],
+        sector=[(65,80,100),(60,65,45),(80,101,10),(0,60,20)],
+        leader=[(70,90,85),(60,70,45),(90,101,40),(0,60,20)],
+        supply=[(50,75,75),(40,50,45),(75,90,60),(90,101,30),(0,40,20)],
+        weights=dict(volume=.32,quality=.15,sector=.28,leader=.15,supply=.10)
+    ),
+    "QUALITY_LEADER": dict(
+        volume=[(1.50,2.50,95),(1.20,1.50,35),(2.50,3.00,25),(3.00,99,5)],
+        quality=[(76,82,100),(73,76,55),(82,85,30),(0,73,20),(85,101,10)],
+        sector=[(65,80,90),(60,65,45),(80,101,15),(0,60,20)],
+        leader=[(70,90,100),(60,70,45),(90,101,45),(0,60,20)],
+        supply=[(50,75,80),(40,50,50),(75,90,65),(90,101,30),(0,40,20)],
+        weights=dict(volume=.20,quality=.28,sector=.17,leader=.25,supply=.10)
+    ),
+    "ROBUST_BALANCED": dict(
+        volume=[(1.55,2.40,100),(1.40,1.55,60),(2.40,2.80,55),(1.20,1.40,25),(2.80,99,10)],
+        quality=[(75,82,100),(72,75,55),(82,84,45),(0,72,25),(84,101,15)],
+        sector=[(64,79,100),(60,64,55),(79,82,45),(82,101,15),(0,60,25)],
+        leader=[(68,90,100),(60,68,55),(90,101,55),(0,60,25)],
+        supply=[(48,78,100),(40,48,55),(78,90,70),(90,101,40),(0,40,20)],
+        weights=dict(volume=.24,quality=.22,sector=.20,leader=.19,supply=.15)
+    ),
+}
+
+def _sweet_score(x, bands):
+    try: x=float(x)
+    except Exception: return 0.0
+    for lo,hi,score in bands:
+        if lo <= x < hi:
+            return float(score)
+    return 0.0
+
+def _v41_frame():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return pd.DataFrame()
+    d=pd.read_csv(p)
+    if d.empty:return d
+    for c in ["supply_score","quality","volratio","leader_score","sector_score","return_pct","hold_days"]:
+        if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+    need=["supply_score","quality","volratio","leader_score","sector_score","return_pct"]
+    if any(c not in d.columns for c in need):
+        return pd.DataFrame()
+
+    for name,cfg in V41_SCHEMES.items():
+        fv=d["volratio"].apply(lambda x:_sweet_score(x,cfg["volume"]))
+        fq=d["quality"].apply(lambda x:_sweet_score(x,cfg["quality"]))
+        fs=d["sector_score"].apply(lambda x:_sweet_score(x,cfg["sector"]))
+        fl=d["leader_score"].apply(lambda x:_sweet_score(x,cfg["leader"]))
+        fsp=d["supply_score"].apply(lambda x:_sweet_score(x,cfg["supply"]))
+        w=cfg["weights"]
+        d["v41_"+name]=fv*w["volume"]+fq*w["quality"]+fs*w["sector"]+fl*w["leader"]+fsp*w["supply"]
+    return d
+
+def _v41_metrics(g):
+    if g is None or g.empty:
+        return dict(trades=0,win_rate=np.nan,avg_return=np.nan,pf=np.nan,avg_win=np.nan,avg_loss=np.nan,avg_hold=np.nan,max_losing_streak=0)
+    r=pd.to_numeric(g["return_pct"],errors="coerce").dropna()
+    if r.empty:return dict(trades=0,win_rate=np.nan,avg_return=np.nan,pf=np.nan,avg_win=np.nan,avg_loss=np.nan,avg_hold=np.nan,max_losing_streak=0)
+    wins=r[r>0]; losses=r[r<0]
+    pf=(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (np.inf if len(wins) else 0)
+    streak=mx=0
+    for x in r.tolist():
+        if x<0:
+            streak+=1; mx=max(mx,streak)
+        else: streak=0
+    return dict(
+        trades=len(r),win_rate=(r>0).mean(),avg_return=r.mean(),
+        pf=pf,avg_win=wins.mean() if len(wins) else np.nan,avg_loss=losses.mean() if len(losses) else np.nan,
+        avg_hold=pd.to_numeric(g.get("hold_days"),errors="coerce").mean() if "hold_days" in g.columns else np.nan,
+        max_losing_streak=mx
+    )
+
+def v41_sweet_spot_sweep():
+    d=_v41_frame()
+    if d.empty:return []
+    rows=[]
+    for name in V41_SCHEMES:
+        col="v41_"+name
+        ranked=d.sort_values(col,ascending=False,kind="mergesort")
+        for n in [10,20,30,50,75,100,150]:
+            g=ranked.head(min(n,len(ranked)))
+            m=_v41_metrics(g)
+            rows.append(dict(scheme=name,selection=f"TOP{n}",cutoff=float(g[col].min()) if len(g) else np.nan,**m))
+        for th in [65,70,75,80,85]:
+            g=d[d[col]>=th].sort_values(col,ascending=False)
+            if len(g)==0: continue
+            m=_v41_metrics(g)
+            rows.append(dict(scheme=name,selection=f"SCORE>={th}",cutoff=float(th),**m))
+    return rows
+
+def v41_best_rows():
+    rows=v41_sweet_spot_sweep()
+    if not rows:return []
+    d=pd.DataFrame(rows)
+    out=[]
+    for sel in ["TOP10","TOP20","TOP30","TOP50","TOP75","TOP100","TOP150"]:
+        g=d[d.selection==sel].copy()
+        if g.empty: continue
+        g=g.sort_values(["avg_return","pf","win_rate"],ascending=False)
+        out.append(g.iloc[0].to_dict())
+    return out
+
+def v41_regime_check():
+    d=_v41_frame()
+    if d.empty or "date" not in d.columns:return []
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    rows=[]
+    for name in V41_SCHEMES:
+        col="v41_"+name
+        top=d.sort_values(col,ascending=False).head(min(50,len(d)))
+        for label,mask in [
+            ("<=2021", top["date"].dt.year<=2021),
+            (">=2022", top["date"].dt.year>=2022)
+        ]:
+            g=top[mask]
+            if len(g)==0:continue
+            m=_v41_metrics(g)
+            rows.append(dict(scheme=name,period=label,**m))
+    return rows
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1096,6 +1230,35 @@ def build_v3_export_pdf():
     lines.append("")
 
 
+
+    # V4.1 Sweet Spot nonlinear factor sweep
+    lines += ["=== V4.1 SWEET SPOT SWEEP ==="]
+    try:
+        vs=pd.DataFrame(v41_sweet_spot_sweep())
+        if not vs.empty:
+            cols=["scheme","selection","trades","win_rate","avg_return","pf","avg_win","avg_loss","avg_hold","max_losing_streak","cutoff"]
+            cols=[c for c in cols if c in vs.columns]
+            widths=[18,11,7,9,10,7,10,10,8,8,8][:len(cols)]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(vs,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.1 TOP50 PERIOD CHECK ==="]
+    try:
+        rg=pd.DataFrame(v41_regime_check())
+        if not rg.empty:
+            cols=["scheme","period","trades","win_rate","avg_return","pf","max_losing_streak"]
+            widths=[18,9,7,9,10,7,8]
+            pctcols={"win_rate","avg_return"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(rg,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
     # V4 Elite weight sweep
     lines += ["=== V4 ELITE WEIGHT SWEEP ==="]
     try:
@@ -1478,6 +1641,71 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 
 
+
+{% if v41_rows %}
+<details class="section-fold" open>
+<summary>V4.1 Sweet Spot Engine · 非线性区间测试</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.1 Sweet Spot Engine</h3>
+<div class="muted" style="margin-bottom:10px">
+这次不再假设 factor 越高越好，而是按“最佳区间”打分。重点测试 Volume、Quality、Sector、Leader、Supply 的甜蜜区间组合。
+</div>
+
+{% if v41_best %}
+<h4>不同精选数量下，目前最佳方案</h4>
+<div class="scroll"><table style="min-width:980px">
+<tr><th>精选数量</th><th>方案</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>最大连亏</th><th>最低分</th></tr>
+{% for r in v41_best %}
+<tr>
+<td><b>{{r.selection}}</b></td><td><b>{{r.scheme}}</b></td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{r.max_losing_streak}}</td>
+<td>{{"%.1f"|format(r.cutoff or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+<h4 style="margin-top:16px">全部 Sweet Spot 测试</h4>
+<div class="scroll"><table style="min-width:1160px">
+<tr><th>方案</th><th>选择</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>平均持有</th><th>最大连亏</th><th>门槛分</th></tr>
+{% for r in v41_rows %}
+<tr>
+<td><b>{{r.scheme}}</b></td><td>{{r.selection}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{"%.1f"|format(r.avg_hold or 0)}}天</td>
+<td>{{r.max_losing_streak}}</td>
+<td>{{"%.1f"|format(r.cutoff or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+{% if v41_regime %}
+<h4 style="margin-top:16px">Top50 年代稳定性检查</h4>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>方案</th><th>时期</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v41_regime %}
+<tr>
+<td><b>{{r.scheme}}</b></td><td>{{r.period}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+</details>
+{% endif %}
+
 {% if v4_sweep %}
 <details class="section-fold" open>
 <summary>V4 Elite Score · 权重压力测试</summary>
@@ -1587,7 +1815,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),
         **s)
 
 @APP.post("/scan")
