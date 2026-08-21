@@ -525,6 +525,72 @@ def v3_rows():
     except Exception:
         return []
 
+
+def v3_trade_details():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:
+        d=pd.read_csv(p)
+        if d.empty: return []
+        for c in ["entry","pivot","return_pct","mfe","mae","volratio","rs","sector_score",
+                  "leader_score","supply_score","group_breadth","quality","hold_days"]:
+            if c in d.columns:
+                d[c]=pd.to_numeric(d[c],errors="coerce")
+        if "entry" in d.columns and "pivot" in d.columns:
+            d["extension_pct"]=(d["entry"]/d["pivot"]-1)*100
+        else:
+            d["extension_pct"]=np.nan
+        if "mfe" in d.columns:
+            d["mfe_pct"]=d["mfe"]*100
+        else:
+            d["mfe_pct"]=np.nan
+        if "mae" in d.columns:
+            d["mae_pct"]=d["mae"]*100
+        else:
+            d["mae_pct"]=np.nan
+        if "return_pct" in d.columns:
+            d["return_display"]=d["return_pct"]*100
+        else:
+            d["return_display"]=np.nan
+
+        def diagnose(r):
+            mfe=r.get("mfe_pct")
+            ext=r.get("extension_pct")
+            vr=r.get("volratio")
+            hold=r.get("hold_days")
+            reason=str(r.get("reason",""))
+            if "STOP" in reason and pd.notna(mfe) and mfe < 2:
+                return "突破后几乎没有跟进，快速失败"
+            if pd.notna(ext) and ext > 2:
+                return "入场离 Pivot 偏远，追价风险"
+            if pd.notna(vr) and vr < 1.5:
+                return "突破量偏弱，需重点检查"
+            if "STOP" in reason and pd.notna(hold) and hold <= 6:
+                return "短期假突破/失败突破特征"
+            return "需结合图形复核"
+        d["diagnosis"]=d.apply(diagnose,axis=1)
+        return d.where(pd.notnull(d),None).to_dict("records")
+    except Exception:
+        return []
+
+def v3_signal_details():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_signals.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:
+        d=pd.read_csv(p)
+        if d.empty:return []
+        for c in ["entry","pivot","volratio","rs","sector_score","leader_score","supply_score","quality"]:
+            if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+        if "entry" in d.columns and "pivot" in d.columns:
+            d["extension_pct"]=(d["entry"]/d["pivot"]-1)*100
+        return d.where(pd.notnull(d),None).to_dict("records")
+    except Exception:
+        return []
+
 def v3_diagnostics():
     base=v3_result_dir()
     def count_csv(name):
@@ -879,6 +945,48 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 <div class="scroll"><table style="min-width:1050px"><tr><th>等级</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>平均盈利</th><th>平均亏损</th><th>盈亏比</th><th>PF</th><th>目标命中率</th><th>止损率</th><th>平均持有</th></tr>
 {% for b in v3_results %}<tr><td><b>{{b.grade}}</b></td><td>{{b.trades}}</td><td>{{"%.1f%%"|format((b.win_rate or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_return or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_win or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_loss or 0)*100)}}</td><td>{{"%.2f"|format(b.payoff_ratio or 0)}}</td><td>{{"%.2f"|format(b.profit_factor or 0)}}</td><td>{{"%.1f%%"|format((b.target_hit_rate or 0)*100)}}</td><td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td><td>{{"%.1f"|format(b.avg_hold or 0)}}天</td></tr>{% endfor %}
 </table></div>{% endif %}
+
+{% if v3_trades %}
+<h3 style="margin-top:18px">突破交易逐笔诊断</h3>
+<div class="muted" style="margin-bottom:8px">直接读取刚才已经完成的回测结果，不需要重新跑。重点看这几笔为什么在约5天内止损。</div>
+<div class="scroll"><table style="min-width:1400px">
+<tr>
+<th>股票</th><th>日期</th><th>等级</th><th>入场</th><th>Pivot</th><th>距Pivot</th>
+<th>量比</th><th>RS</th><th>板块</th><th>Leader</th><th>Supply</th><th>质量</th>
+<th>MFE</th><th>MAE</th><th>持有</th><th>退出</th><th>收益</th><th>诊断</th>
+</tr>
+{% for r in v3_trades %}
+<tr>
+<td><b>{{r.ticker}}</b></td>
+<td>{{r.date}}</td>
+<td>{{r.grade}}</td>
+<td>{{"%.2f"|format(r.entry or 0)}}</td>
+<td>{{"%.2f"|format(r.pivot or 0)}}</td>
+<td>{{"%.2f%%"|format(r.extension_pct or 0)}}</td>
+<td>{{"%.2f"|format(r.volratio or 0)}}</td>
+<td>{{"%.0f"|format(r.rs or 0)}}</td>
+<td>{{"%.0f"|format(r.sector_score or 0)}}</td>
+<td>{{"%.0f"|format(r.leader_score or 0)}}</td>
+<td>{{"%.0f"|format(r.supply_score or 0)}}</td>
+<td>{{"%.0f"|format(r.quality or 0)}}</td>
+<td>{{"%.2f%%"|format(r.mfe_pct or 0)}}</td>
+<td>{{"%.2f%%"|format(r.mae_pct or 0)}}</td>
+<td>{{"%.0f"|format(r.hold_days or 0)}}天</td>
+<td>{{r.reason}}</td>
+<td><b>{{"%.2f%%"|format(r.return_display or 0)}}</b></td>
+<td>{{r.diagnosis}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+{% if v3_signals and (v3_signals|length) > (v3_trades|length) %}
+<div style="margin-top:14px;background:#f6f8fb;padding:12px;border-radius:12px">
+<b>信号数多于实际交易：</b>本轮有 {{v3_signals|length}} 个突破信号、{{v3_trades|length}} 笔实际交易。
+这是因为同一股票在上一笔尚未退出时出现的重复信号会被去重，不代表数据丢失。
+</div>
+{% endif %}
+
 <div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
 </div>
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
@@ -932,7 +1040,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),
         **s)
 
 @APP.post("/scan")
