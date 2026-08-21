@@ -98,7 +98,7 @@ def empty_funnel():
     }
 
 def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
-    d=ind(raw); out=[]; funnel=empty_funnel()
+    d=ind(raw); out=[]; funnel=empty_funnel(); diag_rows=[]
     peers=[p for p,s in T2S.items() if s==T2S.get(t) and p in all_data]
     for i in range(260,len(d)):
         if stop_file and Path(stop_file).exists():
@@ -134,6 +134,10 @@ def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
         funnel["group_pass"]+=1
 
         ss,piv,tight,vr,c1,c2,c3,dry=supply(x)
+        diag_rows.append(dict(
+            ticker=t,date=date,rs=rsv,sector_score=secscore,group_breadth=breadth,
+            supply_score=ss,pivot_tight=tight,volratio=vr,c1=c1,c2=c2,c3=c3,dry=dry
+        ))
         if ss<55 or not np.isfinite(tight) or tight>=.12: continue
         funnel["supply_pass"]+=1
 
@@ -150,7 +154,7 @@ def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
         out.append(dict(ticker=t,date=date,idx=i,entry=close,pivot=piv,grade=grade,quality=quality,
                         rs=rsv,sector_score=secscore,leader_score=leader,supply_score=ss,
                         group_breadth=breadth,volratio=vr))
-    return d,pd.DataFrame(out),funnel
+    return d,pd.DataFrame(out),funnel,pd.DataFrame(diag_rows)
 
 def trade(d,sigs):
     rows=[]; last=-1
@@ -193,7 +197,7 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     stocks=[t for t in T2S if t in all_data]
     if quick: stocks=stocks[:max(1,int(quick_n))]
     breakout_sanity_check()
-    sigs=[]; trades=[]; funnels=[]
+    sigs=[]; trades=[]; funnels=[]; supply_diags=[]
     for n,t in enumerate(stocks,1):
         if stop_file and Path(stop_file).exists():
             raise RuntimeError("__V3_STOPPED__")
@@ -206,7 +210,8 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
                 spy_t=spy[spy["date"]>=start_date].reset_index(drop=True)
                 if sd is not None:
                     sd_t=sd[sd["date"]>=start_date].reset_index(drop=True)
-        d,s,f=historical_signals(t,raw_t,spy_t,sd_t,all_data,stop_file=stop_file)
+        d,s,f,sdg=historical_signals(t,raw_t,spy_t,sd_t,all_data,stop_file=stop_file)
+        if not sdg.empty: supply_diags.append(sdg)
         f={"ticker":t,**f}; funnels.append(f)
         if not s.empty:
             sigs.append(s); tr=trade(d,s)
@@ -217,6 +222,19 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     S.to_csv(out/"jlaw_v3_signals.csv",index=False);T.to_csv(out/"jlaw_v3_trades.csv",index=False)
     F=pd.DataFrame(funnels)
     F.to_csv(out/"jlaw_v3_funnel.csv",index=False)
+    SD=pd.concat(supply_diags,ignore_index=True) if supply_diags else pd.DataFrame()
+    SD.to_csv(out/"jlaw_v3_supply_diag.csv",index=False)
+    if not SD.empty:
+        stats=[]
+        for c in ["supply_score","pivot_tight","dry","c1","c2","c3","volratio"]:
+            s=pd.to_numeric(SD[c],errors="coerce").dropna()
+            if len(s):
+                stats.append(dict(
+                    metric=c,count=len(s),min=float(s.min()),p10=float(s.quantile(.10)),
+                    p25=float(s.quantile(.25)),median=float(s.quantile(.50)),
+                    p75=float(s.quantile(.75)),p90=float(s.quantile(.90)),max=float(s.max())
+                ))
+        pd.DataFrame(stats).to_csv(out/"jlaw_v3_supply_stats.csv",index=False)
     if not F.empty:
         totals={c:int(F[c].sum()) for c in F.columns if c!="ticker"}
         pd.DataFrame([totals]).to_csv(out/"jlaw_v3_funnel_total.csv",index=False)

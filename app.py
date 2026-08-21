@@ -552,11 +552,23 @@ def v3_diagnostics():
         except Exception:
             funnel={}
 
+    supply_stats=[]
+    sp=base/"jlaw_v3_supply_stats.csv"
+    if sp.exists():
+        try:
+            supply_stats=pd.read_csv(sp).where(pd.notnull(pd.read_csv(sp)),None).to_dict("records")
+        except Exception:
+            try:
+                sd=pd.read_csv(sp)
+                supply_stats=sd.where(pd.notnull(sd),None).to_dict("records")
+            except Exception:
+                supply_stats=[]
     return {
         "summary":count_csv("jlaw_v3_summary.csv"),
         "signals":count_csv("jlaw_v3_signals.csv"),
         "trades":count_csv("jlaw_v3_trades.csv"),
         "funnel":funnel,
+        "supply_stats":supply_stats,
         "folder":"quick" if base.name=="quick" else "full"
     }
 
@@ -835,6 +847,29 @@ Group {{v3_diag.funnel.get("group_pass",0)}} →
 Supply {{v3_diag.funnel.get("supply_pass",0)}} →
 Leader {{v3_diag.funnel.get("leader_pass",0)}} →
 突破 {{v3_diag.funnel.get("breakout_pass",0)}}
+</div>
+{% endif %}
+
+{% if v3_diag.supply_stats %}
+<div style="margin-top:12px">
+<b>Supply 分布诊断：</b>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>指标</th><th>P10</th><th>P25</th><th>中位数</th><th>P75</th><th>P90</th><th>最大</th></tr>
+{% for r in v3_diag.supply_stats %}
+<tr>
+<td>{{r.metric}}</td>
+<td>{{"%.3f"|format(r.p10 or 0)}}</td>
+<td>{{"%.3f"|format(r.p25 or 0)}}</td>
+<td><b>{{"%.3f"|format(r.median or 0)}}</b></td>
+<td>{{"%.3f"|format(r.p75 or 0)}}</td>
+<td>{{"%.3f"|format(r.p90 or 0)}}</td>
+<td>{{"%.3f"|format(r.max or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+<div class="muted" style="margin-top:8px">
+当前硬门槛：Supply Score ≥55 且 Pivot Tightness &lt;12%。这张表就是用来判断门槛是否定得过严。
+</div>
 </div>
 {% endif %}
 {% if (v3_diag.trades.rows==0) %}<div class="warn" style="margin-top:8px">V3 本轮经过 A+ Gate 后为 0 笔交易，所以没有成绩表。这不是结果丢失，而是筛选条件过严。</div>{% endif %}
