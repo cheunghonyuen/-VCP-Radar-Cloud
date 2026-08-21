@@ -19,6 +19,8 @@ MARKET_DIR = DATA_DIR / "market"; MARKET_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 RESULT_FILE = DATA_DIR / "latest_scan.csv"
 CHECKPOINT_FILE = DATA_DIR / "scan_checkpoint.json"
+BACKTEST_DIR = DATA_DIR / "jlaw_backtest_results"
+BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
@@ -28,6 +30,10 @@ AUTO_REFRESH_SECONDS = int(os.environ.get("AUTO_REFRESH_SECONDS", "5"))
 current_gap = MIN_GAP
 last_request_ts = 0.0
 rate_lock = threading.Lock()
+
+class TiingoRateLimitPause(Exception):
+    """Stop the current scan immediately on Tiingo HTTP 429; checkpoint is kept for resume."""
+    pass
 
 UNIVERSE = sorted(set("""
 AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR
@@ -67,6 +73,7 @@ ALL_SYMBOLS = sorted(set(UNIVERSE + ["SPY"] + list(set(SECTOR.values()))))
 
 lock = threading.Lock()
 scan_thread = None
+backtest_thread = None
 
 def storage_info():
     try:
@@ -140,11 +147,11 @@ def tiingo_history(ticker, start="2006-01-01", retries=4):
         except HTTPError as ex:
             if ex.code == 429:
                 _slow_down()
-                write_state(message=f"Tiingo 限流：冷却 {COOLDOWN_429} 秒后重试；当前间隔 {current_gap:.0f}s",
-                            gap_seconds=current_gap)
-                if attempt < retries:
-                    time.sleep(COOLDOWN_429)
-                    continue
+                # Do not keep hammering Tiingo. Stop this scan immediately and let
+                # the next scan resume from the persistent checkpoint.
+                raise TiingoRateLimitPause(
+                    f"{ticker}: Tiingo HTTP 429；本轮已自动暂停，进度已保存；当前间隔 {current_gap:.0f}s"
+                ) from ex
             raise
         except (URLError, TimeoutError):
             if attempt < retries:
@@ -320,7 +327,7 @@ def run_scan():
     remaining = [t for t in ALL_SYMBOLS if t not in done]
     try:
         write_state(status="updating",
-                    message=f"断点已恢复：从 {len(done)}/{len(ALL_SYMBOLS)} 继续；剩余 {len(remaining)}",
+                    message=f"增量更新/断点续扫：已完成 {len(done)}，剩余 {len(remaining)}",
                     updated=len(done), total=len(ALL_SYMBOLS), error=None,
                     success_count=success_count, fail_count=fail_count, gap_seconds=current_gap)
 
@@ -335,6 +342,14 @@ def run_scan():
                 done.add(t)
                 failed.discard(t)
                 success_count = len(done)
+            except TiingoRateLimitPause as ex:
+                # Current symbol stays unfinished; do not mark it as a data failure.
+                save_checkpoint(done, failed)
+                write_state(status="paused",
+                            message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
+                            error=str(ex), updated=len(done), success_count=len(done),
+                            fail_count=len(failed), gap_seconds=current_gap)
+                return
             except Exception as ex:
                 failed.add(t)
                 fail_count = len(failed)
@@ -352,6 +367,13 @@ def run_scan():
                     update_one(t)
                     done.add(t)
                     failed.discard(t)
+                except TiingoRateLimitPause as ex:
+                    save_checkpoint(done, failed)
+                    write_state(status="paused",
+                                message=f"Tiingo 限流：本轮自动暂停；已保存 {len(done)}/{len(ALL_SYMBOLS)}，稍后可继续",
+                                error=str(ex), updated=len(done), success_count=len(done),
+                                fail_count=len(failed), gap_seconds=current_gap)
+                    return
                 except Exception as ex:
                     write_state(error=f"{t}: 重试仍失败: {type(ex).__name__}: {str(ex)[:140]}")
                 save_checkpoint(done, failed)
@@ -391,32 +413,105 @@ def run_scan():
     finally:
         scan_thread = None
 
-def start_scan(manual=False):
+def start_scan():
     global scan_thread
-    if scan_thread is not None and scan_thread.is_alive():
-        return False
-    cp = read_checkpoint()
-    done = set(cp.get("done", []))
-    failed = set(cp.get("failed", []))
-    if manual:
-        write_state(
-            status="resuming" if done else "updating",
-            message=f"正在从断点继续：已完成 {len(done)}/{len(ALL_SYMBOLS)}" if done else "开始更新",
-            updated=len(done),
-            total=len(ALL_SYMBOLS),
-            success_count=len(done),
-            fail_count=len(failed),
-            error=None,
-            gap_seconds=current_gap
+    if scan_thread is not None and scan_thread.is_alive(): return False
+    scan_thread=threading.Thread(target=run_scan,daemon=True); scan_thread.start(); return True
+
+
+JLAW_EXCLUDED = {"NEE","SO","DUK","AEP","SRE","EXC"}
+
+def read_backtest_status():
+    defaults = {
+        "status":"idle","message":"尚未运行","started_at":None,
+        "finished_at":None,"stocks":0,"error":None
+    }
+    if BACKTEST_STATUS_FILE.exists():
+        try:
+            x=json.loads(BACKTEST_STATUS_FILE.read_text(encoding="utf-8"))
+            defaults.update(x)
+        except Exception:
+            pass
+    return defaults
+
+def write_backtest_status(**kw):
+    BACKTEST_DIR.mkdir(parents=True, exist_ok=True)
+    s=read_backtest_status(); s.update(kw)
+    BACKTEST_STATUS_FILE.write_text(
+        json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8"
+    )
+
+def backtest_summary_rows():
+    p=BACKTEST_DIR/"jlaw_summary.csv"
+    if not p.exists(): return []
+    try:
+        d=pd.read_csv(p)
+        return d.replace({np.nan:None}).to_dict("records")
+    except Exception:
+        return []
+
+def run_jlaw_backtest():
+    global backtest_thread
+    try:
+        write_backtest_status(
+            status="running",
+            message="正在读取现有 /data/market 缓存并执行 J Law 历史回测",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,error=None,stocks=0
         )
-    scan_thread=threading.Thread(target=run_scan,daemon=True)
-    scan_thread.start()
+        from jlaw_backtest_v1 import run as jlaw_run
+
+        spy_path=MARKET_DIR/"SPY.csv"
+        if not spy_path.exists():
+            raise RuntimeError("找不到 /data/market/SPY.csv")
+
+        stock_paths=[]
+        for t in UNIVERSE:
+            if t in JLAW_EXCLUDED:
+                continue
+            p=MARKET_DIR/f"{t}.csv"
+            if p.exists():
+                stock_paths.append(str(p))
+
+        if not stock_paths:
+            raise RuntimeError("没有找到可用于 J Law 回测的股票缓存")
+
+        write_backtest_status(
+            status="running",
+            message=f"正在回测 {len(stock_paths)} 只股票；不调用 Tiingo",
+            stocks=len(stock_paths)
+        )
+        BACKTEST_DIR.mkdir(parents=True,exist_ok=True)
+        jlaw_run(str(spy_path),stock_paths,str(BACKTEST_DIR))
+        write_backtest_status(
+            status="done",
+            message=f"J Law 回测完成：{len(stock_paths)} 只股票",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            stocks=len(stock_paths),error=None
+        )
+    except Exception as ex:
+        traceback.print_exc()
+        write_backtest_status(
+            status="error",
+            message="J Law 回测失败",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error=f"{type(ex).__name__}: {ex}"
+        )
+    finally:
+        backtest_thread=None
+
+def start_jlaw_backtest():
+    global backtest_thread
+    if backtest_thread is not None and backtest_thread.is_alive():
+        return False
+    backtest_thread=threading.Thread(target=run_jlaw_backtest,daemon=True)
+    backtest_thread.start()
     return True
 
 def scheduler_loop():
     time.sleep(8)
     s=read_state()
-    if AUTO_SCAN and not s.get("last_scan") and s.get("status") != "paused": start_scan()
+    if AUTO_SCAN and not s.get("last_scan"): start_scan()
     last_day=None
     while True:
         now=datetime.now(timezone.utc); day=now.date().isoformat()
@@ -486,6 +581,39 @@ th{font-size:12px;color:#667085}.scroll{overflow-x:auto}.score{font-size:20px;fo
 </div></td></tr>{% endfor %}
 </table></div></div>
 
+
+<div class="card">
+<div class="top">
+  <div>
+    <h2 style="margin:0">J Law 历史回测</h2>
+    <div class="muted">直接使用现有 /data/market 缓存 · 不重新下载 · 不调用 Tiingo</div>
+  </div>
+  <form method="post" action="/backtest"><button>开始回测</button></form>
+</div>
+<p><b>状态：</b>{{bt_status}}　{{bt_message}}</p>
+{% if bt_error %}<p class="warn">回测错误：{{bt_error}}</p>{% endif %}
+{% if bt_started_at %}<div class="muted">开始：{{bt_started_at}}{% if bt_finished_at %} ｜ 完成：{{bt_finished_at}}{% endif %} ｜ 股票：{{bt_stocks}}</div>{% endif %}
+{% if bt_rows %}
+<div class="scroll"><table style="min-width:900px">
+<tr><th>止盈</th><th>止损</th><th>交易数</th><th>胜率</th><th>目标命中率</th><th>止损率</th><th>平均收益</th><th>Profit Factor</th><th>平均持有</th></tr>
+{% for b in bt_rows %}
+<tr>
+<td>{{"%.0f%%"|format((b.target_pct or 0)*100)}}</td>
+<td>{{"%.0f%%"|format((b.stop_pct or 0)*100)}}</td>
+<td>{{b.trades}}</td>
+<td>{{"%.1f%%"|format((b.win_rate or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((b.target_hit_rate or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((b.avg_return or 0)*100)}}</td>
+<td>{{"%.2f"|format(b.profit_factor or 0)}}</td>
+<td>{{"%.1f"|format(b.avg_hold or 0)}}天</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+<div class="muted" style="margin-top:10px">V1 对比固定 -7% 止损与 +15% / +20% / +25% / +30% 止盈，最长持有 60 个交易日。历史 point-in-time 销售增长数据尚未伪造加入。</div>
+</div>
+
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
 </div>
 <script>
@@ -527,16 +655,27 @@ def home():
             rows=[]
     cs=cache_summary()
     si=storage_info()
+    bt=read_backtest_status()
+    bt_rows=backtest_summary_rows()
     return render_template_string(HTML,rows=rows,sector_rows=sector_rows,
         count90=count90,count_strict=count_strict,count_breakout=count_breakout,
-        cached_count=cs["cached_count"],cache_total=cs["cache_total"],cache_latest=cs["cache_latest"],storage_dir=si["data_dir"],storage_writable=si["writable"],**s)
+        cached_count=cs["cached_count"],cache_total=cs["cache_total"],cache_latest=cs["cache_latest"],storage_dir=si["data_dir"],storage_writable=si["writable"],
+        bt_status=bt.get("status","idle"),bt_message=bt.get("message","尚未运行"),bt_error=bt.get("error"),
+        bt_started_at=bt.get("started_at"),bt_finished_at=bt.get("finished_at"),bt_stocks=bt.get("stocks",0),bt_rows=bt_rows,
+        **s)
 
 @APP.post("/scan")
 def scan():
-    started = start_scan(manual=True)
-    if not started:
-        write_state(message="扫描任务已经在运行，请稍候")
+    start_scan(); return redirect(url_for("home"))
+
+@APP.post("/backtest")
+def backtest_start():
+    start_jlaw_backtest()
     return redirect(url_for("home"))
+
+@APP.get("/api/backtest-status")
+def api_backtest_status():
+    return jsonify(read_backtest_status())
 
 @APP.get("/api/status")
 def api_status(): return jsonify(read_state())
@@ -553,6 +692,6 @@ def api_results():
 @APP.get("/health")
 def health():
     info=storage_info()
-    return jsonify({"ok":True,"version":"volume-ready-1.3","data_dir":info["data_dir"],"writable":info["writable"]})
+    return jsonify({"ok":True,"version":"volume-ready-1.4-429-pause","data_dir":info["data_dir"],"writable":info["writable"]})
 
 threading.Thread(target=scheduler_loop, daemon=True).start()
