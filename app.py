@@ -1439,6 +1439,60 @@ def v47_threshold_plateau():
         note="Candidate only; use neighboring thresholds and period table to judge plateau, not a single best point."
     )
 
+
+def v48_dual_tier_summary():
+    """Two-tier interpretation of REAL V4.6 engine trades.
+    CORE keeps breadth; ELITE is a priority layer, not a replacement for CORE.
+    """
+    base=v3_result_dir()
+    p=base/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty or "v46_score" not in d.columns:return []
+    d["v46_score"]=pd.to_numeric(d["v46_score"],errors="coerce")
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    tiers=[
+        ("CORE >=70", d[d["v46_score"]>=70]),
+        ("CORE+ >=77.5", d[d["v46_score"]>=77.5]),
+        ("ELITE >=87.5", d[d["v46_score"]>=87.5]),
+        ("SUPER >=90", d[d["v46_score"]>=90]),
+    ]
+    rows=[]
+    for name,g in tiers:
+        g=g.copy().sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        old=g[g["date"].dt.year<=2021]
+        rec=g[g["date"].dt.year>=2022]
+        om=_v41_metrics(old) if not old.empty else {}
+        rm=_v41_metrics(rec) if not rec.empty else {}
+        rows.append(dict(
+            tier=name,**m,
+            old_trades=om.get("trades",0),old_avg=om.get("avg_return",np.nan),old_pf=om.get("pf",np.nan),
+            recent_trades=rm.get("trades",0),recent_avg=rm.get("avg_return",np.nan),recent_pf=rm.get("pf",np.nan)
+        ))
+    return rows
+
+def v48_score_bins():
+    """Non-overlapping score bins to see what each score band itself contributes."""
+    base=v3_result_dir()
+    p=base/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty or "v46_score" not in d.columns:return []
+    d["v46_score"]=pd.to_numeric(d["v46_score"],errors="coerce")
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    bands=[(70,75),(75,80),(80,82.5),(82.5,85),(85,87.5),(87.5,90),(90,101)]
+    rows=[]
+    for lo,hi in bands:
+        g=d[(d["v46_score"]>=lo)&(d["v46_score"]<hi)].copy().sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        rows.append(dict(score_band=f"{lo:g}-{hi:g}",**m))
+    return rows
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1913,6 +1967,34 @@ def build_v3_export_pdf():
         lines.append(f"read error: {_ascii_cell(e)}")
     lines.append("")
 
+
+
+    lines += ["=== V4.8 DUAL TIER SUMMARY ==="]
+    try:
+        dt=pd.DataFrame(v48_dual_tier_summary())
+        if not dt.empty:
+            cols=["tier","trades","win_rate","avg_return","pf","max_losing_streak",
+                  "old_trades","old_avg","old_pf","recent_trades","recent_avg","recent_pf"]
+            widths=[15,7,9,10,7,8,8,9,7,8,9,7]
+            pctcols={"win_rate","avg_return","old_avg","recent_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(dt,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.8 SCORE BINS ==="]
+    try:
+        sb=pd.DataFrame(v48_score_bins())
+        if not sb.empty:
+            cols=["score_band","trades","win_rate","avg_return","pf","max_losing_streak"]
+            widths=[12,7,9,10,7,8]
+            pctcols={"win_rate","avg_return"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(sb,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.7 TRUE ENGINE THRESHOLD SWEEP ==="]
     try:
@@ -2539,6 +2621,47 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 
 
+
+{% if v48_tiers %}
+<details class="section-fold" open>
+<summary>V4.8 Dual Tier · CORE + ELITE 双层筛选</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.8 Dual Tier</h3>
+<div class="muted" style="margin-bottom:10px">
+不再用单一门槛“全有或全无”。CORE 保留稳定样本量，ELITE 作为优先级层。
+</div>
+<div class="scroll"><table style="min-width:1180px">
+<tr><th>层级</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th>
+<th>≤2021笔数</th><th>≤2021平均</th><th>≤2021 PF</th>
+<th>2022+笔数</th><th>2022+平均</th><th>2022+ PF</th></tr>
+{% for r in v48_tiers %}
+<tr>
+<td><b>{{r.tier}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td><b>{{"%.2f"|format(r.pf or 0)}}</b></td><td>{{r.max_losing_streak}}</td>
+<td>{{r.old_trades}}</td><td>{{"%.2f%%"|format((r.old_avg or 0)*100)}}</td><td>{{"%.2f"|format(r.old_pf or 0)}}</td>
+<td>{{r.recent_trades}}</td><td>{{"%.2f%%"|format((r.recent_avg or 0)*100)}}</td><td>{{"%.2f"|format(r.recent_pf or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+{% if v48_bins %}
+<h4 style="margin-top:16px">非重叠 Score Band</h4>
+<div class="scroll"><table style="min-width:860px">
+<tr><th>分数区间</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v48_bins %}
+<tr><td><b>{{r.score_band}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+</details>
+{% endif %}
+
 {% if v47_sweep %}
 <details class="section-fold" open>
 <summary>V4.7 True Engine Robustness · 真发动机门槛稳定性</summary>
@@ -3000,7 +3123,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),
         **s)
 
 @APP.post("/scan")
