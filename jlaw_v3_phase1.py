@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np, pandas as pd
 
 STOP=0.07; TARGET=0.30; MAX_HOLD=60
+ENGINE_VERSION="V3.1_STRUCTURE"
 
 SECTORS={
 "XLK":"AAPL MSFT NVDA AVGO ORCL AMD CRM ADBE QCOM TXN INTU AMAT LRCX KLAC MU PANW CRWD NOW PLTR",
@@ -56,24 +57,113 @@ def stage2(x):
     return bool(r.close>=12 and r.close>r.ma50>r.ma150>r.ma200 and r.ma200>r.ma200old
                 and r.close>=1.30*r.lo252 and r.close>=0.85*r.hi252)
 
+
+def _swing_points(df, left=2, right=2):
+    """Return local swing highs/lows using only surrounding bars.
+    Used only for historical backtest after the bar exists, so no future leak
+    relative to the current evaluation date.
+    """
+    highs=[]; lows=[]
+    h=df["high"].to_numpy(); l=df["low"].to_numpy()
+    n=len(df)
+    for i in range(left, n-right):
+        wh=h[i-left:i+right+1]
+        wl=l[i-left:i+right+1]
+        if np.isfinite(h[i]) and h[i] >= np.nanmax(wh):
+            highs.append(i)
+        if np.isfinite(l[i]) and l[i] <= np.nanmin(wl):
+            lows.append(i)
+    return highs,lows
+
+def _find_contractions(df, lookback=90):
+    """Identify actual peak->trough pullbacks rather than splitting time into thirds.
+    Returns recent contraction percentages from oldest to newest.
+    """
+    w=df.iloc[-lookback:].reset_index(drop=True) if len(df)>lookback else df.reset_index(drop=True)
+    highs,lows=_swing_points(w,2,2)
+    pairs=[]
+    for hi in highs:
+        later=[lo for lo in lows if lo>hi]
+        if not later: 
+            continue
+        lo=later[0]
+        # require at least one rebound attempt after the trough
+        later_hi=[hh for hh in highs if hh>lo]
+        if not later_hi and lo > len(w)-6:
+            continue
+        ph=float(w.loc[hi,"high"]); pl=float(w.loc[lo,"low"])
+        if ph<=0 or pl<=0 or pl>=ph:
+            continue
+        dd=(ph-pl)/ph
+        # ignore micro noise and absurd crash legs
+        if 0.025 <= dd <= 0.65:
+            pairs.append((hi,lo,dd))
+    # de-duplicate overlapping highs/lows and keep chronologically latest distinct legs
+    cleaned=[]
+    last_lo=-1
+    for p in pairs:
+        if p[0] <= last_lo:
+            continue
+        cleaned.append(p)
+        last_lo=p[1]
+    vals=[p[2] for p in cleaned[-4:]]
+    return vals, w
+
 def supply(x):
-    b=x.iloc[-60:]; z=np.array_split(b,3); c=[]
-    for q in z:
-        lo=float(q.low.min()); hi=float(q.high.max()); c.append((hi-lo)/lo if lo>0 else np.nan)
-    c1,c2,c3=c
-    base=float(x.volume.iloc[-50:-10].mean()); dry=float(x.volume.iloc[-10:].mean()/base) if base>0 else np.nan
-    # IMPORTANT: pivot must be based on PRIOR bars only.
-    # Including today's high makes close > pivot mathematically impossible
-    # on a normal OHLC bar (close <= high), which would create 0 signals.
+    contractions,w=_find_contractions(x, lookback=90)
+    # last 3 actual contractions, oldest->newest
+    c1=c2=c3=np.nan
+    if len(contractions)>=3:
+        c1,c2,c3=contractions[-3:]
+    elif len(contractions)==2:
+        c1,c2=contractions[-2:]
+    elif len(contractions)==1:
+        c1=contractions[-1]
+
+    # volume dry-up: compare recent 10d volume to prior 40d baseline
+    base=float(x.volume.iloc[-50:-10].mean()) if len(x)>=50 else np.nan
+    dry=float(x.volume.iloc[-10:].mean()/base) if np.isfinite(base) and base>0 else np.nan
+
+    # pivot formed from PRIOR bars only; focus on recent resistance cluster
     prior=x.iloc[-16:-1] if len(x)>=16 else x.iloc[:-1]
-    pivot=float(prior.high.max()); plow=float(prior.low.min())
-    tight=(pivot-plow)/plow if plow>0 else np.nan
+    pivot=float(prior.high.max()) if len(prior) else np.nan
+
+    # tightness is based on the FINAL 10 prior bars, not the whole contraction history
+    tight_zone=x.iloc[-11:-1] if len(x)>=11 else x.iloc[:-1]
+    if len(tight_zone):
+        zhi=float(tight_zone.high.max()); zlo=float(tight_zone.low.min())
+        tight=(zhi-zlo)/zlo if zlo>0 else np.nan
+    else:
+        tight=np.nan
+
     vr=float(x.volume.iloc[-1]/x.v50.iloc[-1]) if x.v50.iloc[-1]>0 else np.nan
+
     s=0
-    if np.isfinite(c1+c2+c3):
-        s+=12 if c2<c1 else 0; s+=12 if c3<c2 else 0; s+=14 if c3<.10 else (7 if c3<.13 else 0)
-    if np.isfinite(dry): s+=18 if dry<.65 else (12 if dry<.80 else (6 if dry<.90 else 0))
-    if np.isfinite(tight): s+=18 if tight<.06 else (10 if tight<.10 else 0)
+    # structure quality: reward actual sequential shrinking pullbacks
+    if np.isfinite(c1) and np.isfinite(c2):
+        if c2 < c1: s += 18
+    if np.isfinite(c2) and np.isfinite(c3):
+        if c3 < c2: s += 22
+    if np.isfinite(c3):
+        if c3 <= .08: s += 18
+        elif c3 <= .12: s += 12
+        elif c3 <= .16: s += 6
+    elif np.isfinite(c2):
+        if c2 <= .12: s += 10
+        elif c2 <= .16: s += 5
+
+    # volume dry-up
+    if np.isfinite(dry):
+        if dry < .65: s += 18
+        elif dry < .80: s += 12
+        elif dry < .95: s += 6
+
+    # final pivot tightness
+    if np.isfinite(tight):
+        if tight < .06: s += 14
+        elif tight < .10: s += 10
+        elif tight < .14: s += 6
+
     return min(s,100),pivot,tight,vr,c1,c2,c3,dry
 
 
@@ -138,7 +228,7 @@ def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
             ticker=t,date=date,rs=rsv,sector_score=secscore,group_breadth=breadth,
             supply_score=ss,pivot_tight=tight,volratio=vr,c1=c1,c2=c2,c3=c3,dry=dry
         ))
-        if ss<55 or not np.isfinite(tight) or tight>=.12: continue
+        if ss<40 or not np.isfinite(tight) or tight>=.16: continue
         funnel["supply_pass"]+=1
 
         leader=min(100,int(round(min(40,max(0,(rsv-60)*1.5))+min(25,max(0,secscore-55))+min(20,breadth*.2)+(15 if top>=2 else (8 if top>=1 else 0)))))

@@ -807,8 +807,8 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 
 
 <div class="card">
-<div class="top"><div><h2 style="margin:0">J Law V3 Phase 1 · A+ Trade Filter</h2>
-<div class="muted">只测试选股质量：Market Gate + Stage 2 + Sector/Group + Leader + Supply Dry-Up + Tight Pivot；退出固定沿用 -7% / +30% / 60日</div></div>
+<div class="top"><div><h2 style="margin:0">J Law V3.1 · VCP Structure Engine</h2>
+<div class="muted">只测试选股质量：Market Gate + Stage 2 + Sector/Group + Leader + 真实Swing收缩 + Supply Dry-Up + Tight Pivot；退出固定沿用 -7% / +30% / 60日</div></div>
 <div>
 <form method="post" action="/v3/quick" style="display:inline">
 <button {% if v3_status in ["running","stopping"] %}disabled style="opacity:.45"{% endif %}>
@@ -868,7 +868,7 @@ Leader {{v3_diag.funnel.get("leader_pass",0)}} →
 {% endfor %}
 </table></div>
 <div class="muted" style="margin-top:8px">
-当前硬门槛：Supply Score ≥55 且 Pivot Tightness &lt;12%。这张表就是用来判断门槛是否定得过严。
+V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;16%。先验证真实 Swing 收缩引擎能否正常产生候选，再做最终校准。
 </div>
 </div>
 {% endif %}
