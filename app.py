@@ -500,6 +500,18 @@ def start_jlaw_backtest():
     return True
 
 
+
+def v3_shadow_results():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_shadow_summary.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:
+        d=pd.read_csv(p)
+        return d.where(pd.notnull(d),None).to_dict("records")
+    except Exception:
+        return []
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -987,6 +999,38 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 </div>
 {% endif %}
 
+
+{% if v3_shadow %}
+<h3 style="margin-top:20px">V3.2 Shadow Test · 同一信号并排测试</h3>
+<div class="muted" style="margin-bottom:8px">
+不改变前面的 Market / Stage 2 / RS / Group / Supply 筛选，只比较突破量门槛、Breakeven 利润保护和 ATR 自适应止损/止盈。
+</div>
+<div class="scroll"><table style="min-width:1350px">
+<tr><th>模型</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>平均持有</th><th>目标命中</th><th>止损率</th><th>BE退出</th><th>平均止损</th><th>平均目标</th><th>平均MFE</th></tr>
+{% for r in v3_shadow %}
+<tr>
+<td><b>{{r.mode}}</b></td>
+<td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.profit_factor or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{"%.1f"|format(r.avg_hold or 0)}}天</td>
+<td>{{"%.1f%%"|format((r.target_hit_rate or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.stop_rate or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.be_rate or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.avg_stop or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.avg_target or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_mfe or 0)*100)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+<div class="muted" style="margin-top:8px">
+BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=浮盈达到8%/10%后止损提到成本；ATR=按股票自身ATR动态调整止损和目标；组合模型同时使用两层规则。
+</div>
+{% endif %}
+
 <div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
 </div>
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
@@ -1040,7 +1084,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),
         **s)
 
 @APP.post("/scan")

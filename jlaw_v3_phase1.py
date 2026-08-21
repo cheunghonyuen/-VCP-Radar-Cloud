@@ -29,6 +29,10 @@ def load(p):
 def ind(d):
     x=d.copy()
     for n in [20,50,150,200]: x[f"ma{n}"]=x.close.rolling(n).mean()
+    prev_close=x.close.shift(1)
+    tr=pd.concat([(x.high-x.low),(x.high-prev_close).abs(),(x.low-prev_close).abs()],axis=1).max(axis=1)
+    x["atr14"]=tr.rolling(14).mean()
+    x["atr_pct"]=x["atr14"]/x["close"]
     x["ma50old"]=x.ma50.shift(10); x["ma200old"]=x.ma200.shift(20); x["v50"]=x.volume.rolling(50).mean()
     x["hi252"]=x.high.rolling(252).max(); x["lo252"]=x.low.rolling(252).min()
     return x
@@ -267,6 +271,123 @@ def trade(d,sigs):
         rows.append(row);last=exi
     return pd.DataFrame(rows)
 
+
+def _simulate_exit(d, i, entry, mode):
+    """Simulate one exit policy from the same entry signal."""
+    # Defaults
+    stop_pct=0.07
+    target_pct=0.30
+    be_trigger=None
+
+    atr_pct=float(d.loc[i,"atr_pct"]) if "atr_pct" in d.columns and pd.notna(d.loc[i,"atr_pct"]) else np.nan
+
+    if mode=="BASE":
+        pass
+    elif mode=="VOL15":
+        # same exit, entry filter handled outside
+        pass
+    elif mode=="VOL18":
+        pass
+    elif mode=="BE8":
+        be_trigger=0.08
+    elif mode=="BE10":
+        be_trigger=0.10
+    elif mode=="VOL15_BE8":
+        be_trigger=0.08
+    elif mode=="ATR":
+        # Adaptive stop/target based on current ATR%
+        # clamp avoids absurdly tight/wide levels
+        if np.isfinite(atr_pct):
+            stop_pct=float(np.clip(2.2*atr_pct,0.045,0.10))
+            target_pct=float(np.clip(4.5*atr_pct,0.16,0.40))
+    elif mode=="ATR_BE8":
+        if np.isfinite(atr_pct):
+            stop_pct=float(np.clip(2.2*atr_pct,0.045,0.10))
+            target_pct=float(np.clip(4.5*atr_pct,0.16,0.40))
+        be_trigger=0.08
+
+    stop=entry*(1-stop_pct)
+    target=entry*(1+target_pct)
+    live_stop=stop
+    mfe=0.; mae=0.; be_armed=False
+
+    for j in range(i+1,min(i+1+MAX_HOLD,len(d))):
+        o=float(d.loc[j,"open"]); h=float(d.loc[j,"high"]); l=float(d.loc[j,"low"])
+        mfe=max(mfe,h/entry-1); mae=min(mae,l/entry-1)
+
+        # Arm breakeven once threshold has been reached on a prior/intraday high.
+        if be_trigger is not None and h >= entry*(1+be_trigger):
+            be_armed=True
+            live_stop=max(live_stop,entry)
+
+        if o<=live_stop:
+            return j,o,"STOP_GAP",o/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+        if o>=target:
+            return j,o,"TARGET_GAP",o/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+        if l<=live_stop:
+            return j,live_stop,"STOP_BE" if be_armed and live_stop>=entry else "STOP",live_stop/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+        if h>=target:
+            return j,target,"TARGET",target/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+
+    j=min(i+MAX_HOLD,len(d)-1)
+    px=float(d.loc[j,"close"])
+    return j,px,"TIME",px/entry-1,mfe,mae,stop_pct,target_pct,be_armed
+
+def shadow_tests(d,sigs):
+    """Run multiple exit/entry policies against the exact same signal set."""
+    modes=[
+        ("BASE",1.20),
+        ("VOL15",1.50),
+        ("VOL18",1.80),
+        ("BE8",1.20),
+        ("BE10",1.20),
+        ("VOL15_BE8",1.50),
+        ("ATR",1.20),
+        ("ATR_BE8",1.20),
+    ]
+    rows=[]
+    for mode,min_vr in modes:
+        last=-1
+        for _,s in sigs.iterrows():
+            i=int(s.idx)
+            if i<=last: continue
+            vr=float(s.volratio) if pd.notna(s.volratio) else 0
+            if vr<min_vr: continue
+            entry=float(s.entry)
+            exi,px,reason,ret,mfe,mae,sp,tp,be=_simulate_exit(d,i,entry,mode)
+            rows.append(dict(
+                mode=mode,ticker=s.ticker,date=s.date,grade=s.grade,entry=entry,
+                volratio=vr,quality=s.quality,rs=s.rs,supply_score=s.supply_score,
+                return_pct=ret,reason=reason,hold_days=exi-i,mfe=mfe,mae=mae,
+                stop_pct=sp,target_pct=tp,be_armed=be,
+                atr_pct=float(d.loc[i,"atr_pct"]) if pd.notna(d.loc[i,"atr_pct"]) else np.nan
+            ))
+            last=exi
+    return pd.DataFrame(rows)
+
+def shadow_summary(df):
+    rows=[]
+    if df.empty:return pd.DataFrame()
+    for mode,g in df.groupby("mode"):
+        wins=g[g.return_pct>0].return_pct; losses=g[g.return_pct<0].return_pct
+        rows.append(dict(
+            mode=mode,trades=len(g),
+            win_rate=(g.return_pct>0).mean(),
+            avg_return=g.return_pct.mean(),
+            avg_win=wins.mean() if len(wins) else np.nan,
+            avg_loss=losses.mean() if len(losses) else np.nan,
+            profit_factor=(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (np.inf if len(wins) else 0),
+            avg_hold=g.hold_days.mean(),
+            target_hit_rate=g.reason.astype(str).str.startswith("TARGET").mean(),
+            stop_rate=g.reason.astype(str).str.startswith("STOP").mean(),
+            be_rate=g.reason.astype(str).eq("STOP_BE").mean(),
+            avg_stop=g.stop_pct.mean(),
+            avg_target=g.target_pct.mean(),
+            avg_mfe=g.mfe.mean(),
+            avg_mae=g.mae.mean()
+        ))
+    return pd.DataFrame(rows)
+
 def summary(g):
     wins=g[g.return_pct>0].return_pct; losses=g[g.return_pct<0].return_pct
     return dict(trades=len(g),win_rate=(g.return_pct>0).mean(),avg_return=g.return_pct.mean(),
@@ -287,7 +408,7 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     stocks=[t for t in T2S if t in all_data]
     if quick: stocks=stocks[:max(1,int(quick_n))]
     breakout_sanity_check()
-    sigs=[]; trades=[]; funnels=[]; supply_diags=[]
+    sigs=[]; trades=[]; funnels=[]; supply_diags=[]; shadow_frames=[]
     for n,t in enumerate(stocks,1):
         if stop_file and Path(stop_file).exists():
             raise RuntimeError("__V3_STOPPED__")
@@ -306,6 +427,8 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
         if not s.empty:
             sigs.append(s); tr=trade(d,s)
             if not tr.empty: trades.append(tr)
+            sh=shadow_tests(d,s)
+            if not sh.empty: shadow_frames.append(sh)
         if progress_cb: progress_cb(n,len(stocks),t)
     S=pd.concat(sigs,ignore_index=True) if sigs else pd.DataFrame()
     T=pd.concat(trades,ignore_index=True) if trades else pd.DataFrame()
@@ -328,6 +451,11 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     if not F.empty:
         totals={c:int(F[c].sum()) for c in F.columns if c!="ticker"}
         pd.DataFrame([totals]).to_csv(out/"jlaw_v3_funnel_total.csv",index=False)
+    SH=pd.concat(shadow_frames,ignore_index=True) if shadow_frames else pd.DataFrame()
+    SH.to_csv(out/"jlaw_v3_shadow_trades.csv",index=False)
+    SHS=shadow_summary(SH)
+    SHS.to_csv(out/"jlaw_v3_shadow_summary.csv",index=False)
+
     rows=[]
     if not T.empty:
         for grade,g in T.groupby("grade"):
