@@ -1304,6 +1304,65 @@ def v461_diag():
         out["diagnosis"]="V4.6.1 发动机与诊断链路正常，可读取真实 Challenger 结果。"
     return out
 
+
+def v462_deploy_probe():
+    import os, sys, hashlib, importlib.util
+    rows=[]
+    cwd=Path.cwd()
+    candidates=[
+        cwd/"jlaw_v3_phase1.py",
+        Path(__file__).resolve().parent/"jlaw_v3_phase1.py",
+        Path("/app/jlaw_v3_phase1.py"),
+        Path("/workspace/jlaw_v3_phase1.py"),
+    ]
+    seen=set()
+    for p in candidates:
+        try:
+            rp=str(p.resolve())
+        except Exception:
+            rp=str(p)
+        if rp in seen: 
+            continue
+        seen.add(rp)
+        info=dict(path=rp,exists=p.exists(),size=0,sha12="",has_v461=False,has_v46=False,mtime="")
+        if p.exists():
+            try:
+                b=p.read_bytes()
+                info["size"]=len(b)
+                info["sha12"]=hashlib.sha256(b).hexdigest()[:12]
+                s=b.decode("utf-8",errors="ignore")
+                info["has_v461"]="V4.6.1-DIAG" in s
+                info["has_v46"]="V4.6 SHADOW GATE" in s or "v46_diag" in s
+                info["mtime"]=str(p.stat().st_mtime)
+            except Exception as e:
+                info["error"]=repr(e)
+        rows.append(info)
+
+    imported={}
+    try:
+        import jlaw_v3_phase1 as jm
+        imported["module_file"]=str(getattr(jm,"__file__",""))
+        imported["has_diag_attr"]=hasattr(jm,"V46_SCHEMES") or hasattr(jm,"_v46_adaptive_score")
+        try:
+            ip=Path(imported["module_file"])
+            if ip.exists():
+                b=ip.read_bytes()
+                imported["sha12"]=hashlib.sha256(b).hexdigest()[:12]
+                s=b.decode("utf-8",errors="ignore")
+                imported["contains_v461"]="V4.6.1-DIAG" in s
+        except Exception:
+            pass
+    except Exception as e:
+        imported["import_error"]=f"{type(e).__name__}: {e}"
+
+    return dict(
+        cwd=str(cwd),
+        app_file=str(Path(__file__).resolve()),
+        python=sys.version.split()[0],
+        candidates=rows,
+        imported=imported
+    )
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1752,6 +1811,19 @@ def build_v3_export_pdf():
 
 
 
+
+
+    lines += ["=== V4.6.2 DEPLOY PROBE ==="]
+    try:
+        pr=v462_deploy_probe()
+        lines.append(f"cwd: {_ascii_cell(pr.get('cwd',''))}")
+        lines.append(f"app_file: {_ascii_cell(pr.get('app_file',''))}")
+        lines.append(f"imported: {_ascii_cell(pr.get('imported',{}))}")
+        for r in pr.get("candidates",[]):
+            lines.append(_ascii_cell(r))
+    except Exception as e:
+        lines.append(f"probe error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.6.1 SELF CHECK ==="]
     try:
@@ -2299,6 +2371,35 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v462_probe %}
+<details class="section-fold" open>
+<summary>V4.6.2 Deploy Probe · 实际加载的是哪个发动机文件</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.6.2 Deploy Probe</h3>
+<div class="muted" style="margin-bottom:10px">
+不需要跑 Full122。这里直接检查 Railway 容器内实际存在和 Python 实际 import 的 jlaw_v3_phase1.py。
+</div>
+<div style="margin-bottom:10px">
+<b>CWD:</b> {{v462_probe.cwd}}<br>
+<b>App:</b> {{v462_probe.app_file}}<br>
+<b>Imported module:</b> {{v462_probe.imported.module_file}}<br>
+<b>Imported has V4.6:</b> {{v462_probe.imported.has_diag_attr}} /
+{{v462_probe.imported.contains_v461}}
+</div>
+<div class="scroll"><table style="min-width:1100px">
+<tr><th>路径</th><th>存在</th><th>大小</th><th>SHA12</th><th>含V4.6.1-DIAG</th><th>含V4.6代码</th><th>mtime</th></tr>
+{% for r in v462_probe.candidates %}
+<tr>
+<td>{{r.path}}</td><td>{{r.exists}}</td><td>{{r.size}}</td><td><b>{{r.sha12}}</b></td>
+<td>{{r.has_v461}}</td><td>{{r.has_v46}}</td><td>{{r.mtime}}</td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v461_diag %}
 <details class="section-fold" open>
 <summary>V4.6.1 Self Check · 发动机自检</summary>
@@ -2745,7 +2846,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),
         **s)
 
 @APP.post("/scan")
