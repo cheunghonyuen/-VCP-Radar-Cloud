@@ -512,6 +512,32 @@ def v3_shadow_results():
     except Exception:
         return []
 
+
+def v3_shadow_trade_details():
+    base=v3_result_dir()
+    p=base/"jlaw_v3_shadow_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:
+        d=pd.read_csv(p)
+        if d.empty:return []
+        for c in ["entry","volratio","quality","rs","supply_score","return_pct","mfe","mae",
+                  "stop_pct","target_pct","atr_pct","hold_days"]:
+            if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+        d["return_display"]=d["return_pct"]*100
+        d["mfe_display"]=d["mfe"]*100
+        d["mae_display"]=d["mae"]*100
+        d["stop_display"]=d["stop_pct"]*100
+        d["target_display"]=d["target_pct"]*100
+        d["atr_display"]=d["atr_pct"]*100
+        keep=["ticker","date","mode","volratio","atr_display","stop_display","target_display",
+              "mfe_display","mae_display","hold_days","reason","return_display","be_armed"]
+        keep=[c for c in keep if c in d.columns]
+        d=d[keep].sort_values(["ticker","mode"])
+        return d.where(pd.notnull(d),None).to_dict("records")
+    except Exception:
+        return []
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1029,6 +1055,31 @@ V3.1 暂定门槛：Structure/Supply Score ≥40 且 Final Pivot Tightness &lt;1
 <div class="muted" style="margin-top:8px">
 BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=浮盈达到8%/10%后止损提到成本；ATR=按股票自身ATR动态调整止损和目标；组合模型同时使用两层规则。
 </div>
+
+{% if v3_shadow_trades %}
+<h3 style="margin-top:18px">Shadow Test · 逐笔结果</h3>
+<div class="muted" style="margin-bottom:8px">
+这张表直接解释为什么某个模型改善/没有改善。尤其看 AVGO 的 BE 是否已触发，以及 ATR 到底把哪一笔变成盈利。
+</div>
+<div class="scroll"><table style="min-width:1350px">
+<tr><th>股票</th><th>模型</th><th>量比</th><th>ATR%</th><th>止损%</th><th>目标%</th><th>MFE</th><th>MAE</th><th>持有</th><th>BE已触发</th><th>退出</th><th>收益</th></tr>
+{% for r in v3_shadow_trades %}
+<tr>
+<td><b>{{r.ticker}}</b></td><td>{{r.mode}}</td>
+<td>{{"%.2f"|format(r.volratio or 0)}}</td>
+<td>{{"%.2f%%"|format(r.atr_display or 0)}}</td>
+<td>{{"%.1f%%"|format(r.stop_display or 0)}}</td>
+<td>{{"%.1f%%"|format(r.target_display or 0)}}</td>
+<td>{{"%.2f%%"|format(r.mfe_display or 0)}}</td>
+<td>{{"%.2f%%"|format(r.mae_display or 0)}}</td>
+<td>{{"%.0f"|format(r.hold_days or 0)}}天</td>
+<td>{{"是" if r.be_armed else "否"}}</td>
+<td>{{r.reason}}</td>
+<td><b>{{"%.2f%%"|format(r.return_display or 0)}}</b></td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
 {% endif %}
 
 <div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
@@ -1084,7 +1135,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),
         **s)
 
 @APP.post("/scan")
