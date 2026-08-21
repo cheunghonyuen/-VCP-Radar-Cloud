@@ -1209,6 +1209,32 @@ def v45_research_decision():
         reason=f"Walk-forward is mixed: {len(passes)} pass, {len(fails)} fail, {len(wf)-len(valid)} tiny-sample windows. Do not replace the baseline yet."
     )
 
+
+def v46_engine_summary():
+    base=v3_result_dir()
+    p=base/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:
+        d=pd.read_csv(p)
+    except Exception:
+        return []
+    if d.empty:return []
+    for c in ["return_pct","hold_days","v46_score"]:
+        if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    rows=[]
+    for label,g in [
+        ("ALL",d),
+        ("<=2021",d[d.date.dt.year<=2021]),
+        ("2022+",d[d.date.dt.year>=2022]),
+        ("SCORE>=85",d[d.get("v46_score",0)>=85] if "v46_score" in d.columns else d.iloc[0:0]),
+        ("SCORE>=90",d[d.get("v46_score",0)>=90] if "v46_score" in d.columns else d.iloc[0:0]),
+    ]:
+        if g.empty:continue
+        m=_v41_metrics(g.sort_values("date"))
+        rows.append(dict(selection=label,**m))
+    return rows
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1655,6 +1681,20 @@ def build_v3_export_pdf():
 
 
 
+
+
+    lines += ["=== V4.6 SHADOW GATE ENGINE ==="]
+    try:
+        e46=pd.DataFrame(v46_engine_summary())
+        if not e46.empty:
+            cols=["selection","trades","win_rate","avg_return","pf","avg_win","avg_loss","avg_hold","max_losing_streak"]
+            widths=[12,7,9,10,7,10,10,8,8]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(e46,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.5 CHAMPION CHALLENGER ==="]
     try:
@@ -2175,6 +2215,32 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v46_engine %}
+<details class="section-fold" open>
+<summary>V4.6 Shadow Gate · 发动机真实重跑结果</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.6 Shadow Gate</h3>
+<div class="muted" style="margin-bottom:10px">
+这是发动机重新逐日扫描后产生的 Challenger 交易，不再只是对旧385笔做 App 端排序。
+V3 BASE 仍然保留，不会被覆盖。
+</div>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>范围</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>平均持有</th><th>最大连亏</th></tr>
+{% for r in v46_engine %}
+<tr><td><b>{{r.selection}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td><b>{{"%.2f"|format(r.pf or 0)}}</b></td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{"%.1f"|format(r.avg_hold or 0)}}天</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v45_cc %}
 <details class="section-fold" open>
 <summary>V4.5 Champion vs Challenger · 是否真的赢过基准</summary>
@@ -2562,7 +2628,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),
         **s)
 
 @APP.post("/scan")

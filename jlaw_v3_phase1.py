@@ -191,6 +191,92 @@ def empty_funnel():
         "breakout_pass":0,
     }
 
+
+# ---------------- V4.6 SHADOW GATE ----------------
+# Important: V4.6 does NOT replace V3 BASE. It runs beside it as a Challenger.
+# Same entry day information only; same -7% / +30% / 60d exit for fair comparison.
+
+V46_SCHEMES = {
+    "SWEET_CORE": dict(
+        volume=[(1.60,2.50,100),(1.50,1.60,70),(2.50,3.00,35),(1.20,1.50,30),(3.00,99,10)],
+        quality=[(76,82,100),(73,76,55),(82,85,35),(0,73,25),(85,101,10)],
+        sector=[(65,80,100),(60,65,50),(80,101,15),(0,60,25)],
+        leader=[(70,90,100),(60,70,50),(90,101,45),(0,60,25)],
+        supply=[(50,75,100),(40,50,55),(75,90,70),(90,101,35),(0,40,20)],
+        weights=dict(volume=.25,quality=.22,sector=.20,leader=.18,supply=.15)
+    ),
+    "VOLUME_SECTOR": dict(
+        volume=[(1.60,2.50,100),(1.50,1.60,70),(2.50,3.00,30),(1.20,1.50,25),(3.00,99,5)],
+        quality=[(76,82,90),(73,76,50),(82,85,30),(0,73,20),(85,101,10)],
+        sector=[(65,80,100),(60,65,45),(80,101,10),(0,60,20)],
+        leader=[(70,90,85),(60,70,45),(90,101,40),(0,60,20)],
+        supply=[(50,75,75),(40,50,45),(75,90,60),(90,101,30),(0,40,20)],
+        weights=dict(volume=.32,quality=.15,sector=.28,leader=.15,supply=.10)
+    ),
+    "QUALITY_LEADER": dict(
+        volume=[(1.50,2.50,95),(1.20,1.50,35),(2.50,3.00,25),(3.00,99,5)],
+        quality=[(76,82,100),(73,76,55),(82,85,30),(0,73,20),(85,101,10)],
+        sector=[(65,80,90),(60,65,45),(80,101,15),(0,60,20)],
+        leader=[(70,90,100),(60,70,45),(90,101,45),(0,60,20)],
+        supply=[(50,75,80),(40,50,50),(75,90,65),(90,101,30),(0,40,20)],
+        weights=dict(volume=.20,quality=.28,sector=.17,leader=.25,supply=.10)
+    ),
+    "ROBUST_BALANCED": dict(
+        volume=[(1.55,2.40,100),(1.40,1.55,60),(2.40,2.80,55),(1.20,1.40,25),(2.80,99,10)],
+        quality=[(75,82,100),(72,75,55),(82,84,45),(0,72,25),(84,101,15)],
+        sector=[(64,79,100),(60,64,55),(79,82,45),(82,101,15),(0,60,25)],
+        leader=[(68,90,100),(60,68,55),(90,101,55),(0,60,25)],
+        supply=[(48,78,100),(40,48,55),(78,90,70),(90,101,40),(0,40,20)],
+        weights=dict(volume=.24,quality=.22,sector=.20,leader=.19,supply=.15)
+    ),
+}
+
+def _v46_band(x,bands):
+    try: x=float(x)
+    except Exception: return 0.0
+    for lo,hi,score in bands:
+        if lo <= x < hi:
+            return float(score)
+    return 0.0
+
+def _v46_scheme_score(name,vr,quality,sector,leader,supply):
+    cfg=V46_SCHEMES[name]; w=cfg["weights"]
+    return (
+        _v46_band(vr,cfg["volume"])*w["volume"] +
+        _v46_band(quality,cfg["quality"])*w["quality"] +
+        _v46_band(sector,cfg["sector"])*w["sector"] +
+        _v46_band(leader,cfg["leader"])*w["leader"] +
+        _v46_band(supply,cfg["supply"])*w["supply"]
+    )
+
+def _v46_regime(spy_hist):
+    x=ind(spy_hist)
+    if len(x)<220:return "UNKNOWN"
+    r=x.iloc[-1]
+    need=[r.close,r.ma20,r.ma50,r.ma200,r.ma50old,r.ma200old]
+    if any(pd.isna(v) for v in need):return "UNKNOWN"
+    ret20=(r.close/x.close.iloc[-21]-1) if len(x)>=21 else np.nan
+    if (r.close>r.ma20>r.ma50>r.ma200 and
+        r.ma50>r.ma50old and r.ma200>r.ma200old and
+        pd.notna(ret20) and ret20>0):
+        return "STRONG_BULL"
+    if r.close>r.ma200 and r.ma200>r.ma200old:
+        return "BULL"
+    if r.close>r.ma200 or r.ma50>r.ma200:
+        return "TRANSITION"
+    return "DEFENSIVE"
+
+def _v46_adaptive_score(regime,vr,quality,sector,leader,supply):
+    sweet=_v46_scheme_score("SWEET_CORE",vr,quality,sector,leader,supply)
+    vs=_v46_scheme_score("VOLUME_SECTOR",vr,quality,sector,leader,supply)
+    ql=_v46_scheme_score("QUALITY_LEADER",vr,quality,sector,leader,supply)
+    rb=_v46_scheme_score("ROBUST_BALANCED",vr,quality,sector,leader,supply)
+    if regime=="STRONG_BULL":
+        return 0.45*ql + 0.35*rb + 0.20*vs
+    if regime=="BULL":
+        return 0.45*vs + 0.35*rb + 0.20*sweet
+    return 0.0
+
 def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
     d=ind(raw); out=[]; funnel=empty_funnel(); diag_rows=[]
     peers=[p for p,s in T2S.items() if s==T2S.get(t) and p in all_data]
@@ -245,9 +331,12 @@ def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
 
         quality=int(round(.20*(ms/4*100)+.20*secscore+.25*leader+.25*ss+.10*100))
         grade="A+" if quality>=78 else "A"
+        regime=_v46_regime(sp)
+        v46_score=_v46_adaptive_score(regime,vr,quality,secscore,leader,ss)
         out.append(dict(ticker=t,date=date,idx=i,entry=close,pivot=piv,grade=grade,quality=quality,
                         rs=rsv,sector_score=secscore,leader_score=leader,supply_score=ss,
-                        group_breadth=breadth,volratio=vr))
+                        group_breadth=breadth,volratio=vr,regime=regime,v46_score=v46_score,
+                        v46_pass=bool(regime in ("STRONG_BULL","BULL") and v46_score>=70)))
     return d,pd.DataFrame(out),funnel,pd.DataFrame(diag_rows)
 
 def trade(d,sigs):
@@ -419,7 +508,7 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     stocks=[t for t in T2S if t in all_data]
     if quick: stocks=stocks[:max(1,int(quick_n))]
     breakout_sanity_check()
-    sigs=[]; trades=[]; funnels=[]; supply_diags=[]; shadow_frames=[]
+    sigs=[]; trades=[]; funnels=[]; supply_diags=[]; shadow_frames=[]; v46_sigs=[]; v46_trades=[]
     for n,t in enumerate(stocks,1):
         if stop_file and Path(stop_file).exists():
             raise RuntimeError("__V3_STOPPED__")
@@ -438,12 +527,30 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
         if not s.empty:
             sigs.append(s); tr=trade(d,s)
             if not tr.empty: trades.append(tr)
+
+            # V4.6 Challenger: same original signal universe, but adaptive score >=70.
+            s46=s[s.get("v46_pass",False)==True].copy() if "v46_pass" in s.columns else pd.DataFrame()
+            if not s46.empty:
+                v46_sigs.append(s46)
+                tr46=trade(d,s46)
+                if not tr46.empty: v46_trades.append(tr46)
+
             sh=shadow_tests(d,s)
             if not sh.empty: shadow_frames.append(sh)
         if progress_cb: progress_cb(n,len(stocks),t)
     S=pd.concat(sigs,ignore_index=True) if sigs else pd.DataFrame()
     T=pd.concat(trades,ignore_index=True) if trades else pd.DataFrame()
     S.to_csv(out/"jlaw_v3_signals.csv",index=False);T.to_csv(out/"jlaw_v3_trades.csv",index=False)
+
+    S46=pd.concat(v46_sigs,ignore_index=True) if v46_sigs else pd.DataFrame()
+    T46=pd.concat(v46_trades,ignore_index=True) if v46_trades else pd.DataFrame()
+    S46.to_csv(out/"jlaw_v46_signals.csv",index=False)
+    T46.to_csv(out/"jlaw_v46_trades.csv",index=False)
+    if not T46.empty:
+        pd.DataFrame([summary(T46)]).to_csv(out/"jlaw_v46_summary.csv",index=False)
+    else:
+        pd.DataFrame().to_csv(out/"jlaw_v46_summary.csv",index=False)
+
     F=pd.DataFrame(funnels)
     F.to_csv(out/"jlaw_v3_funnel.csv",index=False)
     SD=pd.concat(supply_diags,ignore_index=True) if supply_diags else pd.DataFrame()
