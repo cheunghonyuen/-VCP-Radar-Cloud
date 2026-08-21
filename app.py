@@ -23,6 +23,7 @@ BACKTEST_DIR = DATA_DIR / "jlaw_backtest_results_v2"
 BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
 V3_DIR = DATA_DIR / "jlaw_v3_phase1"
 V3_STATUS_FILE = V3_DIR / "status.json"
+V3_STOP_FILE = V3_DIR / "STOP"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
@@ -546,6 +547,10 @@ def run_v3(mode="full"):
     try:
         from jlaw_v3_phase1 import run as v3run
         v3_stop_event.clear()
+        try:
+            if V3_STOP_FILE.exists(): V3_STOP_FILE.unlink()
+        except Exception:
+            pass
         quick = (mode == "quick")
         label = "快速验证 22只" if quick else "完整回测 122只"
         write_v3_status(
@@ -565,8 +570,11 @@ def run_v3(mode="full"):
         v3run(
             str(MARKET_DIR), str(V3_DIR),
             progress_cb=prog,
-            quick=quick, quick_n=22, quick_lookback=420
+            quick=quick, quick_n=22, quick_lookback=420,
+            stop_file=str(V3_STOP_FILE)
         )
+        if V3_STOP_FILE.exists() or v3_stop_event.is_set():
+            raise RuntimeError("__V3_STOPPED__")
         s=read_v3_status()
         write_v3_status(
             status="done",mode=mode,
@@ -603,17 +611,41 @@ def start_v3(mode="full"):
     return True
 
 def stop_v3():
-    if v3_thread is not None and v3_thread.is_alive():
-        v3_stop_event.set()
-        s=read_v3_status()
+    # Persistent stop flag: survives page refresh and is visible to the engine
+    V3_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        V3_STOP_FILE.write_text("stop",encoding="utf-8")
+    except Exception:
+        pass
+    v3_stop_event.set()
+    s=read_v3_status()
+    write_v3_status(
+        status="stopped",
+        mode=s.get("mode","full"),
+        message="已停止 V3 回测",
+        stocks=s.get("stocks",0),
+        processed=s.get("processed",0),
+        current="",
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        error=None
+    )
+    return True
+
+def recover_stale_v3_status():
+    # Railway Restart kills the thread but /data/status.json survives.
+    # Convert ghost running/stopping states to interrupted on boot.
+    s=read_v3_status()
+    if s.get("status") in ("running","stopping"):
         write_v3_status(
-            status="stopping",
+            status="interrupted",
             mode=s.get("mode","full"),
-            message="正在停止…会在当前股票处理完成后停止",
-            stocks=s.get("stocks",0),processed=s.get("processed",0),current=s.get("current","")
+            message="上一次回测因服务重启/中断而停止，可重新开始",
+            stocks=s.get("stocks",0),
+            processed=s.get("processed",0),
+            current="",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error=None
         )
-        return True
-    return False
 
 def scheduler_loop():
     time.sleep(8)
@@ -884,4 +916,5 @@ def health():
     info=storage_info()
     return jsonify({"ok":True,"version":"volume-ready-1.4-429-pause","data_dir":info["data_dir"],"writable":info["writable"]})
 
+recover_stale_v3_status()
 threading.Thread(target=scheduler_loop, daemon=True).start()

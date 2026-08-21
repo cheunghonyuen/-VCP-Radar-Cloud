@@ -97,10 +97,12 @@ def empty_funnel():
         "breakout_pass":0,
     }
 
-def historical_signals(t,raw,spy,secdf,all_data):
+def historical_signals(t,raw,spy,secdf,all_data,stop_file=None):
     d=ind(raw); out=[]; funnel=empty_funnel()
     peers=[p for p,s in T2S.items() if s==T2S.get(t) and p in all_data]
     for i in range(260,len(d)):
+        if stop_file and Path(stop_file).exists():
+            raise RuntimeError("__V3_STOPPED__")
         funnel["bars_checked"]+=1
         date=d.loc[i,"date"]; x=d.iloc[:i+1]
         sp=spy[spy.date<=date]
@@ -122,6 +124,8 @@ def historical_signals(t,raw,spy,secdf,all_data):
 
         strong=top=valid=0
         for p in peers:
+            if stop_file and Path(stop_file).exists():
+                raise RuntimeError("__V3_STOPPED__")
             pd0=all_data[p]; ps=pd0[pd0.date<=date]
             if len(ps)<260: continue
             valid+=1; pr=rs(ps,sp); strong+=pr>=70; top+=pr>=85
@@ -178,7 +182,7 @@ def summary(g):
                 target_hit_rate=g.reason.astype(str).str.startswith("TARGET").mean(),
                 stop_rate=g.reason.astype(str).str.startswith("STOP").mean(),avg_hold=g.hold_days.mean())
 
-def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback=420):
+def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback=420,stop_file=None):
     md=Path(market_dir); out=Path(outdir); out=(out/"quick" if quick else out); out.mkdir(parents=True,exist_ok=True)
     files={p.stem.upper():p for p in md.glob("*.csv")}
     spy=load(files["SPY"])
@@ -191,6 +195,8 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
     breakout_sanity_check()
     sigs=[]; trades=[]; funnels=[]
     for n,t in enumerate(stocks,1):
+        if stop_file and Path(stop_file).exists():
+            raise RuntimeError("__V3_STOPPED__")
         sd=all_data.get(T2S.get(t))
         raw_t=all_data[t]; spy_t=spy; sd_t=sd
         if quick:
@@ -200,7 +206,7 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
                 spy_t=spy[spy["date"]>=start_date].reset_index(drop=True)
                 if sd is not None:
                     sd_t=sd[sd["date"]>=start_date].reset_index(drop=True)
-        d,s,f=historical_signals(t,raw_t,spy_t,sd_t,all_data)
+        d,s,f=historical_signals(t,raw_t,spy_t,sd_t,all_data,stop_file=stop_file)
         f={"ticker":t,**f}; funnels.append(f)
         if not s.empty:
             sigs.append(s); tr=trade(d,s)
