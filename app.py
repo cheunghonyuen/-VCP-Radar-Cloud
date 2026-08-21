@@ -1134,6 +1134,81 @@ def v44_recent_validation():
         rows.append(dict(rule=name,**m))
     return rows
 
+
+def v45_champion_challenger():
+    """
+    Compare robust candidate rules against the original V3 BASE on identical historical trades.
+    This is still post-filter research on the 385 trades; it does not reconstruct trades rejected by older gates.
+    """
+    d=v43_adaptive_candidates()
+    if d.empty:return []
+    d=d.copy()
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+
+    rules=[
+        ("V3_BASE_ALL", pd.Series(True,index=d.index)),
+        ("ADAPTIVE>=70", d["v43_score"]>=70),
+        ("ADAPTIVE>=85", d["v43_score"]>=85),
+        ("VOL_SECTOR>=70", d["v41_VOLUME_SECTOR"]>=70),
+        ("VOL_SECTOR>=80", d["v41_VOLUME_SECTOR"]>=80),
+        ("ROBUST>=85", d["v41_ROBUST_BALANCED"]>=85),
+        ("QUALITY_LEADER>=85", d["v41_QUALITY_LEADER"]>=85),
+    ]
+    rows=[]
+    for name,mask in rules:
+        g=d[mask].copy().sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        # Recent and old split shown side by side
+        old=g[g["date"].dt.year<=2021]
+        rec=g[g["date"].dt.year>=2022]
+        om=_v41_metrics(old) if not old.empty else {}
+        rm=_v41_metrics(rec) if not rec.empty else {}
+        rows.append(dict(
+            rule=name,**m,
+            old_trades=om.get("trades",0),old_avg=om.get("avg_return",np.nan),old_pf=om.get("pf",np.nan),
+            recent_trades=rm.get("trades",0),recent_avg=rm.get("avg_return",np.nan),recent_pf=rm.get("pf",np.nan)
+        ))
+    return rows
+
+def v45_walkforward_verdict():
+    wf=v44_walk_forward()
+    if not wf:return []
+    rows=[]
+    for r in wf:
+        n=int(r.get("test_trades",0) or 0)
+        pf=float(r.get("test_pf",0) or 0)
+        avg=float(r.get("test_avg",0) or 0)
+        if n < 10:
+            verdict="TOO_SMALL"
+        elif pf >= 1.5 and avg > 0:
+            verdict="PASS"
+        elif pf >= 1.0 and avg >= 0:
+            verdict="MARGINAL"
+        else:
+            verdict="FAIL"
+        rr=dict(r)
+        rr["verdict"]=verdict
+        rows.append(rr)
+    return rows
+
+def v45_research_decision():
+    """
+    Conservative decision layer: no promotion to engine unless walk-forward robustness is adequate.
+    """
+    wf=v45_walkforward_verdict()
+    if not wf:
+        return dict(status="NO_DATA",reason="No walk-forward results")
+    valid=[r for r in wf if int(r.get("test_trades",0) or 0)>=10]
+    passes=[r for r in valid if r.get("verdict")=="PASS"]
+    fails=[r for r in valid if r.get("verdict")=="FAIL"]
+    if len(valid)>=2 and len(passes)>=2 and len(fails)==0:
+        return dict(status="PROMOTE_CANDIDATE",reason="Multiple non-tiny walk-forward windows passed.")
+    return dict(
+        status="KEEP_RESEARCH",
+        reason=f"Walk-forward is mixed: {len(passes)} pass, {len(fails)} fail, {len(wf)-len(valid)} tiny-sample windows. Do not replace the baseline yet."
+    )
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1579,6 +1654,33 @@ def build_v3_export_pdf():
 
 
 
+
+
+    lines += ["=== V4.5 CHAMPION CHALLENGER ==="]
+    try:
+        cc=pd.DataFrame(v45_champion_challenger())
+        if not cc.empty:
+            cols=["rule","trades","win_rate","avg_return","pf","max_losing_streak","old_trades","old_avg","old_pf","recent_trades","recent_avg","recent_pf"]
+            widths=[22,7,9,10,7,8,8,9,7,8,9,7]
+            pctcols={"win_rate","avg_return","old_avg","recent_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(cc,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.5 WALKFORWARD VERDICT ==="]
+    try:
+        vv=pd.DataFrame(v45_walkforward_verdict())
+        if not vv.empty:
+            cols=["window","model","threshold","test_trades","test_win","test_avg","test_pf","verdict"]
+            widths=[20,15,8,8,9,9,7,10]
+            pctcols={"test_win","test_avg"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(vv,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
 
     lines += ["=== V4.4 WALK FORWARD ==="]
     try:
@@ -2072,6 +2174,54 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v45_cc %}
+<details class="section-fold" open>
+<summary>V4.5 Champion vs Challenger · 是否真的赢过基准</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.5 Champion vs Challenger</h3>
+<div class="muted" style="margin-bottom:10px">
+把 V3 BASE 保留为 Champion，所有新规则只是 Challenger。新规则只有在滚动验证也稳定后才有资格替换基准。
+</div>
+<div style="margin:8px 0 14px"><b>研究结论：</b> {{v45_decision.status}} — {{v45_decision.reason}}</div>
+<div class="scroll"><table style="min-width:1260px">
+<tr><th>规则</th><th>总笔数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th>
+<th>≤2021笔数</th><th>≤2021平均</th><th>≤2021 PF</th>
+<th>2022+笔数</th><th>2022+平均</th><th>2022+ PF</th></tr>
+{% for r in v45_cc %}
+<tr>
+<td><b>{{r.rule}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td>
+<td>{{r.old_trades}}</td><td>{{"%.2f%%"|format((r.old_avg or 0)*100)}}</td><td>{{"%.2f"|format(r.old_pf or 0)}}</td>
+<td>{{r.recent_trades}}</td><td><b>{{"%.2f%%"|format((r.recent_avg or 0)*100)}}</b></td><td><b>{{"%.2f"|format(r.recent_pf or 0)}}</b></td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
+{% if v45_wf %}
+<details class="section-fold" open>
+<summary>V4.5 Walk-Forward Verdict · PASS / FAIL / 样本过小</summary>
+<div class="fold-body">
+<div class="scroll"><table style="min-width:1080px">
+<tr><th>窗口</th><th>模型</th><th>门槛</th><th>测试笔数</th><th>测试胜率</th><th>测试平均</th><th>测试PF</th><th>结论</th></tr>
+{% for r in v45_wf %}
+<tr>
+<td><b>{{r.window}}</b></td><td>{{r.model}}</td><td>{{r.threshold}}</td><td>{{r.test_trades}}</td>
+<td>{{"%.1f%%"|format((r.test_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.test_avg or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.test_pf or 0)}}</td><td><b>{{r.verdict}}</b></td>
+</tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v44_walk %}
 <details class="section-fold" open>
 <summary>V4.4 Walk-Forward Lab · 滚动验证</summary>
@@ -2412,7 +2562,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),
         **s)
 
 @APP.post("/scan")
