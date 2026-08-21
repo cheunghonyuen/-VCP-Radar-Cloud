@@ -926,6 +926,107 @@ def v42_ablation_best():
             out.append(rr)
     return out
 
+
+def v43_adaptive_candidates():
+    """
+    V4.3 regime-adaptive ranking, using only pre-trade factor values and the
+    contemporaneous SPY regime. No outcome data is used in scoring.
+    Design comes from V4.2 evidence:
+      - STRONG_BULL: Quality/Leader + Volume are useful for the elite tail.
+      - BULL: Volume/Sector and Robust Balanced are stronger.
+      - TRANSITION/DEFENSIVE: do not promote trades in this research layer.
+    """
+    d=_v42_frame()
+    if d.empty:
+        return pd.DataFrame()
+
+    out=[]
+    for _,r in d.iterrows():
+        regime=r.get("regime","UNKNOWN")
+        if regime=="STRONG_BULL":
+            # blend QUALITY_LEADER and ROBUST_BALANCED; volume remains important
+            s1=float(r.get("v41_QUALITY_LEADER",0) or 0)
+            s2=float(r.get("v41_ROBUST_BALANCED",0) or 0)
+            s3=float(r.get("v41_VOLUME_SECTOR",0) or 0)
+            score=0.45*s1+0.35*s2+0.20*s3
+            gate="TRADE"
+        elif regime=="BULL":
+            # favor volume/sector + balanced robustness
+            s1=float(r.get("v41_VOLUME_SECTOR",0) or 0)
+            s2=float(r.get("v41_ROBUST_BALANCED",0) or 0)
+            s3=float(r.get("v41_SWEET_CORE",0) or 0)
+            score=0.45*s1+0.35*s2+0.20*s3
+            gate="TRADE"
+        elif regime in ("TRANSITION","DEFENSIVE"):
+            score=0.0
+            gate="BLOCK"
+        else:
+            score=0.0
+            gate="REVIEW"
+
+        rr=r.to_dict()
+        rr["v43_score"]=score
+        rr["v43_gate"]=gate
+        out.append(rr)
+
+    return pd.DataFrame(out)
+
+def v43_adaptive_sweep():
+    d=v43_adaptive_candidates()
+    if d.empty:return []
+
+    rows=[]
+    tradeable=d[d["v43_gate"]=="TRADE"].copy()
+    for scope,base in [("ALL_TRADEABLE",tradeable),
+                       ("STRONG_BULL",tradeable[tradeable["regime"]=="STRONG_BULL"]),
+                       ("BULL",tradeable[tradeable["regime"]=="BULL"])]:
+        if base.empty:continue
+        ranked=base.sort_values("v43_score",ascending=False,kind="mergesort")
+        for n in [10,20,30,50,75,100,150]:
+            g=ranked.head(min(n,len(ranked))).sort_values("date")
+            if g.empty:continue
+            m=_v41_metrics(g)
+            rows.append(dict(scope=scope,selection=f"TOP{n}",
+                             cutoff=float(g["v43_score"].min()),**m))
+        for th in [70,75,80,85,90]:
+            g=base[base["v43_score"]>=th].sort_values("date")
+            if g.empty:continue
+            m=_v41_metrics(g)
+            rows.append(dict(scope=scope,selection=f"SCORE>={th}",
+                             cutoff=float(th),**m))
+    return rows
+
+def v43_year_stability():
+    d=v43_adaptive_candidates()
+    if d.empty:return []
+    d=d[d["v43_gate"]=="TRADE"].copy()
+    d["year"]=pd.to_datetime(d["date"],errors="coerce").dt.year
+    # Use the top 50 adaptive-ranked trades as the main elite research basket.
+    top=d.sort_values("v43_score",ascending=False).head(min(50,len(d))).copy()
+    rows=[]
+    for start,end,label in [(2007,2011,"2007-2011"),
+                            (2012,2016,"2012-2016"),
+                            (2017,2021,"2017-2021"),
+                            (2022,2026,"2022-2026")]:
+        g=top[(top.year>=start)&(top.year<=end)].sort_values("date")
+        if g.empty:continue
+        m=_v41_metrics(g)
+        rows.append(dict(period=label,**m))
+    return rows
+
+def v43_factor_policy():
+    # Human-readable policy distilled from V4.2. This is display-only.
+    return [
+        dict(regime="STRONG_BULL", primary="Quality/Leader + Volume", secondary="Balanced/Sector",
+             action="只取高分精英，避免单纯追最高绝对分"),
+        dict(regime="BULL", primary="Volume/Sector + Balanced", secondary="Sweet Core",
+             action="可适度放宽数量，但仍以甜蜜区间为主"),
+        dict(regime="TRANSITION", primary="Market Risk", secondary="-",
+             action="研究层默认不推送"),
+        dict(regime="DEFENSIVE", primary="Capital Protection", secondary="-",
+             action="研究层默认不推送"),
+    ]
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -1370,6 +1471,33 @@ def build_v3_export_pdf():
 
 
 
+
+    lines += ["=== V4.3 ADAPTIVE ELITE ==="]
+    try:
+        ad=pd.DataFrame(v43_adaptive_sweep())
+        if not ad.empty:
+            cols=["scope","selection","trades","win_rate","avg_return","pf","avg_win","avg_loss","max_losing_streak","cutoff"]
+            widths=[15,11,7,9,10,7,10,10,8,8]
+            pctcols={"win_rate","avg_return","avg_win","avg_loss"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(ad,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
+    lines += ["=== V4.3 ADAPTIVE TOP50 YEAR STABILITY ==="]
+    try:
+        ys=pd.DataFrame(v43_year_stability())
+        if not ys.empty:
+            cols=["period","trades","win_rate","avg_return","pf","max_losing_streak"]
+            widths=[12,7,9,10,7,8]
+            pctcols={"win_rate","avg_return"}
+            tr={c:(lambda v,_c=c: _fmt_num(v,pct=_c in pctcols)) for c in cols}
+            lines += _table_lines(ys,cols,widths,transforms=tr)
+    except Exception as e:
+        lines.append(f"read error: {_ascii_cell(e)}")
+    lines.append("")
+
     lines += ["=== V4.2 REGIME LAB ==="]
     try:
         rg=pd.DataFrame(v42_regime_summary())
@@ -1808,6 +1936,57 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+{% if v43_rows %}
+<details class="section-fold" open>
+<summary>V4.3 Adaptive Elite · Regime 自适应精选</summary>
+<div class="fold-body">
+<h3 style="margin-top:0">V4.3 Adaptive Elite</h3>
+<div class="muted" style="margin-bottom:10px">
+STRONG_BULL 与 BULL 不再使用同一套评分。TRANSITION / DEFENSIVE 在研究层默认 BLOCK。
+这仍然是对现有385笔的再排序研究，不是完整 Gate 重跑。
+</div>
+
+<div class="scroll"><table style="min-width:980px">
+<tr><th>范围</th><th>选择</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>平均盈利</th><th>平均亏损</th><th>最大连亏</th><th>最低分</th></tr>
+{% for r in v43_rows %}
+<tr>
+<td><b>{{r.scope}}</b></td><td>{{r.selection}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td>
+<td>{{"%.2f%%"|format((r.avg_win or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_loss or 0)*100)}}</td>
+<td>{{r.max_losing_streak}}</td>
+<td>{{"%.1f"|format(r.cutoff or 0)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+{% if v43_years %}
+<h4 style="margin-top:16px">Adaptive Top50 年代稳定性</h4>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>时期</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v43_years %}
+<tr><td>{{r.period}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td><b>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</b></td>
+<td>{{"%.2f"|format(r.pf or 0)}}</td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+<h4 style="margin-top:16px">Regime 策略</h4>
+<div class="scroll"><table style="min-width:860px">
+<tr><th>Regime</th><th>主因子</th><th>辅助</th><th>动作</th></tr>
+{% for r in v43_policy %}
+<tr><td><b>{{r.regime}}</b></td><td>{{r.primary}}</td><td>{{r.secondary}}</td><td>{{r.action}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+</details>
+{% endif %}
+
 {% if v42_regime %}
 <details class="section-fold" open>
 <summary>V4.2 Regime Lab · 市场环境 × Sweet Spot</summary>
@@ -2032,7 +2211,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),
         **s)
 
 @APP.post("/scan")
