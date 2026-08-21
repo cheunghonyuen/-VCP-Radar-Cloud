@@ -21,6 +21,8 @@ RESULT_FILE = DATA_DIR / "latest_scan.csv"
 CHECKPOINT_FILE = DATA_DIR / "scan_checkpoint.json"
 BACKTEST_DIR = DATA_DIR / "jlaw_backtest_results_v2"
 BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
+V3_DIR = DATA_DIR / "jlaw_v3_phase1"
+V3_STATUS_FILE = V3_DIR / "status.json"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
@@ -74,6 +76,7 @@ ALL_SYMBOLS = sorted(set(UNIVERSE + ["SPY"] + list(set(SECTOR.values()))))
 lock = threading.Lock()
 scan_thread = None
 backtest_thread = None
+v3_thread = None
 
 def storage_info():
     try:
@@ -494,6 +497,44 @@ def start_jlaw_backtest():
     backtest_thread.start()
     return True
 
+
+def read_v3_status():
+    s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
+    if V3_STATUS_FILE.exists():
+        try:s.update(json.loads(V3_STATUS_FILE.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def write_v3_status(**kw):
+    V3_DIR.mkdir(parents=True,exist_ok=True)
+    s=read_v3_status();s.update(kw)
+    V3_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+
+def v3_rows():
+    p=V3_DIR/"jlaw_v3_summary.csv"
+    if not p.exists():return []
+    try:return pd.read_csv(p).replace({np.nan:None}).to_dict("records")
+    except Exception:return []
+
+def run_v3():
+    global v3_thread
+    try:
+        from jlaw_v3_phase1 import run as v3run
+        write_v3_status(status="running",message="正在运行 J Law V3 Phase 1 A+ Filter",started_at=datetime.now(timezone.utc).isoformat(),finished_at=None,error=None,processed=0)
+        def prog(done,total,t):
+            write_v3_status(status="running",message=f"正在筛选/回测 {done}/{total}: {t}",stocks=total,processed=done,current=t)
+        v3run(str(MARKET_DIR),str(V3_DIR),progress_cb=prog)
+        s=read_v3_status()
+        write_v3_status(status="done",message="J Law V3 Phase 1 完成",stocks=s.get("stocks",0),processed=s.get("stocks",0),current="",finished_at=datetime.now(timezone.utc).isoformat())
+    except Exception as ex:
+        traceback.print_exc();write_v3_status(status="error",message="V3 回测失败",error=f"{type(ex).__name__}: {ex}",finished_at=datetime.now(timezone.utc).isoformat())
+    finally:v3_thread=None
+
+def start_v3():
+    global v3_thread
+    if v3_thread is not None and v3_thread.is_alive():return False
+    v3_thread=threading.Thread(target=run_v3,daemon=True);v3_thread.start();return True
+
 def scheduler_loop():
     time.sleep(8)
     s=read_state()
@@ -622,6 +663,21 @@ Native V1 是公开规则的量化近似，不假装等同于全部主观判断�
 </div>
 </div>
 
+
+<div class="card">
+<div class="top"><div><h2 style="margin:0">J Law V3 Phase 1 · A+ Trade Filter</h2>
+<div class="muted">只测试选股质量：Market Gate + Stage 2 + Sector/Group + Leader + Supply Dry-Up + Tight Pivot；退出固定沿用 -7% / +30% / 60日</div></div>
+<form method="post" action="/v3"><button {% if v3_status=="running" %}disabled style="opacity:.45"{% endif %}>{% if v3_status=="running" %}V3 正在回测…{% else %}开始 V3 回测{% endif %}</button></form></div>
+{% if v3_status=="running" %}<div class="progress"><div style="width:{{((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%"></div></div>
+<div><b>{{v3_processed}} / {{v3_stocks}}</b> · {{"%.0f"|format((v3_processed/v3_stocks*100) if v3_stocks else 0)}}%</div>{% endif %}
+<p><b>状态：</b>{{v3_status}}　{{v3_message}}</p>
+{% if v3_error %}<p class="warn">{{v3_error}}</p>{% endif %}
+{% if v3_results %}
+<div class="scroll"><table style="min-width:1050px"><tr><th>等级</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>平均盈利</th><th>平均亏损</th><th>盈亏比</th><th>PF</th><th>目标命中率</th><th>止损率</th><th>平均持有</th></tr>
+{% for b in v3_results %}<tr><td><b>{{b.grade}}</b></td><td>{{b.trades}}</td><td>{{"%.1f%%"|format((b.win_rate or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_return or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_win or 0)*100)}}</td><td>{{"%.2f%%"|format((b.avg_loss or 0)*100)}}</td><td>{{"%.2f"|format(b.payoff_ratio or 0)}}</td><td>{{"%.2f"|format(b.profit_factor or 0)}}</td><td>{{"%.1f%%"|format((b.target_hit_rate or 0)*100)}}</td><td>{{"%.1f%%"|format((b.stop_rate or 0)*100)}}</td><td>{{"%.1f"|format(b.avg_hold or 0)}}天</td></tr>{% endfor %}
+</table></div>{% endif %}
+<div class="muted">目标：与旧 baseline（约234笔、胜率43.6%、PF 1.55、平均收益约2.03%）做同口径比较。Fundamental 历史数据尚未加入，所以这是 V3 Phase 1，不是最终 J Law Pure。</div>
+</div>
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
 </div>
 <script>
@@ -634,7 +690,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();if(s.status==='updating'||bs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();if(s.status==='updating'||bs.status==='running'||vs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -671,11 +727,23 @@ def home():
         bt_status=bt.get("status","idle"),bt_message=bt.get("message","尚未运行"),
         bt_error=bt.get("error"),bt_started_at=bt.get("started_at"),bt_finished_at=bt.get("finished_at"),
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
+        v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
+        v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
+        v3_processed=read_v3_status().get("processed",0),v3_results=v3_rows(),
         **s)
 
 @APP.post("/scan")
 def scan():
     start_scan(); return redirect(url_for("home"))
+
+@APP.post("/v3")
+def v3_start():
+    start_v3()
+    return redirect(url_for("home"))
+
+@APP.get("/api/v3-status")
+def api_v3_status():
+    return jsonify(read_v3_status())
 
 @APP.post("/backtest")
 def backtest_start():
