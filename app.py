@@ -834,7 +834,11 @@ def _v42_frame():
         d["regime"]="UNKNOWN"; d["spy_ret20"]=np.nan; d["spy_ret60"]=np.nan
         return d
     # Match each trade to the latest SPY session on/before entry date.
+    # V4.6 engine may already persist regime/spy_ret columns into the trade CSV.
+    # Drop them before merge_asof so pandas does not create regime_x/regime_y,
+    # which previously caused KeyError: 'regime' in v42_regime_summary().
     left=d.sort_values("date").copy()
+    left=left.drop(columns=[c for c in ["regime","spy_ret20","spy_ret60"] if c in left.columns], errors="ignore")
     right=rg.reset_index().rename(columns={rg.index.name or "index":"date"})
     if "date" not in right.columns:
         right=right.rename(columns={right.columns[0]:"date"})
