@@ -2359,7 +2359,7 @@ def v61_decision_lab():
 
 
 def read_v63_status():
-    base={"state":"idle","message":"尚未运行 V6.3","done":0,"total":0,"ticker":"","error":""}
+    base={"state":"idle","message":"尚未运行 V6.3","done":0,"total":321,"ticker":"","error":"","started_at":""}
     if V63_STATUS_FILE.exists():
         try:base.update(json.loads(V63_STATUS_FILE.read_text(encoding="utf-8")))
         except Exception:pass
@@ -2397,7 +2397,7 @@ def run_v63():
     import importlib.util
     try:
         if V63_STOP_FILE.exists():V63_STOP_FILE.unlink()
-        write_v63_status(state="running",message="V6.3 RS2 Feature Store + Full321 运行中",done=0,total=0,ticker="",error="")
+        write_v63_status(state="running",message="阶段1/2：正在建立 RS2 Feature Store",done=0,total=321,ticker="",error="",started_at=datetime.now(timezone.utc).isoformat())
         ep=Path(__file__).with_name("jlaw_v6_3_RS2_FEATURE_STORE.py")
         if not ep.exists():raise RuntimeError("GitHub 根目录缺少 jlaw_v6_3_RS2_FEATURE_STORE.py")
         spec=importlib.util.spec_from_file_location("jlaw_v63_rs2",ep)
@@ -2405,7 +2405,7 @@ def run_v63():
         outdir=V63_DIR/"full"
         outdir.mkdir(parents=True,exist_ok=True)
         def cb(done,total,ticker):
-            write_v63_status(state="running",message=f"V6.3 运行中 {done}/{total}",done=int(done),total=int(total),ticker=str(ticker),error="")
+            write_v63_status(state="running",message=f"阶段2/2：Full321 扫描 {done}/{total}",done=int(done),total=int(total),ticker=str(ticker),error="")
         mod.run(MARKET_DIR,outdir,progress_cb=cb,quick=False,stop_file=V63_STOP_FILE,parallel_workers=2,resume=True)
         write_v63_status(state="done",message="V6.3 RS2 Full321 完成",done=321,total=321,ticker="",error="")
     except Exception as e:
@@ -3730,6 +3730,55 @@ YouTube 字幕库 <span class="muted" style="font-size:15px;font-weight:600">（
 </div>
 </details>
 
+
+<script>
+(function(){
+  const startedAt = {{ (v63_status.started_at or "")|tojson }};
+  function elapsedText(iso){
+    if(!iso) return "";
+    const ms = Date.now() - new Date(iso).getTime();
+    if(!isFinite(ms) || ms < 0) return "";
+    const m = Math.floor(ms/60000), s = Math.floor((ms%60000)/1000);
+    return " · 已运行 " + (m>0 ? m+"分" : "") + s + "秒";
+  }
+  async function pollV63(){
+    try{
+      const r = await fetch("/api/v63/status", {cache:"no-store"});
+      if(!r.ok) return;
+      const s = await r.json();
+      const total = Number(s.total || 321);
+      const done = Number(s.done || 0);
+      const pct = total ? Math.max(0, Math.min(100, done/total*100)) : 0;
+
+      const state=document.getElementById("v63-state");
+      const msg=document.getElementById("v63-message");
+      const count=document.getElementById("v63-count");
+      const bar=document.getElementById("v63-progress-bar");
+      const percent=document.getElementById("v63-percent");
+      const ticker=document.getElementById("v63-ticker");
+      const phase=document.getElementById("v63-phase");
+      const elapsed=document.getElementById("v63-elapsed");
+      const err=document.getElementById("v63-error");
+
+      if(state) state.textContent=s.state||"";
+      if(msg) msg.textContent=s.message||"";
+      if(count) count.textContent=done+" / "+total;
+      if(bar) bar.style.width=pct.toFixed(1)+"%";
+      if(percent) percent.textContent=pct.toFixed(1)+"%";
+      if(ticker) ticker.textContent=s.ticker ? " · 当前 "+s.ticker : "";
+      if(phase) phase.textContent=(s.state==="running" && done===0) ? "阶段1/2：RS2 Feature Store" : "阶段2/2：Full321 扫描";
+      if(elapsed) elapsed.textContent=elapsedText(s.started_at || startedAt);
+      if(err){
+        if(s.error){ err.style.display="block"; err.textContent="⚠️ "+s.error; }
+        else { err.style.display="none"; }
+      }
+    }catch(e){}
+  }
+  pollV63();
+  setInterval(pollV63, 3000);
+})();
+</script>
+
 </body></html>"""
 
 HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3804,7 +3853,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.2</h1><div class="muted">当前研究版：V6.3.2 RS2 + Feature Store Hotfix · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.3</h1><div class="muted">当前研究版：V6.3.3 RS2 + Feature Store Progress · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3824,7 +3873,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.2 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.3 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4644,15 +4693,29 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.2 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.3 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
 </div>
-<p><b>状态：</b> {{v63_status.state}} · {{v63_status.message}}
-{% if v63_status.total %} · {{v63_status.done}}/{{v63_status.total}}{% endif %}
-{% if v63_status.ticker %} · {{v63_status.ticker}}{% endif %}</p>
-{% if v63_status.error %}<div style="padding:10px;background:#fff1f1;border-radius:10px">⚠️ {{v63_status.error}}</div>{% endif %}
+<p><b>状态：</b> <span id="v63-state">{{v63_status.state}}</span> · <span id="v63-message">{{v63_status.message}}</span></p>
+
+<div id="v63-progress-wrap" style="margin:12px 0">
+  <div style="display:flex;justify-content:space-between;gap:10px;font-weight:800;margin-bottom:6px">
+    <span id="v63-phase">{% if v63_status.done == 0 and v63_status.state == "running" %}RS2 Feature Store 建立中{% else %}Full321 扫描{% endif %}</span>
+    <span id="v63-count">{{v63_status.done}} / {{v63_status.total or 321}}</span>
+  </div>
+  <div style="height:14px;background:#e8edf5;border-radius:999px;overflow:hidden">
+    <div id="v63-progress-bar" style="height:100%;width:{{ ((v63_status.done or 0) / (v63_status.total or 321) * 100)|round(1) }}%;background:#111827;transition:width .35s ease"></div>
+  </div>
+  <div class="muted" style="margin-top:6px">
+    <span id="v63-percent">{{ ((v63_status.done or 0) / (v63_status.total or 321) * 100)|round(1) }}%</span>
+    <span id="v63-ticker">{% if v63_status.ticker %} · 当前 {{v63_status.ticker}}{% endif %}</span>
+    <span id="v63-elapsed"></span>
+  </div>
+</div>
+
+{% if v63_status.error %}<div id="v63-error" style="padding:10px;background:#fff1f1;border-radius:10px">⚠️ {{v63_status.error}}</div>{% else %}<div id="v63-error" style="display:none;padding:10px;background:#fff1f1;border-radius:10px"></div>{% endif %}
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
 <form method="post" action="/v63/run"><button>▶ V6.3 Full321 + RS2 Build</button></form>
 <form method="post" action="/v63/stop"><button>■ 停止 / 保留Checkpoint</button></form>
