@@ -1962,6 +1962,182 @@ def stop_v5_validation():
     return True
 
 
+
+def _oos_metrics(g):
+    if g is None or len(g)==0 or "return_pct" not in g.columns:
+        return dict(trades=0,win_rate=0.0,avg_return=0.0,pf=0.0,max_losing_streak=0,
+                    avg_win=0.0,avg_loss=0.0,target_rate=0.0,stop_rate=0.0)
+    x=pd.to_numeric(g["return_pct"],errors="coerce").dropna()
+    if x.empty:
+        return dict(trades=0,win_rate=0.0,avg_return=0.0,pf=0.0,max_losing_streak=0,
+                    avg_win=0.0,avg_loss=0.0,target_rate=0.0,stop_rate=0.0)
+    wins=x[x>0]; losses=x[x<0]
+    pf=(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (999.0 if len(wins) else 0.0)
+    streak=0; mx=0
+    for v in x.tolist():
+        if v<0: streak+=1; mx=max(mx,streak)
+        else: streak=0
+    reason=g["reason"].astype(str) if "reason" in g.columns else pd.Series([],dtype=str)
+    return dict(
+        trades=int(len(x)),
+        win_rate=float((x>0).mean()),
+        avg_return=float(x.mean()),
+        pf=float(pf),
+        max_losing_streak=int(mx),
+        avg_win=float(wins.mean()) if len(wins) else 0.0,
+        avg_loss=float(losses.mean()) if len(losses) else 0.0,
+        target_rate=float(reason.str.startswith("TARGET").mean()) if len(reason) else 0.0,
+        stop_rate=float(reason.str.startswith("STOP").mean()) if len(reason) else 0.0,
+    )
+
+def _oos_band_rows(d,col,bands):
+    if col not in d.columns: return []
+    x=d.copy()
+    x[col]=pd.to_numeric(x[col],errors="coerce")
+    rows=[]
+    for lo,hi,label in bands:
+        g=x[(x[col]>=lo)&(x[col]<hi)]
+        if len(g)==0: continue
+        m=_oos_metrics(g)
+        rows.append(dict(factor=col,band=label,lo=lo,hi=hi,**m))
+    return rows
+
+def v5_oos_autopsy():
+    """Descriptive OOS failure autopsy only. No parameter fitting and no rerun."""
+    p=V5_VALIDATION_DIR/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return dict(available=False,message="Validation 交易文件不存在")
+    try:
+        d=pd.read_csv(p)
+    except Exception as e:
+        return dict(available=False,message=f"读取失败: {type(e).__name__}: {e}")
+    if d.empty:
+        return dict(available=False,message="Validation 交易文件为空")
+
+    for c in ["return_pct","v46_score","volratio","quality","rs","supply_score",
+              "sector_score","leader_score","pivot_tight","group_breadth","mfe","mae","hold_days"]:
+        if c in d.columns: d[c]=pd.to_numeric(d[c],errors="coerce")
+    if "date" in d.columns:
+        d["date"]=pd.to_datetime(d["date"],errors="coerce")
+        d["year"]=d["date"].dt.year
+
+    overall=_oos_metrics(d)
+    core=_oos_metrics(d[d["v46_score"]>=70]) if "v46_score" in d.columns else overall
+    elite=_oos_metrics(d[d["v46_score"]>=87.5]) if "v46_score" in d.columns else {}
+    superm=_oos_metrics(d[d["v46_score"]>=90]) if "v46_score" in d.columns else {}
+
+    score_bins=[]
+    if "v46_score" in d.columns:
+        for lo,hi,label in [
+            (70,75,"70–75"),(75,80,"75–80"),(80,82.5,"80–82.5"),
+            (82.5,85,"82.5–85"),(85,87.5,"85–87.5"),
+            (87.5,90,"87.5–90"),(90,101,"90+")
+        ]:
+            g=d[(d.v46_score>=lo)&(d.v46_score<hi)]
+            if len(g): score_bins.append(dict(band=label,**_oos_metrics(g)))
+
+    factor_rows=[]
+    factor_rows += _oos_band_rows(d,"volratio",[
+        (0,1.2,"<1.2"),(1.2,1.5,"1.2–1.5"),(1.5,1.8,"1.5–1.8"),
+        (1.8,2.5,"1.8–2.5"),(2.5,3.0,"2.5–3.0"),(3.0,99,">=3.0")])
+    factor_rows += _oos_band_rows(d,"quality",[
+        (0,73,"<73"),(73,76,"73–76"),(76,82,"76–82"),(82,85,"82–85"),(85,101,"85+")])
+    factor_rows += _oos_band_rows(d,"supply_score",[
+        (0,40,"<40"),(40,50,"40–50"),(50,75,"50–75"),(75,90,"75–90"),(90,101,"90+")])
+    factor_rows += _oos_band_rows(d,"sector_score",[
+        (0,60,"<60"),(60,65,"60–65"),(65,80,"65–80"),(80,101,"80+")])
+    factor_rows += _oos_band_rows(d,"leader_score",[
+        (0,60,"<60"),(60,70,"60–70"),(70,90,"70–90"),(90,101,"90+")])
+    factor_rows += _oos_band_rows(d,"rs",[
+        (0,72,"<72"),(72,80,"72–80"),(80,90,"80–90"),(90,101,"90+")])
+
+    regimes=[]
+    if "regime" in d.columns:
+        for name,g in d.groupby("regime",dropna=False):
+            regimes.append(dict(regime=str(name),**_oos_metrics(g)))
+
+    eras=[]
+    if "year" in d.columns:
+        for lo,hi,label in [(2007,2011,"2007–11"),(2012,2016,"2012–16"),(2017,2021,"2017–21"),(2022,2026,"2022–26")]:
+            g=d[(d.year>=lo)&(d.year<=hi)]
+            if len(g): eras.append(dict(era=label,**_oos_metrics(g)))
+
+    exits=[]
+    if "reason" in d.columns:
+        for name,g in d.groupby("reason",dropna=False):
+            exits.append(dict(reason=str(name),count=int(len(g)),avg_return=float(pd.to_numeric(g.return_pct,errors="coerce").mean())))
+
+    top_losers=[]
+    cols=[c for c in ["ticker","date","v46_score","return_pct","volratio","quality","rs","sector_score","leader_score","supply_score","regime","reason"] if c in d.columns]
+    if cols:
+        q=d.sort_values("return_pct",ascending=True).head(25)[cols].copy()
+        for _,r in q.iterrows():
+            z={}
+            for c in cols:
+                v=r[c]
+                if pd.isna(v): z[c]=""
+                elif isinstance(v,pd.Timestamp): z[c]=v.strftime("%Y-%m-%d")
+                elif c=="date":
+                    try:z[c]=pd.to_datetime(v).strftime("%Y-%m-%d")
+                    except:z[c]=str(v)
+                elif isinstance(v,(float,int,np.floating,np.integer)): z[c]=float(v)
+                else:z[c]=str(v)
+            top_losers.append(z)
+
+    # Compare the failed high-score tier to CORE winners/losses descriptively.
+    profile=[]
+    numeric=[c for c in ["v46_score","volratio","quality","rs","sector_score","leader_score","supply_score","pivot_tight","group_breadth","mfe","mae","hold_days"] if c in d.columns]
+    if "v46_score" in d.columns and "return_pct" in d.columns:
+        groups=[
+            ("CORE winners",d[(d.v46_score>=70)&(d.return_pct>0)]),
+            ("CORE losers",d[(d.v46_score>=70)&(d.return_pct<0)]),
+            ("ELITE+ winners",d[(d.v46_score>=87.5)&(d.return_pct>0)]),
+            ("ELITE+ losers",d[(d.v46_score>=87.5)&(d.return_pct<0)]),
+            ("SUPER winners",d[(d.v46_score>=90)&(d.return_pct>0)]),
+            ("SUPER losers",d[(d.v46_score>=90)&(d.return_pct<0)]),
+        ]
+        for name,g in groups:
+            if len(g)==0: continue
+            row={"group":name,"n":int(len(g))}
+            for c in numeric:
+                row[c]=float(pd.to_numeric(g[c],errors="coerce").median()) if pd.to_numeric(g[c],errors="coerce").notna().any() else None
+            profile.append(row)
+
+    # Explicit diagnostic flags from OOS facts, not fitted thresholds.
+    flags=[]
+    if core.get("pf",0)<1.2:
+        flags.append("CORE 的 PF 接近 1，底层信号只有很薄的 OOS 优势。")
+    if elite.get("pf",999)<1:
+        flags.append("ELITE 在 OOS 中 PF<1，高分层没有泛化。")
+    if superm.get("pf",999)<elite.get("pf",999):
+        flags.append("SUPER 比 ELITE 更差，评分与结果呈反向关系。")
+    if superm.get("trades",0)>=30:
+        flags.append("SUPER 样本已超过30笔，不能只用“小样本噪音”解释。")
+
+    return dict(
+        available=True,rows=int(len(d)),overall=overall,core=core,elite=elite,super=superm,
+        score_bins=score_bins,factor_rows=factor_rows,regimes=regimes,eras=eras,exits=exits,
+        top_losers=top_losers,profile=profile,flags=flags,
+        generated_at=datetime.now(timezone.utc).isoformat()
+    )
+
+def export_v5_oos_autopsy_csv():
+    a=v5_oos_autopsy()
+    if not a.get("available"): return None
+    rows=[]
+    for r in a.get("score_bins",[]):
+        rows.append(dict(section="score_bin",name=r["band"],**{k:v for k,v in r.items() if k!="band"}))
+    for r in a.get("factor_rows",[]):
+        rows.append(dict(section=f"factor:{r['factor']}",name=r["band"],**{k:v for k,v in r.items() if k not in ("factor","band")}))
+    for r in a.get("regimes",[]):
+        rows.append(dict(section="regime",name=r["regime"],**{k:v for k,v in r.items() if k!="regime"}))
+    for r in a.get("eras",[]):
+        rows.append(dict(section="era",name=r["era"],**{k:v for k,v in r.items() if k!="era"}))
+    out=V5_VALIDATION_DIR/"v5_oos_autopsy.csv"
+    pd.DataFrame(rows).to_csv(out,index=False)
+    return out
+
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -3171,6 +3347,89 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <div style="margin-top:6px"><b>本轮允许跳过：</b> {{v50_status.deferred}}</div>
 {% endif %}
 <div style="margin-top:6px"><b>验证组当前可用：</b> {{v50_status.validation_usable}} / {{v50_status.validation}}</div>
+
+{% if v5_autopsy.available %}
+<details class="card" open style="margin-top:18px">
+<summary style="font-size:20px;font-weight:800;cursor:pointer">🔬 V5.4 OOS Failure Autopsy（不重跑）</summary>
+<div class="muted" style="margin:10px 0">
+只读取已经完成的 Validation 交易文件做失败解剖；不改参数、不重新回测、不污染这次 OOS。
+</div>
+
+{% if v5_autopsy.flags %}
+<div style="padding:12px;border-radius:12px;background:#fff7ed;margin:10px 0">
+{% for x in v5_autopsy.flags %}<div>• {{x}}</div>{% endfor %}
+</div>
+{% endif %}
+
+<p><a class="btn" href="/v5/autopsy.csv">导出 Autopsy CSV</a></p>
+
+<h4>分数区间是否真的单调</h4>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>Score</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v5_autopsy.score_bins %}
+<tr><td><b>{{r.band}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h4>Regime</h4>
+<div class="scroll"><table style="min-width:650px">
+<tr><th>Regime</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v5_autopsy.regimes %}
+<tr><td>{{r.regime}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h4>时代分段</h4>
+<div class="scroll"><table style="min-width:650px">
+<tr><th>时期</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v5_autopsy.eras %}
+<tr><td>{{r.era}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h4>因子区间（描述性，不拿来调参）</h4>
+<div class="scroll"><table style="min-width:900px">
+<tr><th>因子</th><th>区间</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v5_autopsy.factor_rows %}
+<tr><td>{{r.factor}}</td><td>{{r.band}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td>{{"%.2f"|format(r.pf)}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h4>高分赢家 vs 高分输家：中位数画像</h4>
+<div class="scroll"><table style="min-width:1100px">
+<tr><th>组</th><th>N</th><th>Score</th><th>Vol</th><th>Quality</th><th>RS</th><th>Sector</th><th>Leader</th><th>Supply</th><th>MFE</th><th>MAE</th><th>Hold</th></tr>
+{% for r in v5_autopsy.profile %}
+<tr><td><b>{{r.group}}</b></td><td>{{r.n}}</td>
+<td>{{"%.1f"|format(r.v46_score or 0)}}</td><td>{{"%.2f"|format(r.volratio or 0)}}</td>
+<td>{{"%.1f"|format(r.quality or 0)}}</td><td>{{"%.1f"|format(r.rs or 0)}}</td>
+<td>{{"%.1f"|format(r.sector_score or 0)}}</td><td>{{"%.1f"|format(r.leader_score or 0)}}</td>
+<td>{{"%.1f"|format(r.supply_score or 0)}}</td>
+<td>{{"%.1f%%"|format((r.mfe or 0)*100)}}</td><td>{{"%.1f%%"|format((r.mae or 0)*100)}}</td>
+<td>{{"%.0f"|format(r.hold_days or 0)}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h4>最差25笔（重点解剖对象）</h4>
+<div class="scroll"><table style="min-width:1150px">
+<tr><th>Ticker</th><th>Date</th><th>Score</th><th>Return</th><th>Vol</th><th>Quality</th><th>RS</th><th>Sector</th><th>Leader</th><th>Supply</th><th>Regime</th><th>Exit</th></tr>
+{% for r in v5_autopsy.top_losers %}
+<tr><td><b>{{r.ticker}}</b></td><td>{{r.date}}</td>
+<td>{{"%.1f"|format(r.v46_score or 0)}}</td><td>{{"%.2f%%"|format((r.return_pct or 0)*100)}}</td>
+<td>{{"%.2f"|format(r.volratio or 0)}}</td><td>{{"%.1f"|format(r.quality or 0)}}</td>
+<td>{{"%.1f"|format(r.rs or 0)}}</td><td>{{"%.1f"|format(r.sector_score or 0)}}</td>
+<td>{{"%.1f"|format(r.leader_score or 0)}}</td><td>{{"%.1f"|format(r.supply_score or 0)}}</td>
+<td>{{r.regime}}</td><td>{{r.reason}}</td></tr>
+{% endfor %}
+</table></div>
+</details>
+{% endif %}
+
 {% if v5v_summary %}
 <h4 style="margin-top:16px">本次 OOS 独立验证结果</h4>
 <div class="scroll"><table style="min-width:760px">
@@ -3825,9 +4084,17 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),
         **s)
 
+
+
+@APP.get("/v5/autopsy.csv")
+def v5_autopsy_csv_route():
+    p=export_v5_oos_autopsy_csv()
+    if p is None or not p.exists():
+        return "OOS autopsy unavailable",404
+    return send_file(p,mimetype="text/csv",as_attachment=True,download_name="v5_oos_autopsy.csv")
 
 @APP.post("/v5/validation/start")
 def v5_validation_start_route():
