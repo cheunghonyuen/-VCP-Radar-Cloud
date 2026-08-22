@@ -3408,8 +3408,38 @@ details.section-fold > summary:after{
 details.section-fold[open] > summary:after{content:"－"}
 details.section-fold .fold-body{padding:14px 18px 18px}
 
+/* ===== V6.2.1 User Friendly UI ===== */
+.quick-nav{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 18px}
+.quick-nav a{display:inline-block;text-decoration:none;padding:9px 12px;border-radius:999px;background:#eef2f7;color:#17202a;font-weight:800;font-size:14px}
+.quick-nav a.primary{background:#111827;color:#fff}
+.version-label{display:inline-block;margin-left:8px;padding:4px 8px;border-radius:999px;background:#eef4ff;color:#244a9b;font-size:12px;font-weight:800;vertical-align:middle}
+.current-card{border:2px solid #d7e5ff;box-shadow:0 8px 28px #1d64f012}
+.archive-title{margin:22px 0 8px;font-size:18px;color:#667085;font-weight:800}
+.mobile-metrics{display:none}
+.scroll-hint{display:none;color:#667085;font-size:13px;margin:7px 0}
+details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:transparent}
+@media(max-width:700px){
+  .wrap{padding:10px}
+  .card{border-radius:14px;padding:14px;margin:10px 0}
+  h1{font-size:25px}
+  .kpi{font-size:22px}
+  button{min-height:44px;padding:11px 13px}
+  .quick-nav{position:sticky;top:0;z-index:20;background:#f3f6fbee;padding:8px 0;backdrop-filter:blur(8px)}
+  .desktop-v62-table{display:none}
+  .mobile-metrics{display:grid;grid-template-columns:1fr;gap:10px;margin-top:12px}
+  .metric-card{background:#f8fafc;border:1px solid #e7ebf1;border-radius:14px;padding:12px}
+  .metric-card .name{font-size:17px;font-weight:900;margin-bottom:8px}
+  .metric-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .metric-box{background:#fff;border-radius:10px;padding:9px;border:1px solid #edf0f4}
+  .metric-box small{display:block;color:#667085;font-size:11px;margin-bottom:2px}
+  .metric-box b{font-size:17px}
+  .scroll-hint{display:block}
+  details.card>summary{font-size:20px!important;line-height:1.25}
+  details.section-fold>summary{font-size:18px}
+}
+
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · Final</h1><div class="muted">Tiingo统一数据 · V2.2冻结评分 · 增量更新 · 本地缓存 · 手机版</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2</h1><div class="muted">当前研究版：V6.2 Instant Research · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3427,6 +3457,14 @@ details.section-fold .fold-body{padding:14px 18px 18px}
 <div class="muted">上次完成：{{last_scan or "尚未完成"}}</div>
 {% if error %}<p class="warn">最近错误：{{error}}</p>{% endif %}</div>
 
+
+<div class="quick-nav">
+<a class="primary" href="#v62-current">🚀 V6.2 当前版</a>
+<a href="#v61-fast">⚡ V6.1 Fast</a>
+<a href="#research-archive">历史版本</a>
+<a href="#top-candidates">Top 候选</a>
+</div>
+<div id="latest-version-mount"></div>
 {% if sector_rows %}
 <details class="card" style="margin-top:18px">
 <summary style="font-size:24px;font-weight:800;cursor:pointer;list-style:none">
@@ -3439,7 +3477,7 @@ details.section-fold .fold-body{padding:14px 18px 18px}
 </table></div></div>
 {% endif %}
 
-<details class="card" style="margin-top:18px">
+<details id="top-candidates" class="card" style="margin-top:18px">
 <summary style="font-size:28px;font-weight:800;cursor:pointer;list-style:none">
 Top 候选 <span class="muted" style="font-size:16px;font-weight:600">（点开查看）</span>
 </summary>
@@ -3923,8 +3961,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 
 
-<details class="card" open style="margin-top:18px">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2 Instant Research Cache</summary>
+<details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2 Instant Research Cache <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -3942,7 +3980,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% if v62_lab.available %}
 <details open style="margin-top:12px">
 <summary style="font-weight:800;cursor:pointer">Instant Lab 结果</summary>
-<div class="scroll"><table style="min-width:820px">
+<div class="scroll-hint">手机会自动用卡片显示；电脑仍显示完整表格。</div>
+<div class="scroll desktop-v62-table"><table style="min-width:820px">
 <tr><th>规则组合</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
 {% for r in v62_lab.rows %}
 <tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td>
@@ -3950,6 +3989,19 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
 </table></div>
+<div class="mobile-metrics">
+{% for r in v62_lab.rows %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
 </details>
 <details style="margin-top:10px">
 <summary style="font-weight:800;cursor:pointer">Ranking 诊断</summary>
@@ -3964,8 +4016,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 </details>
 
-<details class="card" open style="margin-top:18px">
-<summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine</summary>
+<details id="v61-fast" class="card" style="margin-top:18px" data-version="6.1">
+<summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine <span class="version-label">上一版</span></summary>
 <div class="muted" style="margin:10px 0">
 2线程并行 + 每只股票 checkpoint。中断后再次运行会跳过已经完成的股票。先 Quick 50（50只代表样本、全历史），再决定是否 Full 321。旧版 Quick50 只看420日，可能出现0笔交易；这版已修正。
 </div>
@@ -4001,6 +4053,7 @@ Quick 50 已完成，但没有产生 V6 交易记录。旧版420日Quick可能�
 </details>
 
 {% if v5_autopsy.available %}
+<div id="research-archive" class="archive-title">历史研究版本 · 最新在上，最旧在下</div>
 <details class="card" style="margin-top:18px">
 <summary style="font-size:20px;font-weight:800;cursor:pointer">🔬 V5.4 OOS Failure Autopsy（不重跑）</summary>
 <div class="muted" style="margin:10px 0">
@@ -4561,6 +4614,62 @@ SETUP_LEADER=Setup 24% + Leader 22%；BALANCED_ELITE=Supply25/Setup20/Volume20/L
 </div>
 <div class="card muted" style="font-size:13px">本系统是研究/筛选工具，不保证未来收益。V2.2评分仍需继续扩大样本与独立验证。</div>
 </div>
+
+<script>
+document.addEventListener("DOMContentLoaded",function(){
+  const mount=document.getElementById("latest-version-mount");
+  const current=document.getElementById("v62-current");
+  const fast=document.getElementById("v61-fast");
+  if(mount){
+    if(current) mount.appendChild(current);
+    if(fast) mount.appendChild(fast);
+
+    // V6.0 was historically nested inside the V5 validation section. Pull it out so V6 stays above V5.
+    const h3s=[...document.querySelectorAll("h3")];
+    const v60h=h3s.find(x=>x.textContent.includes("V6.0 J Law Decision Shadow"));
+    if(v60h){
+      const v60=v60h.closest(".card");
+      if(v60 && v60!==current && v60!==fast){
+        v60.dataset.version="6.0";
+        v60.classList.add("version-extracted");
+        mount.appendChild(v60);
+      }
+    }
+
+    // Also bring V6.1 Decision Lab directly under V6.1 Fast.
+    const summaries=[...document.querySelectorAll("summary")];
+    const labSummary=summaries.find(x=>x.textContent.includes("V6.1 Decision Lab"));
+    if(labSummary){
+      const lab=labSummary.closest("details.card");
+      if(lab){lab.dataset.version="6.1";mount.appendChild(lab);}
+    }
+  }
+
+  // Historical archive: collect remaining visible version blocks and sort newest -> oldest.
+  const archive=document.getElementById("research-archive");
+  if(archive){
+    const root=document.querySelector(".wrap");
+    const candidates=[...root.children].filter(el=>{
+      if(el===mount || el===archive) return false;
+      const t=(el.textContent||"").replace(/\s+/g," ");
+      return /\bV(?:2(?:\.\d+)?|3(?:\.\d+)?|4(?:\.\d+)?|5(?:\.\d+)?)\b/i.test(t);
+    });
+    function versionOf(el){
+      const t=(el.textContent||"");
+      const nums=[...t.matchAll(/\bV(\d+)(?:\.(\d+))?/gi)].map(m=>parseFloat(m[1]+"."+(m[2]||"0")));
+      return nums.length?Math.max(...nums):0;
+    }
+    candidates.sort((a,b)=>versionOf(b)-versionOf(a));
+    let cursor=archive;
+    candidates.forEach(el=>{
+      cursor.insertAdjacentElement("afterend",el);
+      cursor=el;
+      // Old versions default collapsed when possible.
+      if(el.tagName==="DETAILS" && versionOf(el)<6) el.removeAttribute("open");
+    });
+  }
+});
+</script>
 <script>
 function setFilter(kind){
  document.querySelectorAll('.rank-row').forEach(row=>{
