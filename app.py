@@ -2596,6 +2596,71 @@ def v62_instant_lab():
                         "max_losing_streak":m["max_losing_streak"]
                     })
 
+    # V6.2.4 robustness: non-overlapping volume buckets under RS>=90.
+    volume_buckets=[]
+    if "volratio" in d.columns and "rs" in d.columns:
+        base=power&(d["rs"]>=90)
+        bucket_defs=[
+            ("1.5–1.7x",1.5,1.7),
+            ("1.7–1.8x",1.7,1.8),
+            ("1.8–2.0x",1.8,2.0),
+            ("2.0–2.2x",2.0,2.2),
+            ("2.2–2.5x",2.2,2.5),
+            ("2.5x+",2.5,None),
+        ]
+        for name,lo,hi in bucket_defs:
+            mask=base&(d["volratio"]>=lo)
+            if hi is not None:
+                mask=mask&(d["volratio"]<hi)
+            g=d[mask]
+            if len(g):
+                m=_v6_shadow_metrics(g)
+                volume_buckets.append({
+                    "name":name,"trades":m["trades"],"win_rate":m["win_rate"],
+                    "avg_return":m["avg_return"],"pf":m["pf"],
+                    "max_losing_streak":m["max_losing_streak"]
+                })
+
+    # Split the selected CORE rule by broad eras to check persistence.
+    era_rows=[]
+    if "volratio" in d.columns and "rs" in d.columns and "date" in d.columns:
+        dd=d.copy()
+        dd["date"]=pd.to_datetime(dd["date"],errors="coerce")
+        core=power&(dd["volratio"]>=1.8)&(dd["rs"]>=90)
+        era_defs=[
+            ("2007–2011","2007-01-01","2011-12-31"),
+            ("2012–2016","2012-01-01","2016-12-31"),
+            ("2017–2021","2017-01-01","2021-12-31"),
+            ("2022–2026","2022-01-01","2026-12-31"),
+        ]
+        for name,start,end in era_defs:
+            g=dd[core&(dd["date"]>=pd.Timestamp(start))&(dd["date"]<=pd.Timestamp(end))]
+            if len(g):
+                m=_v6_shadow_metrics(g)
+                era_rows.append({
+                    "name":name,"trades":m["trades"],"win_rate":m["win_rate"],
+                    "avg_return":m["avg_return"],"pf":m["pf"],
+                    "max_losing_streak":m["max_losing_streak"]
+                })
+
+    # Year-by-year split for the same CORE rule.
+    yearly_rows=[]
+    if "volratio" in d.columns and "rs" in d.columns and "date" in d.columns:
+        dd=d.copy()
+        dd["date"]=pd.to_datetime(dd["date"],errors="coerce")
+        core=power&(dd["volratio"]>=1.8)&(dd["rs"]>=90)
+        dg=dd[core].copy()
+        if not dg.empty:
+            dg["year"]=dg["date"].dt.year
+            for yy,g in dg.groupby("year"):
+                if len(g):
+                    m=_v6_shadow_metrics(g)
+                    yearly_rows.append({
+                        "year":int(yy),"trades":m["trades"],"win_rate":m["win_rate"],
+                        "avg_return":m["avg_return"],"pf":m["pf"],
+                        "max_losing_streak":m["max_losing_streak"]
+                    })
+
     seen=set()
     for name,mask in masks:
         g=d[mask.fillna(False)]
@@ -2613,7 +2678,7 @@ def v62_instant_lab():
         ]:
             g=d[mask]
             if len(g):ranks.append(dict(name=name,**_v6_shadow_metrics(g)))
-    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability}
+    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability,"volume_buckets":volume_buckets,"era_rows":era_rows,"yearly_rows":yearly_rows}
 
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
@@ -3472,7 +3537,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.3</h1><div class="muted">当前研究版：V6.2.3 Stability Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.4</h1><div class="muted">当前研究版：V6.2.4 Robustness Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3492,7 +3557,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.3 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.4 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -3995,7 +4060,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.3 Stability Lab <span class="version-label">当前</span></summary>
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.4 Robustness Lab <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4098,6 +4163,91 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 {% endfor %}
 </div>
+
+<details open style="margin-top:12px">
+<summary style="font-weight:900;cursor:pointer">🧱 非重叠 Volume 区间 · RS≥90</summary>
+<div class="muted" style="margin:8px 0">
+这组最重要：每个区间互不重叠，用来确认 1.8x 以后是否真的逐段变强，而不是累计门槛造成的假象。
+</div>
+<div class="scroll desktop-v62-table">
+<table style="min-width:760px">
+<tr><th>Volume 区间</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.volume_buckets %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table>
+</div>
+<div class="mobile-metrics">
+{% for r in v62_lab.volume_buckets %}
+<div class="metric-card">
+<div class="name">{{r.name}} · RS≥90</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</details>
+
+<details open style="margin-top:12px">
+<summary style="font-weight:900;cursor:pointer">🕒 CORE 跨时期稳定性 · Vol≥1.8x + RS≥90</summary>
+<div class="muted" style="margin:8px 0">
+检查这个候选核心规则是不是只靠某一段牛市撑起来。先看四个大时期，再看逐年明细。
+</div>
+<div class="scroll desktop-v62-table">
+<table style="min-width:760px">
+<tr><th>时期</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.era_rows %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table>
+</div>
+<div class="mobile-metrics">
+{% for r in v62_lab.era_rows %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<details style="margin-top:10px">
+<summary style="font-weight:800;cursor:pointer">逐年明细</summary>
+<div class="scroll desktop-v62-table">
+<table style="min-width:760px">
+<tr><th>年份</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.yearly_rows %}
+<tr><td><b>{{r.year}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table>
+</div>
+<div class="mobile-metrics">
+{% for r in v62_lab.yearly_rows %}
+<div class="metric-card">
+<div class="name">{{r.year}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</details>
+</details>
+
 </details>
 
 {% endif %}
