@@ -2563,6 +2563,22 @@ def v62_instant_lab():
     if "rs" in d.columns:
         masks.append(("POWER + RS≥90",(char=="POWER_TREND")&(d["rs"]>=90)))
 
+    # V6.2.2 cross-combination diagnostics.
+    # These are descriptive tests on the same development set, not new OOS validation.
+    power=(char=="POWER_TREND")
+    if "volratio" in d.columns and "extension" in d.columns:
+        masks.append(("POWER + vol≥1.8x + entry≤2%", power&(d["volratio"]>=1.8)&(d["extension"]<=.02)))
+    if "volratio" in d.columns and "rs" in d.columns:
+        masks.append(("POWER + vol≥1.8x + RS≥90", power&(d["volratio"]>=1.8)&(d["rs"]>=90)))
+    if "volratio" in d.columns and "supply_score" in d.columns:
+        masks.append(("POWER + vol≥1.8x + supply≥75", power&(d["volratio"]>=1.8)&(d["supply_score"]>=75)))
+    if "volratio" in d.columns and "extension" in d.columns and "rs" in d.columns:
+        masks.append(("POWER + vol≥1.8x + entry≤2% + RS≥90",
+                      power&(d["volratio"]>=1.8)&(d["extension"]<=.02)&(d["rs"]>=90)))
+    if "volratio" in d.columns and "v6_edge_count" in d.columns:
+        masks.append(("POWER + vol≥1.8x + edges≥7", power&(d["volratio"]>=1.8)&(d["v6_edge_count"]>=7)))
+        masks.append(("POWER + vol≥1.8x + edges≥8", power&(d["volratio"]>=1.8)&(d["v6_edge_count"]>=8)))
+
     seen=set()
     for name,mask in masks:
         g=d[mask.fillna(False)]
@@ -3439,7 +3455,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2</h1><div class="muted">当前研究版：V6.2 Instant Research · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.2</h1><div class="muted">当前研究版：V6.2.2 Combo Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3459,7 +3475,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.2 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -3962,7 +3978,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2 Instant Research Cache <span class="version-label">当前</span></summary>
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.2 Instant Combo Lab <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4005,13 +4021,26 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 <details style="margin-top:10px">
 <summary style="font-weight:800;cursor:pointer">Ranking 诊断</summary>
-<div class="scroll"><table style="min-width:700px">
-<tr><th>Rank</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+<div class="scroll desktop-v62-table"><table style="min-width:700px">
+<tr><th>Rank</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
 {% for r in v62_lab.ranks %}
 <tr><td>{{r.name}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
-<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
 </table></div>
+<div class="mobile-metrics">
+{% for r in v62_lab.ranks %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
 </details>
 {% endif %}
 </details>
