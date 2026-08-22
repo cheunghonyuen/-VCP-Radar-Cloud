@@ -38,6 +38,9 @@ V5_VALIDATION_STOP_FILE = V5_VALIDATION_DIR / "STOP"
 V6_SHADOW_DIR = DATA_DIR / "jlaw_v6_shadow"
 V6_SHADOW_STATUS_FILE = V6_SHADOW_DIR / "status.json"
 V6_SHADOW_STOP_FILE = V6_SHADOW_DIR / "STOP"
+V61_FAST_DIR = DATA_DIR / "jlaw_v61_fast"
+V61_FAST_STATUS_FILE = V61_FAST_DIR / "status.json"
+V61_FAST_STOP_FILE = V61_FAST_DIR / "STOP"
 YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
 YOUTUBE_UPLOAD_TOKEN = os.environ.get("YOUTUBE_UPLOAD_TOKEN", "").strip()
@@ -113,6 +116,8 @@ v5_validation_thread = None
 v5_validation_stop_event = threading.Event()
 v6_shadow_thread = None
 v6_shadow_stop_event = threading.Event()
+v61_fast_thread = None
+v61_fast_stop_event = threading.Event()
 
 
 def youtube_video_id(value):
@@ -2298,6 +2303,155 @@ def stop_v6_shadow():
     return True
 
 
+
+def v61_decision_lab():
+    """Analyze completed V6 Shadow outputs only. No rerun."""
+    p=V6_SHADOW_DIR/"jlaw_v6_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return dict(available=False,message="V6 Shadow 交易文件不存在")
+    try:d=pd.read_csv(p)
+    except Exception as e:return dict(available=False,message=f"读取失败: {type(e).__name__}: {e}")
+    if d.empty:return dict(available=False,message="V6 Shadow 交易文件为空")
+
+    for c in ["return_pct","v6_edge_count","v6_rank","rs","volratio","supply_score","extension"]:
+        if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+
+    matrix=[]
+    if "v6_market_character" in d.columns:
+        for ch in ["POWER_TREND","BULL_TREND"]:
+            base=d[d["v6_market_character"].astype(str)==ch]
+            for tier in ["ALL","A1","A1+A2","TOP3"]:
+                g=base
+                if tier=="A1" and "v6_tier" in g.columns:g=g[g.v6_tier.astype(str)=="A1"]
+                elif tier=="A1+A2" and "v6_tier" in g.columns:g=g[g.v6_tier.astype(str).isin(["A1","A2"])]
+                elif tier=="TOP3" and "v6_top3" in g.columns:g=g[g.v6_top3.astype(str).str.lower().isin(["true","1"])]
+                if len(g):matrix.append(dict(character=ch,tier=tier,**_v6_shadow_metrics(g)))
+
+    edges=[]
+    if "v6_edge_count" in d.columns:
+        for n in sorted(d.v6_edge_count.dropna().unique()):
+            g=d[d.v6_edge_count==n]
+            if len(g):edges.append(dict(edge_count=int(n),**_v6_shadow_metrics(g)))
+
+    ranks=[]
+    if "v6_rank" in d.columns:
+        for label,mask in [("Rank 1",d.v6_rank==1),("Rank 2",d.v6_rank==2),("Rank 3",d.v6_rank==3),("Rank 4+",d.v6_rank>=4)]:
+            g=d[mask]
+            if len(g):ranks.append(dict(rank=label,**_v6_shadow_metrics(g)))
+
+    char=d.v6_market_character.astype(str) if "v6_market_character" in d.columns else pd.Series("",index=d.index)
+    tier=d.v6_tier.astype(str) if "v6_tier" in d.columns else pd.Series("",index=d.index)
+    combos=[("POWER + A1",(char=="POWER_TREND")&(tier=="A1")),
+            ("POWER + A1/A2",(char=="POWER_TREND")&(tier.isin(["A1","A2"])))]
+    if "extension" in d.columns:combos.append(("POWER + entry≤2%",(char=="POWER_TREND")&(d.extension<=.02)))
+    if "volratio" in d.columns:combos.append(("POWER + volume≥1.8x",(char=="POWER_TREND")&(d.volratio>=1.8)))
+    if "supply_score" in d.columns:combos.append(("POWER + supply≥75",(char=="POWER_TREND")&(d.supply_score>=75)))
+    if "rs" in d.columns:combos.append(("POWER + RS≥90",(char=="POWER_TREND")&(d.rs>=90)))
+    opportunity=[]
+    for name,mask in combos:
+        g=d[mask.fillna(False)]
+        if len(g):opportunity.append(dict(name=name,**_v6_shadow_metrics(g)))
+
+    return dict(available=True,matrix=matrix,edges=edges,ranks=ranks,opportunity=opportunity)
+
+def read_v61_fast_status():
+    s={"status":"idle","mode":"","message":"尚未运行 V6.1 Fast","stocks":0,"processed":0,"current":"",
+       "started_at":None,"finished_at":None,"error":None}
+    if V61_FAST_STATUS_FILE.exists():
+        try:s.update(json.loads(V61_FAST_STATUS_FILE.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def write_v61_fast_status(**kw):
+    V61_FAST_DIR.mkdir(parents=True,exist_ok=True)
+    s=read_v61_fast_status();s.update(kw)
+    V61_FAST_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+
+def v61_fast_summary(mode="full"):
+    base=V61_FAST_DIR/("quick50/quick" if mode=="quick50" else "full")
+    p=base/"jlaw_v6_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty:return []
+    rows=[dict(segment="ALL",**_v6_shadow_metrics(d))]
+    if "v6_tier" in d.columns:
+        for label,g in [("A1",d[d.v6_tier=="A1"]),("A1+A2",d[d.v6_tier.isin(["A1","A2"])])]:
+            if len(g):rows.append(dict(segment=label,**_v6_shadow_metrics(g)))
+    if "v6_top3" in d.columns:
+        g=d[d.v6_top3.astype(str).str.lower().isin(["true","1"])]
+        if len(g):rows.append(dict(segment="TOP3",**_v6_shadow_metrics(g)))
+    return rows
+
+def run_v61_fast(mode):
+    global v61_fast_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():raise RuntimeError("GitHub 根目录缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("jlaw_v61_fast_engine",str(ep))
+        mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+
+        V61_FAST_DIR.mkdir(parents=True,exist_ok=True)
+        v61_fast_stop_event.clear()
+        try:
+            if V61_FAST_STOP_FILE.exists():V61_FAST_STOP_FILE.unlink()
+        except Exception:pass
+
+        available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
+        quick=(mode=="quick50")
+        target=available[:50] if quick else available
+        outdir=V61_FAST_DIR/("quick50" if quick else "full")
+
+        write_v61_fast_status(status="running",mode=mode,
+            message=("Quick 50" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
+            stocks=len(target),processed=0,current="",error=None,
+            started_at=datetime.now(timezone.utc).isoformat(),finished_at=None)
+
+        def prog(done,total,t):
+            if v61_fast_stop_event.is_set():raise RuntimeError("__V61_STOPPED__")
+            write_v61_fast_status(status="running",mode=mode,
+                message=("Quick 50" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
+                stocks=total,processed=done,current=t)
+
+        mod.run(str(MARKET_DIR),str(outdir),progress_cb=prog,
+                quick=quick,quick_n=50,quick_lookback=420,
+                stop_file=str(V61_FAST_STOP_FILE),ticker_filter=target,
+                parallel_workers=2,resume=True)
+
+        if V61_FAST_STOP_FILE.exists() or v61_fast_stop_event.is_set():
+            raise RuntimeError("__V61_STOPPED__")
+
+        write_v61_fast_status(status="done",mode=mode,
+            message=("Quick 50" if quick else "Full 321")+" 完成",
+            stocks=len(target),processed=len(target),current="",
+            finished_at=datetime.now(timezone.utc).isoformat(),error=None)
+    except Exception as ex:
+        if str(ex)=="__V61_STOPPED__":
+            s=read_v61_fast_status()
+            write_v61_fast_status(status="stopped",mode=mode,message="已停止；下次会从 checkpoint 继续",
+                                  stocks=s.get("stocks",0),processed=s.get("processed",0),current="",
+                                  finished_at=datetime.now(timezone.utc).isoformat(),error=None)
+        else:
+            traceback.print_exc()
+            write_v61_fast_status(status="error",mode=mode,message="V6.1 Fast 失败",
+                                  error=f"{type(ex).__name__}: {ex}",
+                                  finished_at=datetime.now(timezone.utc).isoformat())
+    finally:
+        v61_fast_thread=None;v61_fast_stop_event.clear()
+
+def start_v61_fast(mode):
+    global v61_fast_thread
+    if v61_fast_thread is not None and v61_fast_thread.is_alive():return False
+    v61_fast_thread=threading.Thread(target=run_v61_fast,args=(mode,),daemon=True)
+    v61_fast_thread.start();return True
+
+def stop_v61_fast():
+    V61_FAST_DIR.mkdir(parents=True,exist_ok=True)
+    try:V61_FAST_STOP_FILE.write_text("stop",encoding="utf-8")
+    except Exception:pass
+    v61_fast_stop_event.set();return True
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -3063,8 +3217,13 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 <pre>{{result.transcript[:16000]}}{{"…" if result.transcript|length > 16000 else ""}}</pre>
 {% endif %}
 </div>
-<div class="card">
-<h3 style="margin-top:0">已学习的视频</h3>
+<details class="card" style="margin-top:18px">
+<summary style="font-size:24px;font-weight:800;cursor:pointer;list-style:none">
+YouTube 字幕库 <span class="muted" style="font-size:15px;font-weight:600">（点开查看）</span>
+</summary>
+<div style="margin-top:16px">
+
+
 <p><a class="btn" href="/api/youtube/index">公开只读字幕索引</a></p>
 <table><tr><th>Video ID</th><th>语言</th><th>字幕</th><th>字符</th><th>时间</th></tr>
 {% for r in history %}
@@ -3072,7 +3231,11 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 <td>{{"自动" if r.is_generated else "人工"}}</td><td>{{r.char_count}}</td><td>{{r.fetched_at_utc}}</td></tr>
 {% endfor %}
 </table>
-</div></div></body></html>"""
+</div>
+</div>
+</details>
+
+</body></html>"""
 
 HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VCP Radar Cloud Final</title><style>
@@ -3135,13 +3298,23 @@ details.section-fold .fold-body{padding:14px 18px 18px}
 {% if error %}<p class="warn">最近错误：{{error}}</p>{% endif %}</div>
 
 {% if sector_rows %}
-<div class="card"><h2>板块强弱</h2><div class="scroll"><table style="min-width:520px">
+<details class="card" style="margin-top:18px">
+<summary style="font-size:24px;font-weight:800;cursor:pointer;list-style:none">
+板块强弱 <span class="muted" style="font-size:15px;font-weight:600">（点开查看）</span>
+</summary>
+<div style="margin-top:16px">
+<div class="scroll"><table style="min-width:520px">
 <tr><th>板块</th><th>候选数</th><th>平均评分</th><th>90+数量</th></tr>
 {% for s in sector_rows %}<tr><td><b>{{s.sector}}</b></td><td>{{s.count}}</td><td>{{"%.1f"|format(s.avg_score)}}</td><td>{{s.count90}}</td></tr>{% endfor %}
 </table></div></div>
 {% endif %}
 
-<div class="card"><div class="top"><h2>Top 候选</h2><div>
+<details class="card" style="margin-top:18px">
+<summary style="font-size:28px;font-weight:800;cursor:pointer;list-style:none">
+Top 候选 <span class="muted" style="font-size:16px;font-weight:600">（点开查看）</span>
+</summary>
+<div style="margin-top:18px">
+<div><div class="top"><h2>Top 候选</h2><div>
 <button type="button" class="alt" onclick="setFilter('all')">全部</button>
 <button type="button" class="alt" onclick="setFilter('90')">90+</button>
 <button type="button" class="alt" onclick="setFilter('80')">80–89</button>
@@ -3165,6 +3338,10 @@ details.section-fold .fold-body{padding:14px 18px 18px}
 </div></td></tr>{% endfor %}
 </table></div></div>
 
+
+
+</div>
+</details>
 
 <div class="card">
 <div class="top">
@@ -3218,8 +3395,9 @@ details.section-fold .fold-body{padding:14px 18px 18px}
 本轮同时测试：固定 -7% / +15,+20,+25,+30,+40,+50；J Law 中位数 -4.5%/+13%；以及 Native V1（结构止损≤8%、+20%卖一半、余仓跟30周趋势/Stage 2）。
 Native V1 是公开规则的量化近似，不假装等同于全部主观判断。
 </div>
-</div>
 
+</div>
+</details>
 
 <div class="card">
 <div class="top"><div><h2 style="margin:0">J Law V3.1 · VCP Structure Engine</h2>
@@ -3536,6 +3714,9 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% if v6_status.error %}<p class="warn">{{v6_status.error}}</p>{% endif %}
 
 {% if v6_summary %}
+<details style="margin-top:12px">
+<summary style="font-weight:800;cursor:pointer">V6 Shadow 结果（点开）</summary>
+<div style="margin-top:10px">
 <h4>V6 Shadow 结果</h4>
 <div class="scroll"><table style="min-width:760px">
 <tr><th>分组</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
@@ -3550,8 +3731,12 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endfor %}
 </table></div>
 {% endif %}
+</div></details>
 
 {% if v6_characters %}
+<details style="margin-top:12px">
+<summary style="font-weight:800;cursor:pointer">Market Character（点开）</summary>
+<div style="margin-top:10px">
 <h4>Market Character</h4>
 <div class="scroll"><table style="min-width:700px">
 <tr><th>环境</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
@@ -3565,10 +3750,80 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endfor %}
 </table></div>
 {% endif %}
+</div></details>
 </div>
 
-{% if v5_autopsy.available %}
+
+{% if v61_lab.available %}
+<details class="card" style="margin-top:18px">
+<summary style="font-size:24px;font-weight:800;cursor:pointer">🧪 V6.1 Decision Lab（不重跑）</summary>
+<div class="muted" style="margin:10px 0">读取刚完成的 V6 Shadow 结果；不重跑321只。</div>
+
+<details open style="margin-top:10px">
+<summary style="font-weight:800;cursor:pointer">Market Character × Tier</summary>
+<div class="scroll"><table style="min-width:820px">
+<tr><th>环境</th><th>层级</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v61_lab.matrix %}
+<tr><td>{{r.character}}</td><td><b>{{r.tier}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>{% endfor %}
+</table></div></details>
+
+<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Edge Count 单调性</summary>
+<div class="scroll"><table style="min-width:720px">
+<tr><th>Edges</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v61_lab.edges %}<tr><td>{{r.edge_count}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
+</table></div></details>
+
+<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Ranking 是否有用</summary>
+<div class="scroll"><table style="min-width:700px">
+<tr><th>Rank</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v61_lab.ranks %}<tr><td>{{r.rank}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
+</table></div></details>
+
+<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">J Law 启发组合（描述性）</summary>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>组合</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v61_lab.opportunity %}<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
+</table></div></details>
+</details>
+{% endif %}
+
 <details class="card" open style="margin-top:18px">
+<summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine</summary>
+<div class="muted" style="margin:10px 0">
+2线程并行 + 每只股票 checkpoint。中断后再次运行会跳过已经完成的股票。先 Quick 50，再决定是否 Full 321。
+</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+<form method="post" action="/v61/quick50"><button {% if v61_status.status=="running" %}disabled style="opacity:.45"{% endif %}>⚡ Quick 50</button></form>
+<form method="post" action="/v61/full"><button {% if v61_status.status=="running" %}disabled style="opacity:.45"{% endif %}>▶ Full 321 Fast</button></form>
+{% if v61_status.status=="running" %}<form method="post" action="/v61/stop"><button style="background:#7f1d1d">■ 停止（可续跑）</button></form>{% endif %}
+</div>
+{% if v61_status.status=="running" %}
+<div class="progress"><div style="width:{{((v61_status.processed/v61_status.stocks*100) if v61_status.stocks else 0)}}%"></div></div>
+<div><b>{{v61_status.processed}} / {{v61_status.stocks}}</b> · {{v61_status.current}}</div>
+{% endif %}
+<p><b>状态：</b>{{v61_status.status}}　{{v61_status.message}}</p>
+{% if v61_status.error %}<p class="warn">{{v61_status.error}}</p>{% endif %}
+
+{% if v61_quick %}
+<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Quick 50 结果</summary>
+<div class="scroll"><table style="min-width:700px"><tr><th>分组</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v61_quick %}<tr><td>{{r.segment}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
+</table></div></details>{% endif %}
+
+{% if v61_full %}
+<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Full Fast 结果</summary>
+<div class="scroll"><table style="min-width:700px"><tr><th>分组</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v61_full %}<tr><td>{{r.segment}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
+</table></div></details>{% endif %}
+</details>
+
+{% if v5_autopsy.available %}
+<details class="card" style="margin-top:18px">
 <summary style="font-size:20px;font-weight:800;cursor:pointer">🔬 V5.4 OOS Failure Autopsy（不重跑）</summary>
 <div class="muted" style="margin:10px 0">
 只读取已经完成的 Validation 交易文件做失败解剖；不改参数、不重新回测、不污染这次 OOS。
@@ -4138,7 +4393,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();const v6r=await fetch('/api/v6-shadow-status',{cache:'no-store'});const v6s=await v6r.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running'||v6s.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();const v6r=await fetch('/api/v6-shadow-status',{cache:'no-store'});const v6s=await v6r.json();const f61=await fetch('/api/v61-fast-status',{cache:'no-store'});const f61s=await f61.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running'||v6s.status==='running'||f61s.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -4303,11 +4558,31 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),v61_lab=v61_decision_lab(),v61_status=read_v61_fast_status(),v61_quick=v61_fast_summary("quick50"),v61_full=v61_fast_summary("full"),
         **s)
 
 
 
+
+
+@APP.post("/v61/quick50")
+def v61_quick50_route():
+    start_v61_fast("quick50")
+    return redirect(url_for("home"))
+
+@APP.post("/v61/full")
+def v61_full_route():
+    start_v61_fast("full")
+    return redirect(url_for("home"))
+
+@APP.post("/v61/stop")
+def v61_stop_route():
+    stop_v61_fast()
+    return redirect(url_for("home"))
+
+@APP.get("/api/v61-fast-status")
+def api_v61_fast_status():
+    return jsonify(read_v61_fast_status())
 
 @APP.post("/v6/shadow/start")
 def v6_shadow_start_route():
