@@ -41,6 +41,9 @@ V6_SHADOW_STOP_FILE = V6_SHADOW_DIR / "STOP"
 V61_FAST_DIR = DATA_DIR / "jlaw_v61_fast"
 V61_FAST_STATUS_FILE = V61_FAST_DIR / "status.json"
 V61_FAST_STOP_FILE = V61_FAST_DIR / "STOP"
+V63_DIR = DATA_DIR / "jlaw_v63_rs2"
+V63_STATUS_FILE = V63_DIR / "status.json"
+V63_STOP_FILE = V63_DIR / "STOP"
 YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
 YOUTUBE_UPLOAD_TOKEN = os.environ.get("YOUTUBE_UPLOAD_TOKEN", "").strip()
@@ -2354,6 +2357,68 @@ def v61_decision_lab():
 
     return dict(available=True,matrix=matrix,edges=edges,ranks=ranks,opportunity=opportunity)
 
+
+def read_v63_status():
+    base={"state":"idle","message":"尚未运行 V6.3","done":0,"total":0,"ticker":"","error":""}
+    if V63_STATUS_FILE.exists():
+        try:base.update(json.loads(V63_STATUS_FILE.read_text(encoding="utf-8")))
+        except Exception:pass
+    return base
+
+def write_v63_status(**kw):
+    V63_DIR.mkdir(parents=True,exist_ok=True)
+    cur=read_v63_status();cur.update(kw)
+    V63_STATUS_FILE.write_text(json.dumps(cur,ensure_ascii=False,indent=2),encoding="utf-8")
+
+def v63_summary():
+    p=V63_DIR/"full"/"jlaw_v6_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return {"available":False}
+    try:T=pd.read_csv(p)
+    except Exception:return {"available":False}
+    if T.empty:return {"available":False}
+    rows=[]
+    def add(name,g):
+        if g is None or g.empty:return
+        m=_v6_shadow_metrics(g)
+        rows.append({"name":name,**m})
+    add("ALL V6.3",T)
+    if "v6_market_character" in T.columns:
+        add("POWER_TREND",T[T["v6_market_character"].astype(str)=="POWER_TREND"])
+    if "rs" in T.columns:
+        add("RS2 ≥90",T[pd.to_numeric(T["rs"],errors="coerce")>=90])
+        add("RS2 90–95",T[(pd.to_numeric(T["rs"],errors="coerce")>=90)&(pd.to_numeric(T["rs"],errors="coerce")<95)])
+        add("RS2 ≥95",T[pd.to_numeric(T["rs"],errors="coerce")>=95])
+    if "volratio" in T.columns and "rs" in T.columns and "v6_market_character" in T.columns:
+        m=(T["v6_market_character"].astype(str)=="POWER_TREND")&(pd.to_numeric(T["volratio"],errors="coerce")>=1.8)&(pd.to_numeric(T["rs"],errors="coerce")>=90)
+        add("POWER + Vol≥1.8x + RS2≥90",T[m])
+    return {"available":True,"rows":rows,"trades":int(len(T))}
+
+def run_v63():
+    try:
+        if V63_STOP_FILE.exists():V63_STOP_FILE.unlink()
+        write_v63_status(state="running",message="V6.3 RS2 Feature Store + Full321 运行中",done=0,total=0,ticker="",error="")
+        ep=Path(__file__).with_name("jlaw_v6_3_RS2_FEATURE_STORE.py")
+        if not ep.exists():raise RuntimeError("GitHub 根目录缺少 jlaw_v6_3_RS2_FEATURE_STORE.py")
+        spec=importlib.util.spec_from_file_location("jlaw_v63_rs2",ep)
+        mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+        outdir=V63_DIR/"full"
+        outdir.mkdir(parents=True,exist_ok=True)
+        def cb(done,total,ticker):
+            write_v63_status(state="running",message=f"V6.3 运行中 {done}/{total}",done=int(done),total=int(total),ticker=str(ticker),error="")
+        mod.run(MARKET_DIR,outdir,progress_cb=cb,quick=False,stop_file=V63_STOP_FILE,parallel_workers=2,resume=True)
+        write_v63_status(state="done",message="V6.3 RS2 Full321 完成",done=321,total=321,ticker="",error="")
+    except Exception as e:
+        write_v63_status(state="error",message="V6.3 失败",error=str(e))
+
+def start_v63():
+    st=read_v63_status()
+    if st.get("state")=="running":return
+    threading.Thread(target=run_v63,daemon=True).start()
+
+def stop_v63():
+    V63_DIR.mkdir(parents=True,exist_ok=True);V63_STOP_FILE.write_text("stop",encoding="utf-8")
+    write_v63_status(state="stopping",message="正在停止 V6.3；已完成股票会保留 checkpoint")
+
 def read_v61_fast_status():
     s={"status":"idle","mode":"","message":"尚未运行 V6.1 Fast","stocks":0,"processed":0,"current":"",
        "started_at":None,"finished_at":None,"error":None}
@@ -3738,7 +3803,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.9</h1><div class="muted">当前研究版：V6.2.9 RS Saturation Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3</h1><div class="muted">当前研究版：V6.3 RS2 + Feature Store · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3758,7 +3823,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.9 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4576,6 +4641,44 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+
+<div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
+<h2 style="margin:0 0 8px">🚀 V6.3 RS2 + Feature Store</h2>
+<div class="muted" style="margin-bottom:10px">
+底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
+Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
+</div>
+<p><b>状态：</b> {{v63_status.state}} · {{v63_status.message}}
+{% if v63_status.total %} · {{v63_status.done}}/{{v63_status.total}}{% endif %}
+{% if v63_status.ticker %} · {{v63_status.ticker}}{% endif %}</p>
+{% if v63_status.error %}<div style="padding:10px;background:#fff1f1;border-radius:10px">⚠️ {{v63_status.error}}</div>{% endif %}
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+<form method="post" action="/v63/run"><button>▶ V6.3 Full321 + RS2 Build</button></form>
+<form method="post" action="/v63/stop"><button>■ 停止 / 保留Checkpoint</button></form>
+</div>
+
+{% if v63_summary.available %}
+<h3 style="margin:14px 0 8px">V6.3 新RS结果</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.rows %}
+<div class="metric-card"><div class="name">{{r.name}}</div><div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+<div class="scroll desktop-v62-table"><table style="min-width:780px">
+<tr><th>组合</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v63_summary.rows %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+
 <div class="card current-card" id="v629-rsdiag" style="margin-top:18px">
 <h2 style="margin:0 0 6px">🎯 V6.2.9 RS Saturation Diagnostic</h2>
 <div class="muted" style="margin-bottom:12px">
@@ -5224,9 +5327,11 @@ SETUP_LEADER=Setup 24% + Leader 22%；BALANCED_ELITE=Supply25/Setup20/Volume20/L
 <script>
 document.addEventListener("DOMContentLoaded",function(){
   const mount=document.getElementById("latest-version-mount");
+  const v63=document.getElementById("v63-current");
   const current=document.getElementById("v62-current");
   const fast=document.getElementById("v61-fast");
   if(mount){
+    if(v63) mount.appendChild(v63);
     if(current) mount.appendChild(current);
     const diag=document.getElementById("v628-diagnostic");
     if(diag) mount.appendChild(diag);
@@ -5455,7 +5560,7 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),v61_lab=v61_decision_lab(),v61_status=read_v61_fast_status(),v61_quick=v61_fast_summary("quick50"),v61_full=v61_fast_summary("full"),v62_status=v62_cache_status(),v62_lab=v62_instant_lab(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),v61_lab=v61_decision_lab(),v61_status=read_v61_fast_status(),v61_quick=v61_fast_summary("quick50"),v61_full=v61_fast_summary("full"),v62_status=v62_cache_status(),v62_lab=v62_instant_lab(),v63_status=read_v63_status(),v63_summary=v63_summary(),
         **s)
 
 
@@ -5467,6 +5572,21 @@ def home():
 def v62_build_cache_route():
     build_v62_research_cache()
     return redirect(url_for("home"))
+
+
+@APP.post("/v63/run")
+def v63_run_route():
+    start_v63()
+    return redirect(url_for("home"))
+
+@APP.post("/v63/stop")
+def v63_stop_route():
+    stop_v63()
+    return redirect(url_for("home"))
+
+@APP.get("/api/v63/status")
+def api_v63_status():
+    return jsonify(read_v63_status())
 
 @APP.post("/v61/quick50")
 def v61_quick50_route():
