@@ -2368,7 +2368,7 @@ def write_v61_fast_status(**kw):
     V61_FAST_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
 
 def v61_fast_summary(mode="full"):
-    base=V61_FAST_DIR/("quick50/quick" if mode=="quick50" else "full")
+    base=V61_FAST_DIR/("quick50" if mode=="quick50" else "full")
     p=base/"jlaw_v6_trades.csv"
     if not p.exists() or p.stat().st_size==0:return []
     try:d=pd.read_csv(p)
@@ -2400,22 +2400,47 @@ def run_v61_fast(mode):
 
         available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
         quick=(mode=="quick50")
-        target=available[:50] if quick else available
+        if quick:
+            # Evenly sample across the 321-stock validation pool instead of taking
+            # the first 50 alphabetically, which can be sector/ticker biased.
+            if len(available)<=50:
+                target=available
+            else:
+                step=(len(available)-1)/49.0
+                idxs=sorted(set(int(round(i*step)) for i in range(50)))
+                target=[available[i] for i in idxs]
+        else:
+            target=available
         outdir=V61_FAST_DIR/("quick50" if quick else "full")
+        if quick:
+            # Revised Quick50 semantics; remove old 420-bar run artifacts once.
+            marker=outdir/"QUICK50_FULL_HISTORY_V2"
+            if not marker.exists():
+                try:
+                    import shutil
+                    if outdir.exists():
+                        shutil.rmtree(outdir)
+                    outdir.mkdir(parents=True,exist_ok=True)
+                    marker.write_text("full-history representative quick50",encoding="utf-8")
+                except Exception:
+                    pass
 
         write_v61_fast_status(status="running",mode=mode,
-            message=("Quick 50" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
+            message=("Quick 50代表样本·全历史" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
             stocks=len(target),processed=0,current="",error=None,
             started_at=datetime.now(timezone.utc).isoformat(),finished_at=None)
 
         def prog(done,total,t):
             if v61_fast_stop_event.is_set():raise RuntimeError("__V61_STOPPED__")
             write_v61_fast_status(status="running",mode=mode,
-                message=("Quick 50" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
+                message=("Quick 50代表样本·全历史" if quick else "Full 321")+" · 2线程并行 · checkpoint续跑",
                 stocks=total,processed=done,current=t)
 
+        # Quick50 means "50 representative stocks over full history".
+        # This is still much faster than 321 stocks, but avoids the old 420-bar
+        # truncation that could legitimately produce zero V6 trades.
         mod.run(str(MARKET_DIR),str(outdir),progress_cb=prog,
-                quick=quick,quick_n=50,quick_lookback=420,
+                quick=False,quick_n=50,quick_lookback=420,
                 stop_file=str(V61_FAST_STOP_FILE),ticker_filter=target,
                 parallel_workers=2,resume=True)
 
@@ -3795,7 +3820,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <details class="card" open style="margin-top:18px">
 <summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine</summary>
 <div class="muted" style="margin:10px 0">
-2线程并行 + 每只股票 checkpoint。中断后再次运行会跳过已经完成的股票。先 Quick 50，再决定是否 Full 321。
+2线程并行 + 每只股票 checkpoint。中断后再次运行会跳过已经完成的股票。先 Quick 50（50只代表样本、全历史），再决定是否 Full 321。旧版 Quick50 只看420日，可能出现0笔交易；这版已修正。
 </div>
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
 <form method="post" action="/v61/quick50"><button {% if v61_status.status=="running" %}disabled style="opacity:.45"{% endif %}>⚡ Quick 50</button></form>
@@ -3810,10 +3835,16 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% if v61_status.error %}<p class="warn">{{v61_status.error}}</p>{% endif %}
 
 {% if v61_quick %}
-<details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Quick 50 结果</summary>
+<details open style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Quick 50 结果</summary>
 <div class="scroll"><table style="min-width:700px"><tr><th>分组</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
 {% for r in v61_quick %}<tr><td>{{r.segment}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>{% endfor %}
 </table></div></details>{% endif %}
+
+{% if v61_status.status=="done" and v61_status.mode=="quick50" and not v61_quick %}
+<div style="margin-top:10px;padding:10px;border-radius:10px;background:#fff7ed">
+Quick 50 已完成，但没有产生 V6 交易记录。旧版420日Quick可能出现这种情况；请使用本修正版重新跑 Quick 50。
+</div>
+{% endif %}
 
 {% if v61_full %}
 <details style="margin-top:10px"><summary style="font-weight:800;cursor:pointer">Full Fast 结果</summary>
