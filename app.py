@@ -2579,6 +2579,23 @@ def v62_instant_lab():
         masks.append(("POWER + vol≥1.8x + edges≥7", power&(d["volratio"]>=1.8)&(d["v6_edge_count"]>=7)))
         masks.append(("POWER + vol≥1.8x + edges≥8", power&(d["volratio"]>=1.8)&(d["v6_edge_count"]>=8)))
 
+    # V6.2.3 Stability Grid: test whether the edge is a broad plateau rather than one lucky threshold.
+    stability=[]
+    if "volratio" in d.columns and "rs" in d.columns:
+        vol_thresholds=[1.5,1.6,1.7,1.8,2.0,2.2,2.5]
+        rs_thresholds=[88,90,92,95]
+        for vv in vol_thresholds:
+            for rr in rs_thresholds:
+                g=d[power&(d["volratio"]>=vv)&(d["rs"]>=rr)]
+                if len(g):
+                    m=_v6_shadow_metrics(g)
+                    stability.append({
+                        "vol":vv,"rs":rr,
+                        "trades":m["trades"],"win_rate":m["win_rate"],
+                        "avg_return":m["avg_return"],"pf":m["pf"],
+                        "max_losing_streak":m["max_losing_streak"]
+                    })
+
     seen=set()
     for name,mask in masks:
         g=d[mask.fillna(False)]
@@ -2596,7 +2613,7 @@ def v62_instant_lab():
         ]:
             g=d[mask]
             if len(g):ranks.append(dict(name=name,**_v6_shadow_metrics(g)))
-    return {"available":True,"status":st,"rows":rows,"ranks":ranks}
+    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability}
 
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
@@ -3455,7 +3472,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.2</h1><div class="muted">当前研究版：V6.2.2 Combo Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.3</h1><div class="muted">当前研究版：V6.2.3 Stability Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3475,7 +3492,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.2 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.3 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -3978,7 +3995,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.2 Instant Combo Lab <span class="version-label">当前</span></summary>
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.3 Stability Lab <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4042,6 +4059,47 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endfor %}
 </div>
 </details>
+
+<details open style="margin-top:12px">
+<summary style="font-weight:900;cursor:pointer">🧪 Volume × RS 稳定性网格</summary>
+<div class="muted" style="margin:8px 0">
+目的：不是找单一最高 PF，而是找附近多个门槛都表现良好的“稳定平台”。样本太小的组合只作观察。
+</div>
+
+<div class="scroll desktop-v62-table">
+<table style="min-width:920px">
+<tr>
+<th>Volume</th><th>RS</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th>
+</tr>
+{% for r in v62_lab.stability %}
+<tr>
+<td><b>≥{{"%.1f"|format(r.vol)}}x</b></td>
+<td><b>≥{{r.rs}}</b></td>
+<td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf)}}</b></td>
+<td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+
+<div class="mobile-metrics">
+{% for r in v62_lab.stability %}
+<div class="metric-card">
+<div class="name">Vol ≥{{"%.1f"|format(r.vol)}}x · RS ≥{{r.rs}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</details>
+
 {% endif %}
 </details>
 
