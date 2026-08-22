@@ -2791,6 +2791,77 @@ def v62_instant_lab():
                         "max_losing_streak":m["max_losing_streak"]
                     })
 
+    # V6.2.9 RS Saturation diagnostic
+    rs100_profile=[]
+    rs_band_profiles=[]
+    recent_power_years=[]
+
+    if "date" in d.columns and "v6_market_character" in d.columns:
+        rd=d.copy()
+        rd["date"]=pd.to_datetime(rd["date"],errors="coerce")
+        rp=rd[(rd["date"]>=pd.Timestamp("2022-01-01"))&
+              (rd["date"]<=pd.Timestamp("2026-12-31"))&
+              (rd["v6_market_character"].astype(str)=="POWER_TREND")].copy()
+
+        # POWER by year
+        if not rp.empty:
+            rp["year"]=rp["date"].dt.year
+            for yy,g in rp.groupby("year"):
+                if len(g):
+                    m=_v6_shadow_metrics(g)
+                    recent_power_years.append({
+                        "year":int(yy),"trades":m["trades"],"win_rate":m["win_rate"],
+                        "avg_return":m["avg_return"],"pf":m["pf"],
+                        "max_losing_streak":m["max_losing_streak"]
+                    })
+
+        # Profiles for RS bands
+        if "rs" in rp.columns:
+            bands=[
+                ("RS 90–95", (rp["rs"]>=90)&(rp["rs"]<95)),
+                ("RS 95–99", (rp["rs"]>=95)&(rp["rs"]<99.999)),
+                ("RS 100", rp["rs"]>=99.999),
+            ]
+            feature_cols=["volratio","supply_score","sector_score","leader_score",
+                          "group_breadth","extension","v6_edge_count","v6_red_count"]
+            for name,mask in bands:
+                g=rp[mask].copy()
+                if not len(g): continue
+                m=_v6_shadow_metrics(g)
+                row={
+                    "name":name,"trades":m["trades"],"win_rate":m["win_rate"],
+                    "avg_return":m["avg_return"],"pf":m["pf"],
+                    "max_losing_streak":m["max_losing_streak"]
+                }
+                for c in feature_cols:
+                    if c in g.columns:
+                        s=pd.to_numeric(g[c],errors="coerce").dropna()
+                        row[c]=float(s.median()) if len(s) else None
+                rs_band_profiles.append(row)
+
+            # Split RS100 by Volume to see if high RS needs stronger confirmation.
+            rs100=rp[rp["rs"]>=99.999].copy()
+            if len(rs100) and "volratio" in rs100.columns:
+                defs=[
+                    ("<1.5x",None,1.5),
+                    ("1.5–1.8x",1.5,1.8),
+                    ("1.8–2.2x",1.8,2.2),
+                    ("2.2–2.5x",2.2,2.5),
+                    ("2.5x+",2.5,None),
+                ]
+                for name,lo,hi in defs:
+                    mask=pd.Series(True,index=rs100.index)
+                    if lo is not None: mask &= rs100["volratio"]>=lo
+                    if hi is not None: mask &= rs100["volratio"]<hi
+                    g=rs100[mask]
+                    if len(g):
+                        m=_v6_shadow_metrics(g)
+                        rs100_profile.append({
+                            "name":name,"trades":m["trades"],"win_rate":m["win_rate"],
+                            "avg_return":m["avg_return"],"pf":m["pf"],
+                            "max_losing_streak":m["max_losing_streak"]
+                        })
+
     seen=set()
     for name,mask in masks:
         g=d[mask.fillna(False)]
@@ -2808,7 +2879,7 @@ def v62_instant_lab():
         ]:
             g=d[mask]
             if len(g):ranks.append(dict(name=name,**_v6_shadow_metrics(g)))
-    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability,"volume_buckets":volume_buckets,"era_rows":era_rows,"yearly_rows":yearly_rows,"fault_recent":fault_recent,"fault_compare":fault_compare,"fault_features":fault_features,"recent_regime":recent_regime,"recent_power_buckets":recent_power_buckets,"recent_rs_buckets":recent_rs_buckets}
+    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability,"volume_buckets":volume_buckets,"era_rows":era_rows,"yearly_rows":yearly_rows,"fault_recent":fault_recent,"fault_compare":fault_compare,"fault_features":fault_features,"recent_regime":recent_regime,"recent_power_buckets":recent_power_buckets,"recent_rs_buckets":recent_rs_buckets,"recent_power_years":recent_power_years,"rs_band_profiles":rs_band_profiles,"rs100_profile":rs100_profile}
 
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
@@ -3667,7 +3738,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.8</h1><div class="muted">当前研究版：V6.2.8 Recent Regime Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.9</h1><div class="muted">当前研究版：V6.2.9 RS Saturation Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3687,7 +3758,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.8 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.9 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4504,6 +4575,53 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 </div>
 
+
+<div class="card current-card" id="v629-rsdiag" style="margin-top:18px">
+<h2 style="margin:0 0 6px">🎯 V6.2.9 RS Saturation Diagnostic</h2>
+<div class="muted" style="margin-bottom:12px">
+重点检查最近几年为什么 RS=100 反而表现很差：它是真正“过强/过热”，还是 RS 分数被封顶后失去区分度。
+全部直接读现有缓存，不重跑321只。
+</div>
+
+<h3>2022–2026 POWER_TREND · 逐年</h3>
+<div class="scroll"><table style="min-width:720px">
+<tr><th>年份</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.recent_power_years %}
+<tr><td><b>{{r.year}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+
+<h3 style="margin-top:16px">RS Band · 特征剖面</h3>
+<div class="scroll"><table style="min-width:1100px">
+<tr>
+<th>RS组</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th>
+<th>Vol中位</th><th>Supply</th><th>Sector</th><th>Leader</th><th>Group</th><th>Extension</th>
+</tr>
+{% for r in v62_lab.rs_band_profiles %}
+<tr>
+<td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td>
+<td>{% if r.volratio is not none %}{{"%.2f"|format(r.volratio)}}x{% else %}-{% endif %}</td>
+<td>{% if r.supply_score is not none %}{{"%.1f"|format(r.supply_score)}}{% else %}-{% endif %}</td>
+<td>{% if r.sector_score is not none %}{{"%.1f"|format(r.sector_score)}}{% else %}-{% endif %}</td>
+<td>{% if r.leader_score is not none %}{{"%.1f"|format(r.leader_score)}}{% else %}-{% endif %}</td>
+<td>{% if r.group_breadth is not none %}{{"%.1f"|format(r.group_breadth)}}{% else %}-{% endif %}</td>
+<td>{% if r.extension is not none %}{{"%.2f%%"|format(r.extension*100)}}{% else %}-{% endif %}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+<h3 style="margin-top:16px">RS=100 · 再按 Volume 拆</h3>
+<div class="scroll"><table style="min-width:720px">
+<tr><th>Volume区间</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.rs100_profile %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+
 <details id="v61-fast" class="card" style="margin-top:18px" data-version="6.1">
 <summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine <span class="version-label">上一版</span></summary>
 <div class="muted" style="margin:10px 0">
@@ -5112,6 +5230,8 @@ document.addEventListener("DOMContentLoaded",function(){
     if(current) mount.appendChild(current);
     const diag=document.getElementById("v628-diagnostic");
     if(diag) mount.appendChild(diag);
+    const rsdiag=document.getElementById("v629-rsdiag");
+    if(rsdiag) mount.appendChild(rsdiag);
     if(fast) mount.appendChild(fast);
 
     // V6.0 was historically nested inside the V5 validation section. Pull it out so V6 stays above V5.
