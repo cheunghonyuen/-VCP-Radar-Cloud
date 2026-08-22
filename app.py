@@ -3667,7 +3667,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.7</h1><div class="muted">当前研究版：V6.2.7 Recent Regime Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.8</h1><div class="muted">当前研究版：V6.2.8 Recent Regime Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3687,7 +3687,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.7 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.8 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4189,8 +4189,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 
 
-<details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.7 Recent Regime Diagnostics <span class="version-label">当前</span></summary>
+<details id="v62-current" class="card current-card" style="margin-top:18px" data-version="6.2">
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.8 Research Archive <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4452,10 +4452,16 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 
 
-<details open style="margin-top:12px">
-<summary style="font-weight:900;cursor:pointer">🧭 V6.2.7 Recent Regime Diagnostics · 2022–2026</summary>
-<div class="muted" style="margin:8px 0">
-这块现在强制同时显示在手机、电脑和PDF。若某组为空，会明确写“无数据”，避免误以为已经算出结果。
+
+
+{% endif %}
+</details>
+
+
+<div class="card current-card" id="v628-diagnostic" style="margin-top:18px">
+<h2 style="margin:0 0 6px">🧭 V6.2.8 Recent Regime Diagnostics · 2022–2026</h2>
+<div class="muted" style="margin-bottom:12px">
+这是独立显示区，不放在折叠菜单里，确保手机和PDF都能看到真实结果。底层仍读取 V6.1 Full 冻结缓存，不重跑321只。
 </div>
 
 <h3 style="margin:14px 0 8px">Market Character · 最近几年</h3>
@@ -4496,10 +4502,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% else %}
 <div style="padding:10px;border-radius:10px;background:#fff7ed">⚠️ 最近 POWER_TREND 的 RS 分桶无可显示数据。</div>
 {% endif %}
-</details>
-
-{% endif %}
-</details>
+</div>
 
 <details id="v61-fast" class="card" style="margin-top:18px" data-version="6.1">
 <summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine <span class="version-label">上一版</span></summary>
@@ -5107,6 +5110,8 @@ document.addEventListener("DOMContentLoaded",function(){
   const fast=document.getElementById("v61-fast");
   if(mount){
     if(current) mount.appendChild(current);
+    const diag=document.getElementById("v628-diagnostic");
+    if(diag) mount.appendChild(diag);
     if(fast) mount.appendChild(fast);
 
     // V6.0 was historically nested inside the V5 validation section. Pull it out so V6 stays above V5.
