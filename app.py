@@ -3667,7 +3667,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.6</h1><div class="muted">当前研究版：V6.2.6 Recent Regime Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.7</h1><div class="muted">当前研究版：V6.2.7 Recent Regime Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3687,7 +3687,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.6 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.7 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4190,7 +4190,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.6 Recent Regime Diagnostics <span class="version-label">当前</span></summary>
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.7 Recent Regime Diagnostics <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4453,54 +4453,49 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details open style="margin-top:12px">
-<summary style="font-weight:900;cursor:pointer">🧭 V6.2.6 Recent Regime Diagnostics · 2022–2026</summary>
+<summary style="font-weight:900;cursor:pointer">🧭 V6.2.7 Recent Regime Diagnostics · 2022–2026</summary>
 <div class="muted" style="margin:8px 0">
-不再只看4笔 CORE。把最近几年所有交易重新按 Market Character、POWER内的 Volume 区间、RS 区间拆开，
-判断到底是市场环境分类失效，还是只是 CORE 样本太少。
+这块现在强制同时显示在手机、电脑和PDF。若某组为空，会明确写“无数据”，避免误以为已经算出结果。
 </div>
 
 <h3 style="margin:14px 0 8px">Market Character · 最近几年</h3>
-<div class="mobile-metrics">
-{% for r in v62_lab.recent_regime %}
-<div class="metric-card"><div class="name">{{r.name}}</div><div class="metric-grid">
-<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
-<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
-<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
-<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
-</div></div>
-{% endfor %}
-</div>
-<div class="scroll desktop-v62-table"><table style="min-width:760px">
+{% if v62_lab.recent_regime %}
+<div class="scroll"><table style="min-width:760px">
 <tr><th>Market Character</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
 {% for r in v62_lab.recent_regime %}
 <tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
 <td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
 </table></div>
+{% else %}
+<div style="padding:10px;border-radius:10px;background:#fff7ed">⚠️ Market Character 最近几年无可显示数据。</div>
+{% endif %}
 
 <h3 style="margin:16px 0 8px">POWER_TREND 内 · Volume 非重叠区间</h3>
-<div class="mobile-metrics">
+{% if v62_lab.recent_power_buckets %}
+<div class="scroll"><table style="min-width:760px">
+<tr><th>Volume区间</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
 {% for r in v62_lab.recent_power_buckets %}
-<div class="metric-card"><div class="name">{{r.name}}</div><div class="metric-grid">
-<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
-<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
-<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
-<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
-</div></div>
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
-</div>
+</table></div>
+{% else %}
+<div style="padding:10px;border-radius:10px;background:#fff7ed">⚠️ 最近 POWER_TREND 的 Volume 分桶无可显示数据。</div>
+{% endif %}
 
 <h3 style="margin:16px 0 8px">POWER_TREND 内 · RS 非重叠区间</h3>
-<div class="mobile-metrics">
+{% if v62_lab.recent_rs_buckets %}
+<div class="scroll"><table style="min-width:760px">
+<tr><th>RS区间</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
 {% for r in v62_lab.recent_rs_buckets %}
-<div class="metric-card"><div class="name">RS {{r.name}}</div><div class="metric-grid">
-<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
-<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
-<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
-<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
-</div></div>
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
-</div>
+</table></div>
+{% else %}
+<div style="padding:10px;border-radius:10px;background:#fff7ed">⚠️ 最近 POWER_TREND 的 RS 分桶无可显示数据。</div>
+{% endif %}
 </details>
 
 {% endif %}
