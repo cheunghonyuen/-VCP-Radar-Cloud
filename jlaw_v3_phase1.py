@@ -500,7 +500,7 @@ def summary(g):
                 target_hit_rate=g.reason.astype(str).str.startswith("TARGET").mean(),
                 stop_rate=g.reason.astype(str).str.startswith("STOP").mean(),avg_hold=g.hold_days.mean())
 
-def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback=420,stop_file=None):
+def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback=420,stop_file=None,ticker_filter=None):
     md=Path(market_dir); out=Path(outdir); out=(out/"quick" if quick else out); out.mkdir(parents=True,exist_ok=True)
     files={p.stem.upper():p for p in md.glob("*.csv")}
     spy=load(files["SPY"])
@@ -509,12 +509,15 @@ def run(market_dir,outdir,progress_cb=None,quick=False,quick_n=15,quick_lookback
         try: all_data[t]=load(p)
         except: pass
     stocks=[t for t in T2S if t in all_data]
+    if ticker_filter is not None:
+        wanted={str(t).upper().strip() for t in ticker_filter if str(t).strip()}
+        stocks=[t for t in stocks if t in wanted]
     if quick: stocks=stocks[:max(1,int(quick_n))]
     breakout_sanity_check()
     sigs=[]; trades=[]; funnels=[]; supply_diags=[]; shadow_frames=[]; v46_sigs=[]; v46_trades=[]
     v46_diag=dict(
-        engine_version="V5.0-EXPANDED-UNIVERSE",
-        universe_size=446,
+        engine_version="V5.3-VALIDATION-ONLY",
+        universe_size=len(stocks),
         original_universe_size=122,
         validation_universe_size=324,
         base_signal_rows=0,

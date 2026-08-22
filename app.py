@@ -32,6 +32,9 @@ BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
 V3_DIR = DATA_DIR / "jlaw_v3_phase1"
 V3_STATUS_FILE = V3_DIR / "status.json"
 V3_STOP_FILE = V3_DIR / "STOP"
+V5_VALIDATION_DIR = DATA_DIR / "jlaw_v5_validation"
+V5_VALIDATION_STATUS_FILE = V5_VALIDATION_DIR / "status.json"
+V5_VALIDATION_STOP_FILE = V5_VALIDATION_DIR / "STOP"
 YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
 YOUTUBE_UPLOAD_TOKEN = os.environ.get("YOUTUBE_UPLOAD_TOKEN", "").strip()
@@ -103,6 +106,8 @@ scan_thread = None
 backtest_thread = None
 v3_thread = None
 v3_stop_event = threading.Event()
+v5_validation_thread = None
+v5_validation_stop_event = threading.Event()
 
 
 def youtube_video_id(value):
@@ -1791,17 +1796,29 @@ def v48_score_bins():
     return rows
 
 
+V5_DEFERRED_SYMBOLS={"EQR","MMC","TYLER"}
+
 def v50_expanded_universe_status():
     cached=[t for t in UNIVERSE if (MARKET_DIR/f"{t}.csv").exists()]
     missing=[t for t in UNIVERSE if not (MARKET_DIR/f"{t}.csv").exists()]
-    return dict(universe=len(UNIVERSE),original=len(V5_ORIGINAL_122),validation=len(V5_VALIDATION),
-                cached=len(cached),missing=len(missing),
-                original_cached=sum((MARKET_DIR/f"{t}.csv").exists() for t in V5_ORIGINAL_122),
-                validation_cached=sum((MARKET_DIR/f"{t}.csv").exists() for t in V5_VALIDATION),
-                ready=(len(missing)==0),next_missing=" ".join(missing[:30]))
+    blocking=[t for t in missing if t not in V5_DEFERRED_SYMBOLS]
+    validation_cached=[t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists()]
+    validation_missing=[t for t in V5_VALIDATION if not (MARKET_DIR/f"{t}.csv").exists()]
+    validation_usable=[t for t in validation_cached if t not in V5_DEFERRED_SYMBOLS]
+    return dict(
+        universe=len(UNIVERSE),original=len(V5_ORIGINAL_122),validation=len(V5_VALIDATION),
+        cached=len(cached),missing=len(missing),
+        original_cached=sum((MARKET_DIR/f"{t}.csv").exists() for t in V5_ORIGINAL_122),
+        validation_cached=len(validation_cached),
+        validation_usable=len(validation_usable),
+        validation_missing=len(validation_missing),
+        ready=(len(blocking)==0),
+        deferred=" ".join(sorted(V5_DEFERRED_SYMBOLS & set(missing))),
+        next_missing=" ".join(missing[:30])
+    )
 
 def v50_validation_results():
-    p=v3_result_dir()/"jlaw_v46_trades.csv"
+    p=V5_VALIDATION_DIR/"jlaw_v46_trades.csv"
     if not p.exists() or p.stat().st_size==0:return []
     try:d=pd.read_csv(p)
     except Exception:return []
@@ -1816,6 +1833,134 @@ def v50_validation_results():
             if g.empty:continue
             rows.append(dict(cohort=cohort,threshold=th,**_v41_metrics(g)))
     return rows
+
+
+def read_v5_validation_status():
+    s={
+        "status":"idle","message":"尚未运行新增324独立验证",
+        "stocks":0,"processed":0,"current":"","error":None,
+        "started_at":None,"finished_at":None,
+        "requested":len(V5_VALIDATION),"usable":0,"skipped":[]
+    }
+    if V5_VALIDATION_STATUS_FILE.exists():
+        try:s.update(json.loads(V5_VALIDATION_STATUS_FILE.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def write_v5_validation_status(**kw):
+    V5_VALIDATION_DIR.mkdir(parents=True,exist_ok=True)
+    s=read_v5_validation_status(); s.update(kw)
+    V5_VALIDATION_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+
+def v5_validation_summary():
+    p=V5_VALIDATION_DIR/"jlaw_v46_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:
+        d=pd.read_csv(p)
+    except Exception:
+        return []
+    if d.empty or "v46_score" not in d.columns:
+        return []
+    d["date"]=pd.to_datetime(d["date"],errors="coerce")
+    d["v46_score"]=pd.to_numeric(d["v46_score"],errors="coerce")
+    rows=[]
+    for th,label in [(70,"CORE ≥70"),(87.5,"ELITE ≥87.5"),(90,"SUPER ≥90")]:
+        g=d[d["v46_score"]>=th].copy().sort_values("date")
+        if g.empty:
+            rows.append(dict(tier=label,threshold=th,trades=0,win_rate=0,avg_return=0,pf=0,max_losing_streak=0))
+            continue
+        met=_v41_metrics(g)
+        rows.append(dict(tier=label,threshold=th,**met))
+    return rows
+
+def run_v5_validation():
+    global v5_validation_thread
+    try:
+        from jlaw_v3_phase1 import run as vrun
+        V5_VALIDATION_DIR.mkdir(parents=True,exist_ok=True)
+        v5_validation_stop_event.clear()
+        try:
+            if V5_VALIDATION_STOP_FILE.exists(): V5_VALIDATION_STOP_FILE.unlink()
+        except Exception:
+            pass
+
+        available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
+        skipped=sorted(t for t in V5_VALIDATION if t not in set(available))
+        # Never fail the OOS run merely because EQR/MMC/TYLER are deferred.
+        usable=[t for t in available if t not in V5_DEFERRED_SYMBOLS]
+
+        if len(usable) < 250:
+            raise RuntimeError(f"独立验证可用股票只有 {len(usable)} 只，低于安全下限250，只停止不运行")
+
+        write_v5_validation_status(
+            status="running",
+            message=f"正在运行冻结规则独立验证：{len(usable)}/{len(V5_VALIDATION)}只；缺失自动跳过，不改参数",
+            requested=len(V5_VALIDATION),usable=len(usable),skipped=skipped,
+            stocks=len(usable),processed=0,current="",
+            started_at=datetime.now(timezone.utc).isoformat(),finished_at=None,error=None
+        )
+
+        def prog(done,total,t):
+            if v5_validation_stop_event.is_set():
+                raise RuntimeError("__V5_VALIDATION_STOPPED__")
+            write_v5_validation_status(
+                status="running",
+                message=f"Validation 324：{done}/{total} · {t}",
+                stocks=total,processed=done,current=t
+            )
+
+        vrun(
+            str(MARKET_DIR),str(V5_VALIDATION_DIR),
+            progress_cb=prog,quick=False,
+            stop_file=str(V5_VALIDATION_STOP_FILE),
+            ticker_filter=usable
+        )
+
+        if V5_VALIDATION_STOP_FILE.exists() or v5_validation_stop_event.is_set():
+            raise RuntimeError("__V5_VALIDATION_STOPPED__")
+
+        write_v5_validation_status(
+            status="done",
+            message=f"独立验证完成：实际 {len(usable)} 只 / 目标 {len(V5_VALIDATION)}只；缺失 {len(skipped)} 只已跳过",
+            stocks=len(usable),processed=len(usable),current="",
+            requested=len(V5_VALIDATION),usable=len(usable),skipped=skipped,
+            finished_at=datetime.now(timezone.utc).isoformat(),error=None
+        )
+    except Exception as ex:
+        if str(ex)=="__V5_VALIDATION_STOPPED__":
+            s=read_v5_validation_status()
+            write_v5_validation_status(
+                status="stopped",message="已停止新增股票独立验证",
+                processed=s.get("processed",0),stocks=s.get("stocks",0),
+                current="",finished_at=datetime.now(timezone.utc).isoformat(),error=None
+            )
+        else:
+            traceback.print_exc()
+            write_v5_validation_status(
+                status="error",message="新增股票独立验证失败",
+                error=f"{type(ex).__name__}: {ex}",
+                finished_at=datetime.now(timezone.utc).isoformat()
+            )
+    finally:
+        v5_validation_thread=None
+        v5_validation_stop_event.clear()
+
+def start_v5_validation():
+    global v5_validation_thread
+    if v5_validation_thread is not None and v5_validation_thread.is_alive():
+        return False
+    v5_validation_thread=threading.Thread(target=run_v5_validation,daemon=True)
+    v5_validation_thread.start()
+    return True
+
+def stop_v5_validation():
+    V5_VALIDATION_DIR.mkdir(parents=True,exist_ok=True)
+    try: V5_VALIDATION_STOP_FILE.write_text("stop",encoding="utf-8")
+    except Exception: pass
+    v5_validation_stop_event.set()
+    return True
+
 
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
@@ -2994,13 +3139,52 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <details class="section-fold" open>
 <summary>V5.0 Expanded Universe · 扩大股票池验证</summary>
 <div class="fold-body">
-<h3 style="margin-top:0">V5.0 Expanded Universe</h3>
-<div class="muted" style="margin-bottom:10px">冻结 V4.8 规则；新增股票只做独立验证，不拿来重新调参。</div>
+<h3 style="margin-top:0">V5.3 Independent Validation</h3>
+<div class="muted" style="margin-bottom:10px">
+冻结 V4.8 / V4.6 规则；只跑新增验证组。EQR、MMC、TYLER 本轮允许缺失并自动跳过；验证结果写入独立目录，不覆盖原122只历史证据。
+</div>
+<div style="margin:10px 0">
+<form method="post" action="/v5/validation/start" style="display:inline">
+<button {% if v5v_status.status in ["running","stopping"] %}disabled style="opacity:.45"{% endif %}>
+{% if v5v_status.status=="running" %}Validation 运行中…{% else %}▶ Validation 324 独立测试{% endif %}
+</button></form>
+{% if v5v_status.status=="running" %}
+<form method="post" action="/v5/validation/stop" style="display:inline">
+<button style="background:#7f1d1d">■ 停止 Validation</button>
+</form>
+{% endif %}
+</div>
+{% if v5v_status.status=="running" %}
+<div class="progress"><div style="width:{{((v5v_status.processed/v5v_status.stocks*100) if v5v_status.stocks else 0)}}%"></div></div>
+<div><b>{{v5v_status.processed}} / {{v5v_status.stocks}}</b> · {{v5v_status.current}}</div>
+{% endif %}
+<p><b>Validation 状态：</b>{{v5v_status.status}}　{{v5v_status.message}}</p>
+{% if v5v_status.error %}<p class="warn">{{v5v_status.error}}</p>{% endif %}
 <div class="scroll"><table style="min-width:900px">
 <tr><th>总股票池</th><th>原研究组</th><th>新增验证组</th><th>已缓存</th><th>未缓存</th><th>原组缓存</th><th>验证组缓存</th><th>Ready</th></tr>
 <tr><td><b>{{v50_status.universe}}</b></td><td>{{v50_status.original}}</td><td>{{v50_status.validation}}</td><td>{{v50_status.cached}}</td><td>{{v50_status.missing}}</td><td>{{v50_status.original_cached}}</td><td>{{v50_status.validation_cached}}</td><td><b>{{v50_status.ready}}</b></td></tr>
 </table></div>
-{% if v50_status.missing %}<div style="margin-top:10px"><b>下一批未缓存：</b> {{v50_status.next_missing}}</div>{% endif %}
+{% if v50_status.missing %}
+<div style="margin-top:10px"><b>缺失：</b> {{v50_status.next_missing}}</div>
+{% endif %}
+{% if v50_status.deferred %}
+<div style="margin-top:6px"><b>本轮允许跳过：</b> {{v50_status.deferred}}</div>
+{% endif %}
+<div style="margin-top:6px"><b>验证组当前可用：</b> {{v50_status.validation_usable}} / {{v50_status.validation}}</div>
+{% if v5v_summary %}
+<h4 style="margin-top:16px">本次 OOS 独立验证结果</h4>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>层级</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v5v_summary %}
+<tr>
+<td><b>{{r.tier}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format((r.win_rate or 0)*100)}}</td>
+<td>{{"%.2f%%"|format((r.avg_return or 0)*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf or 0)}}</b></td><td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
 {% if v50_results %}
 <h4 style="margin-top:16px">冻结规则验证：原组 vs 新增验证组</h4>
 <div class="scroll"><table style="min-width:900px">
@@ -3476,7 +3660,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping'))setTimeout(()=>location.reload(),3000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -3641,8 +3825,23 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),
         **s)
+
+
+@APP.post("/v5/validation/start")
+def v5_validation_start_route():
+    start_v5_validation()
+    return redirect(url_for("home"))
+
+@APP.post("/v5/validation/stop")
+def v5_validation_stop_route():
+    stop_v5_validation()
+    return redirect(url_for("home"))
+
+@APP.get("/api/v5-validation-status")
+def api_v5_validation_status():
+    return jsonify(read_v5_validation_status())
 
 @APP.post("/scan")
 def scan():
