@@ -1,4 +1,5 @@
 import re
+import hmac
 import os, json, time, threading, traceback, io, math
 from pathlib import Path
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ V3_STATUS_FILE = V3_DIR / "status.json"
 V3_STOP_FILE = V3_DIR / "STOP"
 YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
+YOUTUBE_UPLOAD_TOKEN = os.environ.get("YOUTUBE_UPLOAD_TOKEN", "").strip()
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
@@ -256,6 +258,79 @@ def youtube_ingest(url_or_id, force=False, preferred=None):
 
 def youtube_ingest_list():
     return _yt_read_index()
+
+
+
+def save_uploaded_youtube_transcript(payload):
+    """Persist a transcript uploaded from the user's own Mac/residential network."""
+    video_id = youtube_video_id(payload.get("video_id") or payload.get("source_url") or "")
+    if not video_id:
+        raise ValueError("invalid video id")
+
+    full_text = str(payload.get("transcript") or "").strip()
+    if not full_text:
+        raise ValueError("empty transcript")
+
+    snippets = payload.get("snippets") or []
+    if not isinstance(snippets, list):
+        snippets = []
+
+    result = {
+        "video_id": video_id,
+        "source_url": payload.get("source_url") or f"https://www.youtube.com/watch?v={video_id}",
+        "language": str(payload.get("language") or ""),
+        "language_code": str(payload.get("language_code") or ""),
+        "is_generated": bool(payload.get("is_generated", False)),
+        "fetched_at_utc": str(payload.get("fetched_at_utc") or datetime.now(timezone.utc).isoformat()),
+        "uploaded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "snippet_count": len(snippets),
+        "char_count": len(full_text),
+        "transcript": full_text,
+        "snippets": snippets,
+        "cache_hit": False,
+        "ingest_source": "mac_local_upload",
+    }
+
+    jp, tp = _yt_paths(video_id)
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    timestamp_lines = []
+    if snippets:
+        for item in snippets:
+            txt = str(item.get("text") or "").replace("\n", " ").strip()
+            if not txt:
+                continue
+            start = float(item.get("start") or 0.0)
+            mm, ss = divmod(int(start), 60)
+            hh, mm = divmod(mm, 60)
+            stamp = f"{hh:02d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
+            timestamp_lines.append(f"[{stamp}] {txt}")
+    else:
+        timestamp_lines = [full_text]
+
+    tp.write_text(
+        f"YouTube: {result['source_url']}\n"
+        f"Language: {result['language']} ({result['language_code']})\n"
+        f"Generated captions: {result['is_generated']}\n"
+        f"Fetched UTC: {result['fetched_at_utc']}\n"
+        f"Uploaded UTC: {result['uploaded_at_utc']}\n\n"
+        + "\n".join(timestamp_lines),
+        encoding="utf-8"
+    )
+
+    idx = [r for r in _yt_read_index() if r.get("video_id") != video_id]
+    idx.insert(0, {
+        "video_id": video_id,
+        "source_url": result["source_url"],
+        "language": result["language"],
+        "language_code": result["language_code"],
+        "is_generated": result["is_generated"],
+        "fetched_at_utc": result["fetched_at_utc"],
+        "char_count": result["char_count"],
+        "ingest_source": result["ingest_source"],
+    })
+    _yt_write_index(idx)
+    return result
 
 
 def storage_info():
@@ -3425,6 +3500,30 @@ def youtube_ingest_route():
             YOUTUBE_HTML, result=None, error=f"{type(e).__name__}: {e}",
             url=url, history=youtube_ingest_list()
         ), 400
+
+
+@APP.post("/api/youtube/upload")
+def youtube_api_upload():
+    from flask import request
+    if not YOUTUBE_UPLOAD_TOKEN:
+        return jsonify({"ok": False, "error": "YOUTUBE_UPLOAD_TOKEN_not_configured"}), 503
+
+    supplied = (request.headers.get("X-Upload-Token") or "").strip()
+    if not supplied or not hmac.compare_digest(supplied, YOUTUBE_UPLOAD_TOKEN):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        result = save_uploaded_youtube_transcript(payload)
+        return jsonify({
+            "ok": True,
+            "video_id": result["video_id"],
+            "char_count": result["char_count"],
+            "language": result["language"],
+            "source_url": result["source_url"],
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 400
 
 @APP.get("/api/youtube/transcript")
 def youtube_api_transcript():
