@@ -3,10 +3,16 @@ from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 import pandas as pd
 import numpy as np
 from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
+except Exception:
+    YouTubeTranscriptApi = None
+    TranscriptsDisabled = NoTranscriptFound = VideoUnavailable = Exception
 
 APP = Flask(__name__)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -24,6 +30,8 @@ BACKTEST_STATUS_FILE = BACKTEST_DIR / "status.json"
 V3_DIR = DATA_DIR / "jlaw_v3_phase1"
 V3_STATUS_FILE = V3_DIR / "status.json"
 V3_STOP_FILE = V3_DIR / "STOP"
+YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
+YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
 TIINGO_TOKEN = os.environ.get("TIINGO_TOKEN", "").strip()
 AUTO_SCAN = os.environ.get("AUTO_SCAN", "1") == "1"
 MIN_GAP = float(os.environ.get("TIINGO_MIN_GAP_SECONDS", "6"))
@@ -92,6 +100,162 @@ scan_thread = None
 backtest_thread = None
 v3_thread = None
 v3_stop_event = threading.Event()
+
+
+def youtube_video_id(value):
+    """Extract a YouTube video id from common youtube.com/youtu.be URLs or accept a raw id."""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):
+        return s
+    try:
+        u = urlparse(s)
+        host = (u.netloc or "").lower().split(":")[0]
+        path = (u.path or "").strip("/")
+        if host in ("youtu.be", "www.youtu.be"):
+            return path.split("/")[0] if path else ""
+        if host.endswith("youtube.com"):
+            if path == "watch":
+                return (parse_qs(u.query).get("v") or [""])[0]
+            parts = path.split("/")
+            if len(parts) >= 2 and parts[0] in ("shorts", "embed", "live"):
+                return parts[1]
+    except Exception:
+        pass
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([A-Za-z0-9_-]{11})", s)
+    return m.group(1) if m else ""
+
+def _yt_paths(video_id):
+    return (
+        YOUTUBE_DIR / f"{video_id}.json",
+        YOUTUBE_DIR / f"{video_id}.txt",
+    )
+
+def _yt_read_index():
+    if not YOUTUBE_INDEX_FILE.exists():
+        return []
+    try:
+        x = json.loads(YOUTUBE_INDEX_FILE.read_text(encoding="utf-8"))
+        return x if isinstance(x, list) else []
+    except Exception:
+        return []
+
+def _yt_write_index(rows):
+    YOUTUBE_INDEX_FILE.write_text(
+        json.dumps(rows[:200], ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def youtube_cached(video_id):
+    jp, tp = _yt_paths(video_id)
+    if not jp.exists():
+        return None
+    try:
+        return json.loads(jp.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def _yt_choose_transcript(ytt, video_id, preferred=None):
+    preferred = preferred or ["zh-Hant", "zh-TW", "zh-Hans", "zh-CN", "zh", "en"]
+    tl = ytt.list(video_id)
+
+    # Prefer a manual transcript in the requested languages, then generated, then any transcript.
+    try:
+        return tl.find_manually_created_transcript(preferred)
+    except Exception:
+        pass
+    try:
+        return tl.find_generated_transcript(preferred)
+    except Exception:
+        pass
+    try:
+        return tl.find_transcript(preferred)
+    except Exception:
+        pass
+
+    # Fall back to the first available track so that a video with subtitles is still ingestible.
+    for tr in tl:
+        return tr
+    raise NoTranscriptFound(video_id, preferred, {})
+
+def youtube_ingest(url_or_id, force=False, preferred=None):
+    """Fetch and persist the complete YouTube transcript. No LLM summarization happens here."""
+    video_id = youtube_video_id(url_or_id)
+    if not video_id:
+        raise ValueError("无法识别 YouTube 视频 ID")
+
+    if not force:
+        cached = youtube_cached(video_id)
+        if cached:
+            cached["cache_hit"] = True
+            return cached
+
+    if YouTubeTranscriptApi is None:
+        raise RuntimeError("服务器尚未安装 youtube-transcript-api；请部署新的 requirements.txt")
+
+    ytt = YouTubeTranscriptApi()
+    tr = _yt_choose_transcript(ytt, video_id, preferred=preferred)
+    fetched = tr.fetch()
+
+    snippets = []
+    full_parts = []
+    timestamp_lines = []
+    for item in fetched:
+        txt = str(getattr(item, "text", "") or "").replace("\n", " ").strip()
+        if not txt:
+            continue
+        start = float(getattr(item, "start", 0.0) or 0.0)
+        dur = float(getattr(item, "duration", 0.0) or 0.0)
+        snippets.append({"text": txt, "start": start, "duration": dur})
+        full_parts.append(txt)
+        mm, ss = divmod(int(start), 60)
+        hh, mm = divmod(mm, 60)
+        stamp = f"{hh:02d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
+        timestamp_lines.append(f"[{stamp}] {txt}")
+
+    full_text = " ".join(full_parts).strip()
+    result = {
+        "video_id": video_id,
+        "source_url": f"https://www.youtube.com/watch?v={video_id}",
+        "language": getattr(tr, "language", ""),
+        "language_code": getattr(tr, "language_code", ""),
+        "is_generated": bool(getattr(tr, "is_generated", False)),
+        "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+        "snippet_count": len(snippets),
+        "char_count": len(full_text),
+        "transcript": full_text,
+        "snippets": snippets,
+        "cache_hit": False,
+    }
+
+    jp, tp = _yt_paths(video_id)
+    jp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    tp.write_text(
+        f"YouTube: {result['source_url']}\n"
+        f"Language: {result['language']} ({result['language_code']})\n"
+        f"Generated captions: {result['is_generated']}\n"
+        f"Fetched UTC: {result['fetched_at_utc']}\n\n"
+        + "\n".join(timestamp_lines),
+        encoding="utf-8"
+    )
+
+    idx = [r for r in _yt_read_index() if r.get("video_id") != video_id]
+    idx.insert(0, {
+        "video_id": video_id,
+        "source_url": result["source_url"],
+        "language": result["language"],
+        "language_code": result["language_code"],
+        "is_generated": result["is_generated"],
+        "fetched_at_utc": result["fetched_at_utc"],
+        "char_count": result["char_count"],
+    })
+    _yt_write_index(idx)
+    return result
+
+def youtube_ingest_list():
+    return _yt_read_index()
+
 
 def storage_info():
     try:
@@ -2310,6 +2474,48 @@ def build_v3_export_pdf():
     return _make_text_pdf(lines)
 
 
+
+YOUTUBE_HTML = r"""<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YouTube Ingest</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#142033;margin:0}
+.wrap{max-width:980px;margin:auto;padding:20px}.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 5px 24px #14203312}
+input{box-sizing:border-box;width:100%;padding:14px;border:1px solid #ccd5e2;border-radius:12px;font-size:16px}
+button,.btn{display:inline-block;padding:12px 16px;border:0;border-radius:10px;background:#1d64f0;color:#fff;font-weight:700;text-decoration:none;font-size:15px}
+pre{white-space:pre-wrap;word-break:break-word;background:#f7f9fc;border-radius:12px;padding:14px;max-height:520px;overflow:auto}
+.muted{color:#68758a;font-size:14px}.ok{color:#138a45}.err{color:#c73737}
+table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #edf0f5;text-align:left;font-size:14px}
+</style></head><body><div class="wrap">
+<div><a href="/" class="btn">← VCP Radar</a></div>
+<div class="card">
+<h2 style="margin-top:0">YouTube Ingest</h2>
+<div class="muted">粘贴 YouTube 链接 → 自动抓完整字幕 → 保存到云端。以后你只要把 YouTube 链接发给 ChatGPT，我就可以通过这个云端入口读取字幕并分析。</div>
+<form method="post" action="/youtube/ingest" style="margin-top:14px">
+<input name="url" placeholder="https://youtu.be/..." value="{{url or ''}}" required>
+<div style="margin-top:10px"><button type="submit">抓取完整字幕</button></div>
+</form>
+{% if error %}<p class="err"><b>{{error}}</b></p>{% endif %}
+{% if result %}
+<p class="ok"><b>已保存：</b>{{result.video_id}} · {{result.language}} · {{result.char_count}} 字符 · {{result.snippet_count}} 段</p>
+<p>
+<a class="btn" href="/youtube/text/{{result.video_id}}">查看纯文字</a>
+<a class="btn" href="/youtube/download/{{result.video_id}}">下载 TXT</a>
+<a class="btn" href="/api/youtube/transcript?video_id={{result.video_id}}">JSON API</a>
+</p>
+<pre>{{result.transcript[:16000]}}{{"…" if result.transcript|length > 16000 else ""}}</pre>
+{% endif %}
+</div>
+<div class="card">
+<h3 style="margin-top:0">已学习的视频</h3>
+<table><tr><th>Video ID</th><th>语言</th><th>字幕</th><th>字符</th><th>时间</th></tr>
+{% for r in history %}
+<tr><td><a href="/youtube/text/{{r.video_id}}">{{r.video_id}}</a></td><td>{{r.language}}</td>
+<td>{{"自动" if r.is_generated else "人工"}}</td><td>{{r.char_count}}</td><td>{{r.fetched_at_utc}}</td></tr>
+{% endfor %}
+</table>
+</div></div></body></html>"""
+
 HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VCP Radar Cloud Final</title><style>
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#f3f6fb;color:#17202a;margin:0}
@@ -3196,6 +3402,74 @@ function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker)
 async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping'))setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
+
+
+@APP.get("/youtube")
+def youtube_home():
+    return render_template_string(
+        YOUTUBE_HTML, result=None, error=None, url="", history=youtube_ingest_list()
+    )
+
+@APP.post("/youtube/ingest")
+def youtube_ingest_route():
+    from flask import request
+    url = (request.form.get("url") or "").strip()
+    try:
+        result = youtube_ingest(url)
+        return render_template_string(
+            YOUTUBE_HTML, result=result, error=None, url=url, history=youtube_ingest_list()
+        )
+    except Exception as e:
+        return render_template_string(
+            YOUTUBE_HTML, result=None, error=f"{type(e).__name__}: {e}",
+            url=url, history=youtube_ingest_list()
+        ), 400
+
+@APP.get("/api/youtube/transcript")
+def youtube_api_transcript():
+    from flask import request
+    value = (request.args.get("url") or request.args.get("video_id") or "").strip()
+    video_id = youtube_video_id(value)
+    if not video_id:
+        return jsonify({"ok": False, "error": "invalid_youtube_url_or_id"}), 400
+    try:
+        result = youtube_ingest(value or video_id)
+        # Keep API compact by default; full transcript is enough for ChatGPT ingestion.
+        return jsonify({
+            "ok": True,
+            "video_id": result["video_id"],
+            "source_url": result["source_url"],
+            "language": result["language"],
+            "language_code": result["language_code"],
+            "is_generated": result["is_generated"],
+            "fetched_at_utc": result["fetched_at_utc"],
+            "char_count": result["char_count"],
+            "transcript": result["transcript"],
+            "cache_hit": result.get("cache_hit", False),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 502
+
+@APP.get("/youtube/text/<video_id>")
+def youtube_text(video_id):
+    result = youtube_cached(video_id)
+    if not result:
+        return "Not found", 404
+    return (
+        f"YouTube: {result.get('source_url','')}\n"
+        f"Language: {result.get('language','')} ({result.get('language_code','')})\n"
+        f"Generated captions: {result.get('is_generated',False)}\n\n"
+        + result.get("transcript",""),
+        200, {"Content-Type": "text/plain; charset=utf-8"}
+    )
+
+@APP.get("/youtube/download/<video_id>")
+def youtube_download(video_id):
+    jp, tp = _yt_paths(video_id)
+    if not tp.exists():
+        return "Not found", 404
+    return send_file(tp, mimetype="text/plain", as_attachment=True,
+                     download_name=f"youtube_{video_id}_transcript.txt")
 
 @APP.get("/")
 def home():
