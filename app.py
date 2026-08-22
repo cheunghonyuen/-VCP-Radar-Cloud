@@ -2661,6 +2661,75 @@ def v62_instant_lab():
                         "max_losing_streak":m["max_losing_streak"]
                     })
 
+    # V6.2.5 Fault Isolation: inspect the actual CORE trades, especially 2022-2026.
+    fault_recent=[]
+    fault_compare=[]
+    fault_features=[]
+
+    if "volratio" in d.columns and "rs" in d.columns and "date" in d.columns:
+        dd=d.copy()
+        dd["date"]=pd.to_datetime(dd["date"],errors="coerce")
+        core_mask=(dd["v6_market_character"].astype(str)=="POWER_TREND")&(dd["volratio"]>=1.8)&(dd["rs"]>=90)
+        core_df=dd[core_mask].copy().sort_values("date")
+
+        # Exact recent CORE trades.
+        recent=core_df[(core_df["date"]>=pd.Timestamp("2022-01-01"))&(core_df["date"]<=pd.Timestamp("2026-12-31"))].copy()
+        show_cols=[
+            "ticker","date","return_pct","volratio","rs","supply_score","sector_score",
+            "leader_score","group_breadth","extension","v6_edge_count","v6_red_count",
+            "v6_tier","v6_rank"
+        ]
+        for _,r in recent.iterrows():
+            item={}
+            for c in show_cols:
+                if c in recent.columns:
+                    v=r.get(c)
+                    if c=="date":
+                        item[c]=v.strftime("%Y-%m-%d") if pd.notna(v) else ""
+                    elif isinstance(v,(int,float)) and pd.isna(v):
+                        item[c]=None
+                    else:
+                        item[c]=v
+            fault_recent.append(item)
+
+        # Broad period comparison.
+        period_defs=[
+            ("2007–2016","2007-01-01","2016-12-31"),
+            ("2017–2021","2017-01-01","2021-12-31"),
+            ("2022–2026","2022-01-01","2026-12-31"),
+        ]
+        for name,start,end in period_defs:
+            g=core_df[(core_df["date"]>=pd.Timestamp(start))&(core_df["date"]<=pd.Timestamp(end))]
+            if len(g):
+                m=_v6_shadow_metrics(g)
+                fault_compare.append({
+                    "name":name,"trades":m["trades"],"win_rate":m["win_rate"],
+                    "avg_return":m["avg_return"],"pf":m["pf"],
+                    "max_losing_streak":m["max_losing_streak"]
+                })
+
+        # Feature comparison: early profitable sample vs recent sample, plus winners vs losers.
+        numeric_features=[
+            "volratio","rs","supply_score","sector_score","leader_score",
+            "group_breadth","extension","v6_edge_count","v6_red_count"
+        ]
+        early=core_df[core_df["date"]<pd.Timestamp("2022-01-01")]
+        recent=core_df[core_df["date"]>=pd.Timestamp("2022-01-01")]
+        winners=core_df[core_df["return_pct"]>0] if "return_pct" in core_df.columns else core_df.iloc[0:0]
+        losers=core_df[core_df["return_pct"]<=0] if "return_pct" in core_df.columns else core_df.iloc[0:0]
+        for c in numeric_features:
+            if c not in core_df.columns: continue
+            def med(df):
+                s=pd.to_numeric(df[c],errors="coerce").dropna()
+                return float(s.median()) if len(s) else None
+            fault_features.append({
+                "feature":c,
+                "early":med(early),
+                "recent":med(recent),
+                "winners":med(winners),
+                "losers":med(losers),
+            })
+
     seen=set()
     for name,mask in masks:
         g=d[mask.fillna(False)]
@@ -2678,7 +2747,7 @@ def v62_instant_lab():
         ]:
             g=d[mask]
             if len(g):ranks.append(dict(name=name,**_v6_shadow_metrics(g)))
-    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability,"volume_buckets":volume_buckets,"era_rows":era_rows,"yearly_rows":yearly_rows}
+    return {"available":True,"status":st,"rows":rows,"ranks":ranks,"stability":stability,"volume_buckets":volume_buckets,"era_rows":era_rows,"yearly_rows":yearly_rows,"fault_recent":fault_recent,"fault_compare":fault_compare,"fault_features":fault_features}
 
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
@@ -3537,7 +3606,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.2.4</h1><div class="muted">当前研究版：V6.2.4 Robustness Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.2.5</h1><div class="muted">当前研究版：V6.2.5 Fault Isolation · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3557,7 +3626,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.2.4 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.2.5 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4060,7 +4129,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <details id="v62-current" class="card current-card" open style="margin-top:18px" data-version="6.2">
-<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.4 Robustness Lab <span class="version-label">当前</span></summary>
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2.5 Fault Isolation <span class="version-label">当前</span></summary>
 <div class="muted" style="margin:10px 0">
 完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
 不再重扫321只，目标从几小时降到几秒～几分钟。
@@ -4248,6 +4317,77 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 </details>
 
+</details>
+
+
+<details open style="margin-top:12px">
+<summary style="font-weight:900;cursor:pointer">🩺 V6.2.5 Fault Isolation · 最近失效诊断</summary>
+<div class="muted" style="margin:8px 0">
+核心规则固定为 POWER + Vol≥1.8x + RS≥90。这里不调参数，只检查为什么 2022–2026 表现掉下来。
+</div>
+
+<h3 style="margin:14px 0 8px">时期对比</h3>
+<div class="mobile-metrics">
+{% for r in v62_lab.fault_compare %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<div class="scroll desktop-v62-table">
+<table style="min-width:760px">
+<tr><th>时期</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.fault_compare %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<h3 style="margin:16px 0 8px">2022–2026 · 实际 CORE 交易</h3>
+{% if v62_lab.fault_recent %}
+<div class="mobile-metrics">
+{% for r in v62_lab.fault_recent %}
+<div class="metric-card">
+<div class="name">{{r.ticker or "?"}} · {{r.date}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>收益</small><b>{% if r.return_pct is not none %}{{"%.2f%%"|format(r.return_pct*100)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Volume / RS</small><b>{% if r.volratio is not none %}{{"%.2f"|format(r.volratio)}}x{% else %}-{% endif %} / {% if r.rs is not none %}{{"%.1f"|format(r.rs)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Supply / Sector</small><b>{% if r.supply_score is not none %}{{"%.1f"|format(r.supply_score)}}{% else %}-{% endif %} / {% if r.sector_score is not none %}{{"%.1f"|format(r.sector_score)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Leader / Group</small><b>{% if r.leader_score is not none %}{{"%.1f"|format(r.leader_score)}}{% else %}-{% endif %} / {% if r.group_breadth is not none %}{{"%.1f"|format(r.group_breadth)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Extension</small><b>{% if r.extension is not none %}{{"%.2f%%"|format(r.extension*100)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Edge / Red / Tier / Rank</small><b>{{r.v6_edge_count or "-"}} / {{r.v6_red_count or "-"}} / {{r.v6_tier or "-"}} / {{r.v6_rank or "-"}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+{% else %}
+<div class="muted">没有找到 2022–2026 CORE 交易。</div>
+{% endif %}
+
+<h3 style="margin:16px 0 8px">特征中位数对比</h3>
+<div class="muted" style="margin-bottom:8px">看“早期 vs 最近”以及“赢家 vs 输家”有没有结构性差异。</div>
+<div class="scroll">
+<table style="min-width:760px">
+<tr><th>特征</th><th>2007–2021</th><th>2022–2026</th><th>赢家</th><th>输家</th></tr>
+{% for r in v62_lab.fault_features %}
+<tr>
+<td><b>{{r.feature}}</b></td>
+<td>{% if r.early is not none %}{{"%.3f"|format(r.early)}}{% else %}-{% endif %}</td>
+<td>{% if r.recent is not none %}{{"%.3f"|format(r.recent)}}{% else %}-{% endif %}</td>
+<td>{% if r.winners is not none %}{{"%.3f"|format(r.winners)}}{% else %}-{% endif %}</td>
+<td>{% if r.losers is not none %}{{"%.3f"|format(r.losers)}}{% else %}-{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
 </details>
 
 {% endif %}
