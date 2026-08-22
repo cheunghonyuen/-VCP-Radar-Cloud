@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse, parse_qs
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file
+from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file, request
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
@@ -2584,6 +2584,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 </div>
 <div class="card">
 <h3 style="margin-top:0">已学习的视频</h3>
+<p><a class="btn" href="/api/youtube/index">公开只读字幕索引</a></p>
 <table><tr><th>Video ID</th><th>语言</th><th>字幕</th><th>字符</th><th>时间</th></tr>
 {% for r in history %}
 <tr><td><a href="/youtube/text/{{r.video_id}}">{{r.video_id}}</a></td><td>{{r.language}}</td>
@@ -3570,6 +3571,40 @@ def youtube_download(video_id):
         return "Not found", 404
     return send_file(tp, mimetype="text/plain", as_attachment=True,
                      download_name=f"youtube_{video_id}_transcript.txt")
+
+
+@APP.get("/api/youtube/index")
+def youtube_public_index():
+    """Public, read-only transcript catalog for ChatGPT and other readers."""
+    rows = youtube_ingest_list()
+    items = []
+    for r in rows:
+        vid = str(r.get("video_id") or "").strip()
+        if not vid:
+            continue
+        items.append({
+            "video_id": vid,
+            "source_url": r.get("source_url") or f"https://www.youtube.com/watch?v={vid}",
+            "language": r.get("language") or "",
+            "language_code": r.get("language_code") or "",
+            "is_generated": bool(r.get("is_generated", False)),
+            "fetched_at_utc": r.get("fetched_at_utc") or "",
+            "char_count": int(r.get("char_count") or 0),
+            "transcript_url": f"{request.url_root.rstrip('/')}/youtube/text/{vid}",
+            "api_url": f"{request.url_root.rstrip('/')}/api/youtube/transcript?video_id={vid}",
+        })
+    return jsonify({
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "read_only": True,
+    })
+
+@APP.get("/api/youtube/library")
+def youtube_public_library_alias():
+    """Human-friendly alias of the public read-only index."""
+    return youtube_public_index()
 
 @APP.get("/")
 def home():
