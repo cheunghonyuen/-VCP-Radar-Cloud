@@ -35,6 +35,9 @@ V3_STOP_FILE = V3_DIR / "STOP"
 V5_VALIDATION_DIR = DATA_DIR / "jlaw_v5_validation"
 V5_VALIDATION_STATUS_FILE = V5_VALIDATION_DIR / "status.json"
 V5_VALIDATION_STOP_FILE = V5_VALIDATION_DIR / "STOP"
+V6_SHADOW_DIR = DATA_DIR / "jlaw_v6_shadow"
+V6_SHADOW_STATUS_FILE = V6_SHADOW_DIR / "status.json"
+V6_SHADOW_STOP_FILE = V6_SHADOW_DIR / "STOP"
 YOUTUBE_DIR = DATA_DIR / "youtube_ingest"; YOUTUBE_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_INDEX_FILE = YOUTUBE_DIR / "index.json"
 YOUTUBE_UPLOAD_TOKEN = os.environ.get("YOUTUBE_UPLOAD_TOKEN", "").strip()
@@ -108,6 +111,8 @@ v3_thread = None
 v3_stop_event = threading.Event()
 v5_validation_thread = None
 v5_validation_stop_event = threading.Event()
+v6_shadow_thread = None
+v6_shadow_stop_event = threading.Event()
 
 
 def youtube_video_id(value):
@@ -2138,6 +2143,161 @@ def export_v5_oos_autopsy_csv():
     return out
 
 
+
+def read_v6_shadow_status():
+    s={
+        "status":"idle","message":"尚未运行 V6 Shadow",
+        "stocks":0,"processed":0,"current":"","error":None,
+        "started_at":None,"finished_at":None
+    }
+    if V6_SHADOW_STATUS_FILE.exists():
+        try:s.update(json.loads(V6_SHADOW_STATUS_FILE.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def write_v6_shadow_status(**kw):
+    V6_SHADOW_DIR.mkdir(parents=True,exist_ok=True)
+    s=read_v6_shadow_status(); s.update(kw)
+    V6_SHADOW_STATUS_FILE.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+
+def _v6_shadow_metrics(g):
+    if g is None or len(g)==0 or "return_pct" not in g.columns:
+        return dict(trades=0,win_rate=0.0,avg_return=0.0,pf=0.0,max_losing_streak=0)
+    x=pd.to_numeric(g["return_pct"],errors="coerce").dropna()
+    if x.empty:
+        return dict(trades=0,win_rate=0.0,avg_return=0.0,pf=0.0,max_losing_streak=0)
+    w=x[x>0]; l=x[x<0]
+    pf=(w.sum()/(-l.sum())) if len(l) and -l.sum()>0 else (999.0 if len(w) else 0.0)
+    streak=0; mx=0
+    for v in x.tolist():
+        if v<0: streak+=1; mx=max(mx,streak)
+        else: streak=0
+    return dict(trades=int(len(x)),win_rate=float((x>0).mean()),avg_return=float(x.mean()),
+                pf=float(pf),max_losing_streak=int(mx))
+
+def v6_shadow_summary():
+    p=V6_SHADOW_DIR/"jlaw_v6_trades.csv"
+    if not p.exists() or p.stat().st_size==0:
+        return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty:return []
+    rows=[]
+    segs=[("ALL V6",d)]
+    if "v6_tier" in d.columns:
+        segs += [
+            ("A1",d[d.v6_tier=="A1"]),
+            ("A1+A2",d[d.v6_tier.isin(["A1","A2"])]),
+        ]
+    if "v6_top3" in d.columns:
+        top3=d[d.v6_top3.astype(str).str.lower().isin(["true","1"])]
+        segs.append(("TOP3",top3))
+    for label,g in segs:
+        if len(g):
+            rows.append(dict(segment=label,**_v6_shadow_metrics(g)))
+    return rows
+
+def v6_shadow_character_rows():
+    p=V6_SHADOW_DIR/"jlaw_v6_trades.csv"
+    if not p.exists() or p.stat().st_size==0:return []
+    try:d=pd.read_csv(p)
+    except Exception:return []
+    if d.empty or "v6_market_character" not in d.columns:return []
+    rows=[]
+    for name,g in d.groupby("v6_market_character",dropna=False):
+        rows.append(dict(character=str(name),**_v6_shadow_metrics(g)))
+    return rows
+
+def run_v6_shadow():
+    global v6_shadow_thread
+    try:
+        import importlib.util
+        engine_path=Path(__file__).with_name("jlaw_v6_0_DECISION_SHADOW.py")
+        if not engine_path.exists():
+            raise RuntimeError("GitHub 根目录缺少 jlaw_v6_0_DECISION_SHADOW.py")
+
+        spec=importlib.util.spec_from_file_location("jlaw_v6_shadow_engine",str(engine_path))
+        mod=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        V6_SHADOW_DIR.mkdir(parents=True,exist_ok=True)
+        v6_shadow_stop_event.clear()
+        try:
+            if V6_SHADOW_STOP_FILE.exists():V6_SHADOW_STOP_FILE.unlink()
+        except Exception:pass
+
+        available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
+        if len(available)<250:
+            raise RuntimeError(f"V6 Shadow 可用验证股票只有 {len(available)} 只，低于安全下限250")
+
+        write_v6_shadow_status(
+            status="running",
+            message=f"V6 Shadow 正在运行：{len(available)}只；与 V5 结果分开保存",
+            stocks=len(available),processed=0,current="",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            finished_at=None,error=None
+        )
+
+        def prog(done,total,t):
+            if v6_shadow_stop_event.is_set():
+                raise RuntimeError("__V6_SHADOW_STOPPED__")
+            write_v6_shadow_status(
+                status="running",
+                message=f"V6 Shadow：{done}/{total} · {t}",
+                stocks=total,processed=done,current=t
+            )
+
+        mod.run(
+            str(MARKET_DIR),str(V6_SHADOW_DIR),
+            progress_cb=prog,quick=False,
+            stop_file=str(V6_SHADOW_STOP_FILE),
+            ticker_filter=available
+        )
+
+        if V6_SHADOW_STOP_FILE.exists() or v6_shadow_stop_event.is_set():
+            raise RuntimeError("__V6_SHADOW_STOPPED__")
+
+        write_v6_shadow_status(
+            status="done",
+            message=f"V6 Shadow 完成：{len(available)}只。请看 V6 Shadow 结果，不覆盖 V5。",
+            stocks=len(available),processed=len(available),current="",
+            finished_at=datetime.now(timezone.utc).isoformat(),error=None
+        )
+    except Exception as ex:
+        if str(ex)=="__V6_SHADOW_STOPPED__":
+            s=read_v6_shadow_status()
+            write_v6_shadow_status(
+                status="stopped",message="已停止 V6 Shadow",
+                stocks=s.get("stocks",0),processed=s.get("processed",0),
+                current="",finished_at=datetime.now(timezone.utc).isoformat(),error=None
+            )
+        else:
+            traceback.print_exc()
+            write_v6_shadow_status(
+                status="error",message="V6 Shadow 运行失败",
+                error=f"{type(ex).__name__}: {ex}",
+                finished_at=datetime.now(timezone.utc).isoformat()
+            )
+    finally:
+        v6_shadow_thread=None
+        v6_shadow_stop_event.clear()
+
+def start_v6_shadow():
+    global v6_shadow_thread
+    if v6_shadow_thread is not None and v6_shadow_thread.is_alive():
+        return False
+    v6_shadow_thread=threading.Thread(target=run_v6_shadow,daemon=True)
+    v6_shadow_thread.start()
+    return True
+
+def stop_v6_shadow():
+    V6_SHADOW_DIR.mkdir(parents=True,exist_ok=True)
+    try:V6_SHADOW_STOP_FILE.write_text("stop",encoding="utf-8")
+    except Exception:pass
+    v6_shadow_stop_event.set()
+    return True
+
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -3348,6 +3508,65 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 {% endif %}
 <div style="margin-top:6px"><b>验证组当前可用：</b> {{v50_status.validation_usable}} / {{v50_status.validation}}</div>
 
+
+<div class="card" style="margin-top:18px">
+<h3 style="margin-top:0">V6.0 J Law Decision Shadow</h3>
+<div class="muted" style="margin-bottom:10px">
+新架构：Context → Edge Stack → Red-Flag Veto → Entry Quality → Ranking。独立写入 /data/jlaw_v6_shadow，不覆盖 V5.3。
+</div>
+
+<div style="margin:10px 0">
+<form method="post" action="/v6/shadow/start" style="display:inline">
+<button {% if v6_status.status=="running" %}disabled style="opacity:.45"{% endif %}>
+{% if v6_status.status=="running" %}V6 Shadow 运行中…{% else %}▶ 运行 V6 Shadow{% endif %}
+</button></form>
+{% if v6_status.status=="running" %}
+<form method="post" action="/v6/shadow/stop" style="display:inline">
+<button style="background:#7f1d1d">■ 停止 V6 Shadow</button>
+</form>
+{% endif %}
+</div>
+
+{% if v6_status.status=="running" %}
+<div class="progress"><div style="width:{{((v6_status.processed/v6_status.stocks*100) if v6_status.stocks else 0)}}%"></div></div>
+<div><b>{{v6_status.processed}} / {{v6_status.stocks}}</b> · {{v6_status.current}}</div>
+{% endif %}
+
+<p><b>状态：</b>{{v6_status.status}}　{{v6_status.message}}</p>
+{% if v6_status.error %}<p class="warn">{{v6_status.error}}</p>{% endif %}
+
+{% if v6_summary %}
+<h4>V6 Shadow 结果</h4>
+<div class="scroll"><table style="min-width:760px">
+<tr><th>分组</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v6_summary %}
+<tr>
+<td><b>{{r.segment}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf)}}</b></td>
+<td>{{r.max_losing_streak}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+{% if v6_characters %}
+<h4>Market Character</h4>
+<div class="scroll"><table style="min-width:700px">
+<tr><th>环境</th><th>交易数</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v6_characters %}
+<tr>
+<td>{{r.character}}</td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td>{{"%.2f"|format(r.pf)}}</td>
+</tr>
+{% endfor %}
+</table></div>
+{% endif %}
+</div>
+
 {% if v5_autopsy.available %}
 <details class="card" open style="margin-top:18px">
 <summary style="font-size:20px;font-weight:800;cursor:pointer">🔬 V5.4 OOS Failure Autopsy（不重跑）</summary>
@@ -3919,7 +4138,7 @@ function setFilter(kind){
  });
 }
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
+async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();const v6r=await fetch('/api/v6-shadow-status',{cache:'no-store'});const v6s=await v6r.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running'||v6s.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
 </script></body></html>"""
 
@@ -4084,10 +4303,25 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),
         **s)
 
 
+
+
+@APP.post("/v6/shadow/start")
+def v6_shadow_start_route():
+    start_v6_shadow()
+    return redirect(url_for("home"))
+
+@APP.post("/v6/shadow/stop")
+def v6_shadow_stop_route():
+    stop_v6_shadow()
+    return redirect(url_for("home"))
+
+@APP.get("/api/v6-shadow-status")
+def api_v6_shadow_status():
+    return jsonify(read_v6_shadow_status())
 
 @APP.get("/v5/autopsy.csv")
 def v5_autopsy_csv_route():
