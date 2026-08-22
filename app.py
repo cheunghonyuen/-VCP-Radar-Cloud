@@ -2477,6 +2477,111 @@ def stop_v61_fast():
     except Exception:pass
     v61_fast_stop_event.set();return True
 
+
+# ================= V6.2 INSTANT RESEARCH CACHE =================
+V62_CACHE_DIR = DATA_DIR / "jlaw_v62_research_cache"
+V62_SIGNAL_CACHE = V62_CACHE_DIR / "signals.pkl"
+V62_TRADE_CACHE = V62_CACHE_DIR / "trades.pkl"
+V62_META = V62_CACHE_DIR / "meta.json"
+
+def v62_cache_status():
+    meta={"ready":False,"signals":0,"trades":0,"source":"","built_at":None,
+          "message":"尚未建立研究缓存"}
+    if V62_META.exists():
+        try:meta.update(json.loads(V62_META.read_text(encoding="utf-8")))
+        except Exception:pass
+    return meta
+
+def build_v62_research_cache():
+    """Build once from the most complete existing V6 output. No historical rescan."""
+    V62_CACHE_DIR.mkdir(parents=True,exist_ok=True)
+    candidates=[
+        (V61_FAST_DIR/"full"/"jlaw_v6_signals.csv", V61_FAST_DIR/"full"/"jlaw_v6_trades.csv", "V6.1 Full"),
+        (V6_SHADOW_DIR/"jlaw_v6_signals.csv", V6_SHADOW_DIR/"jlaw_v6_trades.csv", "V6.0 Shadow"),
+    ]
+    sigp=trp=source=None
+    for a,b,name in candidates:
+        if a.exists() and a.stat().st_size>0 and b.exists() and b.stat().st_size>0:
+            sigp,trp,source=a,b,name
+            break
+    if sigp is None:
+        return {"ok":False,"error":"找不到完整 V6 signals/trades；先让当前 Full 321 跑完。"}
+
+    S=pd.read_csv(sigp); T=pd.read_csv(trp)
+    if S.empty or T.empty:
+        return {"ok":False,"error":"V6 signals/trades 为空"}
+
+    for df in (S,T):
+        if "date" in df.columns:df["date"]=pd.to_datetime(df["date"],errors="coerce")
+        for c in ["return_pct","v6_edge_count","v6_red_count","v6_rank","rs","volratio",
+                  "supply_score","sector_score","leader_score","group_breadth","extension",
+                  "pivot_tight","c1","c2","c3","dry","v46_score"]:
+            if c in df.columns:df[c]=pd.to_numeric(df[c],errors="coerce")
+
+    S.to_pickle(V62_SIGNAL_CACHE)
+    T.to_pickle(V62_TRADE_CACHE)
+    meta={
+        "ready":True,"signals":int(len(S)),"trades":int(len(T)),"source":source,
+        "built_at":datetime.now(timezone.utc).isoformat(),
+        "message":"研究缓存已建立：以后改 A1/A2、POWER、Edge、Ranking 不再重扫321只"
+    }
+    V62_META.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
+    return {"ok":True,**meta}
+
+def _v62_load():
+    if V62_SIGNAL_CACHE.exists() and V62_TRADE_CACHE.exists():
+        return pd.read_pickle(V62_SIGNAL_CACHE),pd.read_pickle(V62_TRADE_CACHE)
+    raise RuntimeError("V6.2 Research Cache 尚未建立")
+
+def v62_instant_lab():
+    st=v62_cache_status()
+    if not st.get("ready"):return {"available":False,"status":st}
+    try:S,T=_v62_load()
+    except Exception as e:return {"available":False,"status":st,"error":str(e)}
+
+    d=T.copy()
+    if d.empty:return {"available":False,"status":st}
+    char=d["v6_market_character"].astype(str) if "v6_market_character" in d.columns else pd.Series("",index=d.index)
+    tier=d["v6_tier"].astype(str) if "v6_tier" in d.columns else pd.Series("",index=d.index)
+
+    rows=[]
+    masks=[
+        ("ALL",pd.Series(True,index=d.index)),
+        ("POWER only",char=="POWER_TREND"),
+        ("POWER + A1",(char=="POWER_TREND")&(tier=="A1")),
+        ("POWER + A1/A2",(char=="POWER_TREND")&(tier.isin(["A1","A2"]))),
+    ]
+    if "v6_edge_count" in d.columns:
+        for n in [6,7,8,9]:
+            masks.append((f"POWER + edges≥{n}",(char=="POWER_TREND")&(d["v6_edge_count"]>=n)))
+    if "extension" in d.columns:
+        masks.append(("POWER + entry≤2%",(char=="POWER_TREND")&(d["extension"]<=.02)))
+    if "volratio" in d.columns:
+        masks.append(("POWER + volume≥1.8x",(char=="POWER_TREND")&(d["volratio"]>=1.8)))
+    if "supply_score" in d.columns:
+        masks.append(("POWER + supply≥75",(char=="POWER_TREND")&(d["supply_score"]>=75)))
+    if "rs" in d.columns:
+        masks.append(("POWER + RS≥90",(char=="POWER_TREND")&(d["rs"]>=90)))
+
+    seen=set()
+    for name,mask in masks:
+        g=d[mask.fillna(False)]
+        if len(g)==0:continue
+        key=(name,len(g))
+        if key in seen:continue
+        seen.add(key)
+        rows.append(dict(name=name,**_v6_shadow_metrics(g)))
+
+    ranks=[]
+    if "v6_rank" in d.columns:
+        for name,mask in [
+            ("Rank 1",d.v6_rank==1),("Rank 2",d.v6_rank==2),
+            ("Rank 3",d.v6_rank==3),("Rank 4+",d.v6_rank>=4)
+        ]:
+            g=d[mask]
+            if len(g):ranks.append(dict(name=name,**_v6_shadow_metrics(g)))
+    return {"available":True,"status":st,"rows":rows,"ranks":ranks}
+
 def read_v3_status():
     s={"status":"idle","message":"尚未运行","stocks":0,"processed":0,"current":"","error":None,"started_at":None,"finished_at":None}
     if V3_STATUS_FILE.exists():
@@ -3817,6 +3922,48 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 {% endif %}
 
+
+<details class="card" open style="margin-top:18px">
+<summary style="font-size:25px;font-weight:900;cursor:pointer">🚀 V6.2 Instant Research Cache</summary>
+<div class="muted" style="margin:10px 0">
+完整历史只算一次。以后改 POWER / A1 / A2 / Edge / Ranking 直接读缓存，
+不再重扫321只，目标从几小时降到几秒～几分钟。
+</div>
+<p><b>缓存状态：</b>
+{% if v62_status.ready %}
+✅ ready · {{v62_status.signals}} signals · {{v62_status.trades}} trades · 来源 {{v62_status.source}}
+{% else %}
+未建立
+{% endif %}
+</p>
+<form method="post" action="/v62/build-cache">
+<button>⚡ 建立/更新研究缓存（不重跑）</button>
+</form>
+{% if v62_lab.available %}
+<details open style="margin-top:12px">
+<summary style="font-weight:800;cursor:pointer">Instant Lab 结果</summary>
+<div class="scroll"><table style="min-width:820px">
+<tr><th>规则组合</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th></tr>
+{% for r in v62_lab.rows %}
+<tr><td><b>{{r.name}}</b></td><td>{{r.trades}}</td>
+<td>{{"%.1f%%"|format(r.win_rate*100)}}</td><td>{{"%.2f%%"|format(r.avg_return*100)}}</td>
+<td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
+{% endfor %}
+</table></div>
+</details>
+<details style="margin-top:10px">
+<summary style="font-weight:800;cursor:pointer">Ranking 诊断</summary>
+<div class="scroll"><table style="min-width:700px">
+<tr><th>Rank</th><th>交易</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>
+{% for r in v62_lab.ranks %}
+<tr><td>{{r.name}}</td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.win_rate*100)}}</td>
+<td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td>{{"%.2f"|format(r.pf)}}</td></tr>
+{% endfor %}
+</table></div>
+</details>
+{% endif %}
+</details>
+
 <details class="card" open style="margin-top:18px">
 <summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine</summary>
 <div class="muted" style="margin:10px 0">
@@ -4589,12 +4736,18 @@ def home():
         bt_stocks=bt.get("stocks",0),bt_processed=bt.get("processed",0),bt_rows=bt_rows,
         v3_status=read_v3_status().get("status","idle"),v3_message=read_v3_status().get("message","尚未运行"),
         v3_error=read_v3_status().get("error"),v3_stocks=read_v3_status().get("stocks",0),
-        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),v61_lab=v61_decision_lab(),v61_status=read_v61_fast_status(),v61_quick=v61_fast_summary("quick50"),v61_full=v61_fast_summary("full"),
+        v3_processed=read_v3_status().get("processed",0),v3_mode=read_v3_status().get("mode","full"),v3_results=v3_rows(),v3_diag=v3_diagnostics(),v3_trades=v3_trade_details(),v3_signals=v3_signal_details(),v3_shadow=v3_shadow_results(),v3_shadow_trades=v3_shadow_trade_details(),v4_sweep=v4_weight_sweep(),v4_best=v4_best_by_size(),v41_rows=v41_sweet_spot_sweep(),v41_best=v41_best_rows(),v41_regime=v41_regime_check(),v42_regime=v42_regime_summary(),v42_regime_best=v42_regime_best(),v42_ablation=v42_ablation_best(),v43_rows=v43_adaptive_sweep(),v43_years=v43_year_stability(),v43_policy=v43_factor_policy(),v44_walk=v44_walk_forward(),v44_bands=v44_score_band_check(),v44_recent=v44_recent_validation(),v45_cc=v45_champion_challenger(),v45_wf=v45_walkforward_verdict(),v45_decision=v45_research_decision(),v46_engine=v46_engine_summary(),v461_diag=v461_diag(),v462_probe=v462_deploy_probe(),v47_sweep=v47_true_engine_threshold_sweep(),v47_periods=v47_true_engine_periods(),v47_plateau=v47_threshold_plateau(),v48_tiers=v48_dual_tier_summary(),v48_bins=v48_score_bins(),v50_status=v50_expanded_universe_status(),v50_results=v50_validation_results(),v5v_status=read_v5_validation_status(),v5v_summary=v5_validation_summary(),v5_autopsy=v5_oos_autopsy(),v6_status=read_v6_shadow_status(),v6_summary=v6_shadow_summary(),v6_characters=v6_shadow_character_rows(),v61_lab=v61_decision_lab(),v61_status=read_v61_fast_status(),v61_quick=v61_fast_summary("quick50"),v61_full=v61_fast_summary("full"),v62_status=v62_cache_status(),v62_lab=v62_instant_lab(),
         **s)
 
 
 
 
+
+
+@APP.post("/v62/build-cache")
+def v62_build_cache_route():
+    build_v62_research_cache()
+    return redirect(url_for("home"))
 
 @APP.post("/v61/quick50")
 def v61_quick50_route():
