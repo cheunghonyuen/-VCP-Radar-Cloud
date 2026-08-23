@@ -2877,6 +2877,61 @@ def v63_summary():
                 ex=pd.to_numeric(P["extension"],errors="coerce")
                 _op_add("POWER","Edge≥7 + Red=0 + Ext≤1%",P[(ec>=7)&(rc==0)&(ex<=0.01)])
 
+    ranking_replay=[]
+
+    def _rr_add(scope,label,g):
+        if len(g):
+            ranking_replay.append({"scope":scope,"name":label,**_v6_shadow_metrics(g)})
+
+    # V6.5.1: ranking replay only. No rerun and no new trade generation.
+    # Goal: test ranking as a preference mechanism, NOT as a hard gate.
+    # Candidate order is intentionally simple and theory-led:
+    #   1) POWER_TREND context
+    #   2) better entry location (Extension <=1% first, then lower extension)
+    #   3) demand confirmation (Volume >=1.8x first, then higher volume)
+    #   4) RS2 only as late tie-breaker
+    if len(T) and "date" in T.columns:
+        R=T.copy()
+        R["date"]=pd.to_datetime(R["date"],errors="coerce")
+
+        mc_power=(R["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in R.columns else pd.Series(False,index=R.index)
+        ext=pd.to_numeric(R["extension"],errors="coerce") if "extension" in R.columns else pd.Series(999.0,index=R.index)
+        vol=pd.to_numeric(R["volratio"],errors="coerce") if "volratio" in R.columns else pd.Series(0.0,index=R.index)
+        rs2=pd.to_numeric(R["rs"],errors="coerce") if "rs" in R.columns else pd.Series(0.0,index=R.index)
+
+        R["_power"]=mc_power.astype(int)
+        R["_goodloc"]=(ext<=0.01).astype(int)
+        R["_goodvol"]=(vol>=1.8).astype(int)
+        R["_ext"]=ext.fillna(999.0)
+        R["_vol"]=vol.fillna(0.0)
+        R["_rs2"]=rs2.fillna(0.0)
+
+        # Rank within each signal date. Desc for context/flags/volume/RS2; asc for extension.
+        R=R.sort_values(
+            ["date","_power","_goodloc","_goodvol","_ext","_vol","_rs2"],
+            ascending=[True,False,False,False,True,False,False]
+        )
+        R["v651_rank"]=R.groupby("date").cumcount()+1
+
+        scopes=[("ALL",R)]
+        if "ticker" in R.columns:
+            tick=R["ticker"].astype(str)
+            scopes.append(("VALIDATION_324",R[tick.isin(set(V5_VALIDATION))]))
+        scopes.append(("2022–2026",R[R["date"]>=pd.Timestamp("2022-01-01")]))
+        if "v6_market_character" in R.columns:
+            scopes.append(("POWER_TREND",R[R["v6_market_character"].astype(str)=="POWER_TREND"]))
+
+        for scope_name,S in scopes:
+            if S.empty: continue
+            rrk=pd.to_numeric(S["v651_rank"],errors="coerce")
+            _rr_add(scope_name,"NEW Rank 1",S[rrk==1])
+            _rr_add(scope_name,"NEW Rank 1–2",S[rrk<=2])
+            _rr_add(scope_name,"NEW Rank 1–3",S[rrk<=3])
+
+            if "v6_rank" in S.columns:
+                old=pd.to_numeric(S["v6_rank"],errors="coerce")
+                _rr_add(scope_name,"OLD Rank 1",S[old==1])
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -2884,7 +2939,8 @@ def v63_summary():
             "validation_core_feature_compare":validation_core_feature_compare,
             "context_veto":context_veto,"context_veto_recent":context_veto_recent,
             "veto_validation":veto_validation,
-            "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag}
+            "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag,
+            "ranking_replay":ranking_replay}
 
 def run_v63():
     import importlib.util
@@ -4366,7 +4422,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.5.0</h1><div class="muted">当前研究版：V6.5.0 Opportunity Ranking Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.5.1</h1><div class="muted">当前研究版：V6.5.1 Ranking Replay · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4386,7 +4442,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.5.0 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.5.1 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6193,6 +6249,18 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v651-shortcut")){
+      const box=document.createElement("div");
+      box.id="v651-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #a78bfa";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.5.1 Ranking Replay</h2><div class="muted">同一天候选重新排序，不重跑</div></div><a href="/v651/ranking-replay"><button type="button">打开 Replay</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v65-shortcut")){
       const box=document.createElement("div");
       box.id="v65-shortcut";
@@ -6260,7 +6328,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.5.0 当前版";
+      currentLink.textContent="🚀 V6.5.1 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6517,6 +6585,58 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
     return render_template_string(tpl,rows=rows,recent=recent,groups=groups)
 
 
+
+
+@APP.get("/v651/ranking-replay")
+def v651_ranking_replay_page():
+    s=v63_summary()
+    rows=s.get("ranking_replay",[]) if s.get("available") else []
+    scopes=["ALL","POWER_TREND","VALIDATION_324","2022–2026"]
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.5.1 Ranking Replay</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:900px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:20px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;padding:12px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🎯 V6.5.1 Ranking Replay</h1>
+<div class="note">
+不重跑、不改交易。只是把同一天已有候选重新排序。<br>
+排序逻辑：POWER context → 靠近 Pivot（Extension≤1%优先）→ Volume≥1.8x → 更低 Extension → 更高 Volume → RS2 最后做 tie-break。<br>
+重点比较 NEW Rank 1 和 OLD Rank 1，尤其 Validation_324 与 2022–2026。
+</div>
+</div>
+
+{% for scope in scopes %}
+<div class="card">
+<h2>{{scope}}</h2>
+<div class="grid">
+{% for r in rows if r.scope==scope %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</div>
+{% endfor %}
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,scopes=scopes)
 
 @APP.get("/v65/ranking-diagnostic")
 def v65_ranking_diagnostic_page():
