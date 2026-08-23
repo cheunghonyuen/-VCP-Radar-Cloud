@@ -3249,6 +3249,221 @@ def v63_summary():
             sm,yy=_portfolio_sim(REC,tn,mp,risk,label=label)
             if sm: portfolio_rows.append(sm); portfolio_years.extend(yy)
 
+
+    portfolio_audit=[]
+    portfolio_audit_years=[]
+
+    def _pf_from_returns(vals):
+        x=pd.to_numeric(pd.Series(vals),errors="coerce").dropna()
+        if x.empty:return 0.0
+        gw=float(x[x>0].sum()); gl=float(-x[x<0].sum())
+        return gw/gl if gl>0 else (999.0 if gw>0 else 0.0)
+
+    def _audit_sim(source, top_n=1, max_positions=5, risk_pct=0.003, power_only=False,
+                   initial_equity=100000.0, label=""):
+        if source is None or source.empty or "date" not in source.columns or "return_pct" not in source.columns:
+            return None, []
+
+        D=source.copy()
+        D["date"]=pd.to_datetime(D["date"],errors="coerce")
+        D=D[D["date"].notna()].copy()
+
+        if power_only and "v6_market_character" in D.columns:
+            D=D[D["v6_market_character"].astype(str)=="POWER_TREND"].copy()
+        if D.empty:return None,[]
+
+        # Frozen V6.5.4 Demand-First ordering.
+        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
+        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
+        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
+        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
+        D["_power"]=power.astype(int)
+        D["_goodvol"]=(vol>=1.8).astype(int)
+        D["_goodloc"]=(ext<=0.01).astype(int)
+        D["_vol"]=vol.fillna(0.0)
+        D["_ext"]=ext.fillna(999.0)
+        D["_rs2"]=rs2.fillna(0.0)
+
+        D=D.sort_values(
+            ["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
+            ascending=[True,False,False,False,False,True,False]
+        ).copy()
+        D["_rank"]=D.groupby("date").cumcount()+1
+        D=D[D["_rank"]<=int(top_n)].copy()
+        if D.empty:return None,[]
+
+        hold=pd.to_numeric(D["hold_days"],errors="coerce").fillna(20).clip(lower=1).round().astype(int) if "hold_days" in D.columns else pd.Series(20,index=D.index)
+        D["_hold"]=hold
+        D["_exit_date"]=[d+pd.offsets.BDay(int(h)) for d,h in zip(D["date"],hold)]
+        D["_ret"]=pd.to_numeric(D["return_pct"],errors="coerce").fillna(0.0)
+
+        stop=pd.to_numeric(D["stop_pct"],errors="coerce").abs() if "stop_pct" in D.columns else pd.Series(0.07,index=D.index)
+        D["_stop"]=stop.where((stop>0.005)&(stop<0.30),0.07)
+
+        equity=cash=float(initial_equity)
+        peak=equity
+        max_dd=0.0
+        open_pos=[]
+        realized=[]
+        executed=[]
+        skipped=[]
+        snapshots=[]
+
+        def mark_snapshot(day):
+            eq=cash+sum(p["capital"] for p in open_pos)
+            invested=sum(p["capital"] for p in open_pos)
+            snapshots.append({
+                "date":day,
+                "open":len(open_pos),
+                "invested_pct":invested/eq if eq>0 else 0.0
+            })
+
+        def close_due(day):
+            nonlocal equity,cash,peak,max_dd,open_pos
+            due=[p for p in open_pos if p["exit_date"]<=day]
+            keep=[p for p in open_pos if p["exit_date"]>day]
+            for p in due:
+                pnl=p["capital"]*p["ret"]
+                cash+=p["capital"]+pnl
+                realized.append({
+                    "entry_date":p["entry_date"],"exit_date":p["exit_date"],
+                    "pnl":pnl,"ret":p["ret"],"capital":p["capital"]
+                })
+            open_pos=keep
+            equity=cash+sum(p["capital"] for p in open_pos)
+            peak=max(peak,equity)
+            if peak>0:max_dd=min(max_dd,equity/peak-1.0)
+
+        for day,g in D.groupby("date",sort=True):
+            close_due(day)
+            equity=cash+sum(p["capital"] for p in open_pos)
+
+            for _,r in g.sort_values("_rank").iterrows():
+                record={
+                    "date":day,"ret":float(r["_ret"]),"hold":int(r["_hold"]),
+                    "stop":float(r["_stop"]),"rank":int(r["_rank"])
+                }
+                if len(open_pos)>=int(max_positions):
+                    record["reason"]="capacity"
+                    skipped.append(record)
+                    continue
+
+                target_cap=equity*float(risk_pct)/float(r["_stop"])
+                target_cap=min(target_cap,equity*0.25)
+                cap=min(target_cap,cash)
+
+                if cap<100:
+                    record["reason"]="cash"
+                    skipped.append(record)
+                    continue
+
+                record["capital"]=float(cap)
+                record["size_pct"]=float(cap/equity) if equity>0 else 0.0
+                executed.append(record)
+                cash-=cap
+                open_pos.append({
+                    "entry_date":day,"exit_date":r["_exit_date"],
+                    "capital":float(cap),"ret":float(r["_ret"])
+                })
+                equity=cash+sum(p["capital"] for p in open_pos)
+
+            mark_snapshot(day)
+
+        for day in sorted({p["exit_date"] for p in open_pos}):
+            close_due(day)
+            mark_snapshot(day)
+
+        equity=cash
+
+        exe=pd.DataFrame(executed)
+        skp=pd.DataFrame(skipped)
+        snap=pd.DataFrame(snapshots)
+        real=pd.DataFrame(realized)
+
+        first=D["date"].min()
+        last=max(D["_exit_date"].max(),D["date"].max())
+        years=max((last-first).days/365.25,1/365.25)
+        cagr=(equity/initial_equity)**(1/years)-1 if equity>0 else -1.0
+
+        if not real.empty:
+            wins=real[real["pnl"]>0]
+            losses=real[real["pnl"]<0]
+            gw=float(wins["pnl"].sum())
+            gl=float(-losses["pnl"].sum())
+            pf=gw/gl if gl>0 else (999.0 if gw>0 else 0.0)
+            win_rate=float((real["pnl"]>0).mean())
+        else:
+            pf=0.0; win_rate=0.0
+
+        signal_days=int(D["date"].nunique())
+        total_candidates=int(len(D))
+        executed_n=int(len(exe))
+        skipped_n=int(len(skp))
+        cap_skips=int((skp["reason"]=="capacity").sum()) if not skp.empty else 0
+        cash_skips=int((skp["reason"]=="cash").sum()) if not skp.empty else 0
+
+        row={
+            "name":label,
+            "power_only":bool(power_only),
+            "top_n":int(top_n),
+            "max_positions":int(max_positions),
+            "risk_pct":float(risk_pct),
+            "final_equity":float(equity),
+            "cagr":float(cagr),
+            "max_drawdown":float(max_dd),
+            "pf":float(pf),
+            "win_rate":float(win_rate),
+            "signal_days":signal_days,
+            "candidates":total_candidates,
+            "executed":executed_n,
+            "execution_rate":float(executed_n/total_candidates) if total_candidates else 0.0,
+            "capacity_skips":cap_skips,
+            "cash_skips":cash_skips,
+            "avg_position_pct":float(exe["size_pct"].mean()) if not exe.empty else 0.0,
+            "median_position_pct":float(exe["size_pct"].median()) if not exe.empty else 0.0,
+            "avg_open_positions":float(snap["open"].mean()) if not snap.empty else 0.0,
+            "max_open_positions":int(snap["open"].max()) if not snap.empty else 0,
+            "avg_invested_pct":float(snap["invested_pct"].mean()) if not snap.empty else 0.0,
+            "median_hold":float(exe["hold"].median()) if not exe.empty else 0.0,
+            "avg_exec_return":float(exe["ret"].mean()) if not exe.empty else 0.0,
+            "exec_pf_raw":float(_pf_from_returns(exe["ret"])) if not exe.empty else 0.0,
+            "avg_skipped_return":float(skp["ret"].mean()) if not skp.empty else 0.0,
+            "skipped_pf_raw":float(_pf_from_returns(skp["ret"])) if not skp.empty else 0.0,
+            "trades_per_year":float(executed_n/years) if years>0 else 0.0,
+        }
+
+        yr=[]
+        if not real.empty:
+            RR=real.copy()
+            RR["year"]=pd.to_datetime(RR["exit_date"]).dt.year
+            running=float(initial_equity)
+            for y,gy in RR.groupby("year",sort=True):
+                start=running
+                pnl=float(gy["pnl"].sum())
+                running+=pnl
+                yr.append({
+                    "config":label,"year":int(y),
+                    "return":pnl/start if start else 0.0,
+                    "pnl":pnl,"trades":int(len(gy))
+                })
+
+        return row,yr
+
+    if len(T):
+        audit_configs=[
+            ("Top1 · 5仓 · 0.3%",1,5,0.003,False),
+            ("Top1 · 8仓 · 0.5%",1,8,0.005,False),
+            ("Top2 · 8仓 · 0.3%",2,8,0.003,False),
+            ("Top2 · 10仓 · 0.5%",2,10,0.005,False),
+            ("POWER only · Top1 · 5仓 · 0.3%",1,5,0.003,True),
+            ("POWER only · Top2 · 8仓 · 0.3%",2,8,0.003,True),
+        ]
+        for label,tn,mp,risk,po in audit_configs:
+            sm,yy=_audit_sim(T,top_n=tn,max_positions=mp,risk_pct=risk,power_only=po,label=label)
+            if sm:
+                portfolio_audit.append(sm)
+                portfolio_audit_years.extend(yy)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3261,7 +3476,8 @@ def v63_summary():
             "rank12_diag":rank12_diag,"rank12_features":rank12_features,
             "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features,
             "demand_rank_diag":demand_rank_diag,
-            "portfolio_rows":portfolio_rows,"portfolio_years":portfolio_years}
+            "portfolio_rows":portfolio_rows,"portfolio_years":portfolio_years,
+            "portfolio_audit":portfolio_audit,"portfolio_audit_years":portfolio_audit_years}
 
 def run_v63():
     import importlib.util
@@ -4743,7 +4959,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.6.0</h1><div class="muted">当前研究版：V6.6.0 Portfolio Simulator · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.6.1</h1><div class="muted">当前研究版：V6.6.1 Portfolio Audit · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4763,7 +4979,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.6.0 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.6.1 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6570,6 +6786,17 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v661-shortcut")){
+      const box=document.createElement("div");
+      box.id="v661-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #6366f1";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔍 V6.6.1 Portfolio Audit</h2><div class="muted">不重跑：查CAGR为什么被拖低</div></div><a href="/v661/portfolio-audit"><button type="button">打开 Audit</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v66-shortcut")){
       const box=document.createElement("div"); box.id="v66-shortcut"; box.className="card";
       box.style.cssText="margin:10px 0;border:2px solid #f59e0b";
@@ -6695,7 +6922,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.6.0 当前版";
+      currentLink.textContent="🚀 V6.6.1 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6957,6 +7184,78 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v661/portfolio-audit")
+def v661_portfolio_audit_page():
+    s=v63_summary()
+    rows=s.get("portfolio_audit",[]) if s.get("available") else []
+    yrs=s.get("portfolio_audit_years",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.6.1 Portfolio Audit</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:980px;margin:auto}.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#eef2ff;border:1px solid #c7d2fe;border-radius:12px;padding:12px}
+table{width:100%;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:13px}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🔍 V6.6.1 Portfolio Audit</h1>
+<div class="note">
+不重跑443只。专门解释“单笔PF不差，为什么账户CAGR仍然低”。<br>
+重点拆：资金利用率、平均仓位、持仓数、满仓跳过、被跳过交易质量、交易频率，以及 POWER-only 是否更有效。
+</div>
+</div>
+
+<div class="card">
+<h2>资金效率与瓶颈</h2>
+<div class="grid">
+{% for r in rows %}
+<div class="item">
+<div class="name">{{r.name}}</div>
+<div class="metrics">
+<div class="metric"><small>CAGR / PF</small><b>{{"%.1f%%"|format(r.cagr*100)}} / {{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均资金使用率</small><b>{{"%.1f%%"|format(r.avg_invested_pct*100)}}</b></div>
+<div class="metric"><small>平均仓位 / 中位仓位</small><b>{{"%.1f%%"|format(r.avg_position_pct*100)}} / {{"%.1f%%"|format(r.median_position_pct*100)}}</b></div>
+<div class="metric"><small>平均持仓数 / 最大</small><b>{{"%.1f"|format(r.avg_open_positions)}} / {{r.max_open_positions}}</b></div>
+<div class="metric"><small>候选→实际成交</small><b>{{r.candidates}} → {{r.executed}}</b></div>
+<div class="metric"><small>执行率</small><b>{{"%.1f%%"|format(r.execution_rate*100)}}</b></div>
+<div class="metric"><small>满仓跳过 / 现金不足</small><b>{{r.capacity_skips}} / {{r.cash_skips}}</b></div>
+<div class="metric"><small>每年成交</small><b>{{"%.1f"|format(r.trades_per_year)}}</b></div>
+<div class="metric"><small>成交平均收益 / PF</small><b>{{"%.2f%%"|format(r.avg_exec_return*100)}} / {{"%.2f"|format(r.exec_pf_raw)}}</b></div>
+<div class="metric"><small>跳过平均收益 / PF</small><b>{{"%.2f%%"|format(r.avg_skipped_return*100)}} / {{"%.2f"|format(r.skipped_pf_raw)}}</b></div>
+<div class="metric"><small>持有天数中位数</small><b>{{"%.0f"|format(r.median_hold)}}</b></div>
+<div class="metric"><small>已实现最大回撤</small><b>{{"%.1f%%"|format(r.max_drawdown*100)}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</div>
+
+<div class="card">
+<h2>年度收益（Audit配置）</h2>
+<div style="overflow-x:auto">
+<table><tr><th>配置</th><th>年</th><th>收益</th><th>P/L</th><th>成交</th></tr>
+{% for r in yrs %}
+<tr><td><b>{{r.config}}</b></td><td>{{r.year}}</td><td>{{"%.1f%%"|format(r.return*100)}}</td><td>${{"{:,.0f}".format(r.pnl)}}</td><td>{{r.trades}}</td></tr>
+{% endfor %}
+</table>
+</div>
+</div>
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,yrs=yrs)
 
 @APP.get("/v66/portfolio-simulator")
 def v66_portfolio_simulator_page():
