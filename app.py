@@ -2755,12 +2755,52 @@ def v63_summary():
                         cvadd("RECENT_ENTRY","≤1%",R[ex<=0.01],context_veto_recent)
                         cvadd("RECENT_ENTRY",">1%",R[ex>0.01],context_veto_recent)
 
+    veto_validation=[]
+
+    def _vv_add(scope,label,g):
+        if len(g):
+            veto_validation.append({"scope":scope,"name":label,**_v6_shadow_metrics(g)})
+
+    # V6.4 candidate veto validation: compare BEFORE vs AFTER, no rerun.
+    # Candidates:
+    # A: Extension >2% veto
+    # B: Supply >=65 veto
+    # C: Combined A OR B veto
+    if len(T):
+        scopes=[("ALL_466",T)]
+        if "ticker" in T.columns:
+            tick=T["ticker"].astype(str)
+            scopes.append(("ORIGINAL_122",T[tick.isin(set(V5_ORIGINAL_122))]))
+            scopes.append(("VALIDATION_324",T[tick.isin(set(V5_VALIDATION))]))
+
+        if "date" in T.columns:
+            Td=T.copy()
+            Td["date"]=pd.to_datetime(Td["date"],errors="coerce")
+            scopes.append(("2007–2021",Td[Td["date"]<pd.Timestamp("2022-01-01")]))
+            scopes.append(("2022–2026",Td[Td["date"]>=pd.Timestamp("2022-01-01")]))
+
+        for scope_name,S in scopes:
+            if S.empty: continue
+            _vv_add(scope_name,"BEFORE",S)
+
+            ex=pd.to_numeric(S["extension"],errors="coerce") if "extension" in S.columns else pd.Series(index=S.index,dtype=float)
+            ss=pd.to_numeric(S["supply_score"],errors="coerce") if "supply_score" in S.columns else pd.Series(index=S.index,dtype=float)
+
+            if "extension" in S.columns:
+                _vv_add(scope_name,"AFTER veto Ext>2%",S[~(ex>0.02)])
+            if "supply_score" in S.columns:
+                _vv_add(scope_name,"AFTER veto Supply≥65",S[~(ss>=65)])
+            if "extension" in S.columns and "supply_score" in S.columns:
+                keep=~((ex>0.02)|(ss>=65))
+                _vv_add(scope_name,"AFTER combined veto",S[keep])
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
             "validation_core_recent_trades":validation_core_recent_trades,
             "validation_core_feature_compare":validation_core_feature_compare,
-            "context_veto":context_veto,"context_veto_recent":context_veto_recent}
+            "context_veto":context_veto,"context_veto_recent":context_veto_recent,
+            "veto_validation":veto_validation}
 
 def run_v63():
     import importlib.util
@@ -4242,7 +4282,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.10</h1><div class="muted">当前研究版：V6.3.9.10 Safe UI Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.4.0</h1><div class="muted">当前研究版：V6.4.0 Candidate Veto Validation · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4262,7 +4302,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.10 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.4.0 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6068,6 +6108,18 @@ setTimeout(poll,5000);
 <script>
 document.addEventListener("DOMContentLoaded", function(){
   try{
+    const top=document.querySelector(".top");
+    if(top && !document.getElementById("v64-shortcut")){
+      const box=document.createElement("div");
+      box.id="v64-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #fde68a";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.4 Veto Validation</h2><div class="muted">不重跑，直接比较过滤前后</div></div><a href="/v64/veto-validation"><button type="button">打开诊断</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
     // 1) Move existing publisher card to the very top, directly under page header.
     const pub = document.getElementById("publisher-top");
     const top = document.querySelector(".top");
@@ -6112,7 +6164,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.3.9.10 当前版";
+      currentLink.textContent="🚀 V6.4.0 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6367,6 +6419,56 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 </div></body></html>
 """
     return render_template_string(tpl,rows=rows,recent=recent,groups=groups)
+
+
+@APP.get("/v64/veto-validation")
+def v64_veto_validation_page():
+    s=v63_summary()
+    rows=s.get("veto_validation",[]) if s.get("available") else []
+    scopes=["ALL_466","ORIGINAL_122","VALIDATION_324","2007–2021","2022–2026"]
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.4 Veto Validation</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:900px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:20px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:12px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🧪 V6.4 Candidate Veto Validation</h1>
+<div class="note">不重跑。直接用现有 V6.3 trades 比较过滤前后。重点看：是否在 ALL、原122、新验证组、早期、最近都一致改善。</div>
+</div>
+
+{% for scope in scopes %}
+<div class="card">
+<h2>{{scope}}</h2>
+<div class="grid">
+{% for r in rows if r.scope==scope %}
+<div class="item">
+<div class="name">{{r.name}}</div>
+<div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</div>
+{% endfor %}
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,scopes=scopes)
 
 @APP.post("/v63/run")
 def v63_run_route():
