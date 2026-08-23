@@ -3092,6 +3092,69 @@ def v63_summary():
                                 "median_delta_r1_minus_r2":float(d.median())
                             })
 
+    demand_rank_diag=[]
+
+    def _dr_add(scope,label,g):
+        if len(g):
+            demand_rank_diag.append({"scope":scope,"name":label,**_v6_shadow_metrics(g)})
+
+    # V6.5.4 Demand-First replay.
+    # Pairwise evidence suggests entry closeness is over-prioritized:
+    # Rank1 is always closer to pivot, whether it wins or loses.
+    # Relative demand/volume is more discriminative within the same-date pair.
+    if len(T) and "date" in T.columns:
+        D=T.copy()
+        D["date"]=pd.to_datetime(D["date"],errors="coerce")
+
+        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
+        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
+        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
+        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
+
+        D["_power"]=power.astype(int)
+        D["_goodvol"]=(vol>=1.8).astype(int)
+        D["_goodloc"]=(ext<=0.01).astype(int)
+        D["_vol"]=vol.fillna(0.0)
+        D["_ext"]=ext.fillna(999.0)
+        D["_rs2"]=rs2.fillna(0.0)
+
+        # Old/current replay rank (location-first)
+        O=D.sort_values(
+            ["date","_power","_goodloc","_goodvol","_ext","_vol","_rs2"],
+            ascending=[True,False,False,False,True,False,False]
+        ).copy()
+        O["rank_location_first"]=O.groupby("date").cumcount()+1
+
+        # Candidate new rank: demand first, location only after demand confirmation.
+        N=D.sort_values(
+            ["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
+            ascending=[True,False,False,False,False,True,False]
+        ).copy()
+        N["rank_demand_first"]=N.groupby("date").cumcount()+1
+
+        scopes=[("ALL",None)]
+        if "ticker" in D.columns:
+            scopes.append(("VALIDATION_324","validation"))
+        scopes.append(("2022–2026","recent"))
+        scopes.append(("POWER_TREND","power"))
+
+        for scope_name,kind in scopes:
+            OO=O.copy(); NN=N.copy()
+            if kind=="validation" and "ticker" in D.columns:
+                vset=set(V5_VALIDATION)
+                OO=OO[OO["ticker"].astype(str).isin(vset)]
+                NN=NN[NN["ticker"].astype(str).isin(vset)]
+            elif kind=="recent":
+                OO=OO[OO["date"]>=pd.Timestamp("2022-01-01")]
+                NN=NN[NN["date"]>=pd.Timestamp("2022-01-01")]
+            elif kind=="power" and "v6_market_character" in D.columns:
+                OO=OO[OO["v6_market_character"].astype(str)=="POWER_TREND"]
+                NN=NN[NN["v6_market_character"].astype(str)=="POWER_TREND"]
+
+            _dr_add(scope_name,"LOCATION-FIRST Rank1",OO[OO["rank_location_first"]==1])
+            _dr_add(scope_name,"DEMAND-FIRST Rank1",NN[NN["rank_demand_first"]==1])
+            _dr_add(scope_name,"DEMAND-FIRST Rank1–2",NN[NN["rank_demand_first"]<=2])
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3102,7 +3165,8 @@ def v63_summary():
             "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag,
             "ranking_replay":ranking_replay,
             "rank12_diag":rank12_diag,"rank12_features":rank12_features,
-            "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features}
+            "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features,
+            "demand_rank_diag":demand_rank_diag}
 
 def run_v63():
     import importlib.util
@@ -4584,7 +4648,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.5.3</h1><div class="muted">当前研究版：V6.5.3 Same-Date Pairwise · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.5.4</h1><div class="muted">当前研究版：V6.5.4 Demand-First Ranking Replay · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4604,7 +4668,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.5.3 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.5.4 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6411,6 +6475,18 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v654-shortcut")){
+      const box=document.createElement("div");
+      box.id="v654-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #22c55e";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔥 V6.5.4 Demand-First Replay</h2><div class="muted">不重跑：测试把 Demand/Volume 放到 Extension 前面</div></div><a href="/v654/demand-first-replay"><button type="button">打开 Replay</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v653-shortcut")){
       const box=document.createElement("div");
       box.id="v653-shortcut";
@@ -6514,7 +6590,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.5.3 当前版";
+      currentLink.textContent="🚀 V6.5.4 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6774,6 +6850,55 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v654/demand-first-replay")
+def v654_demand_first_replay_page():
+    s=v63_summary()
+    rows=s.get("demand_rank_diag",[]) if s.get("available") else []
+    scopes=["ALL","POWER_TREND","VALIDATION_324","2022–2026"]
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.5.4 Demand-First Replay</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:900px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:20px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:12px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🔥 V6.5.4 Demand-First Ranking Replay</h1>
+<div class="note">
+不重跑。V6.5.3 显示 Rank1 不论输赢都更靠近 Pivot；真正更能区分同日胜负的是相对 Volume/Demand。
+因此只测试一个理论驱动的改动：把 Volume/Demand 提到 Extension 前面。<br><br>
+LOCATION-FIRST：POWER → Ext≤1% → Vol≥1.8x → Ext → Vol → RS2<br>
+DEMAND-FIRST：POWER → Vol≥1.8x → Ext≤1% → Vol → Ext → RS2
+</div>
+</div>
+{% for scope in scopes %}
+<div class="card"><h2>{{scope}}</h2><div class="grid">
+{% for r in rows if r.scope==scope %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div></div>
+{% endfor %}
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,scopes=scopes)
 
 @APP.get("/v653/pairwise-diagnostic")
 def v653_pairwise_diagnostic_page():
