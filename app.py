@@ -2430,8 +2430,8 @@ def v63_summary():
     # Split by original research cohort vs validation cohort using ticker lists already defined in app.
     if "ticker" in T.columns:
         tick=T["ticker"].astype(str)
-        original_set=set(ORIGINAL_122)
-        validation_set=set(VALIDATION_324)
+        original_set=set(V5_ORIGINAL_122)
+        validation_set=set(V5_VALIDATION)
         cohort_defs=[
             ("ORIGINAL_122", T[tick.isin(original_set)]),
             ("VALIDATION_324", T[tick.isin(validation_set)]),
@@ -3930,7 +3930,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.6</h1><div class="muted">当前研究版：V6.3.6 Cohort + Recent RS2 Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.6.1</h1><div class="muted">当前研究版：V6.3.6.1 Cohort Hotfix · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3950,7 +3950,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.6 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.6.1 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4770,7 +4770,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.6 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.6.1 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
