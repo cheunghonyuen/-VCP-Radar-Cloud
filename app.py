@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.9</h1><div class="muted">当前研究版：V6.12.9 Signal-Date Alignment Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.10</h1><div class="muted">当前研究版：V6.12.10 Signal Timestamp Trace</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6956,6 +6956,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0">🗓️ V6.12.9 Signal-Date Alignment Audit</h2>
       <div class="muted">查 4 个候选日期是否比真正 Breakout 提前</div>
     </div>
+
+<div class="card" id="v61210-shortcut" style="border:2px solid #0ea5e9">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🧵 V6.12.10 Signal Timestamp Trace</h2>
+      <div class="muted">追 ADI 6/3→6/5、KEYS 8/17→8/18 的日期偏移来源</div>
+    </div>
+    <a href="/v61210/signal-timestamp-trace"><button type="button">打开 V6.12.10</button></a>
+  </div>
+</div>
+
     <a href="/v6129/signal-date-alignment"><button type="button">打开 V6.12.9</button></a>
   </div>
 </div>
@@ -9133,6 +9144,181 @@ def v6127_status_api():
 
 
 
+
+@APP.get("/v61210/signal-timestamp-trace")
+def v61210_signal_timestamp_trace():
+    import html, importlib.util, inspect
+    from pathlib import Path
+
+    targets=[
+        {"ticker":"ADI","formal_date":"2026-06-03","observed_date":"2026-06-05"},
+        {"ticker":"KEYS","formal_date":"2026-08-17","observed_date":"2026-08-18"},
+    ]
+
+    ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+    if not ep.exists():
+        return "<h1>缺少 jlaw_v6_1_DECISION_FAST.py</h1>"
+    spec=importlib.util.spec_from_file_location("v61210_engine",str(ep))
+    eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+    files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+    all_data={}
+    for t,p in files.items():
+        try: all_data[t]=eng.load(p)
+        except Exception: pass
+    spy=all_data.get("SPY")
+
+    # Load all currently written V6 signal outputs for direct date comparison.
+    signal_sources=[]
+    candidate_paths=[
+        V6_SHADOW_DIR/"jlaw_v6_signals.csv",
+        V61_FAST_DIR/"full"/"jlaw_v6_signals.csv",
+        V610_FRESH_DIR/"jlaw_v6_signals.csv",
+        V610_DAILY_DIR/"quick"/"jlaw_v6_signals.csv",
+    ]
+    for p in candidate_paths:
+        if p.exists():
+            try:
+                d=pd.read_csv(p)
+                signal_sources.append((p,d))
+            except Exception:
+                pass
+
+    results=[]
+    for tinfo in targets:
+        ticker=tinfo["ticker"]; fdate=pd.Timestamp(tinfo["formal_date"]); odate=pd.Timestamp(tinfo["observed_date"])
+        rec={"ticker":ticker,"formal_date":tinfo["formal_date"],"observed_date":tinfo["observed_date"],
+             "engine_rows":[],"written_rows":[],"error":None}
+        try:
+            if ticker not in all_data or spy is None:
+                raise RuntimeError("market cache missing")
+
+            raw=all_data[ticker]
+            sec=eng.T2S.get(ticker)
+            secdf=all_data.get(sec)
+            if secdf is None:
+                raise RuntimeError(f"sector cache missing: {sec}")
+
+            # Run exact historical_signals only for this ticker using current complete cache.
+            d,s,f,sdg=eng.historical_signals(ticker,raw,spy,secdf,all_data)
+            sigs=s.copy() if isinstance(s,pd.DataFrame) else pd.DataFrame()
+
+            if not sigs.empty:
+                for _,r in sigs.iterrows():
+                    dt=pd.to_datetime(r.get("date"),errors="coerce")
+                    if pd.isna(dt): continue
+                    if abs((dt-fdate).days)<=10 or abs((dt-odate).days)<=10:
+                        item={"date":dt.strftime("%Y-%m-%d")}
+                        for c in ["entry","pivot","extension","volratio","v6_pass","v6_rank","v6_top3",
+                                  "v6_tier","v6_edge_count","v6_red_count","v6_market_character"]:
+                            if c in sigs.columns:
+                                v=r.get(c)
+                                if isinstance(v,(np.bool_,bool)): v=bool(v)
+                                elif isinstance(v,(np.integer,)): v=int(v)
+                                elif isinstance(v,(np.floating,)) and pd.notna(v): v=float(v)
+                                item[c]=None if (isinstance(v,float) and pd.isna(v)) else v
+                        rec["engine_rows"].append(item)
+
+            # Check written CSV rows from all official outputs.
+            for p,dw in signal_sources:
+                if "ticker" not in dw.columns or "date" not in dw.columns: continue
+                z=dw[dw["ticker"].astype(str).str.upper()==ticker].copy()
+                if z.empty: continue
+                z["_date"]=pd.to_datetime(z["date"],errors="coerce")
+                z=z[z["_date"].between(fdate-pd.Timedelta(days=10),odate+pd.Timedelta(days=10))]
+                for _,r in z.iterrows():
+                    item={"source":str(p),"date":r["_date"].strftime("%Y-%m-%d")}
+                    for c in ["entry","pivot","extension","volratio","v6_pass","v6_rank","v6_top3",
+                              "v6_tier","v6_edge_count","v6_red_count","v6_market_character"]:
+                        if c in z.columns:
+                            v=r.get(c)
+                            if isinstance(v,(np.bool_,bool)): v=bool(v)
+                            elif isinstance(v,(np.integer,)): v=int(v)
+                            elif isinstance(v,(np.floating,)) and pd.notna(v): v=float(v)
+                            item[c]=None if (isinstance(v,float) and pd.isna(v)) else v
+                    rec["written_rows"].append(item)
+
+            # Derive whether current engine itself emits formal date or not.
+            dates=[x["date"] for x in rec["engine_rows"]]
+            if tinfo["formal_date"] in dates:
+                rec["engine_emits_formal"]=True
+            else:
+                rec["engine_emits_formal"]=False
+            rec["engine_emits_observed"]=tinfo["observed_date"] in dates
+
+        except Exception as ex:
+            rec["error"]=f"{type(ex).__name__}: {ex}"
+        results.append(rec)
+
+    # Also inspect source code around date write / row assembly / ranking to locate any explicit shift.
+    src_txt=ep.read_text(encoding="utf-8",errors="ignore")
+    code_hits=[]
+    keys=("date=", '"date"', "'date'", "shift(", "iloc[i+1]", "i+1", "next", "rank", "to_csv")
+    for i,line in enumerate(src_txt.splitlines(),1):
+        low=line.lower()
+        if any(k.lower() in low for k in keys):
+            s=line.strip()
+            if s and len(s)<260 and (350<=i<=860):
+                code_hits.append(f"{i}: {s}")
+
+    def esc(v): return html.escape(str(v))
+    sections=[]
+    for r in results:
+        engrows=r.get("engine_rows",[])
+        wr=r.get("written_rows",[])
+        eng_html="".join(
+            "<tr><td>"+esc(x.get("date"))+"</td><td>"+esc(x.get("entry",""))+"</td><td>"+esc(x.get("pivot",""))+
+            "</td><td>"+esc(x.get("volratio",""))+"</td><td>"+esc(x.get("v6_pass",""))+"</td><td>"+esc(x.get("v6_rank",""))+
+            "</td><td>"+esc(x.get("v6_top3",""))+"</td></tr>"
+            for x in engrows
+        ) or "<tr><td colspan=7>当前正式 historical_signals() 在此窗口没有输出 signal row</td></tr>"
+        wr_html="".join(
+            "<tr><td>"+esc(Path(x.get("source","")).parent.name+"/"+Path(x.get("source","")).name)+"</td><td>"+esc(x.get("date"))+
+            "</td><td>"+esc(x.get("entry",""))+"</td><td>"+esc(x.get("pivot",""))+"</td><td>"+esc(x.get("v6_rank",""))+
+            "</td><td>"+esc(x.get("v6_top3",""))+"</td></tr>"
+            for x in wr
+        ) or "<tr><td colspan=6>现有正式 V6 CSV 在这个时间窗没有该股票记录</td></tr>"
+
+        verdict=[]
+        if r.get("error"):
+            verdict.append(r["error"])
+        else:
+            verdict.append(f"formal={r['formal_date']}；observed={r['observed_date']}")
+            verdict.append(f"historical_signals 是否输出 formal 日：{r.get('engine_emits_formal')}")
+            verdict.append(f"historical_signals 是否输出 observed 日：{r.get('engine_emits_observed')}")
+
+        sections.append(f"""
+<div class="c">
+<h2>{esc(r['ticker'])}</h2>
+<div class="warn">{'<br>'.join(esc(x) for x in verdict)}</div>
+<h3>① 当前正式 historical_signals() 实际输出</h3>
+<div style="overflow:auto"><table>
+<tr><th>date</th><th>entry</th><th>pivot</th><th>volratio</th><th>v6_pass</th><th>rank</th><th>top3</th></tr>{eng_html}
+</table></div>
+<h3>② 已写入的正式 V6 CSV</h3>
+<div style="overflow:auto"><table>
+<tr><th>来源</th><th>date</th><th>entry</th><th>pivot</th><th>rank</th><th>top3</th></tr>{wr_html}
+</table></div>
+</div>""")
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
+.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:7px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;word-break:break-word}}
+</style></head><body><div class="w">
+<a href="/v6129/signal-date-alignment">← 返回 V6.12.9</a>
+<div class="c"><h1>🧵 V6.12.10 Signal Timestamp Trace</h1>
+<div class="ok"><b>只追两笔：</b>ADI 6/3→6/5 与 KEYS 8/17→8/18。<br>
+直接运行正式 historical_signals()，再对照 V6 Shadow / V6.1 Full / Fresh / Daily 已写出的 CSV 日期，检查到底是引擎本身、ranking，还是写盘层发生日期偏移。</div></div>
+{''.join(sections)}
+<div class="c"><h2>③ Engine 源码中的日期 / ranking / 写盘相关行</h2>
+<div class="mono">{'<br>'.join(esc(x) for x in code_hits[:260])}</div></div>
+</div></body></html>"""
+
 @APP.get("/v6129/signal-date-alignment")
 def v6129_signal_date_alignment():
     import html, importlib.util
@@ -9270,6 +9456,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:7px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
 </style></head><body><div class="w">
 <a href="/v6128/breakout-autopsy">← 返回 V6.12.8</a>
+<p><a href="/v61210/signal-timestamp-trace"><button type="button">🧵 打开 V6.12.10 Signal Timestamp Trace</button></a></p>
 <div class="c"><h1>🗓️ V6.12.9 Signal-Date Alignment Audit</h1>
 <div class="ok"><b>目标：</b>检查 V6.12.8 那 4 个“候选日期”是不是比真正 Formal Breakout 提前。<br>
 对每只股票向前/向后各看约 15 个交易日，每一天重新调用正式 supply() 和正式 breakout 规则。</div></div>
