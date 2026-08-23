@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.2</h1><div class="muted">当前研究版：V6.12.2 Funnel Audit + Healthcheck Fix</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.3</h1><div class="muted">当前研究版：V6.12.3 Full UI Restore + Funnel Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -7986,17 +7986,6 @@ try{
       box.style.cssText="margin:10px 0;border:2px solid #059669";
       box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.9 Selective Break-even</h2><div class="muted">只对弱交易启用 +10% → BE，并与原策略 Baseline 同表比较</div>
 
-<div class="card" style="border:2px solid #10b981">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div>
-      <h2 style="margin:0">🔬 V6.12.2 Funnel Audit</h2>
-      <div class="muted">Healthcheck 已修复 · 直接查 VCP / Edge / Red-Flag / Ranking 漏斗</div>
-    </div>
-    <a href="/v612/funnel-audit"><button type="button">打开 V6.12 漏斗诊断</button></a>
-  </div>
-</div>
-
-
 <div class="card" style="border:2px solid #d69e2e">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
     <div>
@@ -8417,7 +8406,8 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 <body><div class="wrap">
 <a class="back" href="/">← 返回主仪表盘</a>
 <div class="card">
-<h1>🧱 V6.3.9.3 Context Veto Diagnostic</h1><p><a href="/v612/funnel-audit"><button type="button">🔬 打开 V6.12 Funnel Audit</button></a></p>
+<h1>🧱 V6.3.9.3 Context Veto Diagnostic</h1>
+<p style="margin-top:12px"><a href="/v612/funnel-audit"><button type="button">🔬 打开 V6.12 Funnel Audit</button></a></p>
 <p>独立页面，避免主仪表盘过长导致手机/PDF截断。全部直接读取现有 V6.3 trades，不重跑。</p>
 </div>
 
@@ -8667,6 +8657,106 @@ table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px so
 </div></body></html>"""
     return render_template_string(tpl,a=a,stages=stages)
 
+
+@APP.get("/v612/funnel-audit")
+def v612_funnel_audit():
+    """V6.12 read-only funnel audit; cached data only."""
+    import os, glob, json, html
+    from pathlib import Path
+
+    def pick(d, names):
+        for n in names:
+            if n in d and d[n] is not None:
+                return d[n]
+        return None
+
+    def truth(v):
+        if isinstance(v,bool): return v
+        if isinstance(v,(int,float)): return v != 0
+        if v is None: return None
+        return str(v).strip().lower() in {"1","true","yes","pass","passed","ok","a1","a2","a3"}
+
+    rows=[]
+    for pat in ("/data/**/*.json","/app/data/**/*.json","data/**/*.json",
+                "/data/**/*.jsonl","/app/data/**/*.jsonl","data/**/*.jsonl"):
+        for fp in glob.glob(pat, recursive=True):
+            try:
+                if os.path.getsize(fp) > 80000000: continue
+                raw=Path(fp).read_text(encoding="utf-8",errors="ignore")
+                objs=[]
+                if fp.endswith(".jsonl"):
+                    for ln in raw.splitlines():
+                        try:
+                            z=json.loads(ln)
+                            if isinstance(z,dict): objs.append(z)
+                        except: pass
+                else:
+                    try:
+                        z=json.loads(raw)
+                        if isinstance(z,list): objs=z
+                        elif isinstance(z,dict):
+                            for k in ("signals","rows","results","trades","candidates","data"):
+                                if isinstance(z.get(k),list):
+                                    objs=z[k]; break
+                    except: pass
+                for d in objs:
+                    if not isinstance(d,dict): continue
+                    dt=str(pick(d,["date","signal_date","entry_date","breakout_date","asof","as_of_date"]) or "")[:10]
+                    tk=str(pick(d,["ticker","symbol","stock"]) or "").upper()
+                    if not tk or not dt or dt <= "2026-05-20": continue
+                    vcp=truth(pick(d,["vcp_pass","strict_vcp","is_vcp","vcp_ok","vcp_valid"]))
+                    ec=pick(d,["v6_edge_count","edge_count","edges","edge_stack_count"])
+                    try: ecf=float(ec) if ec is not None else None
+                    except: ecf=None
+                    ep=truth(pick(d,["edge_pass","edge_stack_pass","v6_edge_pass"]))
+                    edge=ep if ep is not None else (ecf>=6 if ecf is not None else None)
+                    veto=truth(pick(d,["veto","vetoed","red_flag_veto","is_vetoed"]))
+                    if veto is None:
+                        veto=truth(pick(d,["red_flag","redflag","has_red_flag","v6_red_flag"]))
+                    rank=pick(d,["rank","ranking","daily_rank","v6_rank"])
+                    try: rankok=float(rank)<=3 if rank is not None else None
+                    except: rankok=None
+                    final=truth(pick(d,["final_signal","signal","selected","is_signal","trade_signal"]))
+                    rows.append(dict(ticker=tk,date=dt,vcp=vcp,edges=ecf,edge=edge,veto=veto,rank=rank,rankok=rankok,final=bool(final)))
+            except: pass
+
+    # dedupe ticker/date, keep row with most downstream fields
+    best={}
+    for r in rows:
+        k=(r["ticker"],r["date"])
+        score=sum(r[x] is not None for x in ("vcp","edge","veto","rankok"))
+        if k not in best or score>best[k][0]: best[k]=(score,r)
+    rows=sorted([x[1] for x in best.values()], key=lambda r:(r["date"],r["ticker"]))
+
+    vknown=[r for r in rows if r["vcp"] is not None]; vp=[r for r in vknown if r["vcp"]]
+    eknown=[r for r in vp if r["edge"] is not None]; ep=[r for r in eknown if r["edge"]]
+    xknown=[r for r in ep if r["veto"] is not None]; xp=[r for r in xknown if not r["veto"]]
+    rknown=[r for r in xp if r["rankok"] is not None]; rp=[r for r in rknown if r["rankok"]]
+    fp=[r for r in rows if r["final"]]
+    stages=[("缓存记录",len(rows),len(rows)),("VCP 通过",len(vp),len(vknown)),
+            ("Edge 通过",len(ep),len(eknown)),("Red-Flag 后保留",len(xp),len(xknown)),
+            ("Ranking Top3",len(rp),len(rknown)),("Final Signal",len(fp),len(rows))]
+
+    collapse="需要看下方“可判定”数量"
+    for name,n,known in stages[1:5]:
+        if known and n==0:
+            collapse=f"{name}：{known} → 0"
+            break
+
+    cards="".join(f'<div class="mini"><b>{html.escape(n)}</b><div class="big">{v}</div><small>可判定 {k}</small></div>' for n,v,k in stages)
+    trs="".join(
+        f"<tr><td>{html.escape(str(r['ticker']))}</td><td>{r['date']}</td><td>{r['vcp']}</td><td>{r['edges']}</td><td>{r['veto']}</td><td>{r['rank']}</td><td>{'✓' if r['final'] else ''}</td></tr>"
+        for r in rows[:100]
+    )
+    page = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}.wrap{max-width:900px;margin:auto}.card{background:#fff;border-radius:22px;padding:20px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mini{background:#f6f8fb;border-radius:14px;padding:14px}.big{font-size:28px;font-weight:800;margin-top:5px}small{color:#64748b}table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}.warn{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}</style></head>
+<body><div class="wrap"><a href="/v611/signal-drought-audit">← 返回 V6.11</a>
+<div class="card"><h1>🔬 V6.12 Funnel Audit</h1><div class="warn"><b>只读定位：</b>不改参数、不重跑321、不下载市场数据。</div></div>
+<div class="card"><h2>漏斗</h2><div class="grid">__CARDS__</div></div>
+<div class="card"><h2>🎯 当前定位</h2><h3>__COLLAPSE__</h3><p>“可判定”=缓存中确实存在该字段，不会把缺字段当失败。</p></div>
+<div class="card"><h2>样本明细</h2><div style="overflow:auto"><table><tr><th>股票</th><th>日期</th><th>VCP</th><th>Edges</th><th>Veto</th><th>Rank</th><th>Final</th></tr>__TRS__</table></div></div>
+</div></body></html>"""
+    return page.replace("__CARDS__",cards).replace("__COLLAPSE__",html.escape(collapse)).replace("__TRS__",trs)
 
 @APP.get("/v610/final-system")
 def v610_final_system_page():
@@ -10061,104 +10151,3 @@ def health():
 
 recover_stale_v3_status()
 threading.Thread(target=scheduler_loop, daemon=True).start()
-
-
-@APP.get("/v612/funnel-audit")
-def v612_funnel_audit():
-    """V6.12 read-only funnel audit; cached data only."""
-    import os, glob, json, html
-    from pathlib import Path
-
-    def pick(d, names):
-        for n in names:
-            if n in d and d[n] is not None:
-                return d[n]
-        return None
-
-    def truth(v):
-        if isinstance(v,bool): return v
-        if isinstance(v,(int,float)): return v != 0
-        if v is None: return None
-        return str(v).strip().lower() in {"1","true","yes","pass","passed","ok","a1","a2","a3"}
-
-    rows=[]
-    for pat in ("/data/**/*.json","/app/data/**/*.json","data/**/*.json",
-                "/data/**/*.jsonl","/app/data/**/*.jsonl","data/**/*.jsonl"):
-        for fp in glob.glob(pat, recursive=True):
-            try:
-                if os.path.getsize(fp) > 80000000: continue
-                raw=Path(fp).read_text(encoding="utf-8",errors="ignore")
-                objs=[]
-                if fp.endswith(".jsonl"):
-                    for ln in raw.splitlines():
-                        try:
-                            z=json.loads(ln)
-                            if isinstance(z,dict): objs.append(z)
-                        except: pass
-                else:
-                    try:
-                        z=json.loads(raw)
-                        if isinstance(z,list): objs=z
-                        elif isinstance(z,dict):
-                            for k in ("signals","rows","results","trades","candidates","data"):
-                                if isinstance(z.get(k),list):
-                                    objs=z[k]; break
-                    except: pass
-                for d in objs:
-                    if not isinstance(d,dict): continue
-                    dt=str(pick(d,["date","signal_date","entry_date","breakout_date","asof","as_of_date"]) or "")[:10]
-                    tk=str(pick(d,["ticker","symbol","stock"]) or "").upper()
-                    if not tk or not dt or dt <= "2026-05-20": continue
-                    vcp=truth(pick(d,["vcp_pass","strict_vcp","is_vcp","vcp_ok","vcp_valid"]))
-                    ec=pick(d,["v6_edge_count","edge_count","edges","edge_stack_count"])
-                    try: ecf=float(ec) if ec is not None else None
-                    except: ecf=None
-                    ep=truth(pick(d,["edge_pass","edge_stack_pass","v6_edge_pass"]))
-                    edge=ep if ep is not None else (ecf>=6 if ecf is not None else None)
-                    veto=truth(pick(d,["veto","vetoed","red_flag_veto","is_vetoed"]))
-                    if veto is None:
-                        veto=truth(pick(d,["red_flag","redflag","has_red_flag","v6_red_flag"]))
-                    rank=pick(d,["rank","ranking","daily_rank","v6_rank"])
-                    try: rankok=float(rank)<=3 if rank is not None else None
-                    except: rankok=None
-                    final=truth(pick(d,["final_signal","signal","selected","is_signal","trade_signal"]))
-                    rows.append(dict(ticker=tk,date=dt,vcp=vcp,edges=ecf,edge=edge,veto=veto,rank=rank,rankok=rankok,final=bool(final)))
-            except: pass
-
-    # dedupe ticker/date, keep row with most downstream fields
-    best={}
-    for r in rows:
-        k=(r["ticker"],r["date"])
-        score=sum(r[x] is not None for x in ("vcp","edge","veto","rankok"))
-        if k not in best or score>best[k][0]: best[k]=(score,r)
-    rows=sorted([x[1] for x in best.values()], key=lambda r:(r["date"],r["ticker"]))
-
-    vknown=[r for r in rows if r["vcp"] is not None]; vp=[r for r in vknown if r["vcp"]]
-    eknown=[r for r in vp if r["edge"] is not None]; ep=[r for r in eknown if r["edge"]]
-    xknown=[r for r in ep if r["veto"] is not None]; xp=[r for r in xknown if not r["veto"]]
-    rknown=[r for r in xp if r["rankok"] is not None]; rp=[r for r in rknown if r["rankok"]]
-    fp=[r for r in rows if r["final"]]
-    stages=[("缓存记录",len(rows),len(rows)),("VCP 通过",len(vp),len(vknown)),
-            ("Edge 通过",len(ep),len(eknown)),("Red-Flag 后保留",len(xp),len(xknown)),
-            ("Ranking Top3",len(rp),len(rknown)),("Final Signal",len(fp),len(rows))]
-
-    collapse="需要看下方“可判定”数量"
-    for name,n,known in stages[1:5]:
-        if known and n==0:
-            collapse=f"{name}：{known} → 0"
-            break
-
-    cards="".join(f'<div class="mini"><b>{html.escape(n)}</b><div class="big">{v}</div><small>可判定 {k}</small></div>' for n,v,k in stages)
-    trs="".join(
-        f"<tr><td>{html.escape(str(r['ticker']))}</td><td>{r['date']}</td><td>{r['vcp']}</td><td>{r['edges']}</td><td>{r['veto']}</td><td>{r['rank']}</td><td>{'✓' if r['final'] else ''}</td></tr>"
-        for r in rows[:100]
-    )
-    page = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}.wrap{max-width:900px;margin:auto}.card{background:#fff;border-radius:22px;padding:20px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mini{background:#f6f8fb;border-radius:14px;padding:14px}.big{font-size:28px;font-weight:800;margin-top:5px}small{color:#64748b}table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}.warn{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}</style></head>
-<body><div class="wrap"><a href="/v611/signal-drought-audit">← 返回 V6.11</a>
-<div class="card"><h1>🔬 V6.12 Funnel Audit</h1><div class="warn"><b>只读定位：</b>不改参数、不重跑321、不下载市场数据。</div></div>
-<div class="card"><h2>漏斗</h2><div class="grid">__CARDS__</div></div>
-<div class="card"><h2>🎯 当前定位</h2><h3>__COLLAPSE__</h3><p>“可判定”=缓存中确实存在该字段，不会把缺字段当失败。</p></div>
-<div class="card"><h2>样本明细</h2><div style="overflow:auto"><table><tr><th>股票</th><th>日期</th><th>VCP</th><th>Edges</th><th>Veto</th><th>Rank</th><th>Final</th></tr>__TRS__</table></div></div>
-</div></body></html>"""
-    return page.replace("__CARDS__",cards).replace("__COLLAPSE__",html.escape(collapse)).replace("__TRS__",trs)
