@@ -2932,6 +2932,71 @@ def v63_summary():
                 old=pd.to_numeric(S["v6_rank"],errors="coerce")
                 _rr_add(scope_name,"OLD Rank 1",S[old==1])
 
+    rank12_diag=[]
+    rank12_features=[]
+
+    def _r12_add(scope,label,g):
+        if len(g):
+            rank12_diag.append({"scope":scope,"name":label,**_v6_shadow_metrics(g)})
+
+    # V6.5.2: diagnose why NEW Rank 2 often beats NEW Rank 1.
+    if len(T) and "date" in T.columns:
+        R=T.copy()
+        R["date"]=pd.to_datetime(R["date"],errors="coerce")
+
+        mc_power=(R["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in R.columns else pd.Series(False,index=R.index)
+        ext=pd.to_numeric(R["extension"],errors="coerce") if "extension" in R.columns else pd.Series(999.0,index=R.index)
+        vol=pd.to_numeric(R["volratio"],errors="coerce") if "volratio" in R.columns else pd.Series(0.0,index=R.index)
+        rs2=pd.to_numeric(R["rs"],errors="coerce") if "rs" in R.columns else pd.Series(0.0,index=R.index)
+
+        R["_power"]=mc_power.astype(int)
+        R["_goodloc"]=(ext<=0.01).astype(int)
+        R["_goodvol"]=(vol>=1.8).astype(int)
+        R["_ext"]=ext.fillna(999.0)
+        R["_vol"]=vol.fillna(0.0)
+        R["_rs2"]=rs2.fillna(0.0)
+
+        R=R.sort_values(
+            ["date","_power","_goodloc","_goodvol","_ext","_vol","_rs2"],
+            ascending=[True,False,False,False,True,False,False]
+        )
+        R["v651_rank"]=R.groupby("date").cumcount()+1
+
+        scopes=[("ALL",R)]
+        if "ticker" in R.columns:
+            tick=R["ticker"].astype(str)
+            scopes.append(("VALIDATION_324",R[tick.isin(set(V5_VALIDATION))]))
+        scopes.append(("2022–2026",R[R["date"]>=pd.Timestamp("2022-01-01")]))
+        if "v6_market_character" in R.columns:
+            scopes.append(("POWER_TREND",R[R["v6_market_character"].astype(str)=="POWER_TREND"]))
+
+        for scope_name,S in scopes:
+            if S.empty: continue
+            rr=pd.to_numeric(S["v651_rank"],errors="coerce")
+            _r12_add(scope_name,"NEW Rank 1",S[rr==1])
+            _r12_add(scope_name,"NEW Rank 2",S[rr==2])
+            _r12_add(scope_name,"NEW Rank 3",S[rr==3])
+
+        # Head-to-head only on dates that have both Rank1 and Rank2.
+        r1=R[R["v651_rank"]==1].copy()
+        r2=R[R["v651_rank"]==2].copy()
+        if len(r1) and len(r2):
+            date12=set(r1["date"].dropna()) & set(r2["date"].dropna())
+            H=R[R["date"].isin(date12)]
+            _r12_add("HEAD_TO_HEAD","Rank 1 on same dates",H[H["v651_rank"]==1])
+            _r12_add("HEAD_TO_HEAD","Rank 2 on same dates",H[H["v651_rank"]==2])
+
+        # Feature medians to show systematic differences between Rank1 and Rank2.
+        features=["extension","volratio","rs","supply_score","sector_score","leader_score",
+                  "group_breadth","v6_edge_count","v6_red_count"]
+        for feat in features:
+            if feat not in R.columns: continue
+            row={"feature":feat}
+            for rank_no in [1,2,3]:
+                s=pd.to_numeric(R.loc[R["v651_rank"]==rank_no,feat],errors="coerce").dropna()
+                row[f"r{rank_no}"]=float(s.median()) if len(s) else None
+            rank12_features.append(row)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -2940,7 +3005,8 @@ def v63_summary():
             "context_veto":context_veto,"context_veto_recent":context_veto_recent,
             "veto_validation":veto_validation,
             "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag,
-            "ranking_replay":ranking_replay}
+            "ranking_replay":ranking_replay,
+            "rank12_diag":rank12_diag,"rank12_features":rank12_features}
 
 def run_v63():
     import importlib.util
@@ -4422,7 +4488,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.5.1</h1><div class="muted">当前研究版：V6.5.1 Ranking Replay · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.5.2</h1><div class="muted">当前研究版：V6.5.2 Rank1 vs Rank2 Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4442,7 +4508,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.5.1 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.5.2 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6249,6 +6315,18 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v652-shortcut")){
+      const box=document.createElement("div");
+      box.id="v652-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #f59e0b";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.5.2 Rank1 vs Rank2</h2><div class="muted">不重跑：查为什么 Rank2 经常比 Rank1 好</div></div><a href="/v652/rank12-diagnostic"><button type="button">打开诊断</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v651-shortcut")){
       const box=document.createElement("div");
       box.id="v651-shortcut";
@@ -6328,7 +6406,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.5.1 当前版";
+      currentLink.textContent="🚀 V6.5.2 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6586,6 +6664,76 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v652/rank12-diagnostic")
+def v652_rank12_diagnostic_page():
+    s=v63_summary()
+    rows=s.get("rank12_diag",[]) if s.get("available") else []
+    feats=s.get("rank12_features",[]) if s.get("available") else []
+    scopes=["ALL","POWER_TREND","VALIDATION_324","2022–2026","HEAD_TO_HEAD"]
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.5.2 Rank 1 vs Rank 2</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:900px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:20px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:12px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid #e5e7eb;font-size:14px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🔬 V6.5.2 Rank 1 vs Rank 2 Diagnostic</h1>
+<div class="note">
+V6.5.1 显示“Top 2”整体比“只买 Rank 1”更好，所以先不冻结 Ranking。这里直接比较 Rank1/2/3，
+并做同日 Head-to-Head 和特征中位数，找出为什么 Rank2 经常优于 Rank1。仍然不重跑。
+</div>
+</div>
+
+{% for scope in scopes %}
+<div class="card">
+<h2>{{scope}}</h2>
+<div class="grid">
+{% for r in rows if r.scope==scope %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</div>
+{% endfor %}
+
+<div class="card">
+<h2>Rank 1 / 2 / 3 · 特征中位数</h2>
+<div style="overflow-x:auto">
+<table>
+<tr><th>Feature</th><th>Rank1</th><th>Rank2</th><th>Rank3</th></tr>
+{% for r in feats %}
+<tr>
+<td><b>{{r.feature}}</b></td>
+<td>{% if r.r1 is not none %}{{"%.3f"|format(r.r1)}}{% else %}-{% endif %}</td>
+<td>{% if r.r2 is not none %}{{"%.3f"|format(r.r2)}}{% else %}-{% endif %}</td>
+<td>{% if r.r3 is not none %}{{"%.3f"|format(r.r3)}}{% else %}-{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+</div>
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,feats=feats,scopes=scopes)
 
 @APP.get("/v651/ranking-replay")
 def v651_ranking_replay_page():
