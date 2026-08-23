@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.11.2</h1><div class="muted">当前研究版：V6.11.2 Signal Drought Audit Static Home Card</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.2</h1><div class="muted">当前研究版：V6.12.2 Funnel Audit + Healthcheck Fix</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -7985,6 +7985,17 @@ try{
       const box=document.createElement("div");box.id="v69-shortcut";box.className="card";
       box.style.cssText="margin:10px 0;border:2px solid #059669";
       box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.9 Selective Break-even</h2><div class="muted">只对弱交易启用 +10% → BE，并与原策略 Baseline 同表比较</div>
+
+<div class="card" style="border:2px solid #10b981">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🔬 V6.12.2 Funnel Audit</h2>
+      <div class="muted">Healthcheck 已修复 · 直接查 VCP / Edge / Red-Flag / Ranking 漏斗</div>
+    </div>
+    <a href="/v612/funnel-audit"><button type="button">打开 V6.12 漏斗诊断</button></a>
+  </div>
+</div>
+
 
 <div class="card" style="border:2px solid #d69e2e">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
