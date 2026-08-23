@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.3</h1><div class="muted">当前研究版：V6.12.3 Full UI Restore + Funnel Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.4</h1><div class="muted">当前研究版：V6.12.4 Full UI Verified + Funnel Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -7969,7 +7969,7 @@ setTimeout(poll,5000);
 </script>
 <script>
 document.addEventListener("DOMContentLoaded", function(){
-try{
+  try{
     const top=document.querySelector(".top");
     if(top && !document.getElementById("v610-shortcut")){
       const box=document.createElement("div");box.id="v610-shortcut";box.className="card";
@@ -7984,18 +7984,7 @@ try{
     if(top && !document.getElementById("v69-shortcut")){
       const box=document.createElement("div");box.id="v69-shortcut";box.className="card";
       box.style.cssText="margin:10px 0;border:2px solid #059669";
-      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.9 Selective Break-even</h2><div class="muted">只对弱交易启用 +10% → BE，并与原策略 Baseline 同表比较</div>
-
-<div class="card" style="border:2px solid #d69e2e">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div>
-      <h2 style="margin:0">🩻 V6.11 Signal Drought Audit</h2>
-      <div class="muted">查为什么 2026-05-20 后没有正式新信号 · 只读诊断</div>
-    </div>
-    <a href="/v611/signal-drought-audit"><button type="button">打开 V6.11 诊断</button></a>
-  </div>
-</div>
-</div><a href="/v69/selective-breakeven"><button type="button">打开 V6.9 测试</button></a></div>';
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.9 Selective Break-even</h2><div class="muted">只对弱交易启用 +10% → BE，并与原策略 Baseline 同表比较</div></div><a href="/v69/selective-breakeven"><button type="button">打开 V6.9 测试</button></a></div>';
       top.insertAdjacentElement("afterend",box);
     }
   }catch(e){}
@@ -8200,6 +8189,58 @@ try{
   }
 });
 </script>
+
+<script id="v6124-safe-ui">
+document.addEventListener("DOMContentLoaded", function(){
+  function makeCard(id,border,title,sub,href,label){
+    let box=document.getElementById(id);
+    if(box) return box;
+    box=document.createElement("div");
+    box.id=id; box.className="card"; box.style.cssText="margin:10px 0;border:2px solid "+border;
+    const row=document.createElement("div");
+    row.style.cssText="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap";
+    const left=document.createElement("div");
+    const h=document.createElement("h2"); h.style.margin="0"; h.textContent=title;
+    const s=document.createElement("div"); s.className="muted"; s.textContent=sub;
+    const a=document.createElement("a"); a.href=href;
+    const b=document.createElement("button"); b.type="button"; b.textContent=label;
+    a.appendChild(b); left.appendChild(h); left.appendChild(s); row.appendChild(left); row.appendChild(a); box.appendChild(row);
+    return box;
+  }
+
+  const top=document.querySelector(".top");
+  if(!top) return;
+
+  const v612=makeCard("v612-shortcut","#10b981","🔬 V6.12 Funnel Audit",
+    "最新诊断：180 个基础候选 → VCP / Edge / Red-Flag / Ranking / Final Signal",
+    "/v612/funnel-audit","打开 V6.12");
+  const v611=makeCard("v611-shortcut","#d69e2e","🩻 V6.11 Signal Drought Audit",
+    "查为什么 2026-05-20 后没有正式新信号",
+    "/v611/signal-drought-audit","打开 V6.11");
+
+  const pub=document.getElementById("publisher-top");
+  const ids=[
+    "v610-shortcut","v69-shortcut","v68-shortcut","v67-shortcut",
+    "v664-shortcut","v663-shortcut","v662-shortcut","v661-shortcut",
+    "v66-shortcut","v654-shortcut","v653-shortcut","v652-shortcut",
+    "v651-shortcut","v65-shortcut","v64-shortcut"
+  ];
+  const cards=ids.map(id=>document.getElementById(id)).filter(Boolean);
+
+  // Force the top layout: uploader first, then newest research to oldest.
+  top.after(...[pub,v612,v611].concat(cards).filter(Boolean));
+
+  // Floating uploader is kept as a second safety entry.
+  let fab=document.getElementById("publisher-fab-safe");
+  if(!fab){
+    fab=document.createElement("a");
+    fab.id="publisher-fab-safe"; fab.href="/publisher/control"; fab.textContent="☁️ 发布";
+    fab.style.cssText="position:fixed;right:14px;bottom:84px;z-index:9999;text-decoration:none;background:#111827;color:white;padding:12px 16px;border-radius:999px;font-weight:900;box-shadow:0 6px 24px rgba(0,0,0,.18)";
+    document.body.appendChild(fab);
+  }
+});
+</script>
+
 </body></html>"""
 
 
@@ -8407,7 +8448,6 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 <a class="back" href="/">← 返回主仪表盘</a>
 <div class="card">
 <h1>🧱 V6.3.9.3 Context Veto Diagnostic</h1>
-<p style="margin-top:12px"><a href="/v612/funnel-audit"><button type="button">🔬 打开 V6.12 Funnel Audit</button></a></p>
 <p>独立页面，避免主仪表盘过长导致手机/PDF截断。全部直接读取现有 V6.3 trades，不重跑。</p>
 </div>
 
@@ -8563,7 +8603,6 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
     return render_template_string(tpl,rows=rows,reasons=reasons,examples=examples)
 
 
-
 def _v611_drought_audit():
     out={"cutoff":"2026-05-20","cache_latest":"—","stocks":0,"rows_after":0,
          "stage2":0,"near_high":0,"volume18":0,"extension_ok":0,"power":0,
@@ -8656,7 +8695,6 @@ table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px so
 {% for r in a.examples %}<tr><td>{{r.ticker}}</td><td>{{r.date}}</td><td>{{r.volratio}}</td><td>{{r.extension}}%</td></tr>{% endfor %}</table></div>{% endif %}
 </div></body></html>"""
     return render_template_string(tpl,a=a,stages=stages)
-
 
 @APP.get("/v612/funnel-audit")
 def v612_funnel_audit():
@@ -8791,9 +8829,6 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 
 
 
-<div class="card" style="border:2px solid #d69e2e"><h2>🩻 V6.11 Signal Drought Audit</h2>
-<p>诊断为什么 <b>2026-05-20</b> 之后没有正式新信号。只读，不改模型。</p>
-<a href="/v611/signal-drought-audit" style="display:inline-block;background:#111827;color:white;text-decoration:none;padding:13px 17px;border-radius:13px;font-weight:800">打开 V6.11 断层诊断</a></div>
 <div class="card"><h2>⚡ Daily Incremental · 日常快速刷新</h2>
 <div class="rule">
 <b>用途：</b>Fresh 321 只需要建立一次完整新基线。以后日常不再重算多年历史。<br>
