@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.8</h1><div class="muted">当前研究版：V6.12.8 Breakout Gate Autopsy</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.8.1</h1><div class="muted">当前研究版：V6.12.8.1 Breakout Gate Autopsy Entry Fix</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6942,6 +6942,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v6128-shortcut" style="border:2px solid #ef4444">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🧫 V6.12.8 Breakout Gate Autopsy</h2>
+      <div class="muted">只拆 KEYS / SLB / ADI 四笔 Breakout 失败原因，不重跑321</div>
+    </div>
+    <a href="/v6128/breakout-autopsy"><button type="button">打开 V6.12.8</button></a>
+  </div>
+</div>
+
     <a href="/publisher/control" style="text-decoration:none">
       <button type="button">🚀 打开上传发布</button>
     </a>
@@ -8240,6 +8251,10 @@ document.addEventListener("DOMContentLoaded", function(){
   }
 });
 </script>
+
+
+<a id="v6128-fab" href="/v6128/breakout-autopsy"
+style="position:fixed;left:14px;bottom:84px;z-index:9999;text-decoration:none;background:#7f1d1d;color:white;padding:12px 14px;border-radius:999px;font-weight:900;box-shadow:0 6px 24px rgba(0,0,0,.18)">🧫 V6.12.8</a>
 
 </body></html>"""
 
