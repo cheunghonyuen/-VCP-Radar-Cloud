@@ -2997,6 +2997,101 @@ def v63_summary():
                 row[f"r{rank_no}"]=float(s.median()) if len(s) else None
             rank12_features.append(row)
 
+    pairwise_diag=[]
+    pairwise_features=[]
+
+    # V6.5.3 Pairwise head-to-head: on dates where both NEW Rank1 and Rank2 exist,
+    # inspect which one actually won and how their features differ.
+    if len(T) and "date" in T.columns:
+        R=T.copy()
+        R["date"]=pd.to_datetime(R["date"],errors="coerce")
+
+        mc_power=(R["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in R.columns else pd.Series(False,index=R.index)
+        ext=pd.to_numeric(R["extension"],errors="coerce") if "extension" in R.columns else pd.Series(999.0,index=R.index)
+        vol=pd.to_numeric(R["volratio"],errors="coerce") if "volratio" in R.columns else pd.Series(0.0,index=R.index)
+        rs2=pd.to_numeric(R["rs"],errors="coerce") if "rs" in R.columns else pd.Series(0.0,index=R.index)
+
+        R["_power"]=mc_power.astype(int)
+        R["_goodloc"]=(ext<=0.01).astype(int)
+        R["_goodvol"]=(vol>=1.8).astype(int)
+        R["_ext"]=ext.fillna(999.0)
+        R["_vol"]=vol.fillna(0.0)
+        R["_rs2"]=rs2.fillna(0.0)
+
+        R=R.sort_values(
+            ["date","_power","_goodloc","_goodvol","_ext","_vol","_rs2"],
+            ascending=[True,False,False,False,True,False,False]
+        )
+        R["v651_rank"]=R.groupby("date").cumcount()+1
+
+        r1=R[R["v651_rank"]==1].copy()
+        r2=R[R["v651_rank"]==2].copy()
+        pairs=r1.merge(r2,on="date",suffixes=("_r1","_r2"))
+        if len(pairs):
+            # identify better trade by return_pct when available
+            if "return_pct_r1" in pairs.columns and "return_pct_r2" in pairs.columns:
+                a=pd.to_numeric(pairs["return_pct_r1"],errors="coerce")
+                b=pd.to_numeric(pairs["return_pct_r2"],errors="coerce")
+                pairs["winner"]=pd.Series("TIE",index=pairs.index)
+                pairs.loc[a>b,"winner"]="R1"
+                pairs.loc[b>a,"winner"]="R2"
+
+                def _pair_group(label, P):
+                    if len(P):
+                        r1m=_v6_shadow_metrics(pd.DataFrame({
+                            "return_pct":pd.to_numeric(P["return_pct_r1"],errors="coerce")
+                        }))
+                        r2m=_v6_shadow_metrics(pd.DataFrame({
+                            "return_pct":pd.to_numeric(P["return_pct_r2"],errors="coerce")
+                        }))
+                        pairwise_diag.append({
+                            "scope":label,
+                            "pairs":int(len(P)),
+                            "r1_better":int((P["winner"]=="R1").sum()),
+                            "r2_better":int((P["winner"]=="R2").sum()),
+                            "ties":int((P["winner"]=="TIE").sum()),
+                            "r1_pf":r1m["pf"],"r1_avg":r1m["avg_return"],"r1_win":r1m["win_rate"],
+                            "r2_pf":r2m["pf"],"r2_avg":r2m["avg_return"],"r2_win":r2m["win_rate"],
+                        })
+
+                _pair_group("ALL SAME-DATE",pairs)
+
+                if "ticker_r1" in pairs.columns and "ticker_r2" in pairs.columns:
+                    vset=set(V5_VALIDATION)
+                    PV=pairs[pairs["ticker_r1"].astype(str).isin(vset) & pairs["ticker_r2"].astype(str).isin(vset)]
+                    _pair_group("VALIDATION_324",PV)
+
+                PR=pairs[pairs["date"]>=pd.Timestamp("2022-01-01")]
+                _pair_group("2022–2026",PR)
+
+                if "v6_market_character_r1" in pairs.columns and "v6_market_character_r2" in pairs.columns:
+                    PP=pairs[(pairs["v6_market_character_r1"].astype(str)=="POWER_TREND") &
+                             (pairs["v6_market_character_r2"].astype(str)=="POWER_TREND")]
+                    _pair_group("POWER_TREND",PP)
+
+                # Feature deltas split by which rank actually did better.
+                features=["extension","volratio","rs","supply_score","sector_score","leader_score",
+                          "group_breadth","v6_edge_count","v6_red_count"]
+                for feat in features:
+                    c1=f"{feat}_r1"; c2=f"{feat}_r2"
+                    if c1 not in pairs.columns or c2 not in pairs.columns:
+                        continue
+                    for winner in ["R1","R2"]:
+                        P=pairs[pairs["winner"]==winner]
+                        if len(P)==0: continue
+                        x1=pd.to_numeric(P[c1],errors="coerce")
+                        x2=pd.to_numeric(P[c2],errors="coerce")
+                        d=(x1-x2).dropna()
+                        if len(d):
+                            pairwise_features.append({
+                                "winner":winner,
+                                "feature":feat,
+                                "pairs":int(len(d)),
+                                "median_r1":float(x1.median()),
+                                "median_r2":float(x2.median()),
+                                "median_delta_r1_minus_r2":float(d.median())
+                            })
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3006,7 +3101,8 @@ def v63_summary():
             "veto_validation":veto_validation,
             "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag,
             "ranking_replay":ranking_replay,
-            "rank12_diag":rank12_diag,"rank12_features":rank12_features}
+            "rank12_diag":rank12_diag,"rank12_features":rank12_features,
+            "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features}
 
 def run_v63():
     import importlib.util
@@ -4488,7 +4584,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.5.2</h1><div class="muted">当前研究版：V6.5.2 Rank1 vs Rank2 Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.5.3</h1><div class="muted">当前研究版：V6.5.3 Same-Date Pairwise · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4508,7 +4604,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.5.2 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.5.3 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6315,6 +6411,18 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v653-shortcut")){
+      const box=document.createElement("div");
+      box.id="v653-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #22d3ee";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚖️ V6.5.3 Same-Date Pairwise</h2><div class="muted">不重跑：同一天 Rank1 vs Rank2 真正对打</div></div><a href="/v653/pairwise-diagnostic"><button type="button">打开 Pairwise</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v652-shortcut")){
       const box=document.createElement("div");
       box.id="v652-shortcut";
@@ -6406,7 +6514,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.5.2 当前版";
+      currentLink.textContent="🚀 V6.5.3 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6665,6 +6773,78 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v653/pairwise-diagnostic")
+def v653_pairwise_diagnostic_page():
+    s=v63_summary()
+    diag=s.get("pairwise_diag",[]) if s.get("available") else []
+    feats=s.get("pairwise_features",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.5.3 Pairwise Diagnostic</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:920px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#ecfeff;border:1px solid #a5f3fc;border-radius:12px;padding:12px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;border-bottom:1px solid #e5e7eb;font-size:13px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>⚖️ V6.5.3 Same-Date Pairwise</h1>
+<div class="note">
+只比较“同一天同时存在 NEW Rank1 和 Rank2”的日子，避免样本日期不同造成错觉。
+看 Rank2 是否真的系统性优于 Rank1，以及它赢的时候哪些特征更不一样。仍然不重跑。
+</div>
+</div>
+
+<div class="card">
+<h2>Same-Date Head-to-Head</h2>
+<div class="grid">
+{% for r in diag %}
+<div class="item">
+<div class="name">{{r.scope}} · {{r.pairs}} 对</div>
+<div class="metrics">
+<div class="metric"><small>R1更好 / R2更好</small><b>{{r.r1_better}} / {{r.r2_better}}</b></div>
+<div class="metric"><small>R1 PF / R2 PF</small><b>{{"%.2f"|format(r.r1_pf)}} / {{"%.2f"|format(r.r2_pf)}}</b></div>
+<div class="metric"><small>R1平均 / R2平均</small><b>{{"%.2f%%"|format(r.r1_avg*100)}} / {{"%.2f%%"|format(r.r2_avg*100)}}</b></div>
+<div class="metric"><small>R1胜率 / R2胜率</small><b>{{"%.1f%%"|format(r.r1_win*100)}} / {{"%.1f%%"|format(r.r2_win*100)}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</div>
+
+{% for winner in ["R1","R2"] %}
+<div class="card">
+<h2>{{winner}} 实际表现更好时 · 特征差异</h2>
+<div style="overflow-x:auto">
+<table>
+<tr><th>Feature</th><th>Pairs</th><th>R1中位</th><th>R2中位</th><th>R1-R2 中位差</th></tr>
+{% for r in feats if r.winner==winner %}
+<tr>
+<td><b>{{r.feature}}</b></td><td>{{r.pairs}}</td>
+<td>{{"%.3f"|format(r.median_r1)}}</td>
+<td>{{"%.3f"|format(r.median_r2)}}</td>
+<td>{{"%.3f"|format(r.median_delta_r1_minus_r2)}}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+</div>
+{% endfor %}
+</div></body></html>
+"""
+    return render_template_string(tpl,diag=diag,feats=feats)
 
 @APP.get("/v652/rank12-diagnostic")
 def v652_rank12_diagnostic_page():
