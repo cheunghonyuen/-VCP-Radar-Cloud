@@ -4491,6 +4491,105 @@ V610_JOURNAL = V610_DIR / "forward_signals.csv"
 
 V610_FRESH_DIR = DATA_DIR / "jlaw_v610_fresh_scan"
 V610_FRESH_STATUS = V610_FRESH_DIR / "status.json"
+
+V610_DAILY_DIR = DATA_DIR / "jlaw_v610_daily_scan"
+V610_DAILY_STATUS = V610_DAILY_DIR / "status.json"
+v610_daily_thread = None
+
+def _v610_daily_status():
+    s={"status":"idle","message":"尚未执行 Daily Incremental","processed":0,"stocks":0,"current":"","error":None}
+    if V610_DAILY_STATUS.exists():
+        try:s.update(json.loads(V610_DAILY_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v610_write_daily_status(**kw):
+    V610_DAILY_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v610_daily_status(); s.update(kw)
+    V610_DAILY_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+    return s
+
+def _v610_run_daily():
+    global v610_daily_thread
+    try:
+        import importlib.util, shutil
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():
+            raise RuntimeError("GitHub 根目录缺少 jlaw_v6_1_DECISION_FAST.py")
+
+        spec=importlib.util.spec_from_file_location("jlaw_v610_daily_engine",str(ep))
+        mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+        available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
+        run_dir=V610_DAILY_DIR/"quick"
+        V610_DAILY_DIR.mkdir(parents=True,exist_ok=True)
+
+        # Daily mode is intentionally fresh each time.
+        # It scans only recent 420 trading days because Forward Shadow only needs new/current signals.
+        for p in [V610_DAILY_DIR/"checkpoints_v61", run_dir/"checkpoints_v61"]:
+            if p.exists(): shutil.rmtree(p,ignore_errors=True)
+        for fn in [
+            V610_DAILY_DIR/"jlaw_v6_signals.csv",V610_DAILY_DIR/"jlaw_v6_trades.csv",
+            run_dir/"jlaw_v6_signals.csv",run_dir/"jlaw_v6_trades.csv"
+        ]:
+            try:
+                if fn.exists(): fn.unlink()
+            except Exception:pass
+
+        _v610_write_daily_status(
+            status="running",
+            message="Daily Incremental 正在扫描321只最近420个交易日；不下载历史、不重算多年回测",
+            processed=0,stocks=len(available),current="",error=None,
+            started_at=datetime.now(timezone.utc).isoformat(),finished_at=None
+        )
+
+        def prog(done,total,t):
+            _v610_write_daily_status(
+                status="running",
+                message="Daily Incremental：只扫描近期窗口，用于 Forward Shadow",
+                processed=done,stocks=total,current=t
+            )
+
+        mod.run(
+            str(MARKET_DIR),str(V610_DAILY_DIR),progress_cb=prog,
+            quick=True,quick_n=len(available),quick_lookback=420,
+            stop_file=str(V610_DAILY_DIR/"STOP"),
+            ticker_filter=available,parallel_workers=2,resume=False
+        )
+
+        sp=run_dir/"jlaw_v6_signals.csv"
+        latest="无"; n=0
+        if sp.exists() and sp.stat().st_size:
+            d=pd.read_csv(sp); n=len(d)
+            if n and "date" in d.columns:
+                dd=pd.to_datetime(d["date"],errors="coerce")
+                if dd.notna().any(): latest=dd.max().strftime("%Y-%m-%d")
+
+        _v610_write_daily_status(
+            status="done",
+            message=f"Daily Incremental 完成；近期信号 {n} 条；最后一个实际信号日期 {latest}",
+            processed=len(available),stocks=len(available),current="",
+            signal_rows=int(n),signal_latest=latest,
+            finished_at=datetime.now(timezone.utc).isoformat(),error=None
+        )
+    except Exception as ex:
+        traceback.print_exc()
+        _v610_write_daily_status(
+            status="error",message="Daily Incremental 失败",
+            error=f"{type(ex).__name__}: {ex}",
+            finished_at=datetime.now(timezone.utc).isoformat()
+        )
+    finally:
+        v610_daily_thread=None
+
+def v610_start_daily():
+    global v610_daily_thread
+    if v610_daily_thread is not None and v610_daily_thread.is_alive():
+        return False
+    v610_daily_thread=threading.Thread(target=_v610_run_daily,daemon=True)
+    v610_daily_thread.start()
+    return True
+
 v610_fresh_thread = None
 
 def _v610_fresh_status():
@@ -4603,6 +4702,7 @@ def _v610_write_meta(**kw):
 
 def _v610_source_signals():
     candidates=[
+        (V610_DAILY_DIR/"quick"/"jlaw_v6_signals.csv","V6.10 Daily Incremental"),
         (V610_FRESH_DIR/"jlaw_v6_signals.csv","V6.10 Fresh 321"),
         (V61_FAST_DIR/"full"/"jlaw_v6_signals.csv","V6.1 Full"),
         (V6_SHADOW_DIR/"jlaw_v6_signals.csv","V6.0 Shadow"),
@@ -6044,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.10.1</h1><div class="muted">当前研究版：V6.10.1 Fresh Signal Refresh · Forward Shadow</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.10.2</h1><div class="muted">当前研究版：V6.10.2 Daily Incremental Forward Scan</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8455,6 +8555,7 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
 def v610_final_system_page():
     st=v610_status()
     fresh=_v610_fresh_status()
+    daily=_v610_daily_status()
     rows=v610_recent_rows(40)
     tpl=r"""
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8481,6 +8582,26 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 <div class="rule"><b>5. Selective Break-even</b><br>只有 <b>Extension &gt; 1%</b> 的交易，先涨到 +10% 后，从下一交易日开始把止损提到买入价；其他交易维持原退出。</div>
 </div>
 
+
+
+<div class="card"><h2>⚡ Daily Incremental · 日常快速刷新</h2>
+<div class="rule">
+<b>用途：</b>Fresh 321 只需要建立一次完整新基线。以后日常不再重算多年历史。<br>
+这个按钮只扫描每只股票最近 <b>420 个交易日</b>，专门找“现在/最近的新信号”，供 Forward Shadow 使用。<br>
+<b>不重新下载历史市场数据，也不会覆盖 Fresh 321 的完整研究结果。</b>
+</div>
+<div class="metrics" style="margin-top:12px">
+<div class="metric"><small>状态</small><b>{{daily.status}}</b></div>
+<div class="metric"><small>进度</small><b>{{daily.processed}} / {{daily.stocks}}</b></div>
+<div class="metric"><small>当前</small><b>{{daily.current or "—"}}</b></div>
+<div class="metric"><small>最新信号</small><b>{{daily.signal_latest or "—"}}</b></div>
+</div>
+<p>{{daily.message}}</p>
+{% if daily.error %}<p style="color:#b91c1c"><b>{{daily.error}}</b></p>{% endif %}
+{% if daily.status != "running" %}
+<form method="post" action="/v610/daily-scan"><button class="green">⚡ Daily Incremental（以后日常用这个）</button></form>
+{% endif %}
+</div>
 
 <div class="card"><h2>🔄 Fresh 321 信号刷新</h2>
 <div class="warn">
@@ -8534,14 +8655,26 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 <script>
 setTimeout(async function pollFresh(){
   try{
-    const r=await fetch("/api/v610-fresh-status",{cache:"no-store"});
-    const s=await r.json();
-    if(s.status==="running") location.reload();
+    const [rf,rd]=await Promise.all([
+      fetch("/api/v610-fresh-status",{cache:"no-store"}),
+      fetch("/api/v610-daily-status",{cache:"no-store"})
+    ]);
+    const sf=await rf.json(), sd=await rd.json();
+    if(sf.status==="running" || sd.status==="running") location.reload();
   }catch(e){}
 },4000);
 </script>
 </div></body></html>"""
-    return render_template_string(tpl,st=st,fresh=fresh,rows=rows)
+    return render_template_string(tpl,st=st,fresh=fresh,daily=daily,rows=rows)
+
+@APP.get("/api/v610-daily-status")
+def api_v610_daily_status():
+    return jsonify(_v610_daily_status())
+
+@APP.post("/v610/daily-scan")
+def v610_daily_scan_route():
+    v610_start_daily()
+    return redirect("/v610/final-system")
 
 @APP.get("/api/v610-fresh-status")
 def api_v610_fresh_status():
