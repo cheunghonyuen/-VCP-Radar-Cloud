@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.5</h1><div class="muted">当前研究版：V6.12.5 Funnel Cache Read Fix</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.6</h1><div class="muted">当前研究版：V6.12.6 Engine Schema Probe</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8697,6 +8697,121 @@ table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px so
     return render_template_string(tpl,a=a,stages=stages)
 
 
+
+@APP.get("/v612/engine-schema-probe")
+def v612_engine_schema_probe():
+    import html, inspect, importlib.util, os
+    from pathlib import Path
+
+    rows=[]
+    paths=[
+        ("V6 Shadow trades", V6_SHADOW_DIR/"jlaw_v6_trades.csv"),
+        ("V6 Shadow signals", V6_SHADOW_DIR/"jlaw_v6_signals.csv"),
+        ("V6.1 Full trades", V61_FAST_DIR/"full"/"jlaw_v6_trades.csv"),
+        ("V6.1 Full signals", V61_FAST_DIR/"full"/"jlaw_v6_signals.csv"),
+        ("V6.10 Fresh trades", V610_FRESH_DIR/"jlaw_v6_trades.csv"),
+        ("V6.10 Fresh signals", V610_FRESH_DIR/"jlaw_v6_signals.csv"),
+        ("V6.10 Daily trades", V610_DAILY_DIR/"quick"/"jlaw_v6_trades.csv"),
+        ("V6.10 Daily signals", V610_DAILY_DIR/"quick"/"jlaw_v6_signals.csv"),
+    ]
+    for label,p in paths:
+        rec={"label":label,"path":str(p),"exists":p.exists(),"rows":0,"latest":"—","cols":"—"}
+        if p.exists() and p.stat().st_size>0:
+            try:
+                d=pd.read_csv(p)
+                rec["rows"]=len(d)
+                rec["cols"]=", ".join(map(str,d.columns.tolist()))
+                if "date" in d.columns and len(d):
+                    dd=pd.to_datetime(d["date"],errors="coerce")
+                    if dd.notna().any(): rec["latest"]=dd.max().strftime("%Y-%m-%d")
+            except Exception as e:
+                rec["cols"]=f"READ ERROR: {type(e).__name__}: {e}"
+        rows.append(rec)
+
+    checkpoints=[]
+    for root in [
+        V6_SHADOW_DIR,
+        V61_FAST_DIR,
+        V610_FRESH_DIR,
+        V610_DAILY_DIR,
+    ]:
+        try:
+            if root.exists():
+                for p in sorted(root.rglob("*")):
+                    if p.is_file() and ("checkpoint" in str(p).lower() or "status" in p.name.lower()):
+                        checkpoints.append({
+                            "path":str(p),
+                            "size":p.stat().st_size,
+                        })
+        except Exception:
+            pass
+
+    engine_info={"exists":False,"path":"—","functions":[],"keywords":[],"error":None}
+    ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+    engine_info["path"]=str(ep); engine_info["exists"]=ep.exists()
+    if ep.exists():
+        try:
+            spec=importlib.util.spec_from_file_location("v612_probe_engine",str(ep))
+            mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+            funcs=[]
+            for name,obj in inspect.getmembers(mod):
+                if inspect.isfunction(obj) and getattr(obj,"__module__","")==mod.__name__:
+                    try:sig=str(inspect.signature(obj))
+                    except:sig="(...)"
+                    funcs.append(name+sig)
+            engine_info["functions"]=funcs[:200]
+
+            src_txt=ep.read_text(encoding="utf-8",errors="ignore")
+            keys=("vcp","edge","red","veto","rank","signal","candidate","tier","top3","breakout")
+            lines=[]
+            for i,line in enumerate(src_txt.splitlines(),1):
+                low=line.lower()
+                if any(k in low for k in keys):
+                    s=line.strip()
+                    if s and len(s)<260:
+                        lines.append(f"{i}: {s}")
+            engine_info["keywords"]=lines[:350]
+        except Exception as e:
+            engine_info["error"]=f"{type(e).__name__}: {e}"
+
+    def esc(v): return html.escape(str(v))
+    file_rows="".join(
+        f"<tr><td><b>{esc(r['label'])}</b><br><small>{esc(r['path'])}</small></td>"
+        f"<td>{'✅' if r['exists'] else '❌'}</td><td>{r['rows']}</td><td>{esc(r['latest'])}</td>"
+        f"<td style='max-width:500px;word-break:break-word'>{esc(r['cols'])}</td></tr>"
+        for r in rows
+    )
+    ck_rows="".join(f"<tr><td>{esc(r['path'])}</td><td>{r['size']}</td></tr>" for r in checkpoints[:200])
+    fn_html="<br>".join(esc(x) for x in engine_info["functions"]) or "—"
+    kw_html="<br>".join(esc(x) for x in engine_info["keywords"]) or "—"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+pre,.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.55;word-break:break-word}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:12px;padding:12px}}
+</style></head><body><div class="w">
+<a href="/v612/funnel-audit">← 返回 V6.12</a>
+<div class="c"><h1>🧬 V6.12.6 Engine Schema Probe</h1>
+<div class="ok"><b>只读：</b>直接检查正式 V6 Shadow / V6.1 Full / Fresh / Daily 的真实文件、字段、checkpoint，以及 jlaw_v6_1_DECISION_FAST.py 的函数和门槛关键词。不会重跑321。</div></div>
+
+<div class="c"><h2>1. 正式 V6 文件与字段</h2><div style="overflow:auto"><table>
+<tr><th>文件</th><th>存在</th><th>行数</th><th>最新日期</th><th>真实字段</th></tr>{file_rows}
+</table></div></div>
+
+<div class="c"><h2>2. Checkpoint / Status 文件</h2><div style="overflow:auto"><table>
+<tr><th>路径</th><th>大小</th></tr>{ck_rows or '<tr><td colspan=2>没有找到</td></tr>'}
+</table></div></div>
+
+<div class="c"><h2>3. V6.1 Engine 函数</h2><p>Engine: {esc(engine_info['path'])} · {'✅' if engine_info['exists'] else '❌'}</p>
+<p style="color:#b91c1c">{esc(engine_info['error'] or '')}</p><div class="mono">{fn_html}</div></div>
+
+<div class="c"><h2>4. Engine 中与 VCP / Edge / Red-Flag / Rank 有关的源码行</h2>
+<div class="mono">{kw_html}</div></div>
+</div></body></html>"""
+
 @APP.get("/v612/funnel-audit")
 def v612_funnel_audit():
     """
@@ -8916,6 +9031,7 @@ td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{b
 .ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
 </style></head><body><div class="wrap">
 <a href="/v611/signal-drought-audit">← 返回 V6.11</a>
+<p><a href="/v612/engine-schema-probe"><button type="button">🧬 检查正式 V6 引擎字段</button></a></p>
 <div class="card"><h1>🔬 V6.12.5 Funnel Audit</h1>
 <div class="ok"><b>修复：</b>基础候选直接按 V6.11 同一路径从市场 CSV 重建，不再依赖 JSON 缓存格式。</div></div>
 <div class="card"><h2>漏斗</h2><div class="grid">{cards}</div></div>
