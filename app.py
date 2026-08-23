@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.11</h1><div class="muted">当前研究版：V6.11 Signal Drought Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.11.1</h1><div class="muted">当前研究版：V6.11.1 Signal Drought Audit Home Fix</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -7969,6 +7969,21 @@ setTimeout(poll,5000);
 </script>
 <script>
 document.addEventListener("DOMContentLoaded", function(){
+  try{
+    if(!document.getElementById("v611-home-card")){
+      const cards=[...document.querySelectorAll(".card")];
+      const v610=cards.find(c => (c.innerText||"").includes("V6.10 Final Combined System"));
+      if(v610){
+        const box=document.createElement("div");
+        box.id="v611-home-card";
+        box.className="card";
+        box.style.cssText="border:2px solid #d69e2e";
+        box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div><h2 style="margin:0 0 6px">🩻 V6.11 Signal Drought Audit</h2><div class="muted">只读诊断：查为什么 2026-05-20 之后没有正式新信号</div></div><a href="/v611/signal-drought-audit"><button type="button">打开 V6.11 诊断</button></a></div>';
+        v610.insertAdjacentElement("afterend",box);
+      }
+    }
+  }catch(e){}
+
   try{
     const top=document.querySelector(".top");
     if(top && !document.getElementById("v610-shortcut")){
