@@ -2794,13 +2794,97 @@ def v63_summary():
                 keep=~((ex>0.02)|(ss>=65))
                 _vv_add(scope_name,"AFTER combined veto",S[keep])
 
+    ranking_diag=[]
+    opportunity_diag=[]
+
+    def _rk_add(group,label,g):
+        if len(g):
+            ranking_diag.append({"group":group,"name":label,**_v6_shadow_metrics(g)})
+
+    def _op_add(group,label,g):
+        if len(g):
+            opportunity_diag.append({"group":group,"name":label,**_v6_shadow_metrics(g)})
+
+    # V6.5 Ranking Diagnostic — no rerun, existing V6.3 trades only.
+    if len(T):
+        # Rank buckets overall
+        if "v6_rank" in T.columns:
+            rk=pd.to_numeric(T["v6_rank"],errors="coerce")
+            _rk_add("ALL","Rank 1",T[rk==1])
+            _rk_add("ALL","Rank 2",T[rk==2])
+            _rk_add("ALL","Rank 3",T[rk==3])
+            _rk_add("ALL","Rank 4+",T[rk>=4])
+
+        # Same by market character
+        if "v6_market_character" in T.columns and "v6_rank" in T.columns:
+            rk=pd.to_numeric(T["v6_rank"],errors="coerce")
+            for mc in ["POWER_TREND","BULL_TREND"]:
+                M=T[T["v6_market_character"].astype(str)==mc]
+                if len(M):
+                    mr=pd.to_numeric(M["v6_rank"],errors="coerce")
+                    _rk_add(mc,"Rank 1",M[mr==1])
+                    _rk_add(mc,"Rank 2",M[mr==2])
+                    _rk_add(mc,"Rank 3",M[mr==3])
+                    _rk_add(mc,"Rank 4+",M[mr>=4])
+
+        # Validation cohort ranking
+        if "ticker" in T.columns and "v6_rank" in T.columns:
+            tick=T["ticker"].astype(str)
+            V=T[tick.isin(set(V5_VALIDATION))]
+            vr=pd.to_numeric(V["v6_rank"],errors="coerce")
+            _rk_add("VALIDATION_324","Rank 1",V[vr==1])
+            _rk_add("VALIDATION_324","Rank 2",V[vr==2])
+            _rk_add("VALIDATION_324","Rank 3",V[vr==3])
+            _rk_add("VALIDATION_324","Rank 4+",V[vr>=4])
+
+        # Recent ranking
+        if "date" in T.columns and "v6_rank" in T.columns:
+            Td=T.copy()
+            Td["date"]=pd.to_datetime(Td["date"],errors="coerce")
+            R=Td[Td["date"]>=pd.Timestamp("2022-01-01")]
+            rr=pd.to_numeric(R["v6_rank"],errors="coerce")
+            _rk_add("2022–2026","Rank 1",R[rr==1])
+            _rk_add("2022–2026","Rank 2",R[rr==2])
+            _rk_add("2022–2026","Rank 3",R[rr==3])
+            _rk_add("2022–2026","Rank 4+",R[rr>=4])
+
+        # Opportunity-quality comparison: not hard gates, descriptive stacks.
+        cols=set(T.columns)
+        if "v6_market_character" in cols:
+            P=T[T["v6_market_character"].astype(str)=="POWER_TREND"].copy()
+            _op_add("POWER","ALL",P)
+            if "v6_edge_count" in cols:
+                ec=pd.to_numeric(P["v6_edge_count"],errors="coerce")
+                _op_add("POWER","Edge≥7",P[ec>=7])
+                _op_add("POWER","Edge≥8",P[ec>=8])
+            if "v6_red_count" in cols:
+                rc=pd.to_numeric(P["v6_red_count"],errors="coerce")
+                _op_add("POWER","Red=0",P[rc==0])
+                _op_add("POWER","Red≤1",P[rc<=1])
+            if "extension" in cols:
+                ex=pd.to_numeric(P["extension"],errors="coerce")
+                _op_add("POWER","Extension≤1%",P[ex<=0.01])
+            if "volratio" in cols:
+                vv=pd.to_numeric(P["volratio"],errors="coerce")
+                _op_add("POWER","Volume≥1.8x",P[vv>=1.8])
+            if "rs" in cols:
+                rr=pd.to_numeric(P["rs"],errors="coerce")
+                _op_add("POWER","RS2≥90",P[rr>=90])
+
+            if all(c in cols for c in ["v6_edge_count","v6_red_count","extension"]):
+                ec=pd.to_numeric(P["v6_edge_count"],errors="coerce")
+                rc=pd.to_numeric(P["v6_red_count"],errors="coerce")
+                ex=pd.to_numeric(P["extension"],errors="coerce")
+                _op_add("POWER","Edge≥7 + Red=0 + Ext≤1%",P[(ec>=7)&(rc==0)&(ex<=0.01)])
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
             "validation_core_recent_trades":validation_core_recent_trades,
             "validation_core_feature_compare":validation_core_feature_compare,
             "context_veto":context_veto,"context_veto_recent":context_veto_recent,
-            "veto_validation":veto_validation}
+            "veto_validation":veto_validation,
+            "ranking_diag":ranking_diag,"opportunity_diag":opportunity_diag}
 
 def run_v63():
     import importlib.util
@@ -4282,7 +4366,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.4.0</h1><div class="muted">当前研究版：V6.4.0 Candidate Veto Validation · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.5.0</h1><div class="muted">当前研究版：V6.5.0 Opportunity Ranking Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4302,7 +4386,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.4.0 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.5.0 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6109,6 +6193,18 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v65-shortcut")){
+      const box=document.createElement("div");
+      box.id="v65-shortcut";
+      box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #c4b5fd";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.5 Ranking Diagnostic</h2><div class="muted">不重跑：先看现有 Ranking 到底会不会排</div></div><a href="/v65/ranking-diagnostic"><button type="button">打开诊断</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v64-shortcut")){
       const box=document.createElement("div");
       box.id="v64-shortcut";
@@ -6164,7 +6260,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.4.0 当前版";
+      currentLink.textContent="🚀 V6.5.0 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6420,6 +6516,69 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 """
     return render_template_string(tpl,rows=rows,recent=recent,groups=groups)
 
+
+
+@APP.get("/v65/ranking-diagnostic")
+def v65_ranking_diagnostic_page():
+    s=v63_summary()
+    rank_rows=s.get("ranking_diag",[]) if s.get("available") else []
+    opp_rows=s.get("opportunity_diag",[]) if s.get("available") else []
+    rank_groups=["ALL","POWER_TREND","BULL_TREND","VALIDATION_324","2022–2026"]
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.5 Ranking Diagnostic</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:900px;margin:auto}.card{background:white;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:20px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px}
+@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🎯 V6.5 Opportunity Ranking Diagnostic</h1>
+<div class="note">不重跑。先确认现有 Rank 1/2/3 是否真的有排序能力；再看 POWER_TREND 下哪些“机会质量特征”值得进入下一版 Ranking，而不是继续加硬门槛。</div>
+</div>
+
+{% for group in rank_groups %}
+<div class="card">
+<h2>{{group}} · Rank表现</h2>
+<div class="grid">
+{% for r in rank_rows if r.group==group %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</div>
+{% endfor %}
+
+<div class="card">
+<h2>POWER_TREND · Opportunity Quality</h2>
+<div class="grid">
+{% for r in opp_rows %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</div>
+</div></body></html>
+"""
+    return render_template_string(tpl,rank_rows=rank_rows,opp_rows=opp_rows,rank_groups=rank_groups)
 
 @APP.get("/v64/veto-validation")
 def v64_veto_validation_page():
