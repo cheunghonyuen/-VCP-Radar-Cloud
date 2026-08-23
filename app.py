@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.16</h1><div class="muted">当前研究版：V6.12.16 Historical Analog Expansion</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.17</h1><div class="muted">当前研究版：V6.12.17 Era × Market-Regime Stability Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v61217-shortcut" style="border:3px solid #0f766e">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🧬 V6.12.17 Era × Regime Stability Audit</h2>
+      <div class="muted">拆四个年代与POWER/BULL，排除时代混合造成的假优势</div></div>
+    <a href="/v61217/era-regime"><button type="button">打开 V6.12.17</button></a>
+  </div>
+</div>
 
 <div class="card" id="v61216-shortcut" style="border:3px solid #0891b2">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9906,6 +9914,87 @@ def v61214_page():
         for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
     run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
+
+# ================= V6.12.17 ERA x MARKET-REGIME STABILITY =================
+@APP.get("/v61217/era-regime")
+def v61217_era_regime_page():
+    import html
+    esc=lambda x:html.escape(str(x))
+    p=V63_DIR/"full"/"jlaw_v6_trades.csv"
+    if not p.exists():return "<h2>缺少历史 V6 trades 缓存</h2>",409
+    try:D=pd.read_csv(p)
+    except Exception as ex:return f"<h2>缓存读取失败</h2><pre>{esc(ex)}</pre>",500
+    if D.empty:return "<h2>历史交易缓存为空</h2>",409
+    D["date"]=pd.to_datetime(D.get("date"),errors="coerce")
+    D["return_pct"]=pd.to_numeric(D.get("return_pct"),errors="coerce")
+    for c in ["supply_score","dry","volratio"]:
+        if c in D.columns:D[c]=pd.to_numeric(D[c],errors="coerce")
+
+    def met(g):
+        z=pd.to_numeric(g.get("return_pct"),errors="coerce").dropna()
+        if z.empty:return {"n":0,"win":0.0,"avg":0.0,"pf":0.0,"streak":0}
+        w=z[z>0].sum();loss=-z[z<0].sum();run=mx=0
+        for v in z.tolist():
+            if v<0:run+=1;mx=max(mx,run)
+            else:run=0
+        return {"n":int(len(z)),"win":float((z>0).mean()),"avg":float(z.mean()),"pf":float(w/loss) if loss>0 else 0.0,"streak":int(mx)}
+
+    rules=[("BASELINE",lambda g:pd.Series(True,index=g.index)),
+           ("Supply ≥50",lambda g:g["supply_score"]>=50),
+           ("Dry <0.95",lambda g:g["dry"]<.95),("Dry <1.05",lambda g:g["dry"]<1.05),
+           ("Vol ≥1.35",lambda g:g["volratio"]>=1.35),("Vol ≥1.50",lambda g:g["volratio"]>=1.50),
+           ("Supply≥50 + Dry<0.95",lambda g:(g["supply_score"]>=50)&(g["dry"]<.95)),
+           ("Supply≥50 + Vol≥1.35",lambda g:(g["supply_score"]>=50)&(g["volratio"]>=1.35)),
+           ("Dry<0.95 + Vol≥1.35",lambda g:(g["dry"]<.95)&(g["volratio"]>=1.35))]
+    eras=[("2007–2011",pd.Timestamp("2007-01-01"),pd.Timestamp("2012-01-01")),
+          ("2012–2016",pd.Timestamp("2012-01-01"),pd.Timestamp("2017-01-01")),
+          ("2017–2021",pd.Timestamp("2017-01-01"),pd.Timestamp("2022-01-01")),
+          ("2022–2026",pd.Timestamp("2022-01-01"),pd.Timestamp("2027-01-01"))]
+    scopes=[]
+    for name,a,b in eras:scopes.append((name,D[(D["date"]>=a)&(D["date"]<b)]))
+    if "v6_market_character" in D.columns:
+        scopes.extend([("POWER_TREND",D[D["v6_market_character"].astype(str)=="POWER_TREND"]),
+                       ("BULL_TREND",D[D["v6_market_character"].astype(str)=="BULL_TREND"])])
+    rows=[]
+    for scope,G in scopes:
+        base=met(G)
+        for label,fn in rules:
+            try:mask=fn(G).fillna(False)
+            except Exception:continue
+            m=met(G[mask]);rows.append({"scope":scope,"rule":label,"coverage":float(mask.mean()) if len(mask) else 0.0,
+                "delta_avg":m["avg"]-base["avg"],"delta_pf":m["pf"]-base["pf"],**m})
+
+    # Stability score only counts eras with >=20 selected trades.
+    score=[]
+    for label,_ in rules[1:]:
+        rr=[x for x in rows if x["rule"]==label]
+        era_rr=[x for x in rr if x["scope"] in {e[0] for e in eras} and x["n"]>=20]
+        positive=[x for x in era_rr if x["delta_avg"]>0 and x["delta_pf"]>0]
+        recent=next((x for x in rr if x["scope"]=="2022–2026"),None)
+        power=next((x for x in rr if x["scope"]=="POWER_TREND"),None)
+        robust=len(era_rr)>=3 and len(positive)>=3 and recent and power and recent["delta_avg"]>0 and recent["delta_pf"]>0 and power["delta_avg"]>0 and power["delta_pf"]>0
+        score.append({"rule":label,"eligible_eras":len(era_rr),"positive_eras":len(positive),
+                      "recent_ok":bool(recent and recent["delta_avg"]>0 and recent["delta_pf"]>0),
+                      "power_ok":bool(power and power["delta_avg"]>0 and power["delta_pf"]>0),"robust":bool(robust)})
+    robust=[x["rule"] for x in score if x["robust"]]
+    verdict="ROBUST_CANDIDATES: "+", ".join(robust) if robust else "NO_RULE_PASSES_CROSS-ERA ROBUSTNESS GATE"
+
+    sr="" 
+    for x in score:sr+=f"<tr><td><b>{esc(x['rule'])}</b></td><td>{x['eligible_eras']}</td><td>{x['positive_eras']}</td><td>{'✓' if x['recent_ok'] else '✕'}</td><td>{'✓' if x['power_ok'] else '✕'}</td><td class='{'good' if x['robust'] else 'bad'}'><b>{'通过' if x['robust'] else '不通过'}</b></td></tr>"
+    trs=""
+    for scope,_ in scopes:
+        for x in rows:
+            if x["scope"]!=scope:continue
+            cls="good" if x["rule"]!="BASELINE" and x["delta_avg"]>0 and x["delta_pf"]>0 else ""
+            trs+=f"<tr><td>{scope}</td><td><b>{esc(x['rule'])}</b></td><td>{x['n']}</td><td>{x['coverage']:.1%}</td><td>{x['win']:.1%}</td><td>{x['avg']:.2%}</td><td>{x['pf']:.2f}</td><td>{x['streak']}</td><td class='{cls}'>{x['delta_avg']:+.2%}</td><td class='{cls}'>{x['delta_pf']:+.2f}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1220px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:14px;line-height:1.6}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:900px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.good{{color:#047857;font-weight:800}}.bad{{color:#b91c1c}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
+<div class='c'><h1>🧬 V6.12.17 Era × Market-Regime Stability Audit</h1><div class='note'>使用现有 {len(D)} 笔历史交易，拆四个年代与 POWER/BULL。只验证12.16候选，不下载、不重跑、不修改正式策略。</div></div>
+<div class='truth'><b>{esc(verdict)}</b><br>严格通过条件：至少3个年代各有≥20笔且同时改善平均收益和PF；2022–2026与POWER也必须同时改善。</div>
+<div class='c'><h2>跨年代稳定性总判定</h2><div class='scroll'><table><tr><th>规则</th><th>有效年代</th><th>正向年代</th><th>近期</th><th>POWER</th><th>最终</th></tr>{sr}</table></div></div>
+<div class='c'><h2>年代 × 市场环境明细</h2><div class='scroll'><table><tr><th>范围</th><th>规则</th><th>N</th><th>覆盖</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th><th>平均差</th><th>PF差</th></tr>{trs}</table></div></div>
+<div class='c'><b>纪律：</b>不通过跨年代门槛的规则不能因为某一个时期漂亮就进入正式策略；组合规则若样本不足也自动不通过。</div>
+</div></body></html>"""
 
 # ================= V6.12.16 HISTORICAL ANALOG EXPANSION =================
 @APP.get("/v61216/historical-analogs")
