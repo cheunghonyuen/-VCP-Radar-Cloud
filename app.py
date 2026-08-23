@@ -9032,7 +9032,7 @@ td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{b
 </style></head><body><div class="wrap">
 <a href="/v611/signal-drought-audit">← 返回 V6.11</a>
 <p><a href="/v612/engine-schema-probe"><button type="button">🧬 检查正式 V6 引擎字段</button></a></p>
-<div class="card"><h1>🔬 V6.12.5 Funnel Audit</h1>
+<div class="card"><h1>🔬 V6.12.6 Funnel Audit</h1>
 <div class="ok"><b>修复：</b>基础候选直接按 V6.11 同一路径从市场 CSV 重建，不再依赖 JSON 缓存格式。</div></div>
 <div class="card"><h2>漏斗</h2><div class="grid">{cards}</div></div>
 <div class="card"><h2>🎯 当前定位</h2><h3>{html.escape(collapse)}</h3>
