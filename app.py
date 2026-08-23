@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.6</h1><div class="muted">当前研究版：V6.12.6 Engine Schema Probe</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.7</h1><div class="muted">当前研究版：V6.12.7 Exact Engine Replay Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8812,6 +8812,387 @@ pre,.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12p
 <div class="mono">{kw_html}</div></div>
 </div></body></html>"""
 
+
+# ================= V6.12.7 EXACT ENGINE REPLAY AUDIT =================
+V6127_DIR = DATA_DIR / "jlaw_v6127_engine_replay"
+V6127_STATUS = V6127_DIR / "status.json"
+V6127_RESULT = V6127_DIR / "result.json"
+v6127_thread = None
+
+def _v6127_status():
+    s={"status":"idle","message":"尚未运行 Engine Replay","processed":0,"total":0,"current":"","error":None}
+    if V6127_STATUS.exists():
+        try:s.update(json.loads(V6127_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6127_write_status(**kw):
+    V6127_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6127_status(); s.update(kw)
+    V6127_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+    return s
+
+def _v6127_base_candidates():
+    cutoff=pd.Timestamp("2026-05-20")
+    rows=[]
+    for fp in sorted(MARKET_DIR.glob("*.csv")):
+        try:
+            d=pd.read_csv(fp)
+            if d.empty: continue
+            cm={str(c).lower():c for c in d.columns}
+            dc=cm.get("date") or cm.get("datetime") or cm.get("timestamp")
+            cc=cm.get("close") or cm.get("adj close") or cm.get("adj_close")
+            vc=cm.get("volume")
+            if not dc or not cc: continue
+            z=pd.DataFrame({
+                "date":pd.to_datetime(d[dc],errors="coerce"),
+                "close":pd.to_numeric(d[cc],errors="coerce"),
+                "volume":pd.to_numeric(d[vc],errors="coerce") if vc else float("nan")
+            }).dropna(subset=["date","close"]).sort_values("date")
+            if z.empty: continue
+            z["ma50"]=z["close"].rolling(50).mean()
+            z["ma150"]=z["close"].rolling(150).mean()
+            z["ma200"]=z["close"].rolling(200).mean()
+            z["hi252"]=z["close"].rolling(252,min_periods=120).max()
+            z["vma50"]=z["volume"].rolling(50,min_periods=20).mean()
+            z["volratio_proxy"]=z["volume"]/z["vma50"]
+            z["extension_proxy"]=z["close"]/z["ma50"]-1
+            q=z[z["date"]>cutoff].copy()
+            if q.empty: continue
+            stage2=(q["close"]>q["ma50"])&(q["ma50"]>q["ma150"])&(q["ma150"]>q["ma200"])
+            near=q["close"]>=0.90*q["hi252"]
+            vol=q["volratio_proxy"]>=1.8
+            ext=q["extension_proxy"].between(-0.02,0.08)
+            ok=stage2&near&vol&ext
+            for _,r in q[ok].iterrows():
+                rows.append({
+                    "ticker":fp.stem.upper(),
+                    "date":r["date"].strftime("%Y-%m-%d"),
+                    "proxy_volratio":float(r["volratio_proxy"]) if pd.notna(r["volratio_proxy"]) else None,
+                    "proxy_extension":float(r["extension_proxy"]) if pd.notna(r["extension_proxy"]) else None,
+                })
+        except Exception:
+            continue
+    return list({(r["ticker"],r["date"]):r for r in rows}.values())
+
+def _v6127_run():
+    global v6127_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():
+            raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v6127_engine",str(ep))
+        eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+        base=_v6127_base_candidates()
+        _v6127_write_status(status="running",message="正在加载现有市场缓存…",processed=0,total=len(base),current="",error=None)
+
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+        if "SPY" not in files: raise RuntimeError("市场缓存缺少 SPY.csv")
+        all_data={}
+        for t,p in files.items():
+            try: all_data[t]=eng.load(p)
+            except Exception: pass
+        spy=all_data["SPY"]
+
+        # Formal engine gate counters.
+        keys=["base180","market","stage2","rs72","sector58","breadth30","supply","leader","breakout",
+              "edge6","red0","tier_pass","top3"]
+        counts={k:0 for k in keys}
+        counts["base180"]=len(base)
+        fail_counts={k:0 for k in ["missing","market","stage2","rs72","sector58","breadth30","supply","leader","breakout",
+                                    "edge6","redflag","tier"]}
+        setup_rows=[]; audit_rows=[]
+
+        peers_by_sector={}
+        for t in eng.T2S:
+            sec=eng.T2S.get(t)
+            if sec:
+                peers_by_sector.setdefault(sec,[]).append(t)
+
+        for n,b in enumerate(sorted(base,key=lambda x:(x["date"],x["ticker"])),1):
+            t=b["ticker"]; date=pd.Timestamp(b["date"])
+            _v6127_write_status(status="running",message="正式 V6 判定链 Replay（只跑180个候选日）",
+                                processed=n-1,total=len(base),current=f"{t} {b['date']}")
+            row={**b,"fail_gate":"","formal_setup":False}
+            try:
+                if t not in all_data or t not in eng.T2S:
+                    row["fail_gate"]="missing"; fail_counts["missing"]+=1; audit_rows.append(row); continue
+                raw=all_data[t]
+                d=eng.ind(raw)
+                hit=d.index[d["date"]==date].tolist()
+                if not hit:
+                    row["fail_gate"]="missing"; fail_counts["missing"]+=1; audit_rows.append(row); continue
+                i=hit[-1]
+                if i<260:
+                    row["fail_gate"]="missing"; fail_counts["missing"]+=1; audit_rows.append(row); continue
+                x=d.iloc[:i+1]
+                sp=spy[spy.date<=date]
+
+                ok,ms=eng.market_ok(sp)
+                row["market_score"]=int(ms)
+                if not ok:
+                    row["fail_gate"]="market"; fail_counts["market"]+=1; audit_rows.append(row); continue
+                counts["market"]+=1
+
+                if not eng.stage2(x):
+                    row["fail_gate"]="stage2"; fail_counts["stage2"]+=1; audit_rows.append(row); continue
+                counts["stage2"]+=1
+
+                rsv=eng.rs(x,sp); row["rs"]=float(rsv)
+                if rsv<72:
+                    row["fail_gate"]="rs72"; fail_counts["rs72"]+=1; audit_rows.append(row); continue
+                counts["rs72"]+=1
+
+                secscore=50
+                sec=eng.T2S.get(t)
+                sd=all_data.get(sec)
+                if sd is not None:
+                    sdx=sd[sd.date<=date]
+                    if len(sdx)>=260: secscore=eng.rs(sdx,sp)
+                row["sector_score"]=float(secscore)
+                if secscore<58:
+                    row["fail_gate"]="sector58"; fail_counts["sector58"]+=1; audit_rows.append(row); continue
+                counts["sector58"]+=1
+
+                strong=top=valid=0
+                for p in peers_by_sector.get(sec,[]):
+                    if p not in all_data: continue
+                    ps=all_data[p][all_data[p].date<=date]
+                    if len(ps)<260: continue
+                    valid+=1; pr=eng.rs(ps,sp); strong+=pr>=70; top+=pr>=85
+                breadth=100*strong/valid if valid else 0
+                row["group_breadth"]=float(breadth)
+                if breadth<30:
+                    row["fail_gate"]="breadth30"; fail_counts["breadth30"]+=1; audit_rows.append(row); continue
+                counts["breadth30"]+=1
+
+                ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+                row.update({
+                    "supply_score":float(ss) if pd.notna(ss) else None,
+                    "pivot":float(piv) if pd.notna(piv) else None,
+                    "pivot_tight":float(tight) if pd.notna(tight) else None,
+                    "volratio":float(vr) if pd.notna(vr) else None,
+                    "c1":float(c1) if pd.notna(c1) else None,
+                    "c2":float(c2) if pd.notna(c2) else None,
+                    "c3":float(c3) if pd.notna(c3) else None,
+                    "dry":float(dry) if pd.notna(dry) else None,
+                })
+                if ss<40 or not np.isfinite(tight) or tight>=.16:
+                    row["fail_gate"]="supply"; fail_counts["supply"]+=1; audit_rows.append(row); continue
+                counts["supply"]+=1
+
+                leader=min(100,int(round(min(40,max(0,(rsv-60)*1.5))+min(25,max(0,secscore-55))+min(20,breadth*.2)+(15 if top>=2 else (8 if top>=1 else 0)))))
+                row["leader_score"]=int(leader)
+                if leader<55:
+                    row["fail_gate"]="leader"; fail_counts["leader"]+=1; audit_rows.append(row); continue
+                counts["leader"]+=1
+
+                prev=float(x.close.iloc[-2]); close=float(x.close.iloc[-1]); ext=close/piv-1
+                row.update({"entry":close,"formal_extension":float(ext)})
+                breakout=bool(prev<=piv and close>piv and ext<=.03 and vr>=1.20)
+                if not breakout:
+                    row["fail_gate"]="breakout"; fail_counts["breakout"]+=1; audit_rows.append(row); continue
+                counts["breakout"]+=1
+                row["formal_setup"]=True
+
+                market_character=eng._v6_market_character(sp)
+                edges,flags,edge_count,red_count=eng._v6_edges(
+                    market_character,rsv,secscore,breadth,ss,tight,vr,ext,c1,c2,c3,dry
+                )
+                tier=eng._v6_decision_tier(edge_count,red_count,market_character)
+                row.update({
+                    "v6_market_character":market_character,
+                    "v6_edge_count":int(edge_count),
+                    "v6_red_count":int(red_count),
+                    "v6_edges":"|".join(k for k,v in edges.items() if v),
+                    "v6_red_flags":"|".join(k for k,v in flags.items() if v),
+                    "v6_tier":tier,
+                    "v6_pass":bool(tier in ("A1","A2","B")),
+                })
+                if edge_count<6:
+                    row["fail_gate"]="edge6"; fail_counts["edge6"]+=1; audit_rows.append(row); continue
+                counts["edge6"]+=1
+                if red_count>0:
+                    row["fail_gate"]="redflag"; fail_counts["redflag"]+=1; audit_rows.append(row); continue
+                counts["red0"]+=1
+                if tier not in ("A1","A2","B"):
+                    row["fail_gate"]="tier"; fail_counts["tier"]+=1; audit_rows.append(row); continue
+                counts["tier_pass"]+=1
+
+                row["fail_gate"]=""
+                setup_rows.append(row.copy())
+                audit_rows.append(row)
+            except Exception as ex:
+                row["fail_gate"]="missing"
+                row["error"]=f"{type(ex).__name__}: {ex}"
+                fail_counts["missing"]+=1
+                audit_rows.append(row)
+
+        # Exact engine ranking across same dates, only on formal V6-pass rows.
+        rank_input=pd.DataFrame(setup_rows)
+        ranked=pd.DataFrame()
+        if not rank_input.empty:
+            ranked=eng._v6_rank_signals(rank_input.copy())
+            top3=int((ranked["v6_top3"]==True).sum()) if "v6_top3" in ranked.columns else 0
+            counts["top3"]=top3
+            rank_map={(str(r.ticker),pd.Timestamp(r.date).strftime("%Y-%m-%d")):{
+                "v6_rank":float(r.v6_rank) if pd.notna(r.v6_rank) else None,
+                "v6_top3":bool(r.v6_top3)
+            } for _,r in ranked.iterrows()}
+            for r in audit_rows:
+                k=(r["ticker"],r["date"])
+                if k in rank_map:r.update(rank_map[k])
+
+        # First actual bottleneck by sequential survival.
+        seq=[
+            ("Market Gate",counts["base180"],counts["market"]),
+            ("Stage 2",counts["market"],counts["stage2"]),
+            ("RS ≥72",counts["stage2"],counts["rs72"]),
+            ("Sector ≥58",counts["rs72"],counts["sector58"]),
+            ("Group Breadth ≥30",counts["sector58"],counts["breadth30"]),
+            ("Supply / Tight Pivot",counts["breadth30"],counts["supply"]),
+            ("Leader ≥55",counts["supply"],counts["leader"]),
+            ("Formal Breakout",counts["leader"],counts["breakout"]),
+            ("V6 Edge ≥6",counts["breakout"],counts["edge6"]),
+            ("Red-Flag = 0",counts["edge6"],counts["red0"]),
+            ("V6 Tier Pass",counts["red0"],counts["tier_pass"]),
+            ("Rank Top3",counts["tier_pass"],counts["top3"]),
+        ]
+        worst=None
+        for name,a,b in seq:
+            if a<=0: continue
+            loss=(a-b)/a
+            if worst is None or loss>worst[0]:worst=(loss,name,a,b)
+
+        result={
+            "generated_at":datetime.now(timezone.utc).isoformat(),
+            "engine_file":str(ep),
+            "engine_version":getattr(eng,"ENGINE_VERSION","unknown"),
+            "counts":counts,
+            "fail_counts":fail_counts,
+            "sequence":[{"stage":n,"in":a,"out":b} for n,a,b in seq],
+            "worst":{"stage":worst[1],"in":worst[2],"out":worst[3],"loss_pct":round(worst[0]*100,1)} if worst else None,
+            "rows":audit_rows,
+        }
+        V6127_DIR.mkdir(parents=True,exist_ok=True)
+        V6127_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6127_write_status(status="done",message="Engine Replay 完成",processed=len(base),total=len(base),current="",
+                            finished_at=datetime.now(timezone.utc).isoformat(),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v6127_write_status(status="error",message="Engine Replay 失败",error=f"{type(ex).__name__}: {ex}",
+                            finished_at=datetime.now(timezone.utc).isoformat())
+    finally:
+        v6127_thread=None
+
+def _v6127_start():
+    global v6127_thread
+    if v6127_thread is not None and v6127_thread.is_alive():
+        return False
+    v6127_thread=threading.Thread(target=_v6127_run,daemon=True)
+    v6127_thread.start()
+    return True
+
+@APP.post("/v6127/run")
+def v6127_run_route():
+    _v6127_start()
+    return redirect("/v6127/engine-replay")
+
+@APP.get("/api/v6127/status")
+def v6127_status_api():
+    return jsonify(_v6127_status())
+
+@APP.get("/v6127/engine-replay")
+def v6127_engine_replay_page():
+    import html
+    st=_v6127_status()
+    result=None
+    if V6127_RESULT.exists():
+        try:result=json.loads(V6127_RESULT.read_text(encoding="utf-8"))
+        except Exception:result=None
+
+    cards=""
+    rows_html=""
+    verdict="尚未运行"
+    worst=""
+    if result:
+        c=result.get("counts",{})
+        stages=[
+            ("基础候选",c.get("base180",0)),
+            ("Market Gate",c.get("market",0)),
+            ("Stage 2",c.get("stage2",0)),
+            ("RS ≥72",c.get("rs72",0)),
+            ("Sector ≥58",c.get("sector58",0)),
+            ("Breadth ≥30",c.get("breadth30",0)),
+            ("Supply / Tight",c.get("supply",0)),
+            ("Leader ≥55",c.get("leader",0)),
+            ("Formal Breakout",c.get("breakout",0)),
+            ("V6 Edge ≥6",c.get("edge6",0)),
+            ("Red-Flag = 0",c.get("red0",0)),
+            ("V6 Tier Pass",c.get("tier_pass",0)),
+            ("Rank Top3",c.get("top3",0)),
+        ]
+        cards="".join(f'<div class="m"><small>{html.escape(n)}</small><b>{v}</b></div>' for n,v in stages)
+        w=result.get("worst")
+        if w:
+            worst=f"{w['stage']}：{w['in']} → {w['out']}（淘汰 {w['loss_pct']}%）"
+            verdict=worst
+        rr=sorted(result.get("rows",[]),key=lambda x:(x.get("date",""),x.get("ticker","")))
+        for r in rr[:220]:
+            rows_html+=(
+                "<tr>"
+                f"<td>{html.escape(str(r.get('ticker','')))}</td>"
+                f"<td>{html.escape(str(r.get('date','')))}</td>"
+                f"<td>{html.escape(str(r.get('fail_gate','通过')) or '通过')}</td>"
+                f"<td>{html.escape(str(r.get('v6_market_character','')))}</td>"
+                f"<td>{html.escape(str(r.get('v6_edge_count','')))}</td>"
+                f"<td>{html.escape(str(r.get('v6_red_count','')))}</td>"
+                f"<td>{html.escape(str(r.get('v6_tier','')))}</td>"
+                f"<td>{html.escape(str(r.get('v6_rank','')))}</td>"
+                f"<td>{'✓' if r.get('v6_top3') else ''}</td>"
+                "</tr>"
+            )
+
+    page=f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:980px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:14px 0}}.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+.m{{background:#f6f8fb;border-radius:14px;padding:13px}}.m small{{display:block;color:#64748b}}.m b{{font-size:25px}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800;font-size:16px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class="w">
+<a href="/v612/funnel-audit">← 返回 V6.12</a>
+<div class="c"><h1>🧪 V6.12.7 Exact Engine Replay Audit</h1>
+<div class="ok"><b>正式引擎 Replay：</b>只对 V6.11 找到的 180 个候选日期，逐条调用正式 V6.1 的 market_ok / stage2 / rs / supply / _v6_edges / _v6_decision_tier / _v6_rank_signals。<br>
+不改参数、不重跑321、不下载市场数据。</div></div>
+<div class="c"><h2>状态</h2><div class="g">
+<div class="m"><small>状态</small><b>{html.escape(str(st.get('status')))}</b></div>
+<div class="m"><small>进度</small><b>{st.get('processed',0)} / {st.get('total',0)}</b></div>
+</div><p>{html.escape(str(st.get('message','')))}</p>
+{('<p style="color:#b91c1c"><b>'+html.escape(str(st.get('error')))+'</b></p>') if st.get('error') else ''}
+{('<form method="post" action="/v6127/run"><button>▶ 运行 Exact Engine Replay</button></form>') if st.get('status')!='running' else ''}
+</div>
+<div class="c"><h2>正式漏斗</h2><div class="g">{cards or '<div class="warn">运行后这里会显示正式漏斗。</div>'}</div></div>
+<div class="c"><h2>🎯 最大瓶颈</h2><div class="warn"><b>{html.escape(verdict)}</b></div></div>
+<div class="c"><h2>样本明细</h2><div style="overflow:auto"><table>
+<tr><th>股票</th><th>日期</th><th>失败层</th><th>市场</th><th>Edge</th><th>Red</th><th>Tier</th><th>Rank</th><th>Top3</th></tr>
+{rows_html}</table></div></div>
+<script>
+setTimeout(async function(){{
+  try{{
+    const r=await fetch("/api/v6127/status",{{cache:"no-store"}});
+    const s=await r.json();
+    if(s.status==="running") location.reload();
+  }}catch(e){{}}
+}},4000);
+</script>
+</div></body></html>"""
+    return page
+
+
 @APP.get("/v612/funnel-audit")
 def v612_funnel_audit():
     """
@@ -9032,6 +9413,7 @@ td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{b
 </style></head><body><div class="wrap">
 <a href="/v611/signal-drought-audit">← 返回 V6.11</a>
 <p><a href="/v612/engine-schema-probe"><button type="button">🧬 检查正式 V6 引擎字段</button></a></p>
+<p><a href="/v6127/engine-replay"><button type="button">🧪 打开 V6.12.7 Exact Engine Replay</button></a></p>
 <div class="card"><h1>🔬 V6.12.6 Funnel Audit</h1>
 <div class="ok"><b>修复：</b>基础候选直接按 V6.11 同一路径从市场 CSV 重建，不再依赖 JSON 缓存格式。</div></div>
 <div class="card"><h2>漏斗</h2><div class="grid">{cards}</div></div>
