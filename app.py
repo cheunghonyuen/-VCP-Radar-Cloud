@@ -4225,7 +4225,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.4</h1><div class="muted">当前研究版：V6.3.9.4 Embedded Cloud Publisher · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.5</h1><div class="muted">当前研究版：V6.3.9.5 Publisher Test · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4245,7 +4245,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.4 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9.5 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -5074,9 +5074,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <div style="margin-top:8px;font-size:14px">
 检查地址：<code>/publisher/health</code>
 </div>
+<div style="margin-top:10px">
+<a href="/publisher/test-page" style="text-decoration:none">
+<button type="button">🧪 Cloud Publisher 安全测试</button>
+</a>
+</div>
 </div>
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9.4 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9.5 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -6399,6 +6404,74 @@ def api_results():
     except Exception:
         return jsonify([])
 
+
+
+@APP.post("/publisher/test")
+def publisher_test():
+    """
+    Safe end-to-end test:
+    writes a harmless jlaw_publisher_probe.py file to GitHub.
+    This should trigger the repo-linked Railway auto-deploy,
+    without touching app.py or the trading engine.
+    """
+    try:
+        stamp = datetime.now(timezone.utc).isoformat()
+        probe = (
+            "# VCP Radar Cloud Publisher probe\n"
+            f"# Generated at: {stamp}\n"
+            "PUBLISHER_PROBE_OK = True\n"
+        ).encode("utf-8")
+        result = _gh_publish(
+            "jlaw_publisher_probe.py",
+            probe,
+            message=f"Publisher probe {stamp}"
+        )
+        return jsonify({"ok": True, "message": "publisher test commit created", **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@APP.get("/publisher/test-page")
+def publisher_test_page():
+    return """
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Publisher Test</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f8fb;color:#111827;padding:18px}
+.card{max-width:680px;margin:30px auto;background:white;border-radius:18px;padding:20px;box-shadow:0 2px 10px rgba(0,0,0,.08)}
+button{font-size:18px;font-weight:800;padding:14px 18px;border:0;border-radius:12px;background:#111827;color:white;width:100%}
+pre{white-space:pre-wrap;word-break:break-word;background:#f3f4f6;padding:12px;border-radius:10px}
+.ok{color:#166534}.bad{color:#991b1b}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>☁️ Cloud Publisher 测试</h2>
+<p>这个测试只会在 GitHub 新建/更新 <b>jlaw_publisher_probe.py</b>，不会改 app.py，也不会改模型。</p>
+<button onclick="runTest()">▶ 开始安全测试</button>
+<pre id="out">等待测试…</pre>
+</div>
+<script>
+async function runTest(){
+  const out=document.getElementById('out');
+  out.textContent='正在提交 GitHub…';
+  try{
+    const r=await fetch('/publisher/test',{method:'POST'});
+    const j=await r.json();
+    out.className=j.ok?'ok':'bad';
+    out.textContent=JSON.stringify(j,null,2);
+  }catch(e){
+    out.className='bad';
+    out.textContent=String(e);
+  }
+}
+</script>
+</body>
+</html>
+"""
 
 @APP.get("/publisher/health")
 def publisher_health():
