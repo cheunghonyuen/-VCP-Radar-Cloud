@@ -10052,7 +10052,7 @@ recover_stale_v3_status()
 threading.Thread(target=scheduler_loop, daemon=True).start()
 
 
-@APP.get("/v612/funnel-audit", response_class=HTMLResponse)
+@APP.get("/v612/funnel-audit")
 def v612_funnel_audit():
     """V6.12 read-only funnel audit; cached data only."""
     import os, glob, json, html
