@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.13</h1><div class="muted">当前研究版：V6.12.13 Write-Path Truth + Pass-Gate Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.14</h1><div class="muted">当前研究版：V6.12.14 Edge-Gate Cliff Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v61214-shortcut" style="border:3px solid #dc2626">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🔬 V6.12.14 Edge-Gate Cliff Audit</h2>
+      <div class="muted">只查5/20前后 Edge 漏斗断层；不改任何策略参数</div></div>
+    <a href="/v61214/edge-cliff"><button type="button">打开 V6.12.14</button></a>
+  </div>
+</div>
 
 <div class="card" id="v61213-shortcut" style="border:3px solid #f59e0b">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -8026,7 +8034,7 @@ document.addEventListener("DOMContentLoaded",function(){
     });
     function versionOf(el){
       const t=(el.textContent||"");
-      const nums=[...t.matchAll(/\bV(\d+)(?:\.(\d+))?/gi)].map(m=>parseFloat(m[1]+"."+(m[2]||"0")));
+  const nums=[...t.matchAll(/\\bV(\\d+)(?:\\.(\\d+))?/gi)].map(m=>parseFloat(m[1]+"."+(m[2]||"0")));
       return nums.length?Math.max(...nums):0;
     }
     candidates.sort((a,b)=>versionOf(b)-versionOf(a));
@@ -9769,6 +9777,119 @@ def v61213_run():
 @APP.get("/api/v61213/status")
 def v61213_status_api():
     return jsonify(_v61213_status())
+
+# ================= V6.12.14 EDGE-GATE CLIFF AUDIT =================
+V61214_DIR=DATA_DIR/"jlaw_v61214_edge_cliff"
+V61214_STATUS=V61214_DIR/"status.json"
+V61214_RESULT=V61214_DIR/"result.json"
+v61214_thread=None
+
+def _v61214_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None}
+    if V61214_STATUS.exists():
+        try:s.update(json.loads(V61214_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v61214_write_status(**kw):
+    V61214_DIR.mkdir(parents=True,exist_ok=True);s=_v61214_status();s.update(kw)
+    V61214_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8");return s
+
+def _v61214_compute():
+    global v61214_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v61214_engine",str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")};all_data={}
+        for t,p in files.items():
+            try:all_data[t]=eng.load(p)
+            except Exception:pass
+        spy=all_data.get("SPY")
+        if spy is None:raise RuntimeError("缺少 SPY 市场缓存")
+        cand=_v61212_base_candidates();tickers=sorted({x["ticker"] for x in cand})
+        if not tickers:tickers=sorted(t for t in files if t in getattr(eng,"T2S",{}))
+        cutoff=pd.Timestamp("2026-05-20");edges_n=["market_context","relative_strength","group_confirmation","supply_dryup","tight_pivot","demand_confirmation","entry_location","contraction_sequence","volume_dry_before_breakout"]
+        vals_n=["rs","sector_score","group_breadth","supply_score","pivot_tight","volratio","extension","c1","c2","c3","dry"]
+        rows=[];errors=[]
+        _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=0,total=len(tickers),current="",error=None)
+        for n,t in enumerate(tickers,1):
+            _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=n-1,total=len(tickers),current=t)
+            try:
+                sec=eng.T2S.get(t)
+                if t not in all_data or not sec or sec not in all_data:raise RuntimeError("ticker/sector cache missing")
+                d,s,f,sdg=eng.historical_signals(t,all_data[t],spy,all_data[sec],all_data)
+                if not isinstance(s,pd.DataFrame) or s.empty:continue
+                for _,r in s.iterrows():
+                    dt=pd.to_datetime(r.get("date"),errors="coerce")
+                    if pd.isna(dt):continue
+                    v={c:r.get(c,np.nan) for c in vals_n}
+                    ee,ff,ec,rc=eng._v6_edges(r.get("v6_market_character"),v["rs"],v["sector_score"],v["group_breadth"],v["supply_score"],v["pivot_tight"],v["volratio"],v["extension"],v["c1"],v["c2"],v["c3"],v["dry"])
+                    z={"ticker":t,"date":dt.strftime("%Y-%m-%d"),"month":dt.strftime("%Y-%m"),"edge_count":int(ec),"red_count":int(rc),"v6_pass":bool(r.get("v6_pass",False)),"tier":str(r.get("v6_tier",""))}
+                    for k in edges_n:z[k]=bool(ee.get(k,False))
+                    for c,x in v.items():
+                        q=pd.to_numeric(pd.Series([x]),errors="coerce").iloc[0];z[c]=None if pd.isna(q) else float(q)
+                    rows.append(z)
+            except Exception as ex:errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+        D=pd.DataFrame(rows)
+        if D.empty:raise RuntimeError("正式 historical_signals() 没有返回 Base Setup")
+        D["_date"]=pd.to_datetime(D["date"],errors="coerce");post=D[D["_date"]>cutoff].copy();end=post["_date"].max() if len(post) else cutoff
+        pre_start=cutoff-pd.Timedelta(days=max(1,(end-cutoff).days));pre=D[(D["_date"]<=cutoff)&(D["_date"]>pre_start)].copy()
+        er=[]
+        for k in edges_n:
+            a=float(pre[k].mean()) if len(pre) else 0;b=float(post[k].mean()) if len(post) else 0
+            er.append({"edge":k,"pre_n":int(pre[k].sum()),"pre_total":int(len(pre)),"pre_rate":a,"post_n":int(post[k].sum()),"post_total":int(len(post)),"post_rate":b,"delta":b-a})
+        er.sort(key=lambda x:x["delta"])
+        cr=[]
+        for c in vals_n:
+            a=pd.to_numeric(pre[c],errors="coerce");b=pd.to_numeric(post[c],errors="coerce")
+            cr.append({"component":c,"pre_median":float(a.median()) if a.notna().any() else None,"post_median":float(b.median()) if b.notna().any() else None,"pre_missing":float(a.isna().mean()) if len(a) else 0,"post_missing":float(b.isna().mean()) if len(b) else 0})
+        mr=[]
+        for m,g in D[D["_date"]>pre_start].groupby("month"):
+            q={"month":str(m),"base":int(len(g)),"v6_pass":int(g["v6_pass"].sum()),"avg_edges":float(g["edge_count"].mean())}
+            for k in edges_n:q[k]=float(g[k].mean())
+            mr.append(q)
+        mr.sort(key=lambda x:x["month"])
+        miss=max([(x["post_missing"]-x["pre_missing"]) for x in cr] or [0]);keyset={"supply_dryup","tight_pivot","demand_confirmation","contraction_sequence"};severe=[x for x in er if x["edge"] in keyset and x["delta"]<=-.25]
+        if miss>=.20:diag="DATA_COVERAGE_CLIFF";verdict="关键输入缺失率在5/20后明显跳升：优先判定数据/字段断层，不能改策略参数。"
+        elif not len(post):diag="NO_POST_BASE_SETUP";verdict="断层发生在 V6 Edge 之前。"
+        elif severe:diag="KEY_EDGE_CLIFF";verdict="关键 Edge 在5/20后大面积消失；输入未同步缺失，需看月度断点区分市场变化与计算逻辑断层。"
+        else:diag="MULTI_GATE_COMBINATION";verdict="没有单一 Edge 足以解释 V6 Pass=0，更像多个条件联合收紧。"
+        out={"generated_at":datetime.now(timezone.utc).isoformat(),"pre_start":pre_start.strftime("%Y-%m-%d"),"cutoff":"2026-05-20","pre_rows":len(pre),"post_rows":len(post),"pre_pass":int(pre["v6_pass"].sum()),"post_pass":int(post["v6_pass"].sum()),"diagnosis":diag,"verdict":verdict,"edge_rows":er,"components":cr,"monthly":mr,"examples":post.sort_values(["edge_count","date"],ascending=[False,False]).head(80).drop(columns=["_date"]).to_dict("records"),"errors":errors[:100]}
+        V61214_DIR.mkdir(parents=True,exist_ok=True);V61214_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v61214_write_status(status="done",message="Edge-Gate Cliff Audit 完成",processed=len(tickers),total=len(tickers),current="",error=None)
+    except Exception as ex:
+        traceback.print_exc();_v61214_write_status(status="error",message="Audit 失败",error=f"{type(ex).__name__}: {ex}")
+    finally:v61214_thread=None
+
+def _v61214_start():
+    global v61214_thread
+    if v61214_thread is not None and v61214_thread.is_alive():return False
+    v61214_thread=threading.Thread(target=_v61214_compute,daemon=True);v61214_thread.start();return True
+
+@APP.post("/v61214/run")
+def v61214_run():_v61214_start();return redirect("/v61214/edge-cliff")
+
+@APP.get("/api/v61214/status")
+def v61214_status_api():return jsonify(_v61214_status())
+
+@APP.get("/v61214/edge-cliff")
+def v61214_page():
+    import html
+    st=_v61214_status();r=None
+    if V61214_RESULT.exists():
+        try:r=json.loads(V61214_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    esc=lambda x:html.escape(str(x));edge=comp=month=ex="";truth=""
+    if r:
+        truth=f"<div class='truth'><b>{esc(r['diagnosis'])}</b><br>{esc(r['verdict'])}</div>"
+        for x in r.get("edge_rows",[]):edge+=f"<tr><td><b>{esc(x['edge'])}</b></td><td>{x['pre_n']}/{x['pre_total']} ({x['pre_rate']:.1%})</td><td>{x['post_n']}/{x['post_total']} ({x['post_rate']:.1%})</td><td>{x['delta']:+.1%}</td></tr>"
+        for x in r.get("components",[]):comp+=f"<tr><td><b>{esc(x['component'])}</b></td><td>{esc(x['pre_median'])}</td><td>{esc(x['post_median'])}</td><td>{x['pre_missing']:.1%}</td><td>{x['post_missing']:.1%}</td></tr>"
+        for x in r.get("monthly",[]):month+=f"<tr><td>{x['month']}</td><td>{x['base']}</td><td>{x['v6_pass']}</td><td>{x['avg_edges']:.2f}</td><td>{x['supply_dryup']:.0%}</td><td>{x['tight_pivot']:.0%}</td><td>{x['demand_confirmation']:.0%}</td><td>{x['contraction_sequence']:.0%}</td></tr>"
+        for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
 
 @APP.get("/v61213/write-truth")
 def v61213_page():
