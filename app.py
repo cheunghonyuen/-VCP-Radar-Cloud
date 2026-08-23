@@ -2424,7 +2424,48 @@ def v63_summary():
             g=T[m]
             if len(g): rsbands.append({"name":nm,**_v6_shadow_metrics(g)})
 
-    return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,"rsbands":rsbands}
+    cohort_rows=[]
+    recent_rs2_bands=[]
+
+    # Split by original research cohort vs validation cohort using ticker lists already defined in app.
+    if "ticker" in T.columns:
+        tick=T["ticker"].astype(str)
+        original_set=set(ORIGINAL_122)
+        validation_set=set(VALIDATION_324)
+        cohort_defs=[
+            ("ORIGINAL_122", T[tick.isin(original_set)]),
+            ("VALIDATION_324", T[tick.isin(validation_set)]),
+        ]
+        for cname,C in cohort_defs:
+            if C.empty: continue
+            def cadd(label,g):
+                if len(g): cohort_rows.append({"cohort":cname,"name":label,**_v6_shadow_metrics(g)})
+            cadd("ALL",C)
+            if "v6_market_character" in C.columns:
+                cadd("POWER",C[C["v6_market_character"].astype(str)=="POWER_TREND"])
+            if "rs" in C.columns:
+                rr=pd.to_numeric(C["rs"],errors="coerce")
+                cadd("RS2≥90",C[rr>=90])
+            if all(c in C.columns for c in ["v6_market_character","rs","volratio"]):
+                rr=pd.to_numeric(C["rs"],errors="coerce")
+                vv=pd.to_numeric(C["volratio"],errors="coerce")
+                mm=(C["v6_market_character"].astype(str)=="POWER_TREND")&(rr>=90)&(vv>=1.8)
+                cadd("POWER+Vol≥1.8+RS2≥90",C[mm])
+
+    # Recent-era non-overlapping RS2 bands.
+    if "date" in T.columns and "rs" in T.columns:
+        R=T[(T["date"]>=pd.Timestamp("2022-01-01"))&(T["date"]<=pd.Timestamp("2026-12-31"))].copy()
+        if len(R):
+            rr=pd.to_numeric(R["rs"],errors="coerce")
+            for nm,lo,hi in [("<80",None,80),("80–90",80,90),("90–95",90,95),("95–98",95,98),("98–100",98,100.0001)]:
+                m=pd.Series(True,index=R.index)
+                if lo is not None:m &= rr>=lo
+                if hi is not None:m &= rr<hi
+                g=R[m]
+                if len(g): recent_rs2_bands.append({"name":nm,**_v6_shadow_metrics(g)})
+
+    return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
+            "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands}
 
 def run_v63():
     import importlib.util
@@ -3889,7 +3930,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.5</h1><div class="muted">当前研究版：V6.3.5 RS2 Result Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.6</h1><div class="muted">当前研究版：V6.3.6 Cohort + Recent RS2 Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3909,7 +3950,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.5 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.6 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4729,7 +4770,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.5 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.6 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -4816,6 +4857,38 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 </div></div>
 {% endfor %}
 </div>
+
+<h3 style="margin-top:16px">Cohort 拆分 · 原122 vs 新增验证组</h3>
+<div class="muted" style="margin-bottom:8px">确认 V6.3 的改善是不是被原研究样本拉高。这里不重跑，只按 ticker 归组读取现有 V6.3 trades。</div>
+<div class="mobile-metrics">
+{% for r in v63_summary.cohort_rows %}
+<div class="metric-card">
+<div class="name">{{r.cohort}} · {{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<h3 style="margin-top:16px">2022–2026 · RS2 非重叠分层</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.recent_rs2_bands %}
+<div class="metric-card">
+<div class="name">RS2 {{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
 </details>
 {% endif %}
 </div>
