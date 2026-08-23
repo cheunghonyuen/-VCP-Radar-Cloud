@@ -4064,6 +4064,18 @@ button,.btn{display:inline-block;padding:12px 16px;border:0;border-radius:10px;b
 pre{white-space:pre-wrap;word-break:break-word;background:#f7f9fc;border-radius:12px;padding:14px;max-height:520px;overflow:auto}
 .muted{color:#68758a;font-size:14px}.ok{color:#138a45}.err{color:#c73737}
 table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #edf0f5;text-align:left;font-size:14px}
+
+#publisher-fab{
+  position:fixed; right:16px; bottom:88px; z-index:9999;
+  text-decoration:none;
+}
+#publisher-fab button{
+  border:0;border-radius:999px;padding:12px 16px;
+  font-weight:900;font-size:15px;
+  box-shadow:0 6px 24px rgba(0,0,0,.18);
+}
+@media print{#publisher-fab{display:none!important}}
+
 </style></head><body><div class="wrap">
 <div><a href="/" class="btn">← VCP Radar</a></div>
 <div class="card">
@@ -4151,6 +4163,11 @@ YouTube 字幕库 <span class="muted" style="font-size:15px;font-weight:600">（
 })();
 </script>
 
+
+<a id="publisher-fab" href="/publisher/control">
+  <button type="button">☁️ 发布</button>
+</a>
+
 </body></html>"""
 
 HTML = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4225,7 +4242,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.7</h1><div class="muted">当前研究版：V6.3.9.7 Publisher Live Test · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.8</h1><div class="muted">当前研究版：V6.3.9.8 Publisher UX · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4245,7 +4262,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.7 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9.8 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -5016,6 +5033,18 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </details>
 
 
+
+<div class="card" id="publisher-top" style="margin-top:10px;border:2px solid #bbf7d0">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
+      <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
+    </div>
+    <a href="/publisher/control" style="text-decoration:none">
+      <button type="button">🚀 打开上传发布</button>
+    </a>
+  </div>
+</div>
 <div class="card current-card" id="v628-diagnostic" style="margin-top:18px">
 <h2 style="margin:0 0 6px">🧭 V6.2.8 Recent Regime Diagnostics · 2022–2026</h2>
 <div class="muted" style="margin-bottom:12px">
@@ -5084,7 +5113,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 </div>
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9.7 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9.8 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -6470,6 +6499,9 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;b
 
 <label>2. Publisher 密码</label>
 <input id="secret" name="secret" type="password" autocomplete="current-password" placeholder="Railway 里设置的 PUBLISH_SECRET" required>
+<label style="font-weight:600;margin-top:8px;display:flex;align-items:center;gap:8px">
+<input id="remember" type="checkbox" checked style="width:auto"> 在这台手机记住密码
+</label>
 
 <label>3. Commit 备注（可留空）</label>
 <input id="message" name="message" type="text" placeholder="例如：V6.4 Context Veto">
@@ -6478,17 +6510,29 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;b
 </form>
 
 <p class="small">app_v*.py 会自动作为 <b>app.py</b> 发布；jlaw_*.py 保持原文件名。</p>
+<p class="small"><b>建议：</b>把这个页面加到 iPhone 主屏幕，以后点图标就直接上传，不必先打开仪表盘。</p>
 <pre id="out">等待发布…</pre>
 </div>
 </div>
 
 <script>
+const secretInput=document.getElementById("secret");
+const rememberBox=document.getElementById("remember");
+try{
+  const saved=localStorage.getItem("vcp_publish_secret")||"";
+  if(saved){ secretInput.value=saved; rememberBox.checked=true; }
+}catch(e){}
+
 document.getElementById("f").addEventListener("submit", async (e)=>{
   e.preventDefault();
   const out=document.getElementById("out");
   const file=document.getElementById("file").files[0];
   const secret=document.getElementById("secret").value;
   const message=document.getElementById("message").value;
+  try{
+    if(rememberBox.checked){ localStorage.setItem("vcp_publish_secret",secret); }
+    else { localStorage.removeItem("vcp_publish_secret"); }
+  }catch(e){}
   if(!file){ out.textContent="请选择 .py 文件"; return; }
 
   const fd=new FormData();
