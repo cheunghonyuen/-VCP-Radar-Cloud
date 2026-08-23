@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.10.2</h1><div class="muted">当前研究版：V6.10.2 Daily Incremental Forward Scan</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.11</h1><div class="muted">当前研究版：V6.11 Signal Drought Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8551,6 +8551,101 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
     return render_template_string(tpl,rows=rows,reasons=reasons,examples=examples)
 
 
+
+def _v611_drought_audit():
+    out={"cutoff":"2026-05-20","cache_latest":"—","stocks":0,"rows_after":0,
+         "stage2":0,"near_high":0,"volume18":0,"extension_ok":0,"power":0,
+         "power_volume":0,"all_basic":0,"notes":[],"examples":[]}
+    try:
+        cutoff=pd.Timestamp(out["cutoff"]); latest=[]; examples=[]
+        files=sorted(MARKET_DIR.glob("*.csv")); out["stocks"]=len(files)
+        for fp in files:
+            try:
+                d=pd.read_csv(fp)
+                if d.empty: continue
+                cm={str(c).lower():c for c in d.columns}
+                dc=cm.get("date") or cm.get("datetime") or cm.get("timestamp")
+                cc=cm.get("close") or cm.get("adj close") or cm.get("adj_close")
+                vc=cm.get("volume")
+                if not dc or not cc: continue
+                z=pd.DataFrame({
+                    "date":pd.to_datetime(d[dc],errors="coerce"),
+                    "close":pd.to_numeric(d[cc],errors="coerce"),
+                    "volume":pd.to_numeric(d[vc],errors="coerce") if vc else float("nan")
+                }).dropna(subset=["date","close"]).sort_values("date")
+                if z.empty: continue
+                latest.append(z["date"].max())
+                z["ma50"]=z.close.rolling(50).mean()
+                z["ma150"]=z.close.rolling(150).mean()
+                z["ma200"]=z.close.rolling(200).mean()
+                z["hi252"]=z.close.rolling(252,min_periods=120).max()
+                z["vma50"]=z.volume.rolling(50,min_periods=20).mean()
+                z["volratio"]=z.volume/z.vma50
+                z["extension"]=z.close/z.ma50-1
+                q=z[z.date>cutoff].copy()
+                if q.empty: continue
+                out["rows_after"]+=len(q)
+                stage2=(q.close>q.ma50)&(q.ma50>q.ma150)&(q.ma150>q.ma200)
+                near=q.close>=0.90*q.hi252
+                vol=q.volratio>=1.8
+                ext=q.extension.between(-0.02,0.08)
+                power=stage2&near
+                allb=power&vol&ext
+                out["stage2"]+=int(stage2.sum()); out["near_high"]+=int(near.sum())
+                out["volume18"]+=int(vol.sum()); out["extension_ok"]+=int(ext.sum())
+                out["power"]+=int(power.sum()); out["power_volume"]+=int((power&vol).sum())
+                out["all_basic"]+=int(allb.sum())
+                if allb.any() and len(examples)<20:
+                    for _,r in q[allb].tail(2).iterrows():
+                        examples.append({"ticker":fp.stem,"date":r.date.strftime("%Y-%m-%d"),
+                                         "volratio":round(float(r.volratio),2),
+                                         "extension":round(float(r.extension)*100,2)})
+            except Exception:
+                continue
+        if latest: out["cache_latest"]=max(latest).strftime("%Y-%m-%d")
+        out["examples"]=examples[:20]
+        if out["rows_after"]==0:
+            out["notes"].append("5/20 后没有可读市场数据：先查缓存日期。")
+        elif out["all_basic"]==0:
+            out["notes"].append("5/20 后基础条件交集已经归零：断层发生在 Ranking 之前。")
+        else:
+            out["notes"].append("5/20 后仍有基础条件通过者，但正式信号为0：重点查 VCP / Edge / Red-Flag / Ranking。")
+        out["notes"].append("这是只读漏斗诊断；代理条件只用于定位，不替代正式 V6 引擎定义。")
+    except Exception as ex:
+        out["notes"].append(f"诊断异常：{type(ex).__name__}: {ex}")
+    return out
+
+@APP.get("/v611/signal-drought-audit")
+def v611_signal_drought_audit():
+    a=_v611_drought_audit()
+    stages=[("Stage 2 代理",a["stage2"]),("接近52周高位",a["near_high"]),
+            ("Volume ≥ 1.8x",a["volume18"]),("Extension 合理区",a["extension_ok"]),
+            ("POWER 代理",a["power"]),("POWER + Volume",a["power_volume"]),
+            ("基础条件全部交集",a["all_basic"])]
+    tpl=r"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.11 Signal Drought Audit</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#111827;margin:0}
+.w{max-width:820px;margin:auto;padding:18px}.c{background:#fff;border-radius:22px;padding:22px;margin:14px 0}
+.r{background:#fff7dd;border:1px solid #f3cf65;border-radius:16px;padding:16px;line-height:1.55}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:10px}.m{background:#f5f8fb;border-radius:14px;padding:14px}
+.m small{display:block;color:#667085}.m b{font-size:23px}.row{margin:15px 0}.lab{display:flex;justify-content:space-between}
+.track{height:12px;background:#edf1f5;border-radius:8px;overflow:hidden}.fill{height:100%;background:#16835d}
+table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left}
+.btn{display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:13px 16px;border-radius:13px;font-weight:800}
+</style></head><body><div class="w"><a class="btn" href="/v610/final-system">← 返回 V6.10</a>
+<div class="c"><h1>🩻 V6.11 Signal Drought Audit</h1><div class="r"><b>只诊断：</b>为什么 {{a.cutoff}} 之后正式信号为0。<br>不调参数、不改退出、不重跑历史回测。</div>
+<div class="g" style="margin-top:14px"><div class="m"><small>缓存最新</small><b>{{a.cache_latest}}</b></div>
+<div class="m"><small>股票缓存</small><b>{{a.stocks}}</b></div><div class="m"><small>5/20后日线行</small><b>{{a.rows_after}}</b></div>
+<div class="m"><small>基础条件交集</small><b>{{a.all_basic}}</b></div></div></div>
+<div class="c"><h2>🚧 漏斗：在哪一层消失</h2>{% for name,n in stages %}
+<div class="row"><div class="lab"><b>{{name}}</b><span>{{n}}</span></div><div class="track"><div class="fill" style="width:{{100*n/a.rows_after if a.rows_after else 0}}%"></div></div></div>{% endfor %}</div>
+<div class="c"><h2>🧭 当前判断</h2>{% for x in a.notes %}<p>{{x}}</p>{% endfor %}</div>
+{% if a.examples %}<div class="c"><h2>🔎 通过基础代理的例子</h2><table><tr><th>股票</th><th>日期</th><th>量比</th><th>Extension</th></tr>
+{% for r in a.examples %}<tr><td>{{r.ticker}}</td><td>{{r.date}}</td><td>{{r.volratio}}</td><td>{{r.extension}}%</td></tr>{% endfor %}</table></div>{% endif %}
+</div></body></html>"""
+    return render_template_string(tpl,a=a,stages=stages)
+
+
 @APP.get("/v610/final-system")
 def v610_final_system_page():
     st=v610_status()
@@ -8584,6 +8679,9 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 
 
 
+<div class="card" style="border:2px solid #d69e2e"><h2>🩻 V6.11 Signal Drought Audit</h2>
+<p>诊断为什么 <b>2026-05-20</b> 之后没有正式新信号。只读，不改模型。</p>
+<a href="/v611/signal-drought-audit" style="display:inline-block;background:#111827;color:white;text-decoration:none;padding:13px 17px;border-radius:13px;font-weight:800">打开 V6.11 断层诊断</a></div>
 <div class="card"><h2>⚡ Daily Incremental · 日常快速刷新</h2>
 <div class="rule">
 <b>用途：</b>Fresh 321 只需要建立一次完整新基线。以后日常不再重算多年历史。<br>
