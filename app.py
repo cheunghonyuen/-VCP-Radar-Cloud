@@ -1,4 +1,5 @@
 import re
+import base64
 import hmac
 import os, json, time, threading, traceback, io, math
 from pathlib import Path
@@ -17,6 +18,83 @@ except Exception:
     TranscriptsDisabled = NoTranscriptFound = VideoUnavailable = Exception
 
 APP = Flask(__name__)
+
+# --- Cloud Auto Publisher (same Railway service) ---
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN","")
+GITHUB_OWNER = os.environ.get("GITHUB_OWNER","cheunghonyuen")
+GITHUB_REPO = os.environ.get("GITHUB_REPO","-VCP-Radar-Cloud")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH","main")
+PUBLISH_SECRET = os.environ.get("PUBLISH_SECRET","")
+PUBLISH_MAX_BYTES = int(os.environ.get("PUBLISH_MAX_BYTES","1500000"))
+
+def _publisher_auth_ok(req):
+    got = req.headers.get("X-Publish-Secret","")
+    return bool(PUBLISH_SECRET) and hmac.compare_digest(got, PUBLISH_SECRET)
+
+def _gh_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "vcp-radar-cloud-publisher"
+    }
+
+def _gh_request(method, url, payload=None):
+    import urllib.request, urllib.error
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method, headers=_gh_headers())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode("utf-8")
+            return r.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try: body = json.loads(raw)
+        except Exception: body = {"raw": raw}
+        return e.code, body
+
+def _gh_content_url(path, include_ref=True):
+    from urllib.parse import quote
+    qp = quote(path, safe="/")
+    base = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{qp}"
+    return base + (f"?ref={GITHUB_BRANCH}" if include_ref else "")
+
+def _gh_get_sha(path):
+    code, body = _gh_request("GET", _gh_content_url(path, True))
+    if code == 200:
+        return body.get("sha")
+    if code == 404:
+        return None
+    raise RuntimeError(f"GitHub GET failed {code}: {body}")
+
+def _gh_publish(path, content_bytes, message=None):
+    if not GITHUB_TOKEN:
+        raise RuntimeError("GITHUB_TOKEN missing")
+    if not PUBLISH_SECRET:
+        raise RuntimeError("PUBLISH_SECRET missing")
+    if len(content_bytes) > PUBLISH_MAX_BYTES:
+        raise RuntimeError(f"file too large: {len(content_bytes)} > {PUBLISH_MAX_BYTES}")
+
+    sha = _gh_get_sha(path)
+    payload = {
+        "message": message or f"Auto publish {path}",
+        "content": base64.b64encode(content_bytes).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+
+    code, body = _gh_request("PUT", _gh_content_url(path, False), payload)
+    if code not in (200, 201):
+        raise RuntimeError(f"GitHub PUT failed {code}: {body}")
+
+    return {
+        "path": path,
+        "commit_sha": ((body.get("commit") or {}).get("sha")),
+        "content_sha": ((body.get("content") or {}).get("sha")),
+        "html_url": ((body.get("content") or {}).get("html_url")),
+    }
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 try:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -4147,7 +4225,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.3</h1><div class="muted">当前研究版：V6.3.9.3 Dedicated Veto Page · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.4</h1><div class="muted">当前研究版：V6.3.9.4 Embedded Cloud Publisher · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4167,7 +4245,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.3 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9.4 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4986,8 +5064,19 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
+
+<div class="card" style="margin-top:12px;border:2px solid #bbf7d0">
+<h3 style="margin:0 0 6px">☁️ Cloud Publisher 已嵌入</h3>
+<div class="muted">
+设置 Railway Variables 后，这个同一个 Service 就能通过 GitHub API 更新 app.py / jlaw_*.py；
+主 Railway 服务会因 GitHub 更新自动重新 Deploy。不会新增第二个 Service。
+</div>
+<div style="margin-top:8px;font-size:14px">
+检查地址：<code>/publisher/health</code>
+</div>
+</div>
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9.3 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9.4 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -6309,6 +6398,39 @@ def api_results():
         return jsonify(df.replace({np.nan:None}).to_dict("records"))
     except Exception:
         return jsonify([])
+
+
+@APP.get("/publisher/health")
+def publisher_health():
+    return jsonify({
+        "ok": True,
+        "publisher": "embedded",
+        "repo": f"{GITHUB_OWNER}/{GITHUB_REPO}",
+        "branch": GITHUB_BRANCH,
+        "token_configured": bool(GITHUB_TOKEN),
+        "secret_configured": bool(PUBLISH_SECRET),
+    })
+
+@APP.post("/publisher/publish")
+def publisher_publish():
+    if not _publisher_auth_ok(request):
+        return jsonify({"ok":False,"error":"unauthorized"}), 401
+
+    body = request.get_json(silent=True) or {}
+    target = body.get("target")
+    content = body.get("content")
+    message = body.get("message")
+
+    if target != "app.py" and not (isinstance(target,str) and target.startswith("jlaw_") and target.endswith(".py")):
+        return jsonify({"ok":False,"error":"target must be app.py or jlaw_*.py"}), 400
+    if not isinstance(content, str):
+        return jsonify({"ok":False,"error":"content must be UTF-8 text"}), 400
+
+    try:
+        result = _gh_publish(target, content.encode("utf-8"), message)
+        return jsonify({"ok":True, **result})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}), 500
 
 @APP.get("/health")
 def health():
