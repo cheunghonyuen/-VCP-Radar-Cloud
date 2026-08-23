@@ -4213,17 +4213,17 @@ def v63_summary():
                 stop=float(abs(pd.to_numeric(pd.Series([r.get("stop_pct",0.07)]),errors="coerce").fillna(0.07).iloc[0]))
                 reason=str(r.get("reason","")); mfe=float(pd.to_numeric(pd.Series([r.get("mfe")]),errors="coerce").fillna(0).iloc[0])
                 for label,trig,beoff in configs:
-                    trigger=stop if trig=="1R" else float(trig); armed_at=None; newret=oldret; be_exit=False; gap=False; new_hold=hold
+                    trigger=stop if trig=="1R" else float(trig); armed_at=None; newret=oldret; be_exit=False; gap=False
                     for k,b in path.iterrows():
                         if armed_at is not None and k>armed_at:
                             level=ep*(1+beoff)
                             if float(b["open"])<=level:
-                                newret=float(b["open"])/ep-1;be_exit=True;gap=True;new_hold=max(1,int(k)+1);break
+                                newret=float(b["open"])/ep-1;be_exit=True;gap=True;break
                             if float(b["low"])<=level:
-                                newret=beoff;be_exit=True;new_hold=max(1,int(k)+1);break
+                                newret=beoff;be_exit=True;break
                         if armed_at is None and float(b["high"])/ep-1>=trigger:armed_at=k
                     replay.append({"ix":ix,"config":label,"ticker":r.get("ticker"),"date":dt,
-                        "oldret":oldret,"newret":newret,"new_hold":new_hold,"reason":reason,"mfe":mfe,"be_exit":be_exit,"gap":gap,
+                        "oldret":oldret,"newret":newret,"reason":reason,"mfe":mfe,"be_exit":be_exit,"gap":gap,
                         "saved_stop":reason.upper().startswith("STOP") and newret>oldret,
                         "killed20":be_exit and mfe>=0.20 and newret<oldret,"killed30":be_exit and mfe>=0.30 and newret<oldret,
                         "v6_market_character":r.get("v6_market_character",""),"v6_tier":r.get("v6_tier",""),
@@ -4303,150 +4303,6 @@ def v63_summary():
             for label,gate in gates:
                 for scope,G in scopes:_sel_add(scope,label,G,gate)
 
-
-    selective_be_portfolio=[]
-    selective_be_portfolio_years=[]
-
-    def _selective_account_sim(source, be_table, eligible_ix, top_n=3, max_positions=8,
-                               base_risk=0.003, power_risk=0.005,
-                               normal_exposure=0.50, power_exposure=0.85,
-                               initial_equity=100000.0, label=""):
-        if source is None or source.empty:
-            return None, []
-
-        D=source.copy()
-        D["date"]=pd.to_datetime(D["date"],errors="coerce")
-        D=D[D["date"].notna()].copy()
-        if D.empty:return None,[]
-
-        # Frozen Demand-First ranking.
-        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
-        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
-        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
-        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
-        D["_power"]=power.astype(int);D["_goodvol"]=(vol>=1.8).astype(int);D["_goodloc"]=(ext<=0.01).astype(int)
-        D["_vol"]=vol.fillna(0.0);D["_ext"]=ext.fillna(999.0);D["_rs2"]=rs2.fillna(0.0)
-        D=D.sort_values(["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
-                        ascending=[True,False,False,False,False,True,False]).copy()
-        D["_rank"]=D.groupby("date").cumcount()+1
-        D=D[D["_rank"]<=int(top_n)].copy()
-        if D.empty:return None,[]
-
-        D["_ret"]=pd.to_numeric(D["return_pct"],errors="coerce").fillna(0.0)
-        D["_hold"]=pd.to_numeric(D["hold_days"],errors="coerce").fillna(20).clip(lower=1).round().astype(int)
-
-        if be_table is not None and len(be_table) and eligible_ix:
-            lookup=be_table.set_index("ix")
-            for ix in D.index:
-                if ix in eligible_ix and ix in lookup.index:
-                    row=lookup.loc[ix]
-                    if isinstance(row,pd.DataFrame): row=row.iloc[0]
-                    D.loc[ix,"_ret"]=float(row.get("newret",D.loc[ix,"_ret"]))
-                    D.loc[ix,"_hold"]=int(row.get("new_hold",D.loc[ix,"_hold"]))
-
-        stop=pd.to_numeric(D["stop_pct"],errors="coerce").abs() if "stop_pct" in D.columns else pd.Series(0.07,index=D.index)
-        D["_stop"]=stop.where((stop>0.005)&(stop<0.30),0.07)
-        D["_exit_date"]=[d+pd.offsets.BDay(int(h)) for d,h in zip(D["date"],D["_hold"])]
-
-        cash=equity=float(initial_equity);peak=equity;maxdd=0.0
-        open_pos=[];realized=[];snaps=[]
-
-        def close_due(day):
-            nonlocal cash,equity,peak,maxdd,open_pos
-            due=[p for p in open_pos if p["exit_date"]<=day]
-            keep=[p for p in open_pos if p["exit_date"]>day]
-            for p in due:
-                pnl=p["capital"]*p["ret"];cash+=p["capital"]+pnl
-                realized.append({"exit_date":p["exit_date"],"pnl":pnl})
-            open_pos=keep
-            equity=cash+sum(p["capital"] for p in open_pos)
-            peak=max(peak,equity)
-            if peak>0:maxdd=min(maxdd,equity/peak-1.0)
-
-        for day,g in D.groupby("date",sort=True):
-            close_due(day)
-            equity=cash+sum(p["capital"] for p in open_pos)
-            day_power=bool((g["_power"]==1).any())
-            exp_cap=power_exposure if day_power else normal_exposure
-            risk=power_risk if day_power else base_risk
-            for _,r in g.sort_values("_rank").iterrows():
-                if len(open_pos)>=max_positions:continue
-                invested=sum(p["capital"] for p in open_pos)
-                room=max(exp_cap-(invested/equity if equity>0 else 0.0),0.0)
-                if room<=0.005:continue
-                natural=equity*risk/float(r["_stop"])
-                cap=min(natural,equity*room,equity*0.25,cash)
-                if cap<100:continue
-                cash-=cap
-                open_pos.append({"exit_date":r["_exit_date"],"capital":float(cap),"ret":float(r["_ret"])})
-                equity=cash+sum(p["capital"] for p in open_pos)
-            invested=sum(p["capital"] for p in open_pos)
-            snaps.append({"date":day,"exp":invested/equity if equity>0 else 0.0,"open":len(open_pos)})
-
-        for day in sorted({p["exit_date"] for p in open_pos}):close_due(day)
-        equity=cash
-
-        real=pd.DataFrame(realized);snap=pd.DataFrame(snaps)
-        first=D["date"].min();last=max(D["_exit_date"].max(),D["date"].max())
-        yrs=max((last-first).days/365.25,1/365.25)
-        cagr=(equity/initial_equity)**(1/yrs)-1 if equity>0 else -1.0
-
-        if not real.empty:
-            gw=float(real.loc[real["pnl"]>0,"pnl"].sum());gl=float(-real.loc[real["pnl"]<0,"pnl"].sum())
-            pf=gw/gl if gl>0 else (999.0 if gw>0 else 0.0)
-            win=float((real["pnl"]>0).mean())
-        else:pf=0.0;win=0.0
-
-        row={"name":label,"final_equity":float(equity),"cagr":float(cagr),
-             "total_return":float(equity/initial_equity-1.0),"pf":float(pf),
-             "win_rate":float(win),"max_drawdown":float(maxdd),
-             "avg_exposure":float(snap["exp"].mean()) if not snap.empty else 0.0,
-             "trades":int(len(real))}
-
-        yy=[]
-        if not real.empty:
-            RR=real.copy();RR["year"]=pd.to_datetime(RR["exit_date"]).dt.year
-            running=float(initial_equity)
-            for y,gy in RR.groupby("year",sort=True):
-                st=running;pnl=float(gy["pnl"].sum());running+=pnl
-                yy.append({"config":label,"year":int(y),"return":pnl/st if st else 0.0,
-                           "end_equity":running,"trades":int(len(gy))})
-        return row,yy
-
-    if len(T) and 'R' in locals() and isinstance(R,pd.DataFrame) and len(R):
-        B10=R[R["config"]=="+10% → BE"].copy()
-        if len(B10):
-            ext_b=pd.to_numeric(B10["extension"],errors="coerce")
-            supply_b=pd.to_numeric(B10["supply_score"],errors="coerce")
-            rank_b=pd.to_numeric(B10["v651_rank"],errors="coerce").fillna(pd.to_numeric(B10["v6_rank"],errors="coerce"))
-
-            rules=[
-                ("BASELINE 原退出",set()),
-                ("Extension>1% 才BE",set(B10.loc[ext_b>0.01,"ix"])),
-                ("Supply<55 才BE",set(B10.loc[supply_b<55,"ix"])),
-                ("Rank3+ 才BE",set(B10.loc[rank_b>=3,"ix"])),
-                ("ALL 全部BE",set(B10["ix"])),
-            ]
-
-            scope_defs=[("ALL",T)]
-            if "ticker" in T.columns:
-                vset=set(V5_VALIDATION)
-                scope_defs.append(("VALIDATION_324",T[T["ticker"].astype(str).isin(vset)]))
-            recentT=T.copy();recentT["date"]=pd.to_datetime(recentT["date"],errors="coerce")
-            scope_defs.append(("2022–2026",recentT[recentT["date"]>=pd.Timestamp("2022-01-01")]))
-
-            for scope_name,SRC in scope_defs:
-                for rule_name,eligible in rules:
-                    sm,yy=_selective_account_sim(
-                        SRC,B10,eligible,top_n=3,max_positions=8,
-                        base_risk=0.003,power_risk=0.005,
-                        normal_exposure=0.50,power_exposure=0.85,
-                        label=f"{scope_name} · {rule_name}"
-                    )
-                    if sm:
-                        selective_be_portfolio.append(sm)
-                        selective_be_portfolio_years.extend(yy)
-
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -4466,9 +4322,7 @@ def v63_summary():
             "sizing_fix_rows":sizing_fix_rows,"sizing_fix_years":sizing_fix_years,
             "winner_capture":winner_capture,"exit_reasons":exit_reasons,"winner_examples":winner_examples,
             "breakeven_survival":breakeven_survival,"breakeven_examples":breakeven_examples,
-            "selective_be_rows":selective_be_rows,
-            "selective_be_portfolio":selective_be_portfolio,
-            "selective_be_portfolio_years":selective_be_portfolio_years}
+            "selective_be_rows":selective_be_rows}
 
 def run_v63():
     import importlib.util
@@ -4629,6 +4483,147 @@ V62_CACHE_DIR = DATA_DIR / "jlaw_v62_research_cache"
 V62_SIGNAL_CACHE = V62_CACHE_DIR / "signals.pkl"
 V62_TRADE_CACHE = V62_CACHE_DIR / "trades.pkl"
 V62_META = V62_CACHE_DIR / "meta.json"
+
+# ================= V6.10 FROZEN SYSTEM + FORWARD SHADOW =================
+V610_DIR = DATA_DIR / "jlaw_v610_forward_shadow"
+V610_META = V610_DIR / "meta.json"
+V610_JOURNAL = V610_DIR / "forward_signals.csv"
+
+def _v610_meta():
+    if V610_META.exists():
+        try:
+            return json.loads(V610_META.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"active":False,"activated_at":None,"message":"尚未启动 Forward Shadow"}
+
+def _v610_write_meta(**kw):
+    V610_DIR.mkdir(parents=True,exist_ok=True)
+    m=_v610_meta(); m.update(kw)
+    V610_META.write_text(json.dumps(m,ensure_ascii=False,indent=2),encoding="utf-8")
+    return m
+
+def _v610_source_signals():
+    candidates=[
+        (V61_FAST_DIR/"full"/"jlaw_v6_signals.csv","V6.1 Full"),
+        (V6_SHADOW_DIR/"jlaw_v6_signals.csv","V6.0 Shadow"),
+    ]
+    for p,name in candidates:
+        if p.exists() and p.stat().st_size>0:
+            try:
+                d=pd.read_csv(p)
+                if len(d):
+                    if "date" in d.columns:d["date"]=pd.to_datetime(d["date"],errors="coerce")
+                    return d,name
+            except Exception:
+                pass
+    return pd.DataFrame(), ""
+
+def _v610_rank_day(g):
+    d=g.copy()
+    power=(d["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in d.columns else pd.Series(False,index=d.index)
+    ext=pd.to_numeric(d["extension"],errors="coerce") if "extension" in d.columns else pd.Series(999.0,index=d.index)
+    vol=pd.to_numeric(d["volratio"],errors="coerce") if "volratio" in d.columns else pd.Series(0.0,index=d.index)
+    rs=pd.to_numeric(d["rs"],errors="coerce") if "rs" in d.columns else pd.Series(0.0,index=d.index)
+    d["_power"]=power.astype(int)
+    d["_goodvol"]=(vol>=1.8).astype(int)
+    d["_goodloc"]=(ext<=0.01).astype(int)
+    d["_vol"]=vol.fillna(0.0); d["_ext"]=ext.fillna(999.0); d["_rs"]=rs.fillna(0.0)
+    d=d.sort_values(
+        ["_power","_goodvol","_goodloc","_vol","_ext","_rs"],
+        ascending=[False,False,False,False,True,False]
+    ).copy()
+    d["final_rank"]=range(1,len(d)+1)
+    return d
+
+def v610_status():
+    meta=_v610_meta()
+    S,source=_v610_source_signals()
+    latest=None
+    if len(S) and "date" in S.columns and S["date"].notna().any():
+        latest=pd.to_datetime(S["date"],errors="coerce").max()
+    journal=pd.DataFrame()
+    if V610_JOURNAL.exists():
+        try: journal=pd.read_csv(V610_JOURNAL)
+        except Exception: journal=pd.DataFrame()
+    return {
+        **meta,
+        "source":source or "无",
+        "source_latest":latest.strftime("%Y-%m-%d") if latest is not None and pd.notna(latest) else "无",
+        "journal_rows":int(len(journal)),
+        "journal_latest":str(journal["date"].max()) if len(journal) and "date" in journal.columns else "无",
+    }
+
+def v610_activate():
+    now=datetime.now(timezone.utc).isoformat()
+    m=_v610_write_meta(active=True,activated_at=now,message="Forward Shadow 已启动；只记录启动后的新信号，不回填历史。")
+    return m
+
+def v610_refresh_forward():
+    meta=_v610_meta()
+    if not meta.get("active"):
+        return {"ok":False,"error":"请先启动 Forward Shadow"}
+
+    S,source=_v610_source_signals()
+    if S.empty or "date" not in S.columns:
+        return {"ok":False,"error":"当前没有可读取的 V6 signals 文件"}
+
+    activated=pd.to_datetime(meta.get("activated_at"),errors="coerce",utc=True)
+    if pd.isna(activated):
+        return {"ok":False,"error":"Forward Shadow 启动时间无效"}
+    cutoff=activated.tz_convert(None).normalize()
+
+    D=S.copy()
+    D["date"]=pd.to_datetime(D["date"],errors="coerce")
+    D=D[D["date"].notna() & (D["date"]>=cutoff)].copy()
+    if D.empty:
+        return {"ok":True,"added":0,"message":"启动后暂时没有新的 V6 信号。"}
+
+    rows=[]
+    for day,g in D.groupby("date",sort=True):
+        r=_v610_rank_day(g)
+        r=r[r["final_rank"]<=3].copy()
+        for _,x in r.iterrows():
+            ext=float(pd.to_numeric(pd.Series([x.get("extension")]),errors="coerce").iloc[0]) if pd.notna(x.get("extension")) else None
+            rows.append({
+                "date":pd.Timestamp(day).strftime("%Y-%m-%d"),
+                "ticker":str(x.get("ticker","")),
+                "rank":int(x["final_rank"]),
+                "market":str(x.get("v6_market_character","")),
+                "volratio":x.get("volratio"),
+                "extension":x.get("extension"),
+                "rs":x.get("rs"),
+                "selective_be":bool(ext is not None and ext>0.01),
+                "be_rule":"+10%→BE" if ext is not None and ext>0.01 else "原退出",
+                "source":source,
+                "recorded_at":datetime.now(timezone.utc).isoformat(),
+            })
+
+    new=pd.DataFrame(rows)
+    old=pd.DataFrame()
+    if V610_JOURNAL.exists():
+        try: old=pd.read_csv(V610_JOURNAL)
+        except Exception: old=pd.DataFrame()
+    allj=pd.concat([old,new],ignore_index=True) if len(old) else new
+    if len(allj):
+        allj=allj.drop_duplicates(subset=["date","ticker"],keep="first").sort_values(["date","rank"])
+        V610_DIR.mkdir(parents=True,exist_ok=True)
+        allj.to_csv(V610_JOURNAL,index=False)
+    added=max(0,len(allj)-len(old))
+    _v610_write_meta(last_refresh=datetime.now(timezone.utc).isoformat(),
+                     message=f"Forward Shadow 已刷新；本次新增 {added} 条。")
+    return {"ok":True,"added":int(added),"total":int(len(allj))}
+
+def v610_recent_rows(n=30):
+    if not V610_JOURNAL.exists():
+        return []
+    try:
+        d=pd.read_csv(V610_JOURNAL)
+        if d.empty:return []
+        return d.sort_values(["date","rank"],ascending=[False,True]).head(n).to_dict("records")
+    except Exception:
+        return []
+
 
 def v62_cache_status():
     meta={"ready":False,"signals":0,"trades":0,"source":"","built_at":None,
@@ -5950,7 +5945,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.9.1</h1><div class="muted">当前研究版：V6.7.0 Winner Capture + Publisher Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.10.0</h1><div class="muted">当前研究版：V6.10.0 Final Combined System · 规则冻结 · Forward Shadow</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -7777,10 +7772,10 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
-    if(top && !document.getElementById("v691-shortcut")){
-      const box=document.createElement("div");box.id="v691-shortcut";box.className="card";
+    if(top && !document.getElementById("v610-shortcut")){
+      const box=document.createElement("div");box.id="v610-shortcut";box.className="card";
       box.style.cssText="margin:10px 0;border:2px solid #059669";
-      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.9.1 Selective BE · 账户验证</h2><div class="muted">Baseline vs Extension>1% / Supply<55 / Rank3+ / 全部BE</div></div><a href="/v691/selective-be-portfolio"><button type="button">打开账户验证</button></a></div>';
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧊 V6.10 Final Combined System</h2><div class="muted">规则冻结 · 开始 Forward Shadow，不再历史微调</div></div><a href="/v610/final-system"><button type="button">打开 V6.10</button></a></div>';
       top.insertAdjacentElement("afterend",box);
     }
   }catch(e){}
@@ -8357,52 +8352,78 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
     return render_template_string(tpl,rows=rows,reasons=reasons,examples=examples)
 
 
-@APP.get("/v691/selective-be-portfolio")
-def v691_selective_be_portfolio_page():
-    s=v63_summary()
-    rows=s.get("selective_be_portfolio",[]) if s.get("available") else []
-    yrs=s.get("selective_be_portfolio_years",[]) if s.get("available") else []
-    scopes=["ALL","VALIDATION_324","2022–2026"]
+@APP.get("/v610/final-system")
+def v610_final_system_page():
+    st=v610_status()
+    rows=v610_recent_rows(40)
     tpl=r"""
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V6.9.1 Selective BE Portfolio</title><style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}.wrap{max-width:1000px;margin:auto}
-.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}.grid{display:grid;grid-template-columns:1fr;gap:10px}
-.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
-.metric{background:#f8fafc;border-radius:10px;padding:10px}.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
-.note{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:12px;padding:12px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #e5e7eb;font-size:12px;text-align:left}
-@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}</style></head>
-<body><div class="wrap"><a class="back" href="/">← 返回主仪表盘</a>
-<div class="card"><h1>🎯 V6.9.1 Selective BE · 账户级验证</h1><div class="note">
-不再调 +10% 触发点。直接把最有希望的三种“选择性保本”放进真实账户模拟：<br>
-<b>Extension&gt;1%</b>、<b>Supply&lt;55</b>、<b>Rank3+</b>，并与 Baseline 和 ALL全部BE 同表比较。<br><br>
-同一账户规则：Demand-First Top3、最多8仓；普通市场风险0.3% / Exposure上限50%；POWER风险0.5% / Exposure上限85%。<br>
-BE提前退出后的“仓位释放”也会计算。
-</div></div>
-{% for scope in scopes %}
-<div class="card"><h2>{{scope}}</h2><div class="grid">
-{% for r in rows if r.name.startswith(scope+" ·") %}
-<div class="item"><div class="name">{{r.name.split(" · ",1)[1]}}</div><div class="metrics">
-<div class="metric"><small>最终资金</small><b>${{"{:,.0f}".format(r.final_equity)}}</b></div>
-<div class="metric"><small>CAGR（复合年增长率）</small><b>{{"%.2f%%"|format(r.cagr*100)}}</b></div>
-<div class="metric"><small>PF（盈利因子）</small><b>{{"%.2f"|format(r.pf)}}</b></div>
-<div class="metric"><small>最大回撤</small><b>{{"%.1f%%"|format(r.max_drawdown*100)}}</b></div>
-<div class="metric"><small>总收益</small><b>{{"%.1f%%"|format(r.total_return*100)}}</b></div>
-<div class="metric"><small>平均资金使用率</small><b>{{"%.1f%%"|format(r.avg_exposure*100)}}</b></div>
-<div class="metric"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
-<div class="metric"><small>实际成交数</small><b>{{r.trades}}</b></div>
-</div></div>
-{% endfor %}
-</div></div>
-{% endfor %}
-<details class="card"><summary style="font-weight:900;font-size:20px;cursor:pointer">📅 年度收益（点开）</summary>
-<div style="overflow-x:auto;margin-top:10px"><table><tr><th>配置</th><th>年</th><th>收益</th><th>年末资金</th><th>交易</th></tr>
-{% for r in yrs %}<tr><td><b>{{r.config}}</b></td><td>{{r.year}}</td><td>{{"%.1f%%"|format(r.return*100)}}</td><td>${{"{:,.0f}".format(r.end_equity)}}</td><td>{{r.trades}}</td></tr>{% endfor %}
-</table></div></details>
+<title>V6.10 Final Combined System</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}.wrap{max-width:980px;margin:auto}
+.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.rule{border-left:4px solid #059669;background:#ecfdf5;border-radius:10px;padding:12px;margin:9px 0}.warn{border:1px solid #fde68a;background:#fffbeb;border-radius:12px;padding:12px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}.metric small{display:block;color:#64748b}.metric b{font-size:18px}
+button{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800;font-size:16px}.green{background:#047857}
+table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:12px}.scroll{overflow-x:auto}
+@media(min-width:720px){.metrics{grid-template-columns:repeat(4,1fr)}}
+</style></head><body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>🧊 V6.10 Final Combined System</h1>
+<div class="warn"><b>规则冻结，不再继续微调历史参数。</b><br>从这一版开始进入 Forward Shadow（前瞻模拟跟踪）。只有未来出现的新信号才记入日志，不把历史回填成“未来成绩”。</div>
+</div>
+
+<div class="card"><h2>✅ 已冻结的最终规则</h2>
+<div class="rule"><b>1. Ranking（排序）</b><br>POWER → Volume/Demand → Extension → RS2。使用 Demand-First，不再使用旧 Elite / Super 加权高分。</div>
+<div class="rule"><b>2. 每日选择</b><br>优先 Top1–Top3；账户层面最多 8 个仓位。</div>
+<div class="rule"><b>3. 单股仓位</b><br>由风险决定自然仓位，不再用“剩余 Exposure ÷ 剩余仓位数”。</div>
+<div class="rule"><b>4. Market Context</b><br>普通市场：每笔风险约 0.3%，总 Exposure 上限约 50%；POWER_TREND：每笔风险约 0.5%，总 Exposure 上限约 85%。</div>
+<div class="rule"><b>5. Selective Break-even</b><br>只有 <b>Extension &gt; 1%</b> 的交易，先涨到 +10% 后，从下一交易日开始把止损提到买入价；其他交易维持原退出。</div>
+</div>
+
+<div class="card"><h2>🔭 Forward Shadow 状态</h2>
+<div class="metrics">
+<div class="metric"><small>状态</small><b>{{"运行中" if st.active else "未启动"}}</b></div>
+<div class="metric"><small>信号来源</small><b>{{st.source}}</b></div>
+<div class="metric"><small>来源最新日期</small><b>{{st.source_latest}}</b></div>
+<div class="metric"><small>Forward 日志</small><b>{{st.journal_rows}} 条</b></div>
+</div>
+<p>{{st.message}}</p>
+{% if not st.active %}
+<form method="post" action="/v610/activate"><button class="green">▶ 启动 Forward Shadow</button></form>
+{% else %}
+<form method="post" action="/v610/refresh"><button>↻ 刷新 Forward Shadow</button></form>
+{% endif %}
+</div>
+
+<div class="card"><h2>📋 启动后的真实前瞻信号</h2>
+{% if rows %}
+<div class="scroll"><table><tr><th>日期</th><th>股票</th><th>排名</th><th>市场</th><th>量比</th><th>Extension</th><th>RS</th><th>退出规则</th></tr>
+{% for r in rows %}<tr><td>{{r.date}}</td><td><b>{{r.ticker}}</b></td><td>{{r.rank}}</td><td>{{r.market}}</td><td>{{r.volratio}}</td><td>{{r.extension}}</td><td>{{r.rs}}</td><td>{{r.be_rule}}</td></tr>{% endfor %}
+</table></div>
+{% else %}
+<div class="warn">目前没有启动后的新信号。正常：Forward Shadow 不会把过去历史自动填进来。</div>
+{% endif %}
+</div>
+
 <details class="card"><summary style="font-weight:900;font-size:20px;cursor:pointer">📖 指标说明（点开）</summary>
-<div style="line-height:1.7;margin-top:10px"><b>CAGR</b>：账户平均每年的复合增长率。<br><b>PF</b>：总盈利 ÷ 总亏损。<br><b>最大回撤</b>：账户从高点到低点最大跌幅。<br><b>Extension</b>：突破后离Pivot买点多远；&gt;1%表示进场位置相对更追高。<br><b>Supply</b>：抛压/供应结构评分。<br><b>Rank3+</b>：当天Demand-First排序第3名或以后。</div></details>
+<div style="line-height:1.7;margin-top:10px"><b>Forward Shadow</b>：不下真钱，只从启动日起记录模型未来真实产生的信号。<br>
+<b>Extension</b>：价格相对 Pivot/突破点已经延伸多少。<br>
+<b>Exposure</b>：账户有多少比例资金投入市场。<br>
+<b>BE / Break-even</b>：保本止损。<br>
+<b>RS2</b>：相对强弱，用作 Ranking 后段排序条件。</div></details>
 </div></body></html>"""
-    return render_template_string(tpl,rows=rows,yrs=yrs,scopes=scopes)
+    return render_template_string(tpl,st=st,rows=rows)
+
+@APP.post("/v610/activate")
+def v610_activate_route():
+    v610_activate()
+    return redirect("/v610/final-system")
+
+@APP.post("/v610/refresh")
+def v610_refresh_route():
+    v610_refresh_forward()
+    return redirect("/v610/final-system")
 
 @APP.get("/v69/selective-breakeven")
 def v69_selective_breakeven_page():
