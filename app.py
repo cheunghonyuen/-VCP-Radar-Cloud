@@ -4147,7 +4147,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9</h1><div class="muted">当前研究版：V6.3.9 Context Veto Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.1</h1><div class="muted">当前研究版：V6.3.9.1 Context Veto Visible Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4167,7 +4167,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9.1 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4987,7 +4987,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9.1 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -5177,27 +5177,6 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 </table>
 </div>
 
-<h3 style="margin-top:18px">🧱 V6.3.9 Context Veto Diagnostic</h3>
-<div class="muted" style="margin-bottom:8px">
-目标：不是继续调 RS2/Volume 门槛，而是找“哪些结构应该直接否决”。重点看 Tier、Edge Count、Supply、Extension 及其组合。
-</div>
-
-{% for group_name in ["TIER","EDGE","SUPPLY","ENTRY","COMBO"] %}
-<details open style="margin-top:10px">
-<summary style="font-weight:900;cursor:pointer">{{group_name}}</summary>
-<div class="mobile-metrics">
-{% for r in v63_summary.context_veto if r.group == group_name %}
-<div class="metric-card">
-<div class="name">{{r.name}}</div>
-<div class="metric-grid">
-<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
-<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
-<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
-<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
-</div>
-</div>
-{% endfor %}
-</div>
 </details>
 {% endfor %}
 
@@ -5217,6 +5196,59 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 </div>
 </details>
 {% endif %}
+</div>
+
+
+<div class="card current-card" id="v639-veto" style="margin-top:18px;border:2px solid #d7c4ff">
+<h2 style="margin:0 0 8px">🧱 V6.3.9.1 Context Veto Diagnostic</h2>
+<div class="muted" style="margin-bottom:10px">
+独立常显，不再嵌套在超长诊断区里，确保手机和PDF都能完整看到。
+只读现有 V6.3 trades，不重跑。
+</div>
+
+{% for group_name in ["TIER","EDGE","SUPPLY","ENTRY","COMBO"] %}
+<h3 style="margin-top:14px">{{group_name}}</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.context_veto if r.group == group_name %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+{% endfor %}
+
+<h3 style="margin-top:16px">2022–2026 · Context Veto</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.context_veto_recent %}
+<div class="metric-card">
+<div class="name">{{r.group}} · {{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<h3 style="margin-top:16px">早期 vs 最近 · 特征中位数</h3>
+<div class="scroll">
+<table style="min-width:620px">
+<tr><th>特征</th><th>2007–2021</th><th>2022–2026</th></tr>
+{% for r in v63_summary.validation_core_feature_compare %}
+<tr><td><b>{{r.feature}}</b></td>
+<td>{% if r.early is not none %}{{"%.3f"|format(r.early)}}{% else %}-{% endif %}</td>
+<td>{% if r.recent is not none %}{{"%.3f"|format(r.recent)}}{% else %}-{% endif %}</td></tr>
+{% endfor %}
+</table>
+</div>
 </div>
 
 <div class="card current-card" id="v629-rsdiag" style="margin-top:18px">
@@ -5875,7 +5907,9 @@ document.addEventListener("DOMContentLoaded",function(){
     if(current) mount.appendChild(current);
     const diag=document.getElementById("v628-diagnostic");
     if(diag) mount.appendChild(diag);
-    const rsdiag=document.getElementById("v629-rsdiag");
+    const veto=document.getElementById("v639-veto");
+  const rsdiag=document.getElementById("v629-rsdiag");
+    if(veto) mount.appendChild(veto);
     if(rsdiag) mount.appendChild(rsdiag);
     if(fast) mount.appendChild(fast);
 
