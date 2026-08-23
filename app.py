@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.8.1</h1><div class="muted">当前研究版：V6.12.8.1 Breakout Gate Autopsy Entry Fix</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.9</h1><div class="muted">当前研究版：V6.12.9 Signal-Date Alignment Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6949,6 +6949,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0">🧫 V6.12.8 Breakout Gate Autopsy</h2>
       <div class="muted">只拆 KEYS / SLB / ADI 四笔 Breakout 失败原因，不重跑321</div>
     </div>
+
+<div class="card" id="v6129-shortcut" style="border:2px solid #6366f1">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🗓️ V6.12.9 Signal-Date Alignment Audit</h2>
+      <div class="muted">查 4 个候选日期是否比真正 Breakout 提前</div>
+    </div>
+    <a href="/v6129/signal-date-alignment"><button type="button">打开 V6.12.9</button></a>
+  </div>
+</div>
+
     <a href="/v6128/breakout-autopsy"><button type="button">打开 V6.12.8</button></a>
   </div>
 </div>
@@ -9121,6 +9132,153 @@ def v6127_status_api():
     return jsonify(_v6127_status())
 
 
+
+@APP.get("/v6129/signal-date-alignment")
+def v6129_signal_date_alignment():
+    import html, importlib.util
+    from pathlib import Path
+
+    targets=[
+        ("KEYS","2026-05-29"),
+        ("SLB","2026-05-29"),
+        ("ADI","2026-06-05"),
+        ("KEYS","2026-08-18"),
+    ]
+
+    ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+    if not ep.exists():
+        return "<h1>缺少 jlaw_v6_1_DECISION_FAST.py</h1>"
+    spec=importlib.util.spec_from_file_location("v6129_engine",str(ep))
+    eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+    files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+    all_data={}
+    for t,p in files.items():
+        try: all_data[t]=eng.load(p)
+        except Exception: pass
+
+    rows=[]
+    for ticker,ds in targets:
+        rec={"ticker":ticker,"signal_date":ds,"error":None}
+        try:
+            if ticker not in all_data:
+                raise RuntimeError("ticker cache missing")
+            d=eng.ind(all_data[ticker])
+            sigdt=pd.Timestamp(ds)
+            hit=d.index[d["date"]==sigdt].tolist()
+            if not hit: raise RuntimeError("signal date not found")
+            i0=hit[-1]
+
+            # Recompute pivot for each day in a +/- 15 trading-day window using exact engine supply().
+            lo=max(260,i0-15); hi=min(len(d)-1,i0+15)
+            window=[]
+            first_after=None
+            first_any=None
+
+            for i in range(lo,hi+1):
+                x=d.iloc[:i+1]
+                ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+                if not np.isfinite(piv): 
+                    continue
+                prev=float(x.close.iloc[-2]); close=float(x.close.iloc[-1])
+                ext=close/piv-1 if piv else np.nan
+                cond_prev=bool(prev<=piv)
+                cond_close=bool(close>piv)
+                cond_ext=bool(np.isfinite(ext) and ext<=.03)
+                cond_vol=bool(np.isfinite(vr) and vr>=1.20)
+                formal=bool(cond_prev and cond_close and cond_ext and cond_vol)
+                row={
+                    "date":pd.Timestamp(x["date"].iloc[-1]).strftime("%Y-%m-%d"),
+                    "prev_close":prev,"pivot":float(piv),"close":close,
+                    "extension_pct":float(ext*100) if np.isfinite(ext) else None,
+                    "volratio":float(vr) if np.isfinite(vr) else None,
+                    "formal":formal,
+                    "close_gt_pivot":cond_close,
+                    "prev_le_pivot":cond_prev,
+                }
+                window.append(row)
+                if formal and first_any is None:
+                    first_any=row
+                if formal and i>=i0 and first_after is None:
+                    first_after=row
+
+            sigrow=next((r for r in window if r["date"]==ds),None)
+            rec["signal_row"]=sigrow
+            rec["first_after"]=first_after
+            rec["first_any"]=first_any
+            rec["window"]=window
+
+            # Alignment status
+            if first_after:
+                delta=(pd.Timestamp(first_after["date"])-sigdt).days
+                rec["status"]="later_breakout"
+                rec["delta_days"]=int(delta)
+            else:
+                rec["status"]="no_breakout_in_window"
+                rec["delta_days"]=None
+        except Exception as ex:
+            rec["error"]=f"{type(ex).__name__}: {ex}"
+        rows.append(rec)
+
+    summary=[]
+    for r in rows:
+        if r.get("error"):
+            summary.append(f"{r['ticker']} {r['signal_date']}: ERROR")
+        elif r["status"]=="later_breakout":
+            summary.append(f"{r['ticker']} {r['signal_date']} → 真正突破 {r['first_after']['date']}（晚 {r['delta_days']} 天）")
+        else:
+            summary.append(f"{r['ticker']} {r['signal_date']} → ±15交易日内没有正式突破")
+
+    cards=[]
+    tables=[]
+    for r in rows:
+        if r.get("error"):
+            cards.append(f"<div class='m'><b>{html.escape(r['ticker'])}</b><small>{r['signal_date']}</small><div style='color:#b91c1c'>{html.escape(r['error'])}</div></div>")
+            continue
+
+        fr=r.get("first_after")
+        verdict=(f"真正突破：{fr['date']}（晚 {r['delta_days']} 天）" if fr else "±15交易日内没有正式突破")
+        cards.append(f"<div class='m'><b>{html.escape(r['ticker'])}</b><small>原日期 {r['signal_date']}</small><div class='big'>{html.escape(verdict)}</div></div>")
+
+        trs=[]
+        for w in r["window"]:
+            mark="⭐" if w["date"]==r["signal_date"] else ("✅" if w["formal"] else "")
+            trs.append(
+                "<tr>"
+                f"<td>{mark}</td><td>{w['date']}</td>"
+                f"<td>{w['prev_close']:.2f}</td><td>{w['pivot']:.2f}</td><td>{w['close']:.2f}</td>"
+                f"<td>{w['extension_pct']:.2f}%</td><td>{w['volratio']:.2f}x</td>"
+                f"<td>{'✅' if w['close_gt_pivot'] else '❌'}</td>"
+                f"<td>{'✅' if w['formal'] else '❌'}</td>"
+                "</tr>"
+            )
+        tables.append(
+            f"<div class='c'><h2>{html.escape(r['ticker'])} · 原日期 {r['signal_date']}</h2>"
+            f"<p><b>{html.escape(verdict)}</b></p>"
+            "<div style='overflow:auto'><table><tr><th></th><th>日期</th><th>Prev</th><th>Pivot</th><th>Close</th><th>Ext</th><th>Vol</th><th>Close>Pivot</th><th>Formal Breakout</th></tr>"
+            + "".join(trs) + "</table></div></div>"
+        )
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+.g{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.m{{background:#f6f8fb;border-radius:14px;padding:14px}}
+.m small{{display:block;color:#64748b}}.big{{font-size:18px;font-weight:800;margin-top:5px}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
+.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:7px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class="w">
+<a href="/v6128/breakout-autopsy">← 返回 V6.12.8</a>
+<div class="c"><h1>🗓️ V6.12.9 Signal-Date Alignment Audit</h1>
+<div class="ok"><b>目标：</b>检查 V6.12.8 那 4 个“候选日期”是不是比真正 Formal Breakout 提前。<br>
+对每只股票向前/向后各看约 15 个交易日，每一天重新调用正式 supply() 和正式 breakout 规则。</div></div>
+
+<div class="c"><h2>🎯 日期对齐结论</h2><div class="warn">{'<br>'.join(html.escape(x) for x in summary)}</div></div>
+<div class="c"><h2>概览</h2><div class="g">{''.join(cards)}</div></div>
+{''.join(tables)}
+</div></body></html>"""
+
 @APP.get("/v6128/breakout-autopsy")
 def v6128_breakout_autopsy():
     import html, importlib.util
@@ -9237,6 +9395,7 @@ table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px 6p
 .warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
 </style></head><body><div class="w">
 <a href="/v6127/engine-replay">← 返回 V6.12.7</a>
+<p><a href="/v6129/signal-date-alignment"><button type="button">🗓️ 打开 V6.12.9 Signal-Date Alignment</button></a></p>
 <div class="c"><h1>🧫 V6.12.8 Breakout Gate Autopsy</h1>
 <div class="ok"><b>只拆 4 笔：</b>KEYS 5/29、SLB 5/29、ADI 6/5、KEYS 8/18。直接复用正式引擎的 supply() 与正式 breakout 规则：<br>
 prev ≤ pivot AND close > pivot AND extension ≤ 3% AND volratio ≥ 1.20x。</div></div>
