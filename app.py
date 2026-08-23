@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.17</h1><div class="muted">当前研究版：V6.12.17 Era × Market-Regime Stability Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.13.0</h1><div class="muted">正式前瞻版：Frozen Champion + Dry 1.05 Shadow Challenger</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v613-shortcut" style="border:3px solid #16a34a">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🏁 V6.13 Frozen Champion + Shadow</h2>
+      <div class="muted">Champion参数冻结；Dry&lt;1.05只做Shadow，新增信号不进入正式买入清单</div></div>
+    <a href="/v613/frozen-shadow"><button type="button">打开 V6.13</button></a>
+  </div>
+</div>
 
 <div class="card" id="v61217-shortcut" style="border:3px solid #0f766e">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9914,6 +9922,98 @@ def v61214_page():
         for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
     run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
+
+# ================= V6.13 FROZEN CHAMPION + DRY 1.05 SHADOW =================
+V613_DIR=DATA_DIR/"jlaw_v613_frozen_shadow"
+V613_LOG=V613_DIR/"shadow_log.csv"
+V613_LAUNCH_DATE=pd.Timestamp("2026-08-24")
+
+def _v613_source_rows():
+    rows=[]
+    if V6127_RESULT.exists():
+        try:
+            q=json.loads(V6127_RESULT.read_text(encoding="utf-8"))
+            rows=[x for x in q.get("rows",[]) if x.get("formal_setup")]
+        except Exception:rows=[]
+    if not rows and V61214_RESULT.exists():
+        try:rows=json.loads(V61214_RESULT.read_text(encoding="utf-8")).get("examples",[])
+        except Exception:rows=[]
+    return rows
+
+def _v613_refresh_log():
+    import importlib.util
+    rows=_v613_source_rows();now=datetime.now(timezone.utc).isoformat();out=[]
+    eng=None;ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+    if ep.exists():
+        try:
+            spec=importlib.util.spec_from_file_location("v613_engine",str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+        except Exception:eng=None
+    for r in rows:
+        dt=pd.to_datetime(r.get("date"),errors="coerce")
+        if pd.isna(dt):continue
+        ec=int(pd.to_numeric(pd.Series([r.get("v6_edge_count",r.get("edge_count",0))]),errors="coerce").fillna(0).iloc[0])
+        rc=int(pd.to_numeric(pd.Series([r.get("v6_red_count",r.get("red_count",0))]),errors="coerce").fillna(0).iloc[0])
+        dry=pd.to_numeric(pd.Series([r.get("dry")]),errors="coerce").iloc[0]
+        edges=str(r.get("v6_edges",""));champ_tier=str(r.get("v6_tier",r.get("tier","WATCH")))
+        champ=bool(r.get("v6_pass",champ_tier in ("A1","A2","B")))
+        old_dry=("volume_dry_before_breakout" in edges) or (pd.notna(dry) and dry<.85)
+        new_dry=pd.notna(dry) and dry<1.05
+        new_ec=ec+(1 if new_dry and not old_dry else 0)
+        mc=str(r.get("v6_market_character","POWER_TREND" if champ_tier in ("A1","A2","B") else "BULL_TREND"))
+        if eng is not None:
+            try:new_tier=str(eng._v6_decision_tier(new_ec,rc,mc))
+            except Exception:new_tier="REJECT" if rc>0 else ("A1" if new_ec>=8 else "A2" if new_ec>=7 else "B" if new_ec>=6 else "WATCH")
+        else:new_tier="REJECT" if rc>0 else ("A1" if new_ec>=8 else "A2" if new_ec>=7 else "B" if new_ec>=6 else "WATCH")
+        challenger=new_tier in ("A1","A2","B")
+        cohort="CHAMPION" if champ else ("CHALLENGER_ONLY" if challenger else "WATCH")
+        entry=pd.to_numeric(pd.Series([r.get("entry")]),errors="coerce").iloc[0]
+        current_ret=mfe=mae=None;bars=0
+        fp=MARKET_DIR/f"{str(r.get('ticker','')).upper()}.csv"
+        if fp.exists() and pd.notna(entry) and entry>0:
+            try:
+                d=pd.read_csv(fp);d.columns=[str(c).lower() for c in d.columns];dc="date" if "date" in d else "datetime"
+                d["date"]=pd.to_datetime(d[dc],errors="coerce");d=d[d["date"]>=dt]
+                if len(d):
+                    hi=pd.to_numeric(d["high"],errors="coerce");lo=pd.to_numeric(d["low"],errors="coerce");cl=pd.to_numeric(d["close"],errors="coerce")
+                    current_ret=float(cl.iloc[-1]/entry-1);mfe=float(hi.max()/entry-1);mae=float(lo.min()/entry-1);bars=int(len(d))
+            except Exception:pass
+        out.append({"ticker":str(r.get("ticker","")),"signal_date":dt.strftime("%Y-%m-%d"),"recorded_at":now,
+            "sample_type":"FORWARD" if dt>=V613_LAUNCH_DATE else "BACKFILL","cohort":cohort,
+            "champion_pass":champ,"challenger_pass":challenger,"champion_tier":champ_tier,"challenger_tier":new_tier,
+            "old_edge_count":ec,"new_edge_count":new_ec,"red_count":rc,"dry":None if pd.isna(dry) else float(dry),
+            "entry":None if pd.isna(entry) else float(entry),"bars":bars,"current_return":current_ret,"mfe":mfe,"mae":mae})
+    V613_DIR.mkdir(parents=True,exist_ok=True)
+    new=pd.DataFrame(out)
+    if V613_LOG.exists():
+        try:
+            old=pd.read_csv(V613_LOG);new=pd.concat([old,new],ignore_index=True)
+        except Exception:pass
+    if len(new):new=new.sort_values(["signal_date","ticker","recorded_at"]).drop_duplicates(["ticker","signal_date","cohort"],keep="last")
+    new.to_csv(V613_LOG,index=False)
+    return new
+
+@APP.get("/v613/frozen-shadow")
+def v613_frozen_shadow_page():
+    import html
+    esc=lambda x:html.escape(str(x))
+    D=_v613_refresh_log();F=D[D["sample_type"]=="FORWARD"] if len(D) else D
+    def stats(g):
+        r=pd.to_numeric(g.get("current_return"),errors="coerce").dropna() if len(g) else pd.Series(dtype=float)
+        return {"n":int(len(g)),"closed":int(len(r)),"avg":float(r.mean()) if len(r) else 0.0,"win":float((r>0).mean()) if len(r) else 0.0}
+    a=stats(F[F["cohort"]=="CHAMPION"] if len(F) else F);b=stats(F[F["cohort"]=="CHALLENGER_ONLY"] if len(F) else F)
+    rows=""
+    if len(D):
+        for _,x in D.sort_values(["signal_date","ticker"],ascending=False).iterrows():
+            def pct(v):return "-" if pd.isna(v) else f"{float(v):.1%}"
+            rows+=f"<tr><td>{esc(x.get('sample_type'))}</td><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('signal_date'))}</td><td>{esc(x.get('cohort'))}</td><td>{esc(x.get('champion_tier'))}</td><td>{esc(x.get('challenger_tier'))}</td><td>{esc(x.get('old_edge_count'))}→{esc(x.get('new_edge_count'))}</td><td>{esc(x.get('dry'))}</td><td>{pct(x.get('current_return'))}</td><td>{pct(x.get('mfe'))}</td><td>{pct(x.get('mae'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.freeze{{background:#ecfdf5;border:2px solid #22c55e;border-radius:14px;padding:14px;line-height:1.65}}.shadow{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:950px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
+<div class='c'><h1>🏁 V6.13 Frozen Champion + Dry 1.05 Shadow</h1><div class='freeze'><b>CHAMPION 已冻结：</b>正式Dry门槛仍为&lt;0.85，所有其他参数保持不变。<br><b>CHALLENGER：</b>唯一变化是Dry&lt;1.05；Challenger-only信号不进入正式买入清单。</div></div>
+<div class='c'><div class='shadow'><b>前瞻验证从 2026-08-24 开始。</b>旧记录只标记BACKFILL，不计入最终胜负。累计20–30个CHALLENGER_ONLY新信号后才做一次最终比较。</div></div>
+<div class='c'><h2>Forward计分板</h2><div class='grid'><div class='k'><b>Champion</b><h2>{a['n']} 信号</h2><div>已有收益记录 {a['closed']}｜平均 {a['avg']:.2%}｜胜率 {a['win']:.1%}</div></div><div class='k'><b>Challenger-only</b><h2>{b['n']} 信号</h2><div>已有收益记录 {b['closed']}｜平均 {b['avg']:.2%}｜胜率 {b['win']:.1%}</div></div></div></div>
+<div class='c'><h2>Shadow日志</h2><div class='scroll'><table><tr><th>样本</th><th>股票</th><th>信号日</th><th>组别</th><th>Champion</th><th>Challenger</th><th>Edge</th><th>Dry</th><th>当前</th><th>MFE</th><th>MAE</th></tr>{rows}</table></div></div>
+<div class='c'><b>纪律：</b>V6.13期间不再根据历史结果修改参数。只有前瞻Challenger-only达到最低样本量后才做一次升级/淘汰决定。</div>
+</div></body></html>"""
 
 # ================= V6.12.17 ERA x MARKET-REGIME STABILITY =================
 @APP.get("/v61217/era-regime")
