@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.7</h1><div class="muted">当前研究版：V6.12.7 Exact Engine Replay Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.8</h1><div class="muted">当前研究版：V6.12.8 Breakout Gate Autopsy</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8794,6 +8794,7 @@ pre,.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12p
 .ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:12px;padding:12px}}
 </style></head><body><div class="w">
 <a href="/v612/funnel-audit">← 返回 V6.12</a>
+<p><a href="/v6128/breakout-autopsy"><button type="button">🧫 打开 V6.12.8 Breakout Gate Autopsy</button></a></p>
 <div class="c"><h1>🧬 V6.12.6 Engine Schema Probe</h1>
 <div class="ok"><b>只读：</b>直接检查正式 V6 Shadow / V6.1 Full / Fresh / Daily 的真实文件、字段、checkpoint，以及 jlaw_v6_1_DECISION_FAST.py 的函数和门槛关键词。不会重跑321。</div></div>
 
@@ -9103,6 +9104,138 @@ def v6127_run_route():
 @APP.get("/api/v6127/status")
 def v6127_status_api():
     return jsonify(_v6127_status())
+
+
+@APP.get("/v6128/breakout-autopsy")
+def v6128_breakout_autopsy():
+    import html, importlib.util
+    from pathlib import Path
+
+    targets=[
+        ("KEYS","2026-05-29"),
+        ("SLB","2026-05-29"),
+        ("ADI","2026-06-05"),
+        ("KEYS","2026-08-18"),
+    ]
+
+    ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+    if not ep.exists():
+        return "<h1>缺少 jlaw_v6_1_DECISION_FAST.py</h1>"
+    spec=importlib.util.spec_from_file_location("v6128_engine",str(ep))
+    eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+    files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+    all_data={}
+    for t,p in files.items():
+        try: all_data[t]=eng.load(p)
+        except Exception: pass
+
+    rows=[]
+    for ticker,ds in targets:
+        r={"ticker":ticker,"date":ds,"error":None}
+        try:
+            if ticker not in all_data:
+                raise RuntimeError("ticker cache missing")
+            d=eng.ind(all_data[ticker])
+            dt=pd.Timestamp(ds)
+            hits=d.index[d["date"]==dt].tolist()
+            if not hits: raise RuntimeError("date not found")
+            i=hits[-1]
+            if i<1: raise RuntimeError("not enough prior rows")
+            x=d.iloc[:i+1]
+
+            ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+            prev=float(x.close.iloc[-2]); close=float(x.close.iloc[-1])
+            ext=close/piv-1 if np.isfinite(piv) and piv!=0 else np.nan
+
+            cond_prev = bool(prev<=piv) if np.isfinite(piv) else False
+            cond_close = bool(close>piv) if np.isfinite(piv) else False
+            cond_ext = bool(np.isfinite(ext) and ext<=.03)
+            cond_vol = bool(np.isfinite(vr) and vr>=1.20)
+            passed = bool(cond_prev and cond_close and cond_ext and cond_vol)
+
+            failures=[]
+            if not cond_prev: failures.append("前一日收盘 > Pivot")
+            if not cond_close: failures.append("当日收盘没有突破 Pivot")
+            if not cond_ext: failures.append("Extension > 3% 或无效")
+            if not cond_vol: failures.append("Volume Ratio < 1.20x 或无效")
+
+            r.update({
+                "prev_close":prev,
+                "pivot":float(piv) if np.isfinite(piv) else None,
+                "close":close,
+                "extension_pct":float(ext*100) if np.isfinite(ext) else None,
+                "volratio":float(vr) if np.isfinite(vr) else None,
+                "supply_score":float(ss) if np.isfinite(ss) else None,
+                "pivot_tight":float(tight) if np.isfinite(tight) else None,
+                "dry":float(dry) if np.isfinite(dry) else None,
+                "cond_prev":cond_prev,
+                "cond_close":cond_close,
+                "cond_ext":cond_ext,
+                "cond_vol":cond_vol,
+                "breakout_pass":passed,
+                "failures":failures,
+            })
+        except Exception as ex:
+            r["error"]=f"{type(ex).__name__}: {ex}"
+        rows.append(r)
+
+    trs=[]
+    for r in rows:
+        if r.get("error"):
+            trs.append(f"<tr><td>{html.escape(r['ticker'])}</td><td>{r['date']}</td><td colspan='12' style='color:#b91c1c'>{html.escape(r['error'])}</td></tr>")
+            continue
+        def fmt(v,nd=2):
+            if v is None:return "—"
+            return f"{v:.{nd}f}"
+        def mark(v): return "✅" if v else "❌"
+        trs.append(
+            "<tr>"
+            f"<td><b>{html.escape(r['ticker'])}</b></td>"
+            f"<td>{r['date']}</td>"
+            f"<td>{fmt(r['prev_close'])}</td>"
+            f"<td>{fmt(r['pivot'])}</td>"
+            f"<td>{fmt(r['close'])}</td>"
+            f"<td>{fmt(r['extension_pct'])}%</td>"
+            f"<td>{fmt(r['volratio'])}x</td>"
+            f"<td>{mark(r['cond_prev'])}</td>"
+            f"<td>{mark(r['cond_close'])}</td>"
+            f"<td>{mark(r['cond_ext'])}</td>"
+            f"<td>{mark(r['cond_vol'])}</td>"
+            f"<td>{mark(r['breakout_pass'])}</td>"
+            f"<td>{html.escape('；'.join(r['failures']) if r['failures'] else '通过')}</td>"
+            "</tr>"
+        )
+
+    fail_counts={}
+    for r in rows:
+        for f in r.get("failures",[]):
+            fail_counts[f]=fail_counts.get(f,0)+1
+    culprit = "；".join(f"{k} ×{v}" for k,v in sorted(fail_counts.items(), key=lambda x:-x[1])) or "没有失败项"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
+.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+</style></head><body><div class="w">
+<a href="/v6127/engine-replay">← 返回 V6.12.7</a>
+<div class="c"><h1>🧫 V6.12.8 Breakout Gate Autopsy</h1>
+<div class="ok"><b>只拆 4 笔：</b>KEYS 5/29、SLB 5/29、ADI 6/5、KEYS 8/18。直接复用正式引擎的 supply() 与正式 breakout 规则：<br>
+prev ≤ pivot AND close > pivot AND extension ≤ 3% AND volratio ≥ 1.20x。</div></div>
+
+<div class="c"><h2>🎯 失败原因汇总</h2><div class="warn"><b>{html.escape(culprit)}</b></div></div>
+
+<div class="c"><h2>逐笔拆解</h2><div style="overflow:auto"><table>
+<tr>
+<th>股票</th><th>日期</th><th>Prev Close</th><th>Pivot</th><th>Close</th><th>Extension</th><th>Vol Ratio</th>
+<th>Prev≤Pivot</th><th>Close>Pivot</th><th>Ext≤3%</th><th>Vol≥1.2x</th><th>Breakout</th><th>失败原因</th>
+</tr>
+{''.join(trs)}
+</table></div></div>
+</div></body></html>"""
 
 @APP.get("/v6127/engine-replay")
 def v6127_engine_replay_page():
