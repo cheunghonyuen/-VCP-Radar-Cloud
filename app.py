@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.11</h1><div class="muted">当前研究版：V6.12.11 Async Timestamp Trace + UI Cleanup</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.12</h1><div class="muted">当前研究版：V6.12.12 One-Shot Root-Cause Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6942,6 +6942,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v61212-shortcut" style="border:3px solid #16a34a">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🚀 V6.12.12 One-Shot Root-Cause Audit</h2>
+      <div class="muted">一次查完 5/20 后断层：正式重算 vs 已保存 signals / checkpoint</div>
+    </div>
+    <a href="/v61212/root-cause"><button type="button">打开 V6.12.12</button></a>
+  </div>
+</div>
+
 
 <div class="card" id="v61210-shortcut" style="border:2px solid #0ea5e9">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9320,6 +9331,336 @@ def v61210_run():
 @APP.get("/api/v61210/status")
 def v61210_status_api():
     return jsonify(_v61210_status())
+
+
+# ================= V6.12.12 ONE-SHOT ROOT CAUSE AUDIT =================
+V61212_DIR = DATA_DIR / "jlaw_v61212_root_cause"
+V61212_STATUS = V61212_DIR / "status.json"
+V61212_RESULT = V61212_DIR / "result.json"
+v61212_thread = None
+
+def _v61212_status():
+    s={"status":"idle","message":"尚未运行 Root-Cause Audit","processed":0,"total":0,"current":"","error":None}
+    if V61212_STATUS.exists():
+        try:s.update(json.loads(V61212_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v61212_write_status(**kw):
+    V61212_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v61212_status(); s.update(kw)
+    V61212_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+    return s
+
+def _v61212_base_candidates():
+    cutoff=pd.Timestamp("2026-05-20")
+    rows=[]
+    for fp in sorted(MARKET_DIR.glob("*.csv")):
+        try:
+            d=pd.read_csv(fp)
+            if d.empty: continue
+            cm={str(c).lower():c for c in d.columns}
+            dc=cm.get("date") or cm.get("datetime") or cm.get("timestamp")
+            cc=cm.get("close") or cm.get("adj close") or cm.get("adj_close")
+            vc=cm.get("volume")
+            if not dc or not cc: continue
+            z=pd.DataFrame({
+                "date":pd.to_datetime(d[dc],errors="coerce"),
+                "close":pd.to_numeric(d[cc],errors="coerce"),
+                "volume":pd.to_numeric(d[vc],errors="coerce") if vc else float("nan")
+            }).dropna(subset=["date","close"]).sort_values("date")
+            if z.empty: continue
+            z["ma50"]=z["close"].rolling(50).mean()
+            z["ma150"]=z["close"].rolling(150).mean()
+            z["ma200"]=z["close"].rolling(200).mean()
+            z["hi252"]=z["close"].rolling(252,min_periods=120).max()
+            z["vma50"]=z["volume"].rolling(50,min_periods=20).mean()
+            z["volratio_proxy"]=z["volume"]/z["vma50"]
+            z["extension_proxy"]=z["close"]/z["ma50"]-1
+            q=z[z["date"]>cutoff].copy()
+            if q.empty: continue
+            ok=(q["close"]>q["ma50"])&(q["ma50"]>q["ma150"])&(q["ma150"]>q["ma200"])
+            ok &= q["close"]>=0.90*q["hi252"]
+            ok &= q["volratio_proxy"]>=1.8
+            ok &= q["extension_proxy"].between(-0.02,0.08)
+            for _,r in q[ok].iterrows():
+                rows.append({
+                    "ticker":fp.stem.upper(),
+                    "date":r["date"].strftime("%Y-%m-%d"),
+                    "proxy_volratio":float(r["volratio_proxy"]) if pd.notna(r["volratio_proxy"]) else None,
+                    "proxy_extension":float(r["extension_proxy"]) if pd.notna(r["extension_proxy"]) else None,
+                })
+        except Exception:
+            continue
+    return list({(r["ticker"],r["date"]):r for r in rows}.values())
+
+def _v61212_compute():
+    global v61212_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists(): raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v61212_engine",str(ep))
+        eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+        base=_v61212_base_candidates()
+        by_ticker={}
+        for r in base: by_ticker.setdefault(r["ticker"],[]).append(r)
+        tickers=sorted(by_ticker)
+
+        _v61212_write_status(status="running",message="加载现有市场缓存…",processed=0,total=len(tickers),current="",error=None)
+
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+        all_data={}
+        for t,p in files.items():
+            try: all_data[t]=eng.load(p)
+            except Exception: pass
+        spy=all_data.get("SPY")
+        if spy is None: raise RuntimeError("缺少 SPY 市场缓存")
+
+        # Saved official outputs, to test whether files are stale.
+        saved_paths=[
+            ("V6 Shadow",V6_SHADOW_DIR/"jlaw_v6_signals.csv"),
+            ("V6.1 Full",V61_FAST_DIR/"full"/"jlaw_v6_signals.csv"),
+            ("V6.10 Fresh",V610_FRESH_DIR/"jlaw_v6_signals.csv"),
+            ("V6.10 Daily",V610_DAILY_DIR/"quick"/"jlaw_v6_signals.csv"),
+        ]
+        saved_meta=[]
+        for label,p in saved_paths:
+            meta={"label":label,"path":str(p),"exists":p.exists(),"rows":0,"latest":"—","post520":0}
+            if p.exists():
+                try:
+                    d=pd.read_csv(p); meta["rows"]=len(d)
+                    if "date" in d.columns:
+                        dd=pd.to_datetime(d["date"],errors="coerce")
+                        if dd.notna().any():
+                            meta["latest"]=dd.max().strftime("%Y-%m-%d")
+                            meta["post520"]=int((dd>pd.Timestamp("2026-05-20")).sum())
+                except Exception:pass
+            saved_meta.append(meta)
+
+        recomputed=[]
+        ticker_errors=[]
+        for n,t in enumerate(tickers,1):
+            _v61212_write_status(status="running",message="逐只调用正式 historical_signals()；每只只跑一次",
+                                 processed=n-1,total=len(tickers),current=t)
+            try:
+                if t not in all_data or t not in eng.T2S:
+                    ticker_errors.append({"ticker":t,"error":"missing cache/sector"}); continue
+                sec=eng.T2S.get(t); secdf=all_data.get(sec)
+                if secdf is None:
+                    ticker_errors.append({"ticker":t,"error":f"missing sector cache {sec}"}); continue
+
+                d,s,f,sdg=eng.historical_signals(t,all_data[t],spy,secdf,all_data)
+                sigs=s.copy() if isinstance(s,pd.DataFrame) else pd.DataFrame()
+                if sigs.empty: continue
+                sigs["date"]=pd.to_datetime(sigs["date"],errors="coerce")
+                sigs=sigs[sigs["date"]>pd.Timestamp("2026-05-20")].copy()
+                if sigs.empty: continue
+
+                for _,r in sigs.iterrows():
+                    item={"ticker":t,"date":r["date"].strftime("%Y-%m-%d")}
+                    for c in ["entry","pivot","extension","volratio","v6_pass","v6_tier","v6_edge_count",
+                              "v6_red_count","v6_market_character","v6_edges","v6_red_flags"]:
+                        if c in sigs.columns:
+                            v=r.get(c)
+                            if isinstance(v,(np.bool_,bool)): v=bool(v)
+                            elif isinstance(v,(np.integer,)): v=int(v)
+                            elif isinstance(v,(np.floating,)) and pd.notna(v): v=float(v)
+                            item[c]=None if (isinstance(v,float) and pd.isna(v)) else v
+                    recomputed.append(item)
+            except Exception as ex:
+                ticker_errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+
+        # Rank recomputed formal V6 rows exactly by date.
+        rs=pd.DataFrame(recomputed)
+        ranked=pd.DataFrame()
+        if not rs.empty:
+            # Ensure fields needed by official ranker exist.
+            ranked=eng._v6_rank_signals(rs.copy())
+            recomputed=[]
+            for _,r in ranked.iterrows():
+                item={}
+                for c in ranked.columns:
+                    v=r.get(c)
+                    if isinstance(v,(np.bool_,bool)): v=bool(v)
+                    elif isinstance(v,(np.integer,)): v=int(v)
+                    elif isinstance(v,(np.floating,)) and pd.notna(v): v=float(v)
+                    elif isinstance(v,pd.Timestamp): v=v.strftime("%Y-%m-%d")
+                    if c=="date" and not isinstance(v,str):
+                        try:v=pd.Timestamp(v).strftime("%Y-%m-%d")
+                        except:pass
+                    item[c]=None if (isinstance(v,float) and pd.isna(v)) else v
+                recomputed.append(item)
+
+        # Compare proxy candidates against exact engine signals.
+        exact_map={(str(r.get("ticker","")).upper(),str(r.get("date",""))[:10]):r for r in recomputed}
+        candidate_rows=[]
+        same_date=0
+        nearby=0
+        no_exact=0
+        for b in sorted(base,key=lambda x:(x["date"],x["ticker"])):
+            k=(b["ticker"],b["date"])
+            ex=exact_map.get(k)
+            near=[]
+            if not ex:
+                bd=pd.Timestamp(b["date"])
+                for r in recomputed:
+                    if str(r.get("ticker","")).upper()!=b["ticker"]: continue
+                    rd=pd.Timestamp(str(r.get("date"))[:10])
+                    if abs((rd-bd).days)<=5:
+                        near.append(r)
+            if ex: same_date+=1
+            elif near: nearby+=1
+            else: no_exact+=1
+            candidate_rows.append({
+                **b,
+                "exact_same_date":bool(ex),
+                "near_dates":[str(x.get("date"))[:10] for x in near[:5]],
+                "exact_v6_pass": ex.get("v6_pass") if ex else None,
+                "exact_v6_tier": ex.get("v6_tier") if ex else None,
+                "exact_rank": ex.get("v6_rank") if ex else None,
+                "exact_top3": ex.get("v6_top3") if ex else None,
+            })
+
+        post_signals=len(recomputed)
+        post_pass=sum(1 for r in recomputed if r.get("v6_pass") is True)
+        post_top3=sum(1 for r in recomputed if r.get("v6_top3") is True)
+        latest_recomputed=max([str(r.get("date",""))[:10] for r in recomputed],default="—")
+
+        # Root-cause verdict.
+        all_saved_stale=all((m["latest"]=="—" or m["latest"]<="2026-05-20") for m in saved_meta)
+        verdict=[]
+        if post_signals>0 and all_saved_stale:
+            verdict.append("ROOT CAUSE 高概率：正式引擎现在能重算出 5/20 后信号，但所有已保存 V6 signals CSV 仍停在 5/20。")
+            verdict.append("这不是市场没机会，也不是 Ranking 把全部杀掉；是“正式输出/刷新链路没有把新结果写进 V6 signals 文件”。")
+        elif post_signals==0:
+            verdict.append("当前正式 historical_signals() 对这些候选股票确实没有产生 5/20 后信号，需要继续查 Setup Gate。")
+        else:
+            verdict.append("保存输出与重算结果并非完全一致，需要按下表继续定位。")
+
+        # Look for checkpoint/resume evidence.
+        checkpoint_evidence=[]
+        for root in [V61_FAST_DIR/"full",V610_FRESH_DIR,V610_DAILY_DIR]:
+            try:
+                for p in root.rglob("*"):
+                    if p.is_file() and ("checkpoint" in str(p).lower() or p.name.lower()=="status.json"):
+                        checkpoint_evidence.append(str(p))
+            except Exception: pass
+
+        result={
+            "generated_at":datetime.now(timezone.utc).isoformat(),
+            "base_candidates":len(base),
+            "unique_tickers":len(tickers),
+            "recomputed_post520_signals":post_signals,
+            "recomputed_post520_v6_pass":post_pass,
+            "recomputed_post520_top3":post_top3,
+            "recomputed_latest":latest_recomputed,
+            "candidate_same_date":same_date,
+            "candidate_nearby":nearby,
+            "candidate_no_exact":no_exact,
+            "saved_meta":saved_meta,
+            "verdict":verdict,
+            "checkpoint_evidence":checkpoint_evidence[:120],
+            "recomputed":recomputed,
+            "candidate_rows":candidate_rows,
+            "ticker_errors":ticker_errors[:100],
+        }
+        V61212_DIR.mkdir(parents=True,exist_ok=True)
+        V61212_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v61212_write_status(status="done",message="Root-Cause Audit 完成",processed=len(tickers),total=len(tickers),current="",
+                             finished_at=datetime.now(timezone.utc).isoformat(),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v61212_write_status(status="error",message="Root-Cause Audit 失败",error=f"{type(ex).__name__}: {ex}",
+                             finished_at=datetime.now(timezone.utc).isoformat())
+    finally:
+        v61212_thread=None
+
+def _v61212_start():
+    global v61212_thread
+    if v61212_thread is not None and v61212_thread.is_alive(): return False
+    v61212_thread=threading.Thread(target=_v61212_compute,daemon=True)
+    v61212_thread.start()
+    return True
+
+@APP.post("/v61212/run")
+def v61212_run():
+    _v61212_start()
+    return redirect("/v61212/root-cause")
+
+@APP.get("/api/v61212/status")
+def v61212_status_api():
+    return jsonify(_v61212_status())
+
+@APP.get("/v61212/root-cause")
+def v61212_root_cause_page():
+    import html
+    st=_v61212_status()
+    result=None
+    if V61212_RESULT.exists():
+        try:result=json.loads(V61212_RESULT.read_text(encoding="utf-8"))
+        except Exception:result=None
+
+    def esc(v): return html.escape(str(v))
+    summary=""
+    saved_rows=""
+    sig_rows=""
+    cand_rows=""
+    verdict=""
+    if result:
+        summary=f"""
+<div class="grid">
+<div class="m"><small>基础候选</small><b>{result.get('base_candidates',0)}</b></div>
+<div class="m"><small>候选股票</small><b>{result.get('unique_tickers',0)}</b></div>
+<div class="m"><small>正式引擎重算 5/20后 signals</small><b>{result.get('recomputed_post520_signals',0)}</b></div>
+<div class="m"><small>其中 V6 Pass</small><b>{result.get('recomputed_post520_v6_pass',0)}</b></div>
+<div class="m"><small>其中 Top3</small><b>{result.get('recomputed_post520_top3',0)}</b></div>
+<div class="m"><small>重算最新日期</small><b>{esc(result.get('recomputed_latest','—'))}</b></div>
+</div>"""
+        verdict="<br>".join(esc(x) for x in result.get("verdict",[]))
+        saved_rows="".join(
+            f"<tr><td>{esc(x.get('label'))}</td><td>{esc(x.get('rows'))}</td><td>{esc(x.get('latest'))}</td><td>{esc(x.get('post520'))}</td><td>{esc(x.get('path'))}</td></tr>"
+            for x in result.get("saved_meta",[])
+        )
+        sig_rows="".join(
+            f"<tr><td>{esc(x.get('ticker'))}</td><td>{esc(x.get('date'))}</td><td>{esc(x.get('v6_market_character',''))}</td><td>{esc(x.get('v6_edge_count',''))}</td><td>{esc(x.get('v6_red_count',''))}</td><td>{esc(x.get('v6_tier',''))}</td><td>{esc(x.get('v6_rank',''))}</td><td>{'✓' if x.get('v6_top3') else ''}</td></tr>"
+            for x in result.get("recomputed",[])[:300]
+        )
+        cand_rows="".join(
+            f"<tr><td>{esc(x.get('ticker'))}</td><td>{esc(x.get('date'))}</td><td>{'✓' if x.get('exact_same_date') else ''}</td><td>{esc(','.join(x.get('near_dates',[])))}</td><td>{esc(x.get('exact_v6_tier',''))}</td><td>{esc(x.get('exact_rank',''))}</td><td>{'✓' if x.get('exact_top3') else ''}</td></tr>"
+            for x in result.get("candidate_rows",[])[:250]
+        )
+
+    run_button="" if st.get("status")=="running" else '<form method="post" action="/v61212/run"><button type="submit">▶ 一次跑完 Root-Cause Audit</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.m{{background:#f6f8fb;border-radius:14px;padding:14px}}
+.m small{{display:block;color:#64748b}}.m b{{font-size:22px}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
+.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:7px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🚀 V6.12.12 One-Shot Root-Cause Audit</h1>
+<div class="ok"><b>一次查完：</b>180 基础候选 → 当前正式 historical_signals() 重算 → V6 Pass / Ranking / Top3 → 对照所有已保存 V6 signals CSV。<br>
+目标：直接判断到底是“策略没信号”，还是“刷新/写盘/Checkpoint 导致正式输出停在 5/20”。</div></div>
+<div class="c"><h2>状态</h2><div class="grid"><div class="m"><small>状态</small><b>{esc(st.get('status'))}</b></div><div class="m"><small>进度</small><b>{st.get('processed',0)} / {st.get('total',0)}</b></div></div>
+<p>{esc(st.get('message',''))} {esc(st.get('current',''))}</p>
+{('<p style="color:#b91c1c"><b>'+esc(st.get('error'))+'</b></p>') if st.get('error') else ''}{run_button}</div>
+{('<div class="c"><h2>🎯 Root Cause</h2><div class="warn"><b>'+verdict+'</b></div></div>') if verdict else ''}
+{('<div class="c"><h2>关键数字</h2>'+summary+'</div>') if summary else ''}
+<div class="c"><h2>已保存正式 V6 signals 文件</h2><div style="overflow:auto"><table><tr><th>来源</th><th>行数</th><th>最新日期</th><th>5/20后行数</th><th>路径</th></tr>{saved_rows}</table></div></div>
+<div class="c"><h2>当前正式引擎重算出来的 5/20 后 signals</h2><div style="overflow:auto"><table><tr><th>股票</th><th>日期</th><th>市场</th><th>Edge</th><th>Red</th><th>Tier</th><th>Rank</th><th>Top3</th></tr>{sig_rows}</table></div></div>
+<div class="c"><h2>180 候选 vs 正式引擎</h2><div style="overflow:auto"><table><tr><th>股票</th><th>候选日</th><th>同日正式信号</th><th>±5天正式信号</th><th>Tier</th><th>Rank</th><th>Top3</th></tr>{cand_rows}</table></div></div>
+<script>
+setTimeout(async function(){{
+ try{{const r=await fetch("/api/v61212/status",{{cache:"no-store"}});const s=await r.json();if(s.status==="running")location.reload();}}catch(e){{}}
+}},3500);
+</script>
+</div></body></html>"""
 
 @APP.get("/v61210/signal-timestamp-trace")
 def v61210_signal_timestamp_trace():
