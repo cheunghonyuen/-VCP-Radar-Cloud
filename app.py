@@ -4079,6 +4079,8 @@ def v63_summary():
     winner_capture=[]
     exit_reasons=[]
     winner_examples=[]
+    breakeven_survival=[]
+    breakeven_examples=[]
 
     def _wc_add(scope,label,g):
         if g is None or g.empty:
@@ -4159,6 +4161,98 @@ def v63_summary():
             for _,r in X.iterrows():
                 winner_examples.append({c:r.get(c) for c in cols} | {"lost_upside":float(r["lost_upside"])})
 
+        # V6.8 Break-even Survival Test: replay cached daily OHLC only; no download.
+        # BE becomes active on the NEXT bar after the trigger bar, because daily
+        # OHLC cannot prove whether the high or low occurred first intraday.
+        _px_cache={}
+        def _market_bars(ticker):
+            key=str(ticker).upper().strip()
+            if key in _px_cache:return _px_cache[key]
+            candidates=[MARKET_DIR/f"{key}.csv",MARKET_DIR/f"{key.lower()}.csv"]
+            candidates += list(MARKET_DIR.glob(f"{key}*.csv"))
+            out=pd.DataFrame()
+            for fp in candidates:
+                try:
+                    q=pd.read_csv(fp)
+                    q.columns=[str(c).lower().strip() for c in q.columns]
+                    dc=next((c for c in ["date","datetime","timestamp"] if c in q.columns),None)
+                    if dc and all(c in q.columns for c in ["open","high","low","close"]):
+                        q["date"]=pd.to_datetime(q[dc],errors="coerce",utc=True).dt.tz_localize(None).dt.normalize()
+                        for c in ["open","high","low","close"]:q[c]=pd.to_numeric(q[c],errors="coerce")
+                        out=q.dropna(subset=["date","open","high","low","close"]).sort_values("date").drop_duplicates("date")
+                        break
+                except Exception:pass
+            _px_cache[key]=out
+            return out
+
+        configs=[("+5% → BE",0.05,0.00),("+5% → BE−1%",0.05,-0.01),
+                 ("+8% → BE",0.08,0.00),("+8% → BE−1%",0.08,-0.01),
+                 ("+10% → BE",0.10,0.00),("+10% → BE−1%",0.10,-0.01),
+                 ("+1R → BE","1R",0.00),("+1R → BE−1%","1R",-0.01)]
+        replay=[]
+        if "ticker" in W.columns and "date" in W.columns:
+            for ix,r in W.iterrows():
+                bars=_market_bars(r.get("ticker"))
+                if bars.empty:continue
+                dt=pd.to_datetime(r.get("date"),errors="coerce")
+                if pd.isna(dt):continue
+                dt=dt.tz_localize(None).normalize() if getattr(dt,"tzinfo",None) else dt.normalize()
+                pos=np.flatnonzero((bars["date"]>=dt).to_numpy())
+                if not len(pos):continue
+                j=int(pos[0]); hold=int(pd.to_numeric(pd.Series([r.get("hold_days",0)]),errors="coerce").fillna(0).iloc[0])
+                path=bars.iloc[j:min(len(bars),j+max(2,hold+1))].reset_index(drop=True)
+                if path.empty:continue
+                ep=None
+                for c in ["entry_price","buy_price","entry","pivot"]:
+                    if c in W.columns:
+                        v=pd.to_numeric(pd.Series([r.get(c)]),errors="coerce").iloc[0]
+                        if pd.notna(v) and v>0:ep=float(v);break
+                if ep is None:ep=float(path.iloc[0]["close"])
+                oldret=float(pd.to_numeric(pd.Series([r.get("return_pct")]),errors="coerce").fillna(0).iloc[0])
+                stop=float(abs(pd.to_numeric(pd.Series([r.get("stop_pct",0.07)]),errors="coerce").fillna(0.07).iloc[0]))
+                reason=str(r.get("reason","")); mfe=float(pd.to_numeric(pd.Series([r.get("mfe")]),errors="coerce").fillna(0).iloc[0])
+                for label,trig,beoff in configs:
+                    trigger=stop if trig=="1R" else float(trig); armed_at=None; newret=oldret; be_exit=False; gap=False
+                    for k,b in path.iterrows():
+                        if armed_at is not None and k>armed_at:
+                            level=ep*(1+beoff)
+                            if float(b["open"])<=level:
+                                newret=float(b["open"])/ep-1;be_exit=True;gap=True;break
+                            if float(b["low"])<=level:
+                                newret=beoff;be_exit=True;break
+                        if armed_at is None and float(b["high"])/ep-1>=trigger:armed_at=k
+                    replay.append({"ix":ix,"config":label,"ticker":r.get("ticker"),"date":dt,
+                        "oldret":oldret,"newret":newret,"reason":reason,"mfe":mfe,"be_exit":be_exit,"gap":gap,
+                        "saved_stop":reason.upper().startswith("STOP") and newret>oldret,
+                        "killed20":be_exit and mfe>=0.20 and newret<oldret,"killed30":be_exit and mfe>=0.30 and newret<oldret,
+                        "v6_market_character":r.get("v6_market_character","")})
+
+        R=pd.DataFrame(replay)
+        def _be_metrics(scope,label,g):
+            if g.empty:return
+            ret=pd.to_numeric(g["newret"],errors="coerce").dropna(); wins=ret[ret>0].sum(); losses=-ret[ret<0].sum()
+            # Chronological constant-risk curve: 0.5% account risk at 7% stop.
+            gg=g.sort_values("date"); eq=1.0; peak=1.0; maxdd=0.0
+            for x in pd.to_numeric(gg["newret"],errors="coerce").fillna(0):
+                eq*=max(0.01,1+x*(0.005/0.07));peak=max(peak,eq);maxdd=min(maxdd,eq/peak-1)
+            yrs=max(1/252,(pd.to_datetime(gg["date"]).max()-pd.to_datetime(gg["date"]).min()).days/365.25)
+            breakeven_survival.append({"scope":scope,"name":label,"trades":int(len(g)),
+                "be_exits":int(g["be_exit"].sum()),"saved_stops":int(g["saved_stop"].sum()),
+                "killed20":int(g["killed20"].sum()),"killed30":int(g["killed30"].sum()),
+                "pf":float(wins/losses) if losses>0 else 0.0,"avg_return":float(ret.mean()),
+                "cagr":float(eq**(1/yrs)-1),"max_drawdown":float(maxdd),"cache_coverage":int(g["ix"].nunique())})
+        if len(R):
+            for cfg in [x[0] for x in configs]:
+                C=R[R["config"]==cfg]
+                _be_metrics("ALL",cfg,C)
+                _be_metrics("2022–2026",cfg,C[C["date"]>=pd.Timestamp("2022-01-01")])
+                _be_metrics("POWER_TREND",cfg,C[C["v6_market_character"].astype(str)=="POWER_TREND"])
+                if "ticker" in W.columns:
+                    valid_ix=set(W[W["ticker"].astype(str).isin(set(V5_VALIDATION))].index)
+                    _be_metrics("VALIDATION_324",cfg,C[C["ix"].isin(valid_ix)])
+            X=R[R["killed20"]|R["killed30"]].sort_values(["mfe","oldret"],ascending=False).head(40)
+            breakeven_examples=X.to_dict("records")
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -4176,7 +4270,8 @@ def v63_summary():
             "exposure_rows":exposure_rows,"exposure_years":exposure_years,
             "bottleneck_rows":bottleneck_rows,
             "sizing_fix_rows":sizing_fix_rows,"sizing_fix_years":sizing_fix_years,
-            "winner_capture":winner_capture,"exit_reasons":exit_reasons,"winner_examples":winner_examples}
+            "winner_capture":winner_capture,"exit_reasons":exit_reasons,"winner_examples":winner_examples,
+            "breakeven_survival":breakeven_survival,"breakeven_examples":breakeven_examples}
 
 def run_v63():
     import importlib.util
@@ -7449,7 +7544,7 @@ document.addEventListener("DOMContentLoaded",function(){
     const root=document.querySelector(".wrap");
     const candidates=[...root.children].filter(el=>{
       if(el===mount || el===archive) return false;
-      const t=(el.textContent||"").replace(/\s+/g," ");
+      const t=(el.textContent||"").replace(/\\s+/g," ");
       return /\bV(?:2(?:\.\d+)?|3(?:\.\d+)?|4(?:\.\d+)?|5(?:\.\d+)?)\b/i.test(t);
     });
     function versionOf(el){
@@ -7483,6 +7578,17 @@ setTimeout(poll,5000);
 </script>
 <script>
 document.addEventListener("DOMContentLoaded", function(){
+  try{
+    const top=document.querySelector(".top");
+    if(top && !document.getElementById("v68-shortcut")){
+      const box=document.createElement("div");
+      box.id="v68-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #2563eb";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛟 V6.8 Break-even Survival Test</h2><div class="muted">缓存路径重放：5% / 8% / 10% / 1R → BE 或 BE−1%</div></div><a href="/v68/breakeven-survival"><button type="button">打开 V6.8 测试</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
   try{
     const top=document.querySelector(".top");
     if(top && !document.getElementById("v67-shortcut")){
@@ -8032,6 +8138,30 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
 </div></body></html>
 """
     return render_template_string(tpl,rows=rows,reasons=reasons,examples=examples)
+
+@APP.get("/v68/breakeven-survival")
+def v68_breakeven_survival_page():
+    s=v63_summary()
+    rows=s.get("breakeven_survival",[]) if s.get("available") else []
+    examples=s.get("breakeven_examples",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.8 Break-even Survival Test</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}.wrap{max-width:1050px;margin:auto}
+.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}h1{font-size:28px;margin:0 0 8px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px;line-height:1.65}.warn{background:#fff7ed;border-color:#fed7aa}.grid{display:grid;grid-template-columns:1fr;gap:10px}.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}.metric small{display:block;color:#64748b}.metric b{font-size:19px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:12px}@media(min-width:760px){.grid{grid-template-columns:1fr 1fr}}
+</style></head><body><div class="wrap"><a class="back" href="/">← 返回主仪表盘</a>
+<div class="card"><h1>🛟 V6.8 Break-even Survival Test</h1><div class="note">使用现有市场缓存做逐日 OHLC 路径重放，不重新下载443只。比较 +5%、+8%、+10%、+1R 触发，以及 BE / BE−1% 两种保护线。</div>
+<div class="note warn" style="margin-top:10px"><b>防止未来函数：</b>触发上涨后的下一交易日才启用 BE；若跳空跌穿保护线，按当日开盘价退出，不假装能成交在 BE。</div></div>
+{% if rows %}<div class="card"><h2>BE 生存结果</h2><div class="grid">{% for r in rows %}<div class="item"><div class="name">{{r.scope}} · {{r.name}}</div><div class="metrics">
+<div class="metric"><small>交易 / BE退出</small><b>{{r.trades}} / {{r.be_exits}}</b></div><div class="metric"><small>救回 STOP / GAP</small><b>{{r.saved_stops}}</b></div>
+<div class="metric"><small>误杀未来 MFE≥20%</small><b>{{r.killed20}}</b></div><div class="metric"><small>误杀未来 MFE≥30%</small><b>{{r.killed30}}</b></div>
+<div class="metric"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div><div class="metric"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>CAGR（固定风险比较）</small><b>{{"%.2f%%"|format(r.cagr*100)}}</b></div><div class="metric"><small>最大回撤</small><b>{{"%.2f%%"|format(r.max_drawdown*100)}}</b></div>
+</div></div>{% endfor %}</div></div>{% else %}<div class="card"><b>现有 V6.3 交易表没有可读取的 be_armed 记录。</b><br>这不代表回本规则安全，只代表旧结果不足以完成本测试；需要进入逐日路径重放。</div>{% endif %}
+{% if examples %}<details class="card"><summary style="font-weight:900;font-size:20px;cursor:pointer">⚠️ 未来大赢家被 BE 误杀案例（点开）</summary><div style="overflow-x:auto;margin-top:10px"><table><tr><th>方案</th><th>股票</th><th>日期</th><th>原收益</th><th>BE后收益</th><th>MFE</th><th>原退出</th></tr>{% for r in examples %}<tr><td>{{r.config}}</td><td><b>{{r.ticker}}</b></td><td>{{r.date}}</td><td>{{"%.1f%%"|format(r.oldret*100)}}</td><td>{{"%.1f%%"|format(r.newret*100)}}</td><td>{{"%.1f%%"|format(r.mfe*100)}}</td><td>{{r.reason}}</td></tr>{% endfor %}</table></div></details>{% endif %}
+</div></body></html>"""
+    return render_template_string(tpl,rows=rows,examples=examples)
 
 @APP.get("/v664/sizing-fix")
 def v664_sizing_fix_page():
