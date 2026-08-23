@@ -4241,9 +4241,25 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
   details.section-fold>summary{font-size:18px}
 }
 
+
+#publisher-fab{position:fixed;right:14px;bottom:84px;z-index:9999;text-decoration:none}
+#publisher-fab button{border:0;border-radius:999px;padding:12px 16px;font-weight:900;font-size:15px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
+@media print{#publisher-fab{display:none!important}}
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.8</h1><div class="muted">当前研究版：V6.3.9.8 Publisher UX · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.9</h1><div class="muted">当前研究版：V6.3.9.9 Publisher UX Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
+
+<div class="card" id="publisher-top" style="margin:10px 0;border:2px solid #bbf7d0">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
+      <div class="muted">固定在最上面；这台 iPhone 可记住 Publisher 密码。</div>
+    </div>
+    <a href="/publisher/control" style="text-decoration:none">
+      <button type="button">🚀 上传新版</button>
+    </a>
+  </div>
+</div>
 
 <div class="grid">
 <div class="card"><div class="muted">持久储存</div><div class="kpi">{{storage_dir}}</div><div class="muted">可写：{{"是" if storage_writable else "否"}}</div></div>
@@ -4262,7 +4278,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.8 当前版</a>
+<a class="primary" href="#v63-current">🚀 V6.3.9.9 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -5034,17 +5050,6 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
-<div class="card" id="publisher-top" style="margin-top:10px;border:2px solid #bbf7d0">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div>
-      <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
-      <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
-    </div>
-    <a href="/publisher/control" style="text-decoration:none">
-      <button type="button">🚀 打开上传发布</button>
-    </a>
-  </div>
-</div>
 <div class="card current-card" id="v628-diagnostic" style="margin-top:18px">
 <h2 style="margin:0 0 6px">🧭 V6.2.8 Recent Regime Diagnostics · 2022–2026</h2>
 <div class="muted" style="margin-bottom:12px">
@@ -5094,26 +5099,25 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 
-<div class="card" style="margin-top:12px;border:2px solid #bbf7d0">
-<h3 style="margin:0 0 6px">☁️ Cloud Publisher 已嵌入</h3>
+<details class="card" style="margin-top:12px;border:1px solid #d1fae5">
+<summary style="font-weight:800;cursor:pointer">☁️ Cloud Publisher 设置/测试（平时不用打开）</summary>
+<div style="margin-top:10px">
 <div class="muted">
 设置 Railway Variables 后，这个同一个 Service 就能通过 GitHub API 更新 app.py / jlaw_*.py；
-主 Railway 服务会因 GitHub 更新自动重新 Deploy。不会新增第二个 Service。
+主 Railway 服务会因 GitHub 更新自动重新 Deploy。
 </div>
-<div style="margin-top:8px;font-size:14px">
-检查地址：<code>/publisher/health</code>
-</div>
+<div style="margin-top:8px;font-size:14px">检查地址：<code>/publisher/health</code></div>
 <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-<a href="/publisher/control" style="text-decoration:none;flex:1;min-width:220px">
-<button type="button" style="width:100%">☁️ 打开自动发布控制台</button>
-</a>
-<a href="/publisher/test-page" style="text-decoration:none;flex:1;min-width:220px">
-<button type="button" style="width:100%">🧪 安全测试</button>
-</a>
+<a href="/publisher/control" style="text-decoration:none;flex:1;min-width:220px"><button type="button" style="width:100%">☁️ 自动发布控制台</button></a>
+<a href="/publisher/test-page" style="text-decoration:none;flex:1;min-width:220px"><button type="button" style="width:100%">🧪 安全测试</button></a>
 </div>
 </div>
-<div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9.8 RS2 + Feature Store</h2>
+</details>
+<details class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
+<summary style="font-size:24px;font-weight:900;cursor:pointer;list-style:none">
+🚀 V6.3.9.9 当前研究结果 <span class="muted" style="font-size:14px">（点开完整数据）</span>
+</summary>
+<div style="margin-top:12px">
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -5391,6 +5395,7 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 {% endfor %}
 </table></div>
 </div>
+</details>
 
 <details id="v61-fast" class="card" style="margin-top:18px" data-version="6.1">
 <summary style="font-size:24px;font-weight:800;cursor:pointer">⚡ V6.1 Fast Engine <span class="version-label">上一版</span></summary>
@@ -6064,7 +6069,9 @@ function setFilter(kind){
 function toggleDetail(ticker){const el=document.getElementById('detail-'+ticker);if(el)el.style.display=(el.style.display==='none'||!el.style.display)?'':'none';}
 async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});const s=await r.json();const b=await fetch('/api/backtest-status',{cache:'no-store'});const bs=await b.json();const vr=await fetch('/api/v3-status',{cache:'no-store'});const vs=await vr.json();const vv=await fetch('/api/v5-validation-status',{cache:'no-store'});const vvs=await vv.json();const v6r=await fetch('/api/v6-shadow-status',{cache:'no-store'});const v6s=await v6r.json();const f61=await fetch('/api/v61-fast-status',{cache:'no-store'});const f61s=await f61.json();if(s.status==='updating'||bs.status==='running'||(vs.status==='running'||vs.status==='stopping')||vvs.status==='running'||v6s.status==='running'||f61s.status==='running')setTimeout(()=>location.reload(),3000);}catch(e){}}
 setTimeout(poll,5000);
-</script></body></html>"""
+</script>
+<a id="publisher-fab" href="/publisher/control"><button type="button">☁️ 发布</button></a>
+</body></html>"""
 
 
 @APP.get("/youtube")
