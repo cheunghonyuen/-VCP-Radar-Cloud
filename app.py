@@ -3155,6 +3155,100 @@ def v63_summary():
             _dr_add(scope_name,"DEMAND-FIRST Rank1",NN[NN["rank_demand_first"]==1])
             _dr_add(scope_name,"DEMAND-FIRST Rank1–2",NN[NN["rank_demand_first"]<=2])
 
+
+    portfolio_rows=[]
+    portfolio_years=[]
+
+    def _portfolio_sim(source, top_n=1, max_positions=5, risk_pct=0.003, initial_equity=100000.0, label=""):
+        if source is None or source.empty or "date" not in source.columns or "return_pct" not in source.columns:
+            return None, []
+        D=source.copy()
+        D["date"]=pd.to_datetime(D["date"],errors="coerce")
+        D=D[D["date"].notna()].copy()
+
+        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
+        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
+        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
+        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
+        D["_power"]=power.astype(int); D["_goodvol"]=(vol>=1.8).astype(int); D["_goodloc"]=(ext<=0.01).astype(int)
+        D["_vol"]=vol.fillna(0.0); D["_ext"]=ext.fillna(999.0); D["_rs2"]=rs2.fillna(0.0)
+        D=D.sort_values(["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
+                        ascending=[True,False,False,False,False,True,False]).copy()
+        D["_rank"]=D.groupby("date").cumcount()+1
+        D=D[D["_rank"]<=int(top_n)].copy()
+        if D.empty:return None,[]
+
+        hold=pd.to_numeric(D["hold_days"],errors="coerce").fillna(20).clip(lower=1).round().astype(int) if "hold_days" in D.columns else pd.Series(20,index=D.index)
+        D["_exit_date"]=[d+pd.offsets.BDay(int(h)) for d,h in zip(D["date"],hold)]
+        D["_ret"]=pd.to_numeric(D["return_pct"],errors="coerce").fillna(0.0)
+        stop=pd.to_numeric(D["stop_pct"],errors="coerce").abs() if "stop_pct" in D.columns else pd.Series(0.07,index=D.index)
+        D["_stop"]=stop.where((stop>0.005)&(stop<0.30),0.07)
+
+        equity=cash=float(initial_equity); peak=equity; max_dd=0.0
+        open_pos=[]; realized=[]; skipped_capacity=0
+
+        def close_due(day):
+            nonlocal equity,cash,peak,max_dd,open_pos
+            due=[p for p in open_pos if p["exit_date"]<=day]
+            keep=[p for p in open_pos if p["exit_date"]>day]
+            for p in due:
+                pnl=p["capital"]*p["ret"]; cash+=p["capital"]+pnl
+                realized.append({"exit_date":p["exit_date"],"pnl":pnl})
+            open_pos=keep
+            equity=cash+sum(p["capital"] for p in open_pos)
+            peak=max(peak,equity)
+            if peak>0:max_dd=min(max_dd,equity/peak-1.0)
+
+        for day,g in D.groupby("date",sort=True):
+            close_due(day)
+            equity=cash+sum(p["capital"] for p in open_pos)
+            for _,r in g.sort_values("_rank").iterrows():
+                if len(open_pos)>=int(max_positions):
+                    skipped_capacity+=1; continue
+                cap=min(equity*float(risk_pct)/float(r["_stop"]), equity*0.25, cash)
+                if cap<100: continue
+                cash-=cap
+                open_pos.append({"exit_date":r["_exit_date"],"capital":float(cap),"ret":float(r["_ret"])})
+        for day in sorted({p["exit_date"] for p in open_pos}): close_due(day)
+        equity=cash
+
+        first=D["date"].min(); last=max(D["_exit_date"].max(),D["date"].max())
+        years=max((last-first).days/365.25,1/365.25)
+        cagr=(equity/initial_equity)**(1/years)-1 if equity>0 else -1.0
+        pnl=[x["pnl"] for x in realized]; wins=[x for x in pnl if x>0]; losses=[x for x in pnl if x<0]
+        pf=sum(wins)/(-sum(losses)) if losses else (999.0 if wins else 0.0)
+
+        yr=[]; running=float(initial_equity)
+        if realized:
+            RR=pd.DataFrame(realized); RR["year"]=pd.to_datetime(RR["exit_date"]).dt.year
+            for y,gy in RR.groupby("year",sort=True):
+                start=running; p=float(gy["pnl"].sum()); running+=p
+                yr.append({"config":label,"year":int(y),"return":p/start if start else 0.0,"end_equity":running,"trades":int(len(gy))})
+
+        return {
+            "name":label,"final_equity":equity,"total_return":equity/initial_equity-1.0,"cagr":cagr,
+            "max_drawdown":max_dd,"trades":len(realized),"win_rate":len(wins)/len(realized) if realized else 0.0,
+            "pf":pf,"skipped_capacity":skipped_capacity
+        },yr
+
+    if len(T):
+        for label,tn,mp,risk in [
+            ("Top1 · 5仓 · Risk0.3%",1,5,0.003),
+            ("Top1 · 8仓 · Risk0.5%",1,8,0.005),
+            ("Top2 · 8仓 · Risk0.3%",2,8,0.003),
+            ("Top2 · 10仓 · Risk0.5%",2,10,0.005),
+        ]:
+            sm,yy=_portfolio_sim(T,tn,mp,risk,label=label)
+            if sm: portfolio_rows.append(sm); portfolio_years.extend(yy)
+        TT=T.copy(); TT["date"]=pd.to_datetime(TT["date"],errors="coerce")
+        REC=TT[TT["date"]>=pd.Timestamp("2022-01-01")].copy()
+        for label,tn,mp,risk in [
+            ("2022–26 Top1 · 5仓 · 0.3%",1,5,0.003),
+            ("2022–26 Top2 · 8仓 · 0.3%",2,8,0.003),
+        ]:
+            sm,yy=_portfolio_sim(REC,tn,mp,risk,label=label)
+            if sm: portfolio_rows.append(sm); portfolio_years.extend(yy)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3166,7 +3260,8 @@ def v63_summary():
             "ranking_replay":ranking_replay,
             "rank12_diag":rank12_diag,"rank12_features":rank12_features,
             "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features,
-            "demand_rank_diag":demand_rank_diag}
+            "demand_rank_diag":demand_rank_diag,
+            "portfolio_rows":portfolio_rows,"portfolio_years":portfolio_years}
 
 def run_v63():
     import importlib.util
@@ -4648,7 +4743,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.5.4</h1><div class="muted">当前研究版：V6.5.4 Demand-First Ranking Replay · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.6.0</h1><div class="muted">当前研究版：V6.6.0 Portfolio Simulator · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4668,7 +4763,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.5.4 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.6.0 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6475,6 +6570,16 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v66-shortcut")){
+      const box=document.createElement("div"); box.id="v66-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #f59e0b";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">💰 V6.6 Portfolio Simulator</h2><div class="muted">不重跑：看10万美元账户级结果</div></div><a href="/v66/portfolio-simulator"><button type="button">打开账户模拟</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v654-shortcut")){
       const box=document.createElement("div");
       box.id="v654-shortcut";
@@ -6590,7 +6695,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.5.4 当前版";
+      currentLink.textContent="🚀 V6.6.0 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -6851,6 +6956,38 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v66/portfolio-simulator")
+def v66_portfolio_simulator_page():
+    s=v63_summary(); rows=s.get("portfolio_rows",[]) if s.get("available") else []; yrs=s.get("portfolio_years",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.6 Portfolio Simulator</title><style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}.wrap{max-width:920px;margin:auto}
+.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}h1{font-size:28px;margin:0 0 8px}
+.grid{display:grid;grid-template-columns:1fr;gap:10px}.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}.metric small{display:block;color:#64748b}.metric b{font-size:20px}
+.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}.note{background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:12px}
+table{width:100%;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:13px}@media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}
+</style></head><body><div class="wrap"><a class="back" href="/">← 返回主仪表盘</a>
+<div class="card"><h1>💰 V6.6 Portfolio Simulator</h1><div class="note">
+起始资金 $100,000；用 V6.5.4 Demand-First 排序，不重跑。仓位按账户风险÷stop_pct，单只最多25%。<br>
+<b>注意：</b>hold_days 用工作日近似退出；最大回撤是“已实现权益”回撤，不是逐日MTM，所以实盘回撤可能更大。本版用于比较配置。
+</div></div>
+<div class="card"><h2>账户级结果</h2><div class="grid">{% for r in rows %}
+<div class="item"><div class="name">{{r.name}}</div><div class="metrics">
+<div class="metric"><small>最终资金</small><b>${{"{:,.0f}".format(r.final_equity)}}</b></div>
+<div class="metric"><small>CAGR</small><b>{{"%.1f%%"|format(r.cagr*100)}}</b></div>
+<div class="metric"><small>总收益</small><b>{{"%.1f%%"|format(r.total_return*100)}}</b></div>
+<div class="metric"><small>已实现最大回撤</small><b>{{"%.1f%%"|format(r.max_drawdown*100)}}</b></div>
+<div class="metric"><small>PF / 胜率</small><b>{{"%.2f"|format(r.pf)}} / {{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>成交 / 满仓跳过</small><b>{{r.trades}} / {{r.skipped_capacity}}</b></div>
+</div></div>{% endfor %}</div></div>
+<div class="card"><h2>年度已实现收益</h2><div style="overflow-x:auto"><table><tr><th>配置</th><th>年份</th><th>收益</th><th>年末资金</th><th>交易</th></tr>
+{% for r in yrs %}<tr><td><b>{{r.config}}</b></td><td>{{r.year}}</td><td>{{"%.1f%%"|format(r.return*100)}}</td><td>${{"{:,.0f}".format(r.end_equity)}}</td><td>{{r.trades}}</td></tr>{% endfor %}
+</table></div></div></div></body></html>"""
+    return render_template_string(tpl,rows=rows,yrs=yrs)
 
 @APP.get("/v654/demand-first-replay")
 def v654_demand_first_replay_page():
