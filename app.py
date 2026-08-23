@@ -4489,6 +4489,104 @@ V610_DIR = DATA_DIR / "jlaw_v610_forward_shadow"
 V610_META = V610_DIR / "meta.json"
 V610_JOURNAL = V610_DIR / "forward_signals.csv"
 
+V610_FRESH_DIR = DATA_DIR / "jlaw_v610_fresh_scan"
+V610_FRESH_STATUS = V610_FRESH_DIR / "status.json"
+v610_fresh_thread = None
+
+def _v610_fresh_status():
+    s={"status":"idle","message":"尚未执行 Fresh 321","processed":0,"stocks":0,"current":"","error":None}
+    if V610_FRESH_STATUS.exists():
+        try:s.update(json.loads(V610_FRESH_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v610_write_fresh_status(**kw):
+    V610_FRESH_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v610_fresh_status(); s.update(kw)
+    V610_FRESH_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+    return s
+
+def _v610_run_fresh():
+    global v610_fresh_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():
+            raise RuntimeError("GitHub 根目录缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("jlaw_v610_fresh_engine",str(ep))
+        mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+        available=sorted(t for t in V5_VALIDATION if (MARKET_DIR/f"{t}.csv").exists())
+        V610_FRESH_DIR.mkdir(parents=True,exist_ok=True)
+
+        # Fresh means do NOT reuse old per-stock checkpoints.
+        # Keep V6.1 historical evidence untouched in its original directory.
+        ck=V610_FRESH_DIR/"checkpoints_v61"
+        if ck.exists():
+            import shutil
+            shutil.rmtree(ck,ignore_errors=True)
+
+        for fn in ["jlaw_v6_signals.csv","jlaw_v6_trades.csv"]:
+            p=V610_FRESH_DIR/fn
+            try:
+                if p.exists(): p.unlink()
+            except Exception:
+                pass
+
+        _v610_write_fresh_status(
+            status="running",message="Fresh 321 正在用现有 2026-08 市场缓存重算；不下载数据",
+            processed=0,stocks=len(available),current="",error=None,
+            started_at=datetime.now(timezone.utc).isoformat(),finished_at=None
+        )
+
+        def prog(done,total,t):
+            _v610_write_fresh_status(
+                status="running",message="Fresh 321 正在重算（不使用旧 checkpoint）",
+                processed=done,stocks=total,current=t
+            )
+
+        mod.run(
+            str(MARKET_DIR),str(V610_FRESH_DIR),progress_cb=prog,
+            quick=False,quick_n=50,quick_lookback=420,
+            stop_file=str(V610_FRESH_DIR/"STOP"),
+            ticker_filter=available,parallel_workers=2,resume=False
+        )
+
+        sp=V610_FRESH_DIR/"jlaw_v6_signals.csv"
+        latest="无"; n=0
+        if sp.exists() and sp.stat().st_size:
+            d=pd.read_csv(sp)
+            n=len(d)
+            if n and "date" in d.columns:
+                dd=pd.to_datetime(d["date"],errors="coerce")
+                if dd.notna().any(): latest=dd.max().strftime("%Y-%m-%d")
+
+        _v610_write_fresh_status(
+            status="done",
+            message=f"Fresh 321 完成；信号 {n} 条；最后一个实际信号日期 {latest}",
+            processed=len(available),stocks=len(available),current="",
+            signal_rows=int(n),signal_latest=latest,
+            finished_at=datetime.now(timezone.utc).isoformat(),error=None
+        )
+    except Exception as ex:
+        traceback.print_exc()
+        _v610_write_fresh_status(
+            status="error",message="Fresh 321 失败",
+            error=f"{type(ex).__name__}: {ex}",
+            finished_at=datetime.now(timezone.utc).isoformat()
+        )
+    finally:
+        v610_fresh_thread=None
+
+def v610_start_fresh():
+    global v610_fresh_thread
+    if v610_fresh_thread is not None and v610_fresh_thread.is_alive():
+        return False
+    v610_fresh_thread=threading.Thread(target=_v610_run_fresh,daemon=True)
+    v610_fresh_thread.start()
+    return True
+
+
 def _v610_meta():
     if V610_META.exists():
         try:
@@ -4505,6 +4603,7 @@ def _v610_write_meta(**kw):
 
 def _v610_source_signals():
     candidates=[
+        (V610_FRESH_DIR/"jlaw_v6_signals.csv","V6.10 Fresh 321"),
         (V61_FAST_DIR/"full"/"jlaw_v6_signals.csv","V6.1 Full"),
         (V6_SHADOW_DIR/"jlaw_v6_signals.csv","V6.0 Shadow"),
     ]
@@ -5945,7 +6044,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.10.0</h1><div class="muted">当前研究版：V6.10.0 Final Combined System · 规则冻结 · Forward Shadow</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.10.1</h1><div class="muted">当前研究版：V6.10.1 Fresh Signal Refresh · Forward Shadow</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8355,6 +8454,7 @@ details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding
 @APP.get("/v610/final-system")
 def v610_final_system_page():
     st=v610_status()
+    fresh=_v610_fresh_status()
     rows=v610_recent_rows(40)
     tpl=r"""
 <!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -8379,6 +8479,25 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 <div class="rule"><b>3. 单股仓位</b><br>由风险决定自然仓位，不再用“剩余 Exposure ÷ 剩余仓位数”。</div>
 <div class="rule"><b>4. Market Context</b><br>普通市场：每笔风险约 0.3%，总 Exposure 上限约 50%；POWER_TREND：每笔风险约 0.5%，总 Exposure 上限约 85%。</div>
 <div class="rule"><b>5. Selective Break-even</b><br>只有 <b>Extension &gt; 1%</b> 的交易，先涨到 +10% 后，从下一交易日开始把止损提到买入价；其他交易维持原退出。</div>
+</div>
+
+
+<div class="card"><h2>🔄 Fresh 321 信号刷新</h2>
+<div class="warn">
+你现有 V6.1 Full 使用 checkpoint，旧 checkpoint 会直接跳过已经完成的股票。<br>
+所以“再点 Full 321”不一定真正用 2026-08-21 的缓存重算。这里的 Fresh 321 会<b>保留旧研究结果</b>，另开目录从现有缓存重新计算321只，<b>不重新下载市场数据</b>。
+</div>
+<div class="metrics" style="margin-top:12px">
+<div class="metric"><small>状态</small><b>{{fresh.status}}</b></div>
+<div class="metric"><small>进度</small><b>{{fresh.processed}} / {{fresh.stocks}}</b></div>
+<div class="metric"><small>当前</small><b>{{fresh.current or "—"}}</b></div>
+<div class="metric"><small>最新信号</small><b>{{fresh.signal_latest or "—"}}</b></div>
+</div>
+<p>{{fresh.message}}</p>
+{% if fresh.error %}<p style="color:#b91c1c"><b>{{fresh.error}}</b></p>{% endif %}
+{% if fresh.status != "running" %}
+<form method="post" action="/v610/fresh-scan"><button class="green">▶ Fresh 321（不使用旧 checkpoint）</button></form>
+{% endif %}
 </div>
 
 <div class="card"><h2>🔭 Forward Shadow 状态</h2>
@@ -8412,8 +8531,26 @@ table{width:100%;border-collapse:collapse;min-width:680px}th,td{padding:8px;bord
 <b>Exposure</b>：账户有多少比例资金投入市场。<br>
 <b>BE / Break-even</b>：保本止损。<br>
 <b>RS2</b>：相对强弱，用作 Ranking 后段排序条件。</div></details>
+<script>
+setTimeout(async function pollFresh(){
+  try{
+    const r=await fetch("/api/v610-fresh-status",{cache:"no-store"});
+    const s=await r.json();
+    if(s.status==="running") location.reload();
+  }catch(e){}
+},4000);
+</script>
 </div></body></html>"""
-    return render_template_string(tpl,st=st,rows=rows)
+    return render_template_string(tpl,st=st,fresh=fresh,rows=rows)
+
+@APP.get("/api/v610-fresh-status")
+def api_v610_fresh_status():
+    return jsonify(_v610_fresh_status())
+
+@APP.post("/v610/fresh-scan")
+def v610_fresh_scan_route():
+    v610_start_fresh()
+    return redirect("/v610/final-system")
 
 @APP.post("/v610/activate")
 def v610_activate_route():
