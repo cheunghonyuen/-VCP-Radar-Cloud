@@ -6144,7 +6144,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.4</h1><div class="muted">当前研究版：V6.12.4 Full UI Verified + Funnel Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.5</h1><div class="muted">当前研究版：V6.12.5 Funnel Cache Read Fix</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -8696,105 +8696,236 @@ table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px so
 </div></body></html>"""
     return render_template_string(tpl,a=a,stages=stages)
 
+
 @APP.get("/v612/funnel-audit")
 def v612_funnel_audit():
-    """V6.12 read-only funnel audit; cached data only."""
-    import os, glob, json, html
+    """
+    V6.12.5 Funnel Audit
+    Read-only. Uses the SAME market-cache foundation as V6.11, then probes
+    downstream V6 fields from available signal/trade caches when present.
+    """
+    import html, glob, os, json
     from pathlib import Path
 
-    def pick(d, names):
-        for n in names:
-            if n in d and d[n] is not None:
-                return d[n]
-        return None
+    cutoff=pd.Timestamp("2026-05-20")
 
+    # ---------- Step 1: rebuild the same V6.11 base-candidate set ----------
+    base=[]
+    for fp in sorted(MARKET_DIR.glob("*.csv")):
+        try:
+            d=pd.read_csv(fp)
+            if d.empty: continue
+            cm={str(c).lower():c for c in d.columns}
+            dc=cm.get("date") or cm.get("datetime") or cm.get("timestamp")
+            cc=cm.get("close") or cm.get("adj close") or cm.get("adj_close")
+            vc=cm.get("volume")
+            if not dc or not cc: continue
+            z=pd.DataFrame({
+                "date":pd.to_datetime(d[dc],errors="coerce"),
+                "close":pd.to_numeric(d[cc],errors="coerce"),
+                "volume":pd.to_numeric(d[vc],errors="coerce") if vc else float("nan")
+            }).dropna(subset=["date","close"]).sort_values("date")
+            if z.empty: continue
+
+            z["ma50"]=z["close"].rolling(50).mean()
+            z["ma150"]=z["close"].rolling(150).mean()
+            z["ma200"]=z["close"].rolling(200).mean()
+            z["hi252"]=z["close"].rolling(252,min_periods=120).max()
+            z["vma50"]=z["volume"].rolling(50,min_periods=20).mean()
+            z["volratio"]=z["volume"]/z["vma50"]
+            z["extension"]=z["close"]/z["ma50"]-1
+
+            q=z[z["date"]>cutoff].copy()
+            if q.empty: continue
+
+            stage2=(q["close"]>q["ma50"])&(q["ma50"]>q["ma150"])&(q["ma150"]>q["ma200"])
+            near=q["close"]>=0.90*q["hi252"]
+            vol=q["volratio"]>=1.8
+            ext=q["extension"].between(-0.02,0.08)
+            basic=stage2 & near & vol & ext
+            if basic.any():
+                for _,r in q[basic].iterrows():
+                    base.append({
+                        "ticker":fp.stem.upper(),
+                        "date":r["date"].strftime("%Y-%m-%d"),
+                        "volratio":float(r["volratio"]) if pd.notna(r["volratio"]) else None,
+                        "extension":float(r["extension"]) if pd.notna(r["extension"]) else None,
+                    })
+        except Exception:
+            continue
+
+    # Deduplicate exact ticker/date. This number should match V6.11 "基础条件交集"
+    base_map={(r["ticker"],r["date"]):r for r in base}
+    base=list(base_map.values())
+
+    # ---------- Step 2: read every known V6 signal/trade CSV cache ----------
+    cache_files=[]
+    roots=[
+        DATA_DIR,
+        V61_FAST_DIR if 'V61_FAST_DIR' in globals() else DATA_DIR,
+        V6_SHADOW_DIR if 'V6_SHADOW_DIR' in globals() else DATA_DIR,
+        V610_FRESH_DIR if 'V610_FRESH_DIR' in globals() else DATA_DIR,
+        V610_DAILY_DIR if 'V610_DAILY_DIR' in globals() else DATA_DIR,
+    ]
+    seen_paths=set()
+    for root in roots:
+        try:
+            for pat in ("*signal*.csv","*trade*.csv","*result*.csv","*.csv"):
+                for p in Path(root).rglob(pat):
+                    sp=str(p)
+                    if sp not in seen_paths and p.is_file() and p.stat().st_size>0:
+                        seen_paths.add(sp); cache_files.append(p)
+        except Exception:
+            pass
+
+    downstream={}
     def truth(v):
         if isinstance(v,bool): return v
-        if isinstance(v,(int,float)): return v != 0
-        if v is None: return None
-        return str(v).strip().lower() in {"1","true","yes","pass","passed","ok","a1","a2","a3"}
+        if isinstance(v,(int,float)) and pd.notna(v): return float(v)!=0
+        if v is None or (isinstance(v,float) and pd.isna(v)): return None
+        s=str(v).strip().lower()
+        if s in ("","nan","none"): return None
+        return s in {"1","true","yes","y","pass","passed","ok","a1","a2","a3"}
 
+    def pick(row, names):
+        for n in names:
+            if n in row.index and pd.notna(row[n]):
+                return row[n]
+        return None
+
+    for p in cache_files:
+        try:
+            d=pd.read_csv(p)
+            if d.empty: continue
+            cols={str(c).lower():c for c in d.columns}
+            tc=cols.get("ticker") or cols.get("symbol") or cols.get("stock")
+            dc=cols.get("date") or cols.get("signal_date") or cols.get("entry_date") or cols.get("breakout_date")
+            if not tc or not dc: continue
+            dd=pd.to_datetime(d[dc],errors="coerce")
+            d=d[dd.notna()].copy()
+            if d.empty: continue
+            d["_date"]=pd.to_datetime(d[dc],errors="coerce").dt.strftime("%Y-%m-%d")
+            d["_ticker"]=d[tc].astype(str).str.upper()
+
+            for _,row in d.iterrows():
+                k=(row["_ticker"],row["_date"])
+                if k not in base_map: continue
+
+                vcp=pick(row,["vcp_pass","strict_vcp","is_vcp","vcp_ok","vcp_valid"])
+                edge_count=pick(row,["v6_edge_count","edge_count","edges","edge_stack_count"])
+                edge_pass=pick(row,["edge_pass","edge_stack_pass","v6_edge_pass"])
+                veto=pick(row,["veto","vetoed","red_flag_veto","is_vetoed","red_flag","redflag","has_red_flag","v6_red_flag"])
+                rank=pick(row,["rank","ranking","daily_rank","v6_rank","final_rank"])
+                final=pick(row,["final_signal","signal","selected","is_signal","trade_signal"])
+
+                cur=downstream.get(k,{"sources":[]})
+                cur["sources"].append(p.name)
+
+                tv=truth(vcp)
+                if tv is not None: cur["vcp"]=tv
+
+                try:
+                    if edge_count is not None and pd.notna(edge_count):
+                        cur["edge_count"]=float(edge_count)
+                except: pass
+
+                te=truth(edge_pass)
+                if te is not None: cur["edge"]=te
+                elif "edge_count" in cur and "edge" not in cur:
+                    cur["edge"]=cur["edge_count"]>=6
+
+                vt=truth(veto)
+                if vt is not None: cur["veto"]=vt
+
+                try:
+                    if rank is not None and pd.notna(rank):
+                        rr=float(rank); cur["rank"]=rr; cur["rank_ok"]=rr<=3
+                except: pass
+
+                tf=truth(final)
+                if tf is not None: cur["final"]=tf
+
+                downstream[k]=cur
+        except Exception:
+            continue
+
+    # ---------- Step 3: exact funnel with "known" counts ----------
     rows=[]
-    for pat in ("/data/**/*.json","/app/data/**/*.json","data/**/*.json",
-                "/data/**/*.jsonl","/app/data/**/*.jsonl","data/**/*.jsonl"):
-        for fp in glob.glob(pat, recursive=True):
-            try:
-                if os.path.getsize(fp) > 80000000: continue
-                raw=Path(fp).read_text(encoding="utf-8",errors="ignore")
-                objs=[]
-                if fp.endswith(".jsonl"):
-                    for ln in raw.splitlines():
-                        try:
-                            z=json.loads(ln)
-                            if isinstance(z,dict): objs.append(z)
-                        except: pass
-                else:
-                    try:
-                        z=json.loads(raw)
-                        if isinstance(z,list): objs=z
-                        elif isinstance(z,dict):
-                            for k in ("signals","rows","results","trades","candidates","data"):
-                                if isinstance(z.get(k),list):
-                                    objs=z[k]; break
-                    except: pass
-                for d in objs:
-                    if not isinstance(d,dict): continue
-                    dt=str(pick(d,["date","signal_date","entry_date","breakout_date","asof","as_of_date"]) or "")[:10]
-                    tk=str(pick(d,["ticker","symbol","stock"]) or "").upper()
-                    if not tk or not dt or dt <= "2026-05-20": continue
-                    vcp=truth(pick(d,["vcp_pass","strict_vcp","is_vcp","vcp_ok","vcp_valid"]))
-                    ec=pick(d,["v6_edge_count","edge_count","edges","edge_stack_count"])
-                    try: ecf=float(ec) if ec is not None else None
-                    except: ecf=None
-                    ep=truth(pick(d,["edge_pass","edge_stack_pass","v6_edge_pass"]))
-                    edge=ep if ep is not None else (ecf>=6 if ecf is not None else None)
-                    veto=truth(pick(d,["veto","vetoed","red_flag_veto","is_vetoed"]))
-                    if veto is None:
-                        veto=truth(pick(d,["red_flag","redflag","has_red_flag","v6_red_flag"]))
-                    rank=pick(d,["rank","ranking","daily_rank","v6_rank"])
-                    try: rankok=float(rank)<=3 if rank is not None else None
-                    except: rankok=None
-                    final=truth(pick(d,["final_signal","signal","selected","is_signal","trade_signal"]))
-                    rows.append(dict(ticker=tk,date=dt,vcp=vcp,edges=ecf,edge=edge,veto=veto,rank=rank,rankok=rankok,final=bool(final)))
-            except: pass
+    for b in sorted(base,key=lambda x:(x["date"],x["ticker"])):
+        d=downstream.get((b["ticker"],b["date"]),{})
+        rows.append({**b,**d})
 
-    # dedupe ticker/date, keep row with most downstream fields
-    best={}
-    for r in rows:
-        k=(r["ticker"],r["date"])
-        score=sum(r[x] is not None for x in ("vcp","edge","veto","rankok"))
-        if k not in best or score>best[k][0]: best[k]=(score,r)
-    rows=sorted([x[1] for x in best.values()], key=lambda r:(r["date"],r["ticker"]))
+    def known(rows, field): return [r for r in rows if field in r and r[field] is not None]
 
-    vknown=[r for r in rows if r["vcp"] is not None]; vp=[r for r in vknown if r["vcp"]]
-    eknown=[r for r in vp if r["edge"] is not None]; ep=[r for r in eknown if r["edge"]]
-    xknown=[r for r in ep if r["veto"] is not None]; xp=[r for r in xknown if not r["veto"]]
-    rknown=[r for r in xp if r["rankok"] is not None]; rp=[r for r in rknown if r["rankok"]]
-    fp=[r for r in rows if r["final"]]
-    stages=[("缓存记录",len(rows),len(rows)),("VCP 通过",len(vp),len(vknown)),
-            ("Edge 通过",len(ep),len(eknown)),("Red-Flag 后保留",len(xp),len(xknown)),
-            ("Ranking Top3",len(rp),len(rknown)),("Final Signal",len(fp),len(rows))]
+    v_known=known(rows,"vcp"); v_pass=[r for r in v_known if r["vcp"]]
+    e_known=known(v_pass,"edge"); e_pass=[r for r in e_known if r["edge"]]
+    x_known=known(e_pass,"veto"); x_pass=[r for r in x_known if not r["veto"]]
+    r_known=known(x_pass,"rank_ok"); r_pass=[r for r in r_known if r["rank_ok"]]
+    f_known=known(rows,"final"); f_pass=[r for r in f_known if r["final"]]
 
-    collapse="需要看下方“可判定”数量"
-    for name,n,known in stages[1:5]:
-        if known and n==0:
-            collapse=f"{name}：{known} → 0"
+    stages=[
+        ("基础条件交集",len(rows),len(rows)),
+        ("VCP 通过",len(v_pass),len(v_known)),
+        ("Edge 通过",len(e_pass),len(e_known)),
+        ("Red-Flag 后保留",len(x_pass),len(x_known)),
+        ("Ranking Top3",len(r_pass),len(r_known)),
+        ("Final Signal",len(f_pass),len(f_known)),
+    ]
+
+    collapse="尚未定位"
+    for name,n,k in stages[1:]:
+        if k>0 and n==0:
+            collapse=f"{name}：{k} → 0"
             break
+    if collapse=="尚未定位":
+        ratios=[(n/k if k else 1.0,name,n,k) for name,n,k in stages[1:-1] if k]
+        if ratios:
+            q=min(ratios,key=lambda x:x[0])
+            collapse=f"最大收缩：{q[1]} {q[3]} → {q[2]}"
+        elif len(rows)>0 and not downstream:
+            collapse="基础候选已读取，但下游缓存没有对应字段/记录"
 
-    cards="".join(f'<div class="mini"><b>{html.escape(n)}</b><div class="big">{v}</div><small>可判定 {k}</small></div>' for n,v,k in stages)
-    trs="".join(
-        f"<tr><td>{html.escape(str(r['ticker']))}</td><td>{r['date']}</td><td>{r['vcp']}</td><td>{r['edges']}</td><td>{r['veto']}</td><td>{r['rank']}</td><td>{'✓' if r['final'] else ''}</td></tr>"
-        for r in rows[:100]
+    cards="".join(
+        f'<div class="mini"><b>{html.escape(name)}</b><div class="big">{n}</div><small>可判定 {k}</small></div>'
+        for name,n,k in stages
     )
-    page = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}.wrap{max-width:900px;margin:auto}.card{background:#fff;border-radius:22px;padding:20px;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mini{background:#f6f8fb;border-radius:14px;padding:14px}.big{font-size:28px;font-weight:800;margin-top:5px}small{color:#64748b}table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}.warn{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}</style></head>
-<body><div class="wrap"><a href="/v611/signal-drought-audit">← 返回 V6.11</a>
-<div class="card"><h1>🔬 V6.12 Funnel Audit</h1><div class="warn"><b>只读定位：</b>不改参数、不重跑321、不下载市场数据。</div></div>
-<div class="card"><h2>漏斗</h2><div class="grid">__CARDS__</div></div>
-<div class="card"><h2>🎯 当前定位</h2><h3>__COLLAPSE__</h3><p>“可判定”=缓存中确实存在该字段，不会把缺字段当失败。</p></div>
-<div class="card"><h2>样本明细</h2><div style="overflow:auto"><table><tr><th>股票</th><th>日期</th><th>VCP</th><th>Edges</th><th>Veto</th><th>Rank</th><th>Final</th></tr>__TRS__</table></div></div>
+
+    sample_rows=[]
+    for r in rows[:120]:
+        sample_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(r.get('ticker','')))}</td>"
+            f"<td>{html.escape(str(r.get('date','')))}</td>"
+            f"<td>{html.escape(str(r.get('vcp','')))}</td>"
+            f"<td>{html.escape(str(r.get('edge_count','')))}</td>"
+            f"<td>{html.escape(str(r.get('veto','')))}</td>"
+            f"<td>{html.escape(str(r.get('rank','')))}</td>"
+            f"<td>{'✓' if r.get('final') else ''}</td>"
+            f"<td>{html.escape(','.join(r.get('sources',[])[:2]))}</td>"
+            "</tr>"
+        )
+    trs="".join(sample_rows)
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.wrap{{max-width:900px;margin:auto}}.card{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}.mini{{background:#f6f8fb;border-radius:14px;padding:14px}}
+.big{{font-size:28px;font-weight:800;margin-top:5px}}small{{color:#64748b}}table{{width:100%;border-collapse:collapse;font-size:13px}}
+td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}
+</style></head><body><div class="wrap">
+<a href="/v611/signal-drought-audit">← 返回 V6.11</a>
+<div class="card"><h1>🔬 V6.12.5 Funnel Audit</h1>
+<div class="ok"><b>修复：</b>基础候选直接按 V6.11 同一路径从市场 CSV 重建，不再依赖 JSON 缓存格式。</div></div>
+<div class="card"><h2>漏斗</h2><div class="grid">{cards}</div></div>
+<div class="card"><h2>🎯 当前定位</h2><h3>{html.escape(collapse)}</h3>
+<p>基础候选：{len(rows)}；有下游缓存匹配：{len(downstream)}。</p>
+<p><small>“可判定”=缓存中确实有该字段；缺字段不会被算成失败。</small></p></div>
+<div class="card"><h2>🔎 样本明细</h2><div style="overflow:auto"><table>
+<tr><th>股票</th><th>日期</th><th>VCP</th><th>Edges</th><th>Veto</th><th>Rank</th><th>Final</th><th>来源</th></tr>{trs}
+</table></div></div>
 </div></body></html>"""
-    return page.replace("__CARDS__",cards).replace("__COLLAPSE__",html.escape(collapse)).replace("__TRS__",trs)
 
 @APP.get("/v610/final-system")
 def v610_final_system_page():
