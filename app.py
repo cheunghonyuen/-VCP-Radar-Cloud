@@ -2391,7 +2391,40 @@ def v63_summary():
     if "volratio" in T.columns and "rs" in T.columns and "v6_market_character" in T.columns:
         m=(T["v6_market_character"].astype(str)=="POWER_TREND")&(pd.to_numeric(T["volratio"],errors="coerce")>=1.8)&(pd.to_numeric(T["rs"],errors="coerce")>=90)
         add("POWER + Vol≥1.8x + RS2≥90",T[m])
-    return {"available":True,"rows":rows,"trades":int(len(T))}
+
+    eras=[]; recent=[]; rsbands=[]
+    if "date" in T.columns:
+        T["date"]=pd.to_datetime(T["date"],errors="coerce")
+        for nm,st,en in [("2007–2011","2007-01-01","2011-12-31"),("2012–2016","2012-01-01","2016-12-31"),
+                         ("2017–2021","2017-01-01","2021-12-31"),("2022–2026","2022-01-01","2026-12-31")]:
+            g=T[(T["date"]>=pd.Timestamp(st))&(T["date"]<=pd.Timestamp(en))]
+            if len(g): eras.append({"name":nm,**_v6_shadow_metrics(g)})
+
+        R=T[(T["date"]>=pd.Timestamp("2022-01-01"))&(T["date"]<=pd.Timestamp("2026-12-31"))].copy()
+        if len(R):
+            def radd(nm,g):
+                if len(g): recent.append({"name":nm,**_v6_shadow_metrics(g)})
+            radd("2022–26 ALL",R)
+            if "v6_market_character" in R.columns:
+                radd("2022–26 POWER",R[R["v6_market_character"].astype(str)=="POWER_TREND"])
+            if "rs" in R.columns:
+                rr=pd.to_numeric(R["rs"],errors="coerce")
+                radd("2022–26 RS2≥90",R[rr>=90])
+            if all(c in R.columns for c in ["v6_market_character","rs","volratio"]):
+                rr=pd.to_numeric(R["rs"],errors="coerce"); vv=pd.to_numeric(R["volratio"],errors="coerce")
+                mm=(R["v6_market_character"].astype(str)=="POWER_TREND")&(rr>=90)&(vv>=1.8)
+                radd("2022–26 POWER+Vol≥1.8+RS2≥90",R[mm])
+
+    if "rs" in T.columns:
+        rr=pd.to_numeric(T["rs"],errors="coerce")
+        for nm,lo,hi in [("<80",None,80),("80–90",80,90),("90–95",90,95),("95–98",95,98),("98–100",98,100.0001)]:
+            m=pd.Series(True,index=T.index)
+            if lo is not None:m &= rr>=lo
+            if hi is not None:m &= rr<hi
+            g=T[m]
+            if len(g): rsbands.append({"name":nm,**_v6_shadow_metrics(g)})
+
+    return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,"rsbands":rsbands}
 
 def run_v63():
     import importlib.util
@@ -2405,9 +2438,12 @@ def run_v63():
         outdir=V63_DIR/"full"
         outdir.mkdir(parents=True,exist_ok=True)
         def cb(done,total,ticker):
-            write_v63_status(state="running",message=f"阶段2/2：Full321 扫描 {done}/{total}",done=int(done),total=int(total),ticker=str(ticker),error="")
+            write_v63_status(state="running",message=f"阶段2/2：全量股票扫描 {done}/{total}",done=int(done),total=int(total),ticker=str(ticker),error="")
         mod.run(MARKET_DIR,outdir,progress_cb=cb,quick=False,stop_file=V63_STOP_FILE,parallel_workers=2,resume=True)
-        write_v63_status(state="done",message="V6.3 RS2 Full321 完成",done=321,total=321,ticker="",error="")
+        st_done=read_v63_status()
+        actual_total=int(st_done.get("total") or st_done.get("done") or 0)
+        actual_done=int(st_done.get("done") or actual_total)
+        write_v63_status(state="done",message=f"V6.3 RS2 全量完成：{actual_done}/{actual_total}",done=actual_done,total=actual_total,ticker="",error="")
     except Exception as e:
         write_v63_status(state="error",message="V6.3 失败",error=str(e))
 
@@ -3766,7 +3802,7 @@ YouTube 字幕库 <span class="muted" style="font-size:15px;font-weight:600">（
       if(bar) bar.style.width=pct.toFixed(1)+"%";
       if(percent) percent.textContent=pct.toFixed(1)+"%";
       if(ticker) ticker.textContent=s.ticker ? " · 当前 "+s.ticker : "";
-      if(phase) phase.textContent=(s.state==="running" && done===0) ? "阶段1/2：RS2 Feature Store" : "阶段2/2：Full321 扫描";
+      if(phase) phase.textContent=(s.state==="running" && done===0) ? "阶段1/2：RS2 Feature Store" : "阶段2/2：全量股票扫描";
       if(elapsed) elapsed.textContent=elapsedText(s.started_at || startedAt);
       if(err){
         if(s.error){ err.style.display="block"; err.textContent="⚠️ "+s.error; }
@@ -3853,7 +3889,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.3</h1><div class="muted">当前研究版：V6.3.3 RS2 + Feature Store Progress · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.5</h1><div class="muted">当前研究版：V6.3.5 RS2 Result Diagnostics · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3873,7 +3909,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.3 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.5 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4693,7 +4729,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.3 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.5 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -4702,7 +4738,7 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 
 <div id="v63-progress-wrap" style="margin:12px 0">
   <div style="display:flex;justify-content:space-between;gap:10px;font-weight:800;margin-bottom:6px">
-    <span id="v63-phase">{% if v63_status.done == 0 and v63_status.state == "running" %}RS2 Feature Store 建立中{% else %}Full321 扫描{% endif %}</span>
+    <span id="v63-phase">{% if v63_status.done == 0 and v63_status.state == "running" %}RS2 Feature Store 建立中{% else %}全量股票扫描{% endif %}</span>
     <span id="v63-count">{{v63_status.done}} / {{v63_status.total or 321}}</span>
   </div>
   <div style="height:14px;background:#e8edf5;border-radius:999px;overflow:hidden">
@@ -4717,7 +4753,7 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 
 {% if v63_status.error %}<div id="v63-error" style="padding:10px;background:#fff1f1;border-radius:10px">⚠️ {{v63_status.error}}</div>{% else %}<div id="v63-error" style="display:none;padding:10px;background:#fff1f1;border-radius:10px"></div>{% endif %}
 <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
-<form method="post" action="/v63/run"><button>▶ V6.3 Full321 + RS2 Build</button></form>
+<form method="post" action="/v63/run"><button>▶ V6.3 全量 + RS2 Build</button></form>
 <form method="post" action="/v63/stop"><button>■ 停止 / 保留Checkpoint</button></form>
 </div>
 
@@ -4740,6 +4776,47 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 <td>{{"%.2f%%"|format(r.avg_return*100)}}</td><td><b>{{"%.2f"|format(r.pf)}}</b></td><td>{{r.max_losing_streak}}</td></tr>
 {% endfor %}
 </table></div>
+
+<details open style="margin-top:14px">
+<summary style="font-weight:900;cursor:pointer">📊 V6.3.5 结果诊断（不重跑）</summary>
+<div class="muted" style="margin:8px 0">重点看新 RS2 在 2022–2026 是否真的改善，以及 RS2 是否有合理分层。</div>
+
+<h3>年代稳定性</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.eras %}
+<div class="metric-card"><div class="name">{{r.name}}</div><div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数/最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+
+<h3 style="margin-top:14px">2022–2026 单独检查</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.recent %}
+<div class="metric-card"><div class="name">{{r.name}}</div><div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数/最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+
+<h3 style="margin-top:14px">RS2 非重叠分层</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.rsbands %}
+<div class="metric-card"><div class="name">RS2 {{r.name}}</div><div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数/最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div></div>
+{% endfor %}
+</div>
+</details>
 {% endif %}
 </div>
 
