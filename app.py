@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse, parse_qs
 import pandas as pd
 import numpy as np
-from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file, request
+from flask import Flask, jsonify, render_template_string, redirect, url_for, send_file, request, make_response
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
@@ -4075,6 +4075,90 @@ def v63_summary():
                 sizing_fix_rows.append(sm)
                 sizing_fix_years.extend(yy)
 
+
+    winner_capture=[]
+    exit_reasons=[]
+    winner_examples=[]
+
+    def _wc_add(scope,label,g):
+        if g is None or g.empty:
+            return
+        rr=pd.to_numeric(g["return_pct"],errors="coerce") if "return_pct" in g.columns else pd.Series(dtype=float)
+        mfe=pd.to_numeric(g["mfe"],errors="coerce") if "mfe" in g.columns else pd.Series(dtype=float)
+        hold=pd.to_numeric(g["hold_days"],errors="coerce") if "hold_days" in g.columns else pd.Series(dtype=float)
+        z=pd.DataFrame({"ret":rr,"mfe":mfe,"hold":hold}).dropna(subset=["ret","mfe"])
+        if z.empty:
+            return
+        posmfe=z[z["mfe"]>0].copy()
+        capture=(posmfe["ret"]/posmfe["mfe"]).replace([np.inf,-np.inf],np.nan).dropna()
+        upside=(z["mfe"]-z["ret"]).clip(lower=0)
+        winner_capture.append({
+            "scope":scope,"name":label,"trades":int(len(z)),
+            "avg_return":float(z["ret"].mean()),
+            "avg_mfe":float(z["mfe"].mean()),
+            "median_mfe":float(z["mfe"].median()),
+            "avg_lost_upside":float(upside.mean()),
+            "median_capture":float(capture.median()) if len(capture) else 0.0,
+            "avg_hold":float(z["hold"].mean()) if z["hold"].notna().any() else 0.0,
+            "mfe20_rate":float((z["mfe"]>=0.20).mean()),
+            "mfe30_rate":float((z["mfe"]>=0.30).mean()),
+            "mfe50_rate":float((z["mfe"]>=0.50).mean()),
+        })
+
+    if len(T) and "mfe" in T.columns:
+        W=T.copy()
+        W["mfe"]=pd.to_numeric(W["mfe"],errors="coerce")
+        W["return_pct"]=pd.to_numeric(W["return_pct"],errors="coerce")
+        if "date" in W.columns:
+            W["date"]=pd.to_datetime(W["date"],errors="coerce")
+
+        _wc_add("ALL","全部交易",W)
+        _wc_add("BIG_WINNER","MFE ≥20%",W[W["mfe"]>=0.20])
+        _wc_add("BIG_WINNER","MFE ≥30%",W[W["mfe"]>=0.30])
+        _wc_add("BIG_WINNER","MFE ≥50%",W[W["mfe"]>=0.50])
+
+        if "v6_market_character" in W.columns:
+            P=W[W["v6_market_character"].astype(str)=="POWER_TREND"]
+            _wc_add("POWER_TREND","全部 POWER",P)
+            _wc_add("POWER_TREND","POWER + MFE≥20%",P[P["mfe"]>=0.20])
+            _wc_add("POWER_TREND","POWER + MFE≥30%",P[P["mfe"]>=0.30])
+
+        if "ticker" in W.columns:
+            vset=set(V5_VALIDATION)
+            V=W[W["ticker"].astype(str).isin(vset)]
+            _wc_add("VALIDATION_324","全部 Validation",V)
+            _wc_add("VALIDATION_324","Validation + MFE≥20%",V[V["mfe"]>=0.20])
+
+        if "date" in W.columns:
+            R=W[W["date"]>=pd.Timestamp("2022-01-01")]
+            _wc_add("2022–2026","全部最近几年",R)
+            _wc_add("2022–2026","最近 + MFE≥20%",R[R["mfe"]>=0.20])
+
+        if "reason" in W.columns:
+            for reason,g in W.groupby(W["reason"].astype(str),dropna=False):
+                if len(g)<3:
+                    continue
+                rr=pd.to_numeric(g["return_pct"],errors="coerce")
+                mm=pd.to_numeric(g["mfe"],errors="coerce")
+                hh=pd.to_numeric(g["hold_days"],errors="coerce") if "hold_days" in g.columns else pd.Series(dtype=float)
+                exit_reasons.append({
+                    "reason":str(reason),
+                    "trades":int(len(g)),
+                    "avg_return":float(rr.mean()),
+                    "avg_mfe":float(mm.mean()),
+                    "lost_upside":float((mm-rr).clip(lower=0).mean()),
+                    "avg_hold":float(hh.mean()) if len(hh) else 0.0,
+                })
+            exit_reasons=sorted(exit_reasons,key=lambda x:(-x["trades"],x["reason"]))[:20]
+
+        cols=[c for c in ["ticker","date","return_pct","mfe","mae","hold_days","reason","v6_market_character","v6_rank","volratio","rs"] if c in W.columns]
+        X=W[W["mfe"]>=0.20].copy()
+        if len(X):
+            X["lost_upside"]=(pd.to_numeric(X["mfe"],errors="coerce")-pd.to_numeric(X["return_pct"],errors="coerce")).clip(lower=0)
+            X=X.sort_values("lost_upside",ascending=False).head(20)
+            for _,r in X.iterrows():
+                winner_examples.append({c:r.get(c) for c in cols} | {"lost_upside":float(r["lost_upside"])})
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -4091,7 +4175,8 @@ def v63_summary():
             "portfolio_audit":portfolio_audit,"portfolio_audit_years":portfolio_audit_years,
             "exposure_rows":exposure_rows,"exposure_years":exposure_years,
             "bottleneck_rows":bottleneck_rows,
-            "sizing_fix_rows":sizing_fix_rows,"sizing_fix_years":sizing_fix_years}
+            "sizing_fix_rows":sizing_fix_rows,"sizing_fix_years":sizing_fix_years,
+            "winner_capture":winner_capture,"exit_reasons":exit_reasons,"winner_examples":winner_examples}
 
 def run_v63():
     import importlib.util
@@ -5573,7 +5658,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.6.4</h1><div class="muted">当前研究版：V6.6.4 Portfolio Sizing Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.7.0</h1><div class="muted">当前研究版：V6.7.0 Winner Capture + Publisher Fix · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -5593,7 +5678,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.6.4 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.7.0 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -7400,6 +7485,17 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v67-shortcut")){
+      const box=document.createElement("div");
+      box.id="v67-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #f59e0b";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🏆 V6.7 Winner Capture</h2><div class="muted">不重跑：查是不是把真正大赢家卖早了</div></div><a href="/v67/winner-capture"><button type="button">打开 Winner Diagnostic</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v664-shortcut")){
       const box=document.createElement("div");
       box.id="v664-shortcut"; box.className="card";
@@ -7569,7 +7665,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.6.4 当前版";
+      currentLink.textContent="🚀 V6.7.0 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -7835,6 +7931,107 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v67/winner-capture")
+def v67_winner_capture_page():
+    s=v63_summary()
+    rows=s.get("winner_capture",[]) if s.get("available") else []
+    reasons=s.get("exit_reasons",[]) if s.get("available") else []
+    examples=s.get("winner_examples",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.7 Winner Capture Diagnostic</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:1000px;margin:auto}.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:12px}
+details{margin-top:10px} table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:12px}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+
+<div class="card">
+<h1>🏆 V6.7 Winner Capture Diagnostic</h1>
+<div class="note">
+不改选股、不重跑443只。先回答：<b>是不是我们把真正的大赢家卖得太早？</b><br><br>
+这一步用现有交易里的 MFE（持仓期间曾经达到的最大浮盈）比较最终实际收益。
+如果 MFE 很高、最终收益却低，说明退出机制可能没有把赢家吃够。<br><br>
+<b>注意：</b>MFE 是事后诊断，不等于当时可以完美卖在最高点；这页只用来判断“有没有值得研究 Runner/30周均线”的空间。
+</div>
+</div>
+
+<div class="card">
+<h2>赢家捕获率</h2>
+<div class="grid">
+{% for r in rows %}
+<div class="item">
+<div class="name">{{r.scope}} · {{r.name}}</div>
+<div class="metrics">
+<div class="metric"><small>交易数</small><b>{{r.trades}}</b></div>
+<div class="metric"><small>平均最终收益</small><b>{{"%.1f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric"><small>MFE（最大曾有浮盈）平均</small><b>{{"%.1f%%"|format(r.avg_mfe*100)}}</b></div>
+<div class="metric"><small>平均“没吃到”的上涨</small><b>{{"%.1f%%"|format(r.avg_lost_upside*100)}}</b></div>
+<div class="metric"><small>中位捕获率</small><b>{{"%.0f%%"|format(r.median_capture*100)}}</b></div>
+<div class="metric"><small>平均持有天数</small><b>{{"%.1f"|format(r.avg_hold)}}</b></div>
+<div class="metric"><small>曾涨到 +20% 的比例</small><b>{{"%.1f%%"|format(r.mfe20_rate*100)}}</b></div>
+<div class="metric"><small>曾涨到 +30% / +50%</small><b>{{"%.1f%%"|format(r.mfe30_rate*100)}} / {{"%.1f%%"|format(r.mfe50_rate*100)}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</div>
+
+<div class="card">
+<h2>退出原因诊断</h2>
+<div style="overflow-x:auto"><table>
+<tr><th>退出原因</th><th>笔数</th><th>平均最终收益</th><th>平均MFE</th><th>平均没吃到</th><th>平均持有天数</th></tr>
+{% for r in reasons %}
+<tr><td><b>{{r.reason}}</b></td><td>{{r.trades}}</td><td>{{"%.1f%%"|format(r.avg_return*100)}}</td><td>{{"%.1f%%"|format(r.avg_mfe*100)}}</td><td>{{"%.1f%%"|format(r.lost_upside*100)}}</td><td>{{"%.1f"|format(r.avg_hold)}}</td></tr>
+{% endfor %}
+</table></div>
+</div>
+
+<details class="card">
+<summary style="font-weight:900;font-size:20px;cursor:pointer">📌 最大“卖早了”案例（点开）</summary>
+<div style="overflow-x:auto;margin-top:10px"><table>
+<tr><th>股票</th><th>日期</th><th>最终收益</th><th>MFE</th><th>没吃到</th><th>持有天数</th><th>退出原因</th></tr>
+{% for r in examples %}
+<tr>
+<td><b>{{r.ticker}}</b></td><td>{{r.date}}</td>
+<td>{{"%.1f%%"|format((r.return_pct or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.mfe or 0)*100)}}</td>
+<td>{{"%.1f%%"|format((r.lost_upside or 0)*100)}}</td>
+<td>{{r.hold_days}}</td><td>{{r.reason}}</td>
+</tr>
+{% endfor %}
+</table></div>
+</details>
+
+<details class="card">
+<summary style="font-weight:900;font-size:20px;cursor:pointer">📖 指标说明（点开）</summary>
+<div style="margin-top:12px;line-height:1.7">
+<b>MFE（最大有利波动）</b>：这笔交易持有期间，曾经最高赚到多少。<br>
+<b>Winner Capture / 捕获率</b>：最终实际收益 ÷ MFE。越高代表越能把上涨真正带走。<br>
+<b>Lost Upside / 没吃到的上涨</b>：MFE − 最终收益。只是诊断“卖早空间”，不是说能卖在最高点。<br>
+<b>Runner</b>：盈利后保留一部分仓位继续让大赢家跑。<br>
+<b>30周均线</b>：中长期趋势线，可作为强势大赢家的跟踪退出参考。<br>
+<b>CAGR</b>：复合年增长率，账户长期平均每年增长多少。<br>
+<b>PF（盈利因子）</b>：总盈利 ÷ 总亏损，大于1代表整体有正收益。<br>
+<b>最大回撤</b>：账户从历史高点到低点最大跌幅。
+</div>
+</details>
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,reasons=reasons,examples=examples)
 
 @APP.get("/v664/sizing-fix")
 def v664_sizing_fix_page():
@@ -8652,7 +8849,7 @@ def publisher_test():
 
 @APP.get("/publisher/control")
 def publisher_control():
-    return """
+    html = """
 <!doctype html>
 <html lang="zh-Hant">
 <head>
@@ -8693,59 +8890,218 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;b
 <label>3. Commit 备注（可留空）</label>
 <input id="message" name="message" type="text" placeholder="例如：V6.4 Context Veto">
 
-<button type="submit">🚀 发布到 GitHub + 触发 Railway</button>
+<button id="publishBtn" type="submit">🚀 发布到 GitHub + 触发 Railway</button>
+<button id="resetBtn" type="button" style="background:#e5e7eb;color:#111827">↻ 重置页面（不用退出重进）</button>
 </form>
 
+<div id="state" class="small" style="margin-top:12px;padding:10px;border-radius:10px;background:#f8fafc">
+页面状态：可发布
+</div>
 <p class="small">app_v*.py 会自动作为 <b>app.py</b> 发布；jlaw_*.py 保持原文件名。</p>
-<p class="small"><b>建议：</b>把这个页面加到 iPhone 主屏幕，以后点图标就直接上传，不必先打开仪表盘。</p>
-<pre id="out">等待发布…</pre>
+<p class="small"><b>提示：</b>发布后 Railway 会重启服务。重启期间刷新网页可能暂时出现错误；不用反复刷新，等状态显示“服务恢复”即可。</p>
+<div id="resultBox" style="display:none;margin-top:12px;padding:14px;border-radius:12px"></div>
+<details style="margin-top:10px"><summary class="small" style="cursor:pointer">查看技术回执</summary><pre id="out">等待发布…</pre></details>
 </div>
 </div>
 
 <script>
+const PAGE_BUILD = "V6.6.5";
+const openedAt = Date.now();
+
+const form=document.getElementById("f");
+const fileInput=document.getElementById("file");
 const secretInput=document.getElementById("secret");
 const rememberBox=document.getElementById("remember");
-try{
-  const saved=localStorage.getItem("vcp_publish_secret")||"";
-  if(saved){ secretInput.value=saved; rememberBox.checked=true; }
-}catch(e){}
+const messageInput=document.getElementById("message");
+const publishBtn=document.getElementById("publishBtn");
+const resetBtn=document.getElementById("resetBtn");
+const out=document.getElementById("out");
+const state=document.getElementById("state");
+const resultBox=document.getElementById("resultBox");
 
-document.getElementById("f").addEventListener("submit", async (e)=>{
+function loadSecret(){
+  try{
+    const saved=localStorage.getItem("vcp_publish_secret")||"";
+    if(saved){ secretInput.value=saved; rememberBox.checked=true; }
+  }catch(e){}
+}
+
+function setState(msg, kind="normal"){
+  state.textContent="页面状态："+msg;
+  state.style.background = kind==="bad" ? "#fef2f2" : kind==="ok" ? "#f0fdf4" : "#f8fafc";
+  state.style.color = kind==="bad" ? "#991b1b" : kind==="ok" ? "#166534" : "#475569";
+}
+
+function resetControl(clearFile=true){
+  publishBtn.disabled=false;
+  publishBtn.textContent="🚀 发布到 GitHub + 触发 Railway";
+  publishBtn.style.opacity="1";
+  if(clearFile) fileInput.value="";
+  messageInput.value="";
+  resultBox.style.display="none";
+  resultBox.textContent="";
+  out.className="";
+  out.textContent="等待发布…";
+  setState("可发布");
+  loadSecret();
+}
+
+loadSecret();
+
+/* iOS Safari may restore this page from BFCache after app switching.
+   Always reset transient controls when the page becomes visible again. */
+window.addEventListener("pageshow",(ev)=>{
+  if(ev.persisted){
+    resetControl(true);
+    setState("已从后台恢复，页面已自动重置","ok");
+  }else{
+    publishBtn.disabled=false;
+  }
+});
+
+/* If user leaves this page open for a long time, don't force exit/re-enter.
+   Just refresh transient state when they come back to the tab/app. */
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible"){
+    const ageMin=(Date.now()-openedAt)/60000;
+    if(ageMin>10){
+      publishBtn.disabled=false;
+      setState("页面停留较久，已重新启用发布；可直接选择新文件","ok");
+      loadSecret();
+    }
+  }
+});
+
+resetBtn.addEventListener("click",()=>{
+  resetControl(true);
+  setState("已重置，可以直接选新文件","ok");
+});
+
+async function waitForService(){
+  setState("Railway 正在重新部署，请不要刷新页面");
+  const started=Date.now();
+  while(Date.now()-started < 120000){
+    await new Promise(r=>setTimeout(r,5000));
+    try{
+      const r=await fetch("/publisher/health?ts="+Date.now(),{
+        method:"GET", cache:"no-store", headers:{"Accept":"application/json"}
+      });
+      if(r.ok){
+        const j=await r.json();
+        if(j && j.ok){
+          setState("服务已恢复，可以继续上传下一版","ok");
+          publishBtn.disabled=false;
+          publishBtn.textContent="🚀 发布到 GitHub + 触发 Railway";
+          return;
+        }
+      }
+    }catch(e){}
+  }
+  setState("部署可能仍在进行；稍后点“重置页面”即可，不用退出重进");
+  publishBtn.disabled=false;
+  publishBtn.textContent="🚀 发布到 GitHub + 触发 Railway";
+}
+
+form.addEventListener("submit", async (e)=>{
   e.preventDefault();
-  const out=document.getElementById("out");
-  const file=document.getElementById("file").files[0];
-  const secret=document.getElementById("secret").value;
-  const message=document.getElementById("message").value;
+
+  const file=fileInput.files[0];
+  const secret=secretInput.value.trim();
+  const message=messageInput.value.trim();
+
+  if(!file){
+    setState("请先选择 .py 文件","bad");
+    return;
+  }
+  if(!secret){
+    setState("Publisher 密码为空","bad");
+    return;
+  }
+
   try{
     if(rememberBox.checked){ localStorage.setItem("vcp_publish_secret",secret); }
     else { localStorage.removeItem("vcp_publish_secret"); }
   }catch(e){}
-  if(!file){ out.textContent="请选择 .py 文件"; return; }
 
   const fd=new FormData();
   fd.append("file",file);
   fd.append("message",message);
 
+  publishBtn.disabled=true;
+  publishBtn.style.opacity=".6";
+  publishBtn.textContent="正在发布…";
+  setState("正在检查并提交 GitHub");
   out.className="";
-  out.textContent="正在检查并提交 GitHub…";
+  out.textContent="正在提交…";
+  resultBox.style.display="none";
 
   try{
-    const r=await fetch("/publisher/upload",{
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),45000);
+
+    const r=await fetch("/publisher/upload?ts="+Date.now(),{
       method:"POST",
-      headers:{"X-Publish-Secret":secret},
-      body:fd
+      cache:"no-store",
+      headers:{
+        "X-Publish-Secret":secret,
+        "Accept":"application/json"
+      },
+      body:fd,
+      signal:controller.signal
     });
-    const j=await r.json();
+    clearTimeout(timer);
+
+    let j={};
+    try{ j=await r.json(); }
+    catch(parseErr){ throw new Error("服务器返回无法解析，可能正在重启。"); }
+
     out.className=j.ok?"ok":"bad";
     out.textContent=JSON.stringify(j,null,2);
+
+    if(j.ok){
+      resultBox.style.display="block";
+      resultBox.style.background="#f0fdf4";
+      resultBox.style.color="#166534";
+      resultBox.innerHTML="<b>✅ 发布成功</b><br>GitHub 已更新，Railway 正在自动部署。<br><span style='font-size:13px'>这时不要手动刷新；页面会自己检查服务何时恢复。</span>";
+      fileInput.value="";
+      messageInput.value="";
+      waitForService();
+    }else{
+      resultBox.style.display="block";
+      resultBox.style.background="#fef2f2";
+      resultBox.style.color="#991b1b";
+      resultBox.textContent="❌ 发布失败："+(j.error||j.message||"未知错误");
+      publishBtn.disabled=false;
+      publishBtn.style.opacity="1";
+      publishBtn.textContent="🚀 发布到 GitHub + 触发 Railway";
+      setState("发布失败，可以修改后直接重试","bad");
+    }
   }catch(err){
-    out.className="bad";
-    out.textContent=String(err);
+    publishBtn.disabled=false;
+    publishBtn.style.opacity="1";
+    publishBtn.textContent="🚀 发布到 GitHub + 触发 Railway";
+    resultBox.style.display="block";
+    resultBox.style.background="#fff7ed";
+    resultBox.style.color="#9a3412";
+
+    if(err && err.name==="AbortError"){
+      resultBox.textContent="⚠️ 请求等待太久。可能 Railway 正在重启。请先等服务恢复，再点“重置页面”，不用退出重进。";
+      setState("连接超时，等待服务恢复","bad");
+    }else{
+      resultBox.textContent="⚠️ "+String(err);
+      setState("连接中断；可点“重置页面”后直接再试","bad");
+    }
   }
 });
 </script>
+
 </body></html>
 """
+    resp = make_response(html)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 @APP.post("/publisher/upload")
 def publisher_upload():
