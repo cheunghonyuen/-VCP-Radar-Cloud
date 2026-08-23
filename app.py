@@ -2464,8 +2464,91 @@ def v63_summary():
                 g=R[m]
                 if len(g): recent_rs2_bands.append({"name":nm,**_v6_shadow_metrics(g)})
 
+    validation_core=[]
+    validation_core_eras=[]
+
+    # V6.3.7: drill into the validation cohort CORE candidate only.
+    # Candidate = VALIDATION_324 + POWER_TREND + volratio>=1.8 + RS2>=90.
+    if "ticker" in T.columns:
+        tick=T["ticker"].astype(str)
+        V=T[tick.isin(set(V5_VALIDATION))].copy()
+
+        if all(c in V.columns for c in ["v6_market_character","volratio","rs"]):
+            vv=pd.to_numeric(V["volratio"],errors="coerce")
+            rr=pd.to_numeric(V["rs"],errors="coerce")
+            base=(V["v6_market_character"].astype(str)=="POWER_TREND")&(vv>=1.8)&(rr>=90)
+            C=V[base].copy()
+
+            def vcadd(group,label,g):
+                if len(g):
+                    validation_core.append({"group":group,"name":label,**_v6_shadow_metrics(g)})
+
+            vcadd("BASE","ALL CORE",C)
+
+            # Non-overlapping Volume buckets
+            if "volratio" in C.columns:
+                cv=pd.to_numeric(C["volratio"],errors="coerce")
+                for nm,lo,hi in [("1.8–2.0x",1.8,2.0),("2.0–2.5x",2.0,2.5),("2.5x+",2.5,None)]:
+                    m=cv>=lo
+                    if hi is not None:m &= cv<hi
+                    vcadd("VOLUME",nm,C[m])
+
+            # Non-overlapping RS2 buckets
+            if "rs" in C.columns:
+                cr=pd.to_numeric(C["rs"],errors="coerce")
+                for nm,lo,hi in [("90–92",90,92),("92–95",92,95),("95–98",95,98),("98–100",98,100.0001)]:
+                    vcadd("RS2",nm,C[(cr>=lo)&(cr<hi)])
+
+            # Supply buckets
+            if "supply_score" in C.columns:
+                cs=pd.to_numeric(C["supply_score"],errors="coerce")
+                for nm,lo,hi in [("<55",None,55),("55–65",55,65),("65–75",65,75),("75+",75,None)]:
+                    m=pd.Series(True,index=C.index)
+                    if lo is not None:m &= cs>=lo
+                    if hi is not None:m &= cs<hi
+                    vcadd("SUPPLY",nm,C[m])
+
+            # Entry extension buckets
+            if "extension" in C.columns:
+                ce=pd.to_numeric(C["extension"],errors="coerce")
+                for nm,lo,hi in [("≤1%",None,0.01),("1–2%",0.01,0.02),("2–3%",0.02,0.03),(">3%",0.03,None)]:
+                    m=pd.Series(True,index=C.index)
+                    if lo is not None:m &= ce>lo
+                    if hi is not None:m &= ce<=hi
+                    vcadd("ENTRY",nm,C[m])
+
+            # Sector buckets
+            if "sector_score" in C.columns:
+                cs=pd.to_numeric(C["sector_score"],errors="coerce")
+                for nm,lo,hi in [("<60",None,60),("60–65",60,65),("65–70",65,70),("70+",70,None)]:
+                    m=pd.Series(True,index=C.index)
+                    if lo is not None:m &= cs>=lo
+                    if hi is not None:m &= cs<hi
+                    vcadd("SECTOR",nm,C[m])
+
+            # Group breadth buckets
+            if "group_breadth" in C.columns:
+                cg=pd.to_numeric(C["group_breadth"],errors="coerce")
+                for nm,lo,hi in [("<40",None,40),("40–50",40,50),("50–60",50,60),("60+",60,None)]:
+                    m=pd.Series(True,index=C.index)
+                    if lo is not None:m &= cg>=lo
+                    if hi is not None:m &= cg<hi
+                    vcadd("GROUP",nm,C[m])
+
+            # Era stability for this exact validation-core candidate
+            if "date" in C.columns:
+                C["date"]=pd.to_datetime(C["date"],errors="coerce")
+                for nm,st,en in [("2007–2011","2007-01-01","2011-12-31"),
+                                 ("2012–2016","2012-01-01","2016-12-31"),
+                                 ("2017–2021","2017-01-01","2021-12-31"),
+                                 ("2022–2026","2022-01-01","2026-12-31")]:
+                    g=C[(C["date"]>=pd.Timestamp(st))&(C["date"]<=pd.Timestamp(en))]
+                    if len(g):
+                        validation_core_eras.append({"name":nm,**_v6_shadow_metrics(g)})
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
-            "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands}
+            "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
+            "validation_core":validation_core,"validation_core_eras":validation_core_eras}
 
 def run_v63():
     import importlib.util
@@ -3930,7 +4013,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.6.1</h1><div class="muted">当前研究版：V6.3.6.1 Cohort Hotfix · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.7</h1><div class="muted">当前研究版：V6.3.7 Validation CORE Robustness · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -3950,7 +4033,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.6.1 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.7 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4770,7 +4853,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.6.1 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.7 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -4889,6 +4972,46 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 {% endfor %}
 </div>
 
+
+<h3 style="margin-top:18px">🧪 Validation CORE 38笔 · 稳健性拆解</h3>
+<div class="muted" style="margin-bottom:8px">
+只看新增验证组中的候选：POWER_TREND + Volume≥1.8x + RS2≥90。
+不重跑，只从现有 V6.3 trades 拆分。
+</div>
+
+{% for group_name in ["BASE","VOLUME","RS2","SUPPLY","ENTRY","SECTOR","GROUP"] %}
+<details {% if group_name in ["BASE","VOLUME","RS2"] %}open{% endif %} style="margin-top:10px">
+<summary style="font-weight:900;cursor:pointer">{{group_name}}</summary>
+<div class="mobile-metrics">
+{% for r in v63_summary.validation_core if r.group == group_name %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</details>
+{% endfor %}
+
+<h3 style="margin-top:16px">Validation CORE · 年代稳定性</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.validation_core_eras %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
 </details>
 {% endif %}
 </div>
