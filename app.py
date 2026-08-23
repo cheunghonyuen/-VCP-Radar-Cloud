@@ -1,7 +1,7 @@
 import re
 import base64
 import hmac
-import os, json, time, threading, traceback, io, math
+import os, json, time, threading, traceback, io, math, zipfile
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.13.1</h1><div class="muted">Daily Forward Runner · Frozen Champion + Dry 1.05 Shadow</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.13.2</h1><div class="muted">Daily Forward Runner + Independent Holdout Universe Census</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v6132-shortcut" style="border:3px solid #7c3aed">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🧮 Holdout Universe Census</h2>
+      <div class="muted">统计最近20年可测试的新股票与退市股；排除现有443只，只读取代码清单</div></div>
+    <a href="/v6132/holdout-census"><button type="button">统计可测试股票</button></a>
+  </div>
+</div>
 
 <div class="card" id="v6131-shortcut" style="border:3px solid #16a34a">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9930,6 +9938,53 @@ def v61214_page():
         for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
     run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
+
+# ================= V6.13.2 INDEPENDENT HOLDOUT UNIVERSE CENSUS =================
+@APP.get("/v6132/holdout-census")
+def v6132_holdout_census_page():
+    import html
+    esc=lambda x:html.escape(str(x));url="https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip"
+    try:
+        req=Request(url,headers={"User-Agent":"VCP-Radar-Cloud/6.13.2"})
+        raw=urlopen(req,timeout=45).read()
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            name=next(n for n in z.namelist() if n.lower().endswith(".csv"));U=pd.read_csv(z.open(name))
+    except Exception as ex:
+        return f"<h2>Tiingo代码清单读取失败</h2><pre>{esc(type(ex).__name__+': '+str(ex))}</pre><p>稍后重试；没有下载任何股价。</p>",502
+    U.columns=[str(c).strip() for c in U.columns]
+    cm={c.lower():c for c in U.columns};tc=cm.get("ticker");ec=cm.get("exchange");ac=cm.get("assettype");pc=cm.get("pricecurrency");sc=cm.get("startdate");dc=cm.get("enddate")
+    if not all([tc,ec,ac,pc,sc,dc]):return f"<h2>清单字段不完整</h2><pre>{esc(U.columns.tolist())}</pre>",500
+    U[sc]=pd.to_datetime(U[sc],errors="coerce");U[dc]=pd.to_datetime(U[dc],errors="coerce")
+    U[tc]=U[tc].astype(str).str.upper().str.strip();U[ec]=U[ec].astype(str).str.upper().str.strip()
+    exchanges={"NYSE","NASDAQ","AMEX","NYSE AMERICAN","NYSE MKT","NYSE ARCA","BATS","IEX"}
+    q=U[(U[ac].astype(str).str.upper()=="STOCK")&(U[pc].astype(str).str.upper()=="USD")&U[ec].isin(exchanges)].copy()
+    q=q[q[dc]>=pd.Timestamp("2006-01-01")]
+    q=q[(q[dc]-q[sc]).dt.days>=730]
+    existing={p.stem.upper() for p in MARKET_DIR.glob("*.csv")}
+    q=q[~q[tc].isin(existing)].drop_duplicates(tc)
+    latest=U[dc].max();active_cut=latest-pd.Timedelta(days=14)
+    q["status"]=np.where(q[dc]>=active_cut,"ACTIVE","DELISTED")
+    # Common-like is a mechanical screen only; final classification must use metadata.
+    q["common_like"]=q[tc].str.match(r"^[A-Z]{1,5}(?:-[A-Z])?$")
+    active=q[q["status"]=="ACTIVE"];dead=q[q["status"]=="DELISTED"]
+    clean=q[q["common_like"]];clean_a=clean[clean["status"]=="ACTIVE"];clean_d=clean[clean["status"]=="DELISTED"]
+    exrows="" 
+    for ex,g in q.groupby(ec):exrows+=f"<tr><td>{esc(ex)}</td><td>{len(g)}</td><td>{int((g['status']=='ACTIVE').sum())}</td><td>{int((g['status']=='DELISTED').sum())}</td></tr>"
+    years=""
+    for y,g in dead.assign(end_year=dead[dc].dt.year).groupby("end_year"):
+        if int(y)>=2006:years+=f"<tr><td>{int(y)}</td><td>{len(g)}</td></tr>"
+    sample=dead.sort_values(dc,ascending=False).head(40);sr=""
+    for _,x in sample.iterrows():sr+=f"<tr><td><b>{esc(x[tc])}</b></td><td>{esc(x[ec])}</td><td>{x[sc].date()}</td><td>{x[dc].date()}</td><td>{'是' if x['common_like'] else '需核查'}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:14px;line-height:1.65}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.65}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}.k b{{font-size:30px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:650px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
+<div class='c'><h1>🧮 Independent Holdout Universe Census</h1><div class='note'>范围：2006年至今、USD Stock、美国主要交易所、至少两年价格跨度，并排除现有缓存 {len(existing)} 只。<b>退市股刻意保留</b>，不会因为后来失败而删除。</div></div>
+<div class='c'><div class='grid'><div class='k'>新候选总数<br><b>{len(q):,}</b></div><div class='k'>仍活跃<br><b>{len(active):,}</b></div><div class='k'>近20年退市<br><b>{len(dead):,}</b></div><div class='k'>普通股样式候选<br><b>{len(clean):,}</b></div><div class='k'>其中活跃<br><b>{len(clean_a):,}</b></div><div class='k'>其中退市<br><b>{len(clean_d):,}</b></div></div></div>
+<div class='warn'><b>公平回测规则：</b>只按信号当天是否上市及是否符合价格/流动性条件。以后退市不能事先剔除；跌破止损按实际跳空价，无法成交或破产按最后可实现价格，必要时保守记至−100%。收购退市不能误当破产归零。</div>
+<div class='c'><h2>按交易所</h2><div class='scroll'><table><tr><th>交易所</th><th>总候选</th><th>活跃</th><th>退市</th></tr>{exrows}</table></div></div>
+<details class='c'><summary><b>退市年份分布</b></summary><div class='scroll'><table><tr><th>最后交易年份</th><th>数量</th></tr>{years}</table></div></details>
+<details class='c'><summary><b>最近退市样例</b></summary><div class='scroll'><table><tr><th>代码</th><th>交易所</th><th>开始</th><th>结束</th><th>普通股样式</th></tr>{sr}</table></div></details>
+<div class='c'><b>说明：</b>Tiingo清单也包含保留代码。以上是候选数量；正式下载前还要逐个验证EOD metadata、证券类型及历史可用性。此页只读取清单，没有消耗批量股价下载额度。</div>
+</div></body></html>"""
 
 # ================= V6.13 FROZEN CHAMPION + DRY 1.05 SHADOW =================
 V613_DIR=DATA_DIR/"jlaw_v613_frozen_shadow"
