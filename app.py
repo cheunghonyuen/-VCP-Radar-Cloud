@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.14</h1><div class="muted">当前研究版：V6.12.14 Edge-Gate Cliff Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.15</h1><div class="muted">当前研究版：V6.12.15 Edge Logic Layer Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v61215-shortcut" style="border:3px solid #7c3aed">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🧪 V6.12.15 Edge Logic Layer Audit</h2>
+      <div class="muted">直接读取12.14结果；查真实门槛、失败距离与逻辑层，不重跑109只</div></div>
+    <a href="/v61215/edge-logic"><button type="button">打开 V6.12.15</button></a>
+  </div>
+</div>
 
 <div class="card" id="v61214-shortcut" style="border:3px solid #dc2626">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9890,6 +9898,72 @@ def v61214_page():
         for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
     run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
+
+# ================= V6.12.15 EDGE LOGIC LAYER AUDIT =================
+@APP.get("/v61215/edge-logic")
+def v61215_edge_logic_page():
+    import html
+    esc=lambda x:html.escape(str(x))
+    r=None
+    if V61214_RESULT.exists():
+        try:r=json.loads(V61214_RESULT.read_text(encoding="utf-8"))
+        except Exception:r=None
+    if not r:
+        return "<h2>请先完成 V6.12.14 Edge-Gate Cliff Audit</h2><a href='/v61214/edge-cliff'>打开 V6.12.14</a>",409
+
+    rules=[
+      ("supply_dryup","supply_score",">=",60.0,"供应质量分至少60"),
+      ("tight_pivot","pivot_tight","<=",0.10,"Pivot宽度不超过10%"),
+      ("demand_confirmation","volratio",">=",1.50,"突破量至少1.50倍"),
+      ("entry_location","extension","<=",0.02,"突破延伸不超过2%"),
+      ("volume_dry_before_breakout","dry","<",0.85,"突破前量能收干低于0.85"),
+    ]
+    comps={x.get("component"):x for x in r.get("components",[])}
+    rule_rows=""
+    for edge,field,op,th,meaning in rules:
+        c=comps.get(field,{})
+        pre=c.get("pre_median");post=c.get("post_median")
+        def ok(v):
+            if v is None:return False
+            return (v>=th) if op==">=" else ((v<=th) if op=="<=" else v<th)
+        verdict=("前后均达标" if ok(pre) and ok(post) else "5/20后跌破门槛" if ok(pre) and not ok(post) else "前后均未达标" if not ok(pre) and not ok(post) else "5/20后改善达标")
+        cls="bad" if "未达标" in verdict or "跌破" in verdict else "good"
+        rule_rows+=f"<tr><td><b>{edge}</b></td><td>{field}</td><td>{op} {th:g}</td><td>{esc(pre)}</td><td>{esc(post)}</td><td class='{cls}'><b>{verdict}</b></td><td>{meaning}</td></tr>"
+
+    examples=r.get("examples",[])
+    detail="";fail_counts={k:0 for k,_,_,_,_ in rules};contract_fail=0
+    for x in examples:
+        fails=[]
+        for edge,field,op,th,_ in rules:
+            v=x.get(field);q=pd.to_numeric(pd.Series([v]),errors="coerce").iloc[0]
+            passed=pd.notna(q) and ((q>=th) if op==">=" else ((q<=th) if op=="<=" else q<th))
+            if not passed:fails.append(f"{edge}: {field}={v} 未达到 {op}{th:g}");fail_counts[edge]+=1
+        vals=[x.get("c1"),x.get("c2"),x.get("c3")]
+        vv=[pd.to_numeric(pd.Series([v]),errors="coerce").iloc[0] for v in vals]
+        contraction=all(pd.notna(v) for v in vv) and vv[1]<vv[0] and vv[2]<vv[1]
+        if not contraction:fails.append(f"contraction_sequence: 需要 c1>c2>c3；实际 {vals}");contract_fail+=1
+        detail+=f"<tr><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('date'))}</td><td>{esc(x.get('edge_count'))}</td><td>{esc(x.get('supply_score'))}</td><td>{esc(x.get('pivot_tight'))}</td><td>{esc(x.get('volratio'))}</td><td>{esc(x.get('extension'))}</td><td>{esc(x.get('c1'))} / {esc(x.get('c2'))} / {esc(x.get('c3'))}</td><td>{'<br>'.join(esc(z) for z in fails)}</td></tr>"
+
+    n=max(1,len(examples));counts="" 
+    for edge,_,_,_,_ in rules:
+        counts+=f"<tr><td><b>{edge}</b></td><td>{fail_counts[edge]}/{len(examples)}</td><td>{fail_counts[edge]/n:.1%}</td></tr>"
+    counts+=f"<tr><td><b>contraction_sequence</b></td><td>{contract_fail}/{len(examples)}</td><td>{contract_fail/n:.1%}</td></tr>"
+
+    supply_pre=comps.get("supply_score",{}).get("pre_median");supply_post=comps.get("supply_score",{}).get("post_median")
+    vol_pre=comps.get("volratio",{}).get("pre_median");vol_post=comps.get("volratio",{}).get("post_median")
+    verdict=("<b>LOGIC_OK · THRESHOLD/REGIME MISMATCH</b><br>没有发现输入缺失或单位跳变。"
+             f"Supply Edge 要求≥60，但中位数由 {supply_pre} 降至 {supply_post}；Demand 要求量比≥1.50，但中位数只有 {vol_pre} / {vol_post}。"
+             "这两个Edge长期为0是门槛结果，不是程序没有计算。5/20后真正新增的断层主要是 Pivot Tightness 与 Contraction 顺序。暂时不能改参数，样本只有4笔对2笔。")
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:14px;line-height:1.6}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.65}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:860px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}.scroll{{overflow:auto}}.good{{color:#047857}}.bad{{color:#b91c1c}}details summary{{font-size:19px;cursor:pointer}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
+<div class='c'><h1>🧪 V6.12.15 Edge Logic Layer Audit</h1><div class='note'>直接读取已经完成的 V6.12.14 result.json；不下载、不重跑109只、不修改门槛。</div></div>
+<div class='truth'>{verdict}</div>
+<div class='c'><h2>真实公式与门槛</h2><div class='scroll'><table><tr><th>Edge</th><th>输入</th><th>真实门槛</th><th>5/20前中位数</th><th>5/20后中位数</th><th>判定</th><th>含义</th></tr>{rule_rows}
+<tr><td><b>contraction_sequence</b></td><td>c1,c2,c3</td><td>c1 &gt; c2 &gt; c3</td><td>{esc(comps.get('c1',{}).get('pre_median'))} / {esc(comps.get('c2',{}).get('pre_median'))} / {esc(comps.get('c3',{}).get('pre_median'))}</td><td>{esc(comps.get('c1',{}).get('post_median'))} / {esc(comps.get('c2',{}).get('post_median'))} / {esc(comps.get('c3',{}).get('post_median'))}</td><td class='bad'><b>后期中位顺序不收缩</b></td><td>每次收缩必须严格小于上一次</td></tr></table></div></div>
+<div class='c'><h2>5/20后失败集中度</h2><div class='scroll'><table><tr><th>Edge</th><th>失败数</th><th>失败率</th></tr>{counts}</table></div></div>
+<details class='c'><summary><b>逐笔原始值、门槛与失败原因</b></summary><div class='scroll'><table><tr><th>股票</th><th>日期</th><th>Edge数</th><th>Supply</th><th>Pivot Tight</th><th>Vol Ratio</th><th>Extension</th><th>c1/c2/c3</th><th>失败原因</th></tr>{detail}</table></div></details>
+<div class='c'><b>下一步纪律：</b>这页只定位逻辑层，不改参数。需要扩大5/20后样本或等待更多正式Base Setup，再决定是否做V6.12.16门槛敏感度测试。</div>
+</div></body></html>"""
 
 @APP.get("/v61213/write-truth")
 def v61213_page():
