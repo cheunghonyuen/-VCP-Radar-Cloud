@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.13.0</h1><div class="muted">正式前瞻版：Frozen Champion + Dry 1.05 Shadow Challenger</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.13.1</h1><div class="muted">Daily Forward Runner · Frozen Champion + Dry 1.05 Shadow</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6957,6 +6957,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v6131-shortcut" style="border:3px solid #16a34a">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">📡 V6.13.1 Daily Forward Runner</h2>
+      <div class="muted">每天只查321只缓存的最新交易日；自动记录Champion与Challenger-only</div></div>
+    <a href="/v6131/daily-forward"><button type="button">打开 Daily Runner</button></a>
+  </div>
+</div>
 
 <div class="card" id="v613-shortcut" style="border:3px solid #16a34a">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9844,7 +9852,7 @@ def _v61214_compute():
         if not tickers:tickers=sorted(t for t in files if t in getattr(eng,"T2S",{}))
         cutoff=pd.Timestamp("2026-05-20");edges_n=["market_context","relative_strength","group_confirmation","supply_dryup","tight_pivot","demand_confirmation","entry_location","contraction_sequence","volume_dry_before_breakout"]
         vals_n=["rs","sector_score","group_breadth","supply_score","pivot_tight","volratio","extension","c1","c2","c3","dry"]
-        rows=[];errors=[]
+        rows=[];errors=[];group_cache={}
         _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=0,total=len(tickers),current="",error=None)
         for n,t in enumerate(tickers,1):
             _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=n-1,total=len(tickers),current=t)
@@ -9927,14 +9935,107 @@ def v61214_page():
 V613_DIR=DATA_DIR/"jlaw_v613_frozen_shadow"
 V613_LOG=V613_DIR/"shadow_log.csv"
 V613_LAUNCH_DATE=pd.Timestamp("2026-08-24")
+V6131_DIR=DATA_DIR/"jlaw_v6131_daily_forward"
+V6131_STATUS=V6131_DIR/"status.json"
+V6131_RESULT=V6131_DIR/"latest.json"
+v6131_thread=None
+
+def _v6131_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None}
+    if V6131_STATUS.exists():
+        try:s.update(json.loads(V6131_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6131_write(**kw):
+    V6131_DIR.mkdir(parents=True,exist_ok=True);s=_v6131_status();s.update(kw)
+    V6131_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8");return s
+
+def _v6131_compute():
+    global v6131_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v6131_engine",str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")};all_data={}
+        for t,p in files.items():
+            try:all_data[t]=eng.load(p)
+            except Exception:pass
+        spy=all_data.get("SPY")
+        if spy is None:raise RuntimeError("缺少SPY缓存")
+        tickers=sorted(t for t in getattr(eng,"T2S",{}) if t in all_data)
+        peers={}
+        for t in tickers:peers.setdefault(eng.T2S.get(t),[]).append(t)
+        rows=[];errors=[]
+        _v6131_write(status="running",message="只检查每只股票最新交易日",processed=0,total=len(tickers),current="",error=None)
+        for n,t in enumerate(tickers,1):
+            _v6131_write(status="running",message="只检查每只股票最新交易日",processed=n-1,total=len(tickers),current=t)
+            try:
+                raw=all_data[t];d=eng.ind(raw)
+                if len(d)<260:continue
+                x=d;date=pd.Timestamp(x.date.iloc[-1]);sp=spy[spy.date<=date]
+                ok,ms=eng.market_ok(sp)
+                if not ok or not eng.stage2(x):continue
+                rsv=eng.rs(x,sp)
+                if rsv<72:continue
+                sec=eng.T2S.get(t);sd=all_data.get(sec);secscore=50
+                if sd is not None:
+                    sx=sd[sd.date<=date]
+                    if len(sx)>=260:secscore=eng.rs(sx,sp)
+                if secscore<58:continue
+                gkey=(sec,date.strftime("%Y-%m-%d"))
+                if gkey in group_cache:breadth,top=group_cache[gkey]
+                else:
+                    strong=top=valid=0
+                    for q in peers.get(sec,[]):
+                        qd=all_data[q][all_data[q].date<=date]
+                        if len(qd)<260:continue
+                        valid+=1;qr=eng.rs(qd,sp);strong+=qr>=70;top+=qr>=85
+                    breadth=100*strong/valid if valid else 0;group_cache[gkey]=(breadth,top)
+                if breadth<30:continue
+                ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+                if ss<40 or not np.isfinite(tight) or tight>=.16:continue
+                leader=min(100,int(round(min(40,max(0,(rsv-60)*1.5))+min(25,max(0,secscore-55))+min(20,breadth*.2)+(15 if top>=2 else (8 if top>=1 else 0)))))
+                if leader<55:continue
+                prev=float(x.close.iloc[-2]);close=float(x.close.iloc[-1]);ext=close/piv-1
+                breakout=bool(prev<=piv and close>piv and ext<=.03 and vr>=1.20)
+                if not breakout:continue
+                mc=eng._v6_market_character(sp)
+                edges,flags,ec,rc=eng._v6_edges(mc,rsv,secscore,breadth,ss,tight,vr,ext,c1,c2,c3,dry)
+                ct=eng._v6_decision_tier(ec,rc,mc);cp=ct in ("A1","A2","B")
+                new_edges=dict(edges);new_edges["volume_dry_before_breakout"]=bool(np.isfinite(dry) and dry<1.05)
+                nec=int(sum(new_edges.values()));nt=eng._v6_decision_tier(nec,rc,mc);npas=nt in ("A1","A2","B")
+                rows.append({"ticker":t,"date":date.strftime("%Y-%m-%d"),"entry":close,"pivot":float(piv),"extension":float(ext),
+                    "stop_pct":0.07,"rs":float(rsv),"sector_score":float(secscore),"group_breadth":float(breadth),
+                    "supply_score":float(ss),"pivot_tight":float(tight),"volratio":float(vr),"dry":float(dry),
+                    "c1":float(c1) if np.isfinite(c1) else None,"c2":float(c2) if np.isfinite(c2) else None,"c3":float(c3) if np.isfinite(c3) else None,
+                    "v6_market_character":mc,"v6_edges":"|".join(k for k,v in edges.items() if v),
+                    "v6_edge_count":int(ec),"v6_red_count":int(rc),"v6_tier":ct,"v6_pass":bool(cp),
+                    "challenger_edge_count":nec,"challenger_tier":nt,"challenger_pass":bool(npas)})
+            except Exception as ex:errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+        out={"generated_at":datetime.now(timezone.utc).isoformat(),"universe":len(tickers),"rows":rows,"errors":errors[:100]}
+        V6131_DIR.mkdir(parents=True,exist_ok=True);V6131_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6131_write(status="done",message="今日最新交易日检查完成",processed=len(tickers),total=len(tickers),current="",error=None)
+    except Exception as ex:
+        traceback.print_exc();_v6131_write(status="error",message="Daily Runner失败",error=f"{type(ex).__name__}: {ex}")
+    finally:v6131_thread=None
+
+def _v6131_start():
+    global v6131_thread
+    if v6131_thread is not None and v6131_thread.is_alive():return False
+    v6131_thread=threading.Thread(target=_v6131_compute,daemon=True);v6131_thread.start();return True
 
 def _v613_source_rows():
     rows=[]
+    if V6131_RESULT.exists():
+        try:rows.extend(json.loads(V6131_RESULT.read_text(encoding="utf-8")).get("rows",[]))
+        except Exception:pass
     if V6127_RESULT.exists():
         try:
             q=json.loads(V6127_RESULT.read_text(encoding="utf-8"))
-            rows=[x for x in q.get("rows",[]) if x.get("formal_setup")]
-        except Exception:rows=[]
+            rows.extend(x for x in q.get("rows",[]) if x.get("formal_setup"))
+        except Exception:pass
     if not rows and V61214_RESULT.exists():
         try:rows=json.loads(V61214_RESULT.read_text(encoding="utf-8")).get("examples",[])
         except Exception:rows=[]
@@ -9991,6 +10092,34 @@ def _v613_refresh_log():
     if len(new):new=new.sort_values(["signal_date","ticker","recorded_at"]).drop_duplicates(["ticker","signal_date","cohort"],keep="last")
     new.to_csv(V613_LOG,index=False)
     return new
+
+@APP.post("/v6131/run")
+def v6131_run_route():
+    _v6131_start();return redirect("/v6131/daily-forward")
+
+@APP.get("/api/v6131/status")
+def v6131_status_api():return jsonify(_v6131_status())
+
+@APP.get("/v6131/daily-forward")
+def v6131_daily_forward_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v6131_status();data=None
+    if V6131_RESULT.exists():
+        try:data=json.loads(V6131_RESULT.read_text(encoding="utf-8"))
+        except Exception:data=None
+    rows=(data or {}).get("rows",[]);champ=[x for x in rows if x.get("v6_pass")];chall=[x for x in rows if x.get("challenger_pass") and not x.get("v6_pass")];watch=[x for x in rows if not x.get("challenger_pass")]
+    tr=""
+    for x in sorted(rows,key=lambda z:(not bool(z.get("v6_pass")),not bool(z.get("challenger_pass")),str(z.get("ticker")))):
+        action="正式可买" if x.get("v6_pass") else "Shadow新增" if x.get("challenger_pass") else "等待"
+        tr+=f"<tr><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('date'))}</td><td>{action}</td><td>{esc(x.get('v6_tier'))}</td><td>{esc(x.get('challenger_tier'))}</td><td>{esc(x.get('v6_edge_count'))}→{esc(x.get('challenger_edge_count'))}</td><td>{float(x.get('entry',0)):.2f}</td><td>{float(x.get('pivot',0)):.2f}</td><td>{float(x.get('entry',0))*.93:.2f}</td><td>{float(x.get('dry',0)):.3f}</td><td>{float(x.get('volratio',0)):.2f}x</td><td>{float(x.get('rs',0)):.0f}</td></tr>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6131/run"><button>▶ 检查321只最新交易日</button></form>'
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:14px}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}.k b{{font-size:28px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:1050px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
+<div class='c'><h1>📡 V6.13.1 Daily Forward Runner</h1><div class='note'>只检查完整缓存股票池的最新交易日；不下载、不回放完整历史。正式Champion参数冻结，Challenger-only只做Shadow。</div></div>
+<div class='c'><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}{'<p style="color:#b91c1c">'+esc(st.get('error'))+'</p>' if st.get('error') else ''}</div>
+<div class='c'><div class='grid'><div class='k'>Champion正式信号<br><b>{len(champ)}</b></div><div class='k'>Challenger-only<br><b>{len(chall)}</b></div><div class='k'>正式Setup总数<br><b>{len(rows)}</b></div></div></div>
+<div class='c'><h2>今日Radar候选</h2><div class='scroll'><table><tr><th>股票</th><th>日期</th><th>状态</th><th>Champion</th><th>Challenger</th><th>Edge</th><th>入场</th><th>Pivot</th><th>7%止损</th><th>Dry</th><th>量比</th><th>RS</th></tr>{tr}</table></div><p><a href='/v613/frozen-shadow'>打开Forward计分板 →</a></p></div>
+<script>setTimeout(async()=>{{try{{let r=await fetch('/api/v6131/status',{{cache:'no-store'}}),s=await r.json();if(s.status==='running')location.reload()}}catch(e){{}}}},4000)</script></div></body></html>"""
 
 @APP.get("/v613/frozen-shadow")
 def v613_frozen_shadow_page():
