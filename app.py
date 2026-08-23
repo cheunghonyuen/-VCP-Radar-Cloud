@@ -3464,6 +3464,228 @@ def v63_summary():
                 portfolio_audit.append(sm)
                 portfolio_audit_years.extend(yy)
 
+
+    exposure_rows=[]
+    exposure_years=[]
+
+    def _exposure_sim(source, top_n=2, max_positions=8, mode="risk",
+                      target_exposure=0.80, base_risk=0.003, initial_equity=100000.0,
+                      label=""):
+        if source is None or source.empty or "date" not in source.columns or "return_pct" not in source.columns:
+            return None, []
+
+        D=source.copy()
+        D["date"]=pd.to_datetime(D["date"],errors="coerce")
+        D=D[D["date"].notna()].copy()
+        if D.empty:
+            return None, []
+
+        # Frozen V6.5.4 Demand-First ranking.
+        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
+        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
+        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
+        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
+
+        D["_power"]=power.astype(int)
+        D["_goodvol"]=(vol>=1.8).astype(int)
+        D["_goodloc"]=(ext<=0.01).astype(int)
+        D["_vol"]=vol.fillna(0.0)
+        D["_ext"]=ext.fillna(999.0)
+        D["_rs2"]=rs2.fillna(0.0)
+
+        D=D.sort_values(
+            ["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
+            ascending=[True,False,False,False,False,True,False]
+        ).copy()
+        D["_rank"]=D.groupby("date").cumcount()+1
+        D=D[D["_rank"]<=int(top_n)].copy()
+        if D.empty:
+            return None, []
+
+        hold=pd.to_numeric(D["hold_days"],errors="coerce").fillna(20).clip(lower=1).round().astype(int) if "hold_days" in D.columns else pd.Series(20,index=D.index)
+        D["_exit_date"]=[d+pd.offsets.BDay(int(h)) for d,h in zip(D["date"],hold)]
+        D["_ret"]=pd.to_numeric(D["return_pct"],errors="coerce").fillna(0.0)
+
+        stop=pd.to_numeric(D["stop_pct"],errors="coerce").abs() if "stop_pct" in D.columns else pd.Series(0.07,index=D.index)
+        D["_stop"]=stop.where((stop>0.005)&(stop<0.30),0.07)
+
+        equity=cash=float(initial_equity)
+        peak=equity
+        max_dd=0.0
+        open_pos=[]
+        realized=[]
+        snapshots=[]
+        skipped_capacity=0
+        skipped_cash=0
+
+        def close_due(day):
+            nonlocal cash,equity,peak,max_dd,open_pos
+            due=[p for p in open_pos if p["exit_date"]<=day]
+            keep=[p for p in open_pos if p["exit_date"]>day]
+            for p in due:
+                pnl=p["capital"]*p["ret"]
+                cash += p["capital"] + pnl
+                realized.append({"exit_date":p["exit_date"],"pnl":pnl})
+            open_pos=keep
+            equity=cash+sum(p["capital"] for p in open_pos)
+            peak=max(peak,equity)
+            if peak>0:
+                max_dd=min(max_dd,equity/peak-1.0)
+
+        for day,g in D.groupby("date",sort=True):
+            close_due(day)
+            equity=cash+sum(p["capital"] for p in open_pos)
+
+            # Market-adaptive exposure target.
+            if mode=="adaptive":
+                day_power=bool((g["_power"]==1).any())
+                desired_exposure=0.85 if day_power else 0.45
+            elif mode=="target":
+                desired_exposure=float(target_exposure)
+            else:
+                desired_exposure=None
+
+            for _,r in g.sort_values("_rank").iterrows():
+                if len(open_pos)>=int(max_positions):
+                    skipped_capacity+=1
+                    continue
+
+                invested=sum(p["capital"] for p in open_pos)
+                current_exposure=invested/equity if equity>0 else 0.0
+
+                if mode=="risk":
+                    cap=min(equity*float(base_risk)/float(r["_stop"]), equity*0.25, cash)
+
+                elif mode in ("target","adaptive"):
+                    remaining_slots=max(int(max_positions)-len(open_pos),1)
+                    exposure_gap=max(float(desired_exposure)-current_exposure,0.0)
+
+                    # Fill the exposure gap gradually across remaining slots.
+                    equal_fill=equity*exposure_gap/remaining_slots
+
+                    # Still respect a modest risk cap and single-position cap.
+                    risk_cap=equity*0.006/float(r["_stop"])
+                    cap=min(equal_fill, risk_cap, equity*0.25, cash)
+
+                else:
+                    cap=min(equity*float(base_risk)/float(r["_stop"]), equity*0.25, cash)
+
+                if cap<100:
+                    skipped_cash+=1
+                    continue
+
+                cash-=cap
+                open_pos.append({
+                    "exit_date":r["_exit_date"],
+                    "capital":float(cap),
+                    "ret":float(r["_ret"])
+                })
+                equity=cash+sum(p["capital"] for p in open_pos)
+
+            invested=sum(p["capital"] for p in open_pos)
+            snapshots.append({
+                "date":day,
+                "invested_pct":invested/equity if equity>0 else 0.0,
+                "open":len(open_pos)
+            })
+
+        for day in sorted({p["exit_date"] for p in open_pos}):
+            close_due(day)
+            invested=sum(p["capital"] for p in open_pos)
+            snapshots.append({
+                "date":day,
+                "invested_pct":invested/equity if equity>0 else 0.0,
+                "open":len(open_pos)
+            })
+
+        equity=cash
+        first=D["date"].min()
+        last=max(D["_exit_date"].max(),D["date"].max())
+        years=max((last-first).days/365.25,1/365.25)
+        cagr=(equity/initial_equity)**(1/years)-1 if equity>0 else -1.0
+
+        real=pd.DataFrame(realized)
+        snap=pd.DataFrame(snapshots)
+
+        if not real.empty:
+            wins=real[real["pnl"]>0]
+            losses=real[real["pnl"]<0]
+            gw=float(wins["pnl"].sum())
+            gl=float(-losses["pnl"].sum())
+            pf=gw/gl if gl>0 else (999.0 if gw>0 else 0.0)
+            win_rate=float((real["pnl"]>0).mean())
+        else:
+            pf=0.0
+            win_rate=0.0
+
+        row={
+            "name":label,
+            "mode":mode,
+            "final_equity":float(equity),
+            "total_return":float(equity/initial_equity-1.0),
+            "cagr":float(cagr),
+            "max_drawdown":float(max_dd),
+            "pf":float(pf),
+            "win_rate":float(win_rate),
+            "avg_invested_pct":float(snap["invested_pct"].mean()) if not snap.empty else 0.0,
+            "avg_open_positions":float(snap["open"].mean()) if not snap.empty else 0.0,
+            "max_open_positions":int(snap["open"].max()) if not snap.empty else 0,
+            "trades":int(len(real)),
+            "skipped_capacity":int(skipped_capacity),
+            "skipped_cash":int(skipped_cash),
+        }
+
+        yrs=[]
+        if not real.empty:
+            RR=real.copy()
+            RR["year"]=pd.to_datetime(RR["exit_date"]).dt.year
+            running=float(initial_equity)
+            for y,gy in RR.groupby("year",sort=True):
+                start=running
+                pnl=float(gy["pnl"].sum())
+                running+=pnl
+                yrs.append({
+                    "config":label,
+                    "year":int(y),
+                    "return":pnl/start if start else 0.0,
+                    "end_equity":running,
+                    "trades":int(len(gy)),
+                })
+        return row,yrs
+
+    if len(T):
+        configs=[
+            ("BASE Risk · Top2 · 8仓",2,8,"risk",0.80,0.003),
+            ("Target 60% · Top2 · 8仓",2,8,"target",0.60,0.003),
+            ("Target 80% · Top2 · 8仓",2,8,"target",0.80,0.003),
+            ("Adaptive 45/85% · Top2 · 8仓",2,8,"adaptive",0.80,0.003),
+            ("Adaptive 45/85% · Top1 · 5仓",1,5,"adaptive",0.80,0.003),
+        ]
+        for label,tn,mp,mode,target,risk in configs:
+            sm,yy=_exposure_sim(
+                T,top_n=tn,max_positions=mp,mode=mode,
+                target_exposure=target,base_risk=risk,label=label
+            )
+            if sm:
+                exposure_rows.append(sm)
+                exposure_years.extend(yy)
+
+        # Recent robustness check.
+        TT=T.copy()
+        TT["date"]=pd.to_datetime(TT["date"],errors="coerce")
+        REC=TT[TT["date"]>=pd.Timestamp("2022-01-01")].copy()
+        for label,tn,mp,mode,target,risk in [
+            ("2022–26 BASE Risk · Top2",2,8,"risk",0.80,0.003),
+            ("2022–26 Adaptive 45/85% · Top2",2,8,"adaptive",0.80,0.003),
+        ]:
+            sm,yy=_exposure_sim(
+                REC,top_n=tn,max_positions=mp,mode=mode,
+                target_exposure=target,base_risk=risk,label=label
+            )
+            if sm:
+                exposure_rows.append(sm)
+                exposure_years.extend(yy)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3477,7 +3699,8 @@ def v63_summary():
             "pairwise_diag":pairwise_diag,"pairwise_features":pairwise_features,
             "demand_rank_diag":demand_rank_diag,
             "portfolio_rows":portfolio_rows,"portfolio_years":portfolio_years,
-            "portfolio_audit":portfolio_audit,"portfolio_audit_years":portfolio_audit_years}
+            "portfolio_audit":portfolio_audit,"portfolio_audit_years":portfolio_audit_years,
+            "exposure_rows":exposure_rows,"exposure_years":exposure_years}
 
 def run_v63():
     import importlib.util
@@ -4959,7 +5182,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.6.1</h1><div class="muted">当前研究版：V6.6.1 Portfolio Audit · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.6.2</h1><div class="muted">当前研究版：V6.6.2 Exposure Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4979,7 +5202,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.6.1 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.6.2 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -6786,6 +7009,17 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v662-shortcut")){
+      const box=document.createElement("div");
+      box.id="v662-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #22c55e";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚙️ V6.6.2 Exposure Lab</h2><div class="muted">不重跑：提高资金利用率，看CAGR能不能起来</div></div><a href="/v662/exposure-lab"><button type="button">打开 Exposure Lab</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v661-shortcut")){
       const box=document.createElement("div");
       box.id="v661-shortcut"; box.className="card";
@@ -6922,7 +7156,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.6.1 当前版";
+      currentLink.textContent="🚀 V6.6.2 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -7185,6 +7419,83 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v662/exposure-lab")
+def v662_exposure_lab_page():
+    s=v63_summary()
+    rows=s.get("exposure_rows",[]) if s.get("available") else []
+    yrs=s.get("exposure_years",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.6.2 Exposure Lab</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:980px;margin:auto}.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}h2{font-size:22px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:12px}
+table{width:100%;border-collapse:collapse}th,td{padding:9px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:13px}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+<div class="card">
+<h1>⚙️ V6.6.2 Exposure Lab</h1>
+<div class="note">
+不改选股、不重跑443只。只测试“怎样把已有 Edge 更有效率地变成账户收益”。<br><br>
+BASE Risk：原来的风险仓位。<br>
+Target 60/80%：有信号时尽量把总资金利用率维持在目标附近。<br>
+Adaptive 45/85%：普通市场目标约45%，POWER_TREND 目标约85%。<br><br>
+重点同时看 <b>CAGR、资金使用率、PF、回撤</b>，不能只看收益变大。
+</div>
+</div>
+
+<div class="card">
+<h2>Exposure 对比</h2>
+<div class="grid">
+{% for r in rows %}
+<div class="item">
+<div class="name">{{r.name}}</div>
+<div class="metrics">
+<div class="metric"><small>最终资金</small><b>${{"{:,.0f}".format(r.final_equity)}}</b></div>
+<div class="metric"><small>CAGR</small><b>{{"%.1f%%"|format(r.cagr*100)}}</b></div>
+<div class="metric"><small>平均资金使用率</small><b>{{"%.1f%%"|format(r.avg_invested_pct*100)}}</b></div>
+<div class="metric"><small>PF / 胜率</small><b>{{"%.2f"|format(r.pf)}} / {{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric"><small>已实现最大回撤</small><b>{{"%.1f%%"|format(r.max_drawdown*100)}}</b></div>
+<div class="metric"><small>平均持仓数 / 最大</small><b>{{"%.1f"|format(r.avg_open_positions)}} / {{r.max_open_positions}}</b></div>
+<div class="metric"><small>成交数</small><b>{{r.trades}}</b></div>
+<div class="metric"><small>满仓跳过 / 现金不足</small><b>{{r.skipped_capacity}} / {{r.skipped_cash}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</div>
+
+<div class="card">
+<h2>年度收益</h2>
+<div style="overflow-x:auto">
+<table><tr><th>配置</th><th>年份</th><th>收益</th><th>年末资金</th><th>交易</th></tr>
+{% for r in yrs %}
+<tr>
+<td><b>{{r.config}}</b></td>
+<td>{{r.year}}</td>
+<td>{{"%.1f%%"|format(r.return*100)}}</td>
+<td>${{"{:,.0f}".format(r.end_equity)}}</td>
+<td>{{r.trades}}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+</div>
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows,yrs=yrs)
 
 @APP.get("/v661/portfolio-audit")
 def v661_portfolio_audit_page():
