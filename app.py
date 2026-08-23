@@ -2587,11 +2587,102 @@ def v63_summary():
                         "feature":c,"early":_med(early),"recent":_med(recentc)
                     })
 
+    context_veto=[]
+    context_veto_recent=[]
+
+    # V6.3.9 Context Veto Diagnostic
+    if "ticker" in T.columns:
+        tick=T["ticker"].astype(str)
+        V=T[tick.isin(set(V5_VALIDATION))].copy()
+        if all(c in V.columns for c in ["v6_market_character","volratio","rs"]):
+            vv=pd.to_numeric(V["volratio"],errors="coerce")
+            rr=pd.to_numeric(V["rs"],errors="coerce")
+            C=V[(V["v6_market_character"].astype(str)=="POWER_TREND")&(vv>=1.8)&(rr>=90)].copy()
+
+            def cvadd(group,label,g,target):
+                if len(g):
+                    target.append({"group":group,"name":label,**_v6_shadow_metrics(g)})
+
+            # Tier
+            if "v6_tier" in C.columns:
+                for nm in ["A1","A2","B","WATCH","REJECT"]:
+                    cvadd("TIER",nm,C[C["v6_tier"].astype(str)==nm],context_veto)
+
+            # Edge count
+            if "v6_edge_count" in C.columns:
+                ec=pd.to_numeric(C["v6_edge_count"],errors="coerce")
+                for nm,lo,hi in [("≤5",None,5.0001),("6",5.999,6.001),("7",6.999,7.001),("8+",8,None)]:
+                    m=pd.Series(True,index=C.index)
+                    if lo is not None:m &= ec>=lo
+                    if hi is not None:m &= ec<hi
+                    cvadd("EDGE",nm,C[m],context_veto)
+
+            # Supply + Extension veto candidates
+            if "supply_score" in C.columns:
+                ss=pd.to_numeric(C["supply_score"],errors="coerce")
+                cvadd("SUPPLY","<55",C[ss<55],context_veto)
+                cvadd("SUPPLY","55–65",C[(ss>=55)&(ss<65)],context_veto)
+                cvadd("SUPPLY","≥65",C[ss>=65],context_veto)
+            if "extension" in C.columns:
+                ex=pd.to_numeric(C["extension"],errors="coerce")
+                cvadd("ENTRY","≤1%",C[ex<=0.01],context_veto)
+                cvadd("ENTRY","1–2%",C[(ex>0.01)&(ex<=0.02)],context_veto)
+                cvadd("ENTRY",">2%",C[ex>0.02],context_veto)
+
+            # Combined veto-style conditions
+            if "v6_tier" in C.columns and "v6_edge_count" in C.columns:
+                ec=pd.to_numeric(C["v6_edge_count"],errors="coerce")
+                tb=C["v6_tier"].astype(str)=="B"
+                cvadd("COMBO","Tier B",C[tb],context_veto)
+                cvadd("COMBO","Tier B + Edge=6",C[tb&(ec==6)],context_veto)
+
+                if "supply_score" in C.columns:
+                    ss=pd.to_numeric(C["supply_score"],errors="coerce")
+                    cvadd("COMBO","B + Edge=6 + Supply<55",C[tb&(ec==6)&(ss<55)],context_veto)
+                    cvadd("COMBO","B + Edge=6 + Supply≥55",C[tb&(ec==6)&(ss>=55)],context_veto)
+                if "extension" in C.columns:
+                    ex=pd.to_numeric(C["extension"],errors="coerce")
+                    cvadd("COMBO","B + Edge=6 + Ext>1%",C[tb&(ec==6)&(ex>0.01)],context_veto)
+                    cvadd("COMBO","B + Edge=6 + Ext≤1%",C[tb&(ec==6)&(ex<=0.01)],context_veto)
+                if "supply_score" in C.columns and "extension" in C.columns:
+                    ss=pd.to_numeric(C["supply_score"],errors="coerce")
+                    ex=pd.to_numeric(C["extension"],errors="coerce")
+                    cvadd("COMBO","B+E6 + weak supply OR ext>1%",
+                          C[tb&(ec==6)&((ss<55)|(ex>0.01))],context_veto)
+                    cvadd("COMBO","B+E6 + Supply≥55 + Ext≤1%",
+                          C[tb&(ec==6)&(ss>=55)&(ex<=0.01)],context_veto)
+
+            # Same diagnostics on recent era only.
+            if "date" in C.columns:
+                C["date"]=pd.to_datetime(C["date"],errors="coerce")
+                R=C[C["date"]>=pd.Timestamp("2022-01-01")].copy()
+                if len(R):
+                    if "v6_tier" in R.columns:
+                        for nm in ["A1","A2","B","WATCH","REJECT"]:
+                            cvadd("RECENT_TIER",nm,R[R["v6_tier"].astype(str)==nm],context_veto_recent)
+                    if "v6_edge_count" in R.columns:
+                        ec=pd.to_numeric(R["v6_edge_count"],errors="coerce")
+                        for nm,val in [("6",6),("7",7),("8+",8)]:
+                            if nm=="8+":
+                                g=R[ec>=8]
+                            else:
+                                g=R[ec==val]
+                            cvadd("RECENT_EDGE",nm,g,context_veto_recent)
+                    if "supply_score" in R.columns:
+                        ss=pd.to_numeric(R["supply_score"],errors="coerce")
+                        cvadd("RECENT_SUPPLY","<55",R[ss<55],context_veto_recent)
+                        cvadd("RECENT_SUPPLY","≥55",R[ss>=55],context_veto_recent)
+                    if "extension" in R.columns:
+                        ex=pd.to_numeric(R["extension"],errors="coerce")
+                        cvadd("RECENT_ENTRY","≤1%",R[ex<=0.01],context_veto_recent)
+                        cvadd("RECENT_ENTRY",">1%",R[ex>0.01],context_veto_recent)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
             "validation_core_recent_trades":validation_core_recent_trades,
-            "validation_core_feature_compare":validation_core_feature_compare}
+            "validation_core_feature_compare":validation_core_feature_compare,
+            "context_veto":context_veto,"context_veto_recent":context_veto_recent}
 
 def run_v63():
     import importlib.util
@@ -4056,7 +4147,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.8</h1><div class="muted">当前研究版：V6.3.8 Recent Validation Fault Isolation · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9</h1><div class="muted">当前研究版：V6.3.9 Context Veto Diagnostic · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4076,7 +4167,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.8 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4896,7 +4987,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.8 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -5084,6 +5175,45 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 <td>{% if r.recent is not none %}{{"%.3f"|format(r.recent)}}{% else %}-{% endif %}</td></tr>
 {% endfor %}
 </table>
+</div>
+
+<h3 style="margin-top:18px">🧱 V6.3.9 Context Veto Diagnostic</h3>
+<div class="muted" style="margin-bottom:8px">
+目标：不是继续调 RS2/Volume 门槛，而是找“哪些结构应该直接否决”。重点看 Tier、Edge Count、Supply、Extension 及其组合。
+</div>
+
+{% for group_name in ["TIER","EDGE","SUPPLY","ENTRY","COMBO"] %}
+<details open style="margin-top:10px">
+<summary style="font-weight:900;cursor:pointer">{{group_name}}</summary>
+<div class="mobile-metrics">
+{% for r in v63_summary.context_veto if r.group == group_name %}
+<div class="metric-card">
+<div class="name">{{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</details>
+{% endfor %}
+
+<h3 style="margin-top:16px">2022–2026 · Context Veto</h3>
+<div class="mobile-metrics">
+{% for r in v63_summary.context_veto_recent %}
+<div class="metric-card">
+<div class="name">{{r.group}} · {{r.name}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>PF</small><b>{{"%.2f"|format(r.pf)}}</b></div>
+<div class="metric-box"><small>平均收益</small><b>{{"%.2f%%"|format(r.avg_return*100)}}</b></div>
+<div class="metric-box"><small>胜率</small><b>{{"%.1f%%"|format(r.win_rate*100)}}</b></div>
+<div class="metric-box"><small>交易数 / 最大连亏</small><b>{{r.trades}} / {{r.max_losing_streak}}</b></div>
+</div>
+</div>
+{% endfor %}
 </div>
 </details>
 {% endif %}
