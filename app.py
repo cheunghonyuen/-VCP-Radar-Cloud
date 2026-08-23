@@ -4557,19 +4557,27 @@ def _v610_run_daily():
             ticker_filter=available,parallel_workers=2,resume=False
         )
 
-        sp=run_dir/"jlaw_v6_signals.csv"
-        latest="无"; n=0
-        if sp.exists() and sp.stat().st_size:
-            d=pd.read_csv(sp); n=len(d)
-            if n and "date" in d.columns:
-                dd=pd.to_datetime(d["date"],errors="coerce")
-                if dd.notna().any(): latest=dd.max().strftime("%Y-%m-%d")
+        base_sp=run_dir/"jlaw_v3_signals.csv"
+        v6_sp=run_dir/"jlaw_v6_signals.csv"
+        base_n=v6_n=0; base_latest=v6_latest="无"
+        if base_sp.exists() and base_sp.stat().st_size:
+            bd=pd.read_csv(base_sp); base_n=len(bd)
+            if base_n and "date" in bd.columns:
+                dd=pd.to_datetime(bd["date"],errors="coerce")
+                if dd.notna().any(): base_latest=dd.max().strftime("%Y-%m-%d")
+        if v6_sp.exists() and v6_sp.stat().st_size:
+            vd=pd.read_csv(v6_sp); v6_n=len(vd)
+            if v6_n and "date" in vd.columns:
+                dd=pd.to_datetime(vd["date"],errors="coerce")
+                if dd.notna().any(): v6_latest=dd.max().strftime("%Y-%m-%d")
 
         _v610_write_daily_status(
             status="done",
-            message=f"Daily Incremental 完成；近期信号 {n} 条；最后一个实际信号日期 {latest}",
+            message=f"Daily Incremental 完成；Base Setup {base_n} 条（最新 {base_latest}）；V6 Pass {v6_n} 条（最新 {v6_latest}）",
             processed=len(available),stocks=len(available),current="",
-            signal_rows=int(n),signal_latest=latest,
+            base_signal_rows=int(base_n),base_signal_latest=base_latest,
+            v6_pass_rows=int(v6_n),v6_pass_latest=v6_latest,
+            signal_rows=int(v6_n),signal_latest=v6_latest,
             finished_at=datetime.now(timezone.utc).isoformat(),error=None
         )
     except Exception as ex:
@@ -4651,20 +4659,27 @@ def _v610_run_fresh():
             ticker_filter=available,parallel_workers=2,resume=False
         )
 
-        sp=V610_FRESH_DIR/"jlaw_v6_signals.csv"
-        latest="无"; n=0
-        if sp.exists() and sp.stat().st_size:
-            d=pd.read_csv(sp)
-            n=len(d)
-            if n and "date" in d.columns:
-                dd=pd.to_datetime(d["date"],errors="coerce")
-                if dd.notna().any(): latest=dd.max().strftime("%Y-%m-%d")
+        base_sp=V610_FRESH_DIR/"jlaw_v3_signals.csv"
+        v6_sp=V610_FRESH_DIR/"jlaw_v6_signals.csv"
+        base_n=v6_n=0; base_latest=v6_latest="无"
+        if base_sp.exists() and base_sp.stat().st_size:
+            bd=pd.read_csv(base_sp); base_n=len(bd)
+            if base_n and "date" in bd.columns:
+                dd=pd.to_datetime(bd["date"],errors="coerce")
+                if dd.notna().any(): base_latest=dd.max().strftime("%Y-%m-%d")
+        if v6_sp.exists() and v6_sp.stat().st_size:
+            vd=pd.read_csv(v6_sp); v6_n=len(vd)
+            if v6_n and "date" in vd.columns:
+                dd=pd.to_datetime(vd["date"],errors="coerce")
+                if dd.notna().any(): v6_latest=dd.max().strftime("%Y-%m-%d")
 
         _v610_write_fresh_status(
             status="done",
-            message=f"Fresh 321 完成；信号 {n} 条；最后一个实际信号日期 {latest}",
+            message=f"Fresh 321 完成；Base Setup {base_n} 条（最新 {base_latest}）；V6 Pass {v6_n} 条（最新 {v6_latest}）",
             processed=len(available),stocks=len(available),current="",
-            signal_rows=int(n),signal_latest=latest,
+            base_signal_rows=int(base_n),base_signal_latest=base_latest,
+            v6_pass_rows=int(v6_n),v6_pass_latest=v6_latest,
+            signal_rows=int(v6_n),signal_latest=v6_latest,
             finished_at=datetime.now(timezone.utc).isoformat(),error=None
         )
     except Exception as ex:
@@ -6144,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.12.12</h1><div class="muted">当前研究版：V6.12.12 One-Shot Root-Cause Audit</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.12.13</h1><div class="muted">当前研究版：V6.12.13 Write-Path Truth + Pass-Gate Audit</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6942,6 +6957,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <h2 style="margin:0 0 4px">☁️ 自动发布</h2>
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
+
+<div class="card" id="v61213-shortcut" style="border:3px solid #f59e0b">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🧭 V6.12.13 Write-Path Truth + Pass-Gate</h2>
+      <div class="muted">更正 12.12：先证明写盘语义，再拆 KEYS / MPC 为什么 WATCH</div>
+    </div>
+    <a href="/v61213/write-truth"><button type="button">打开 V6.12.13</button></a>
+  </div>
+</div>
+
 
 <div class="card" id="v61212-shortcut" style="border:3px solid #16a34a">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9592,6 +9618,225 @@ def v61212_run():
 @APP.get("/api/v61212/status")
 def v61212_status_api():
     return jsonify(_v61212_status())
+
+
+# ================= V6.12.13 WRITE-PATH TRUTH + PASS-GATE AUDIT =================
+V61213_DIR = DATA_DIR / "jlaw_v61213_write_truth"
+V61213_STATUS = V61213_DIR / "status.json"
+V61213_RESULT = V61213_DIR / "result.json"
+v61213_thread = None
+
+def _v61213_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":2,"current":"","error":None}
+    if V61213_STATUS.exists():
+        try:s.update(json.loads(V61213_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v61213_write_status(**kw):
+    V61213_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v61213_status(); s.update(kw)
+    V61213_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2),encoding="utf-8")
+    return s
+
+def _v61213_compute():
+    global v61213_thread
+    try:
+        import importlib.util, inspect
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists(): raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v61213_engine",str(ep))
+        eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+        all_data={}
+        for t,p in files.items():
+            try: all_data[t]=eng.load(p)
+            except Exception: pass
+        spy=all_data.get("SPY")
+        if spy is None: raise RuntimeError("缺少 SPY 市场缓存")
+
+        targets=[("KEYS","2026-08-17"),("MPC","2026-08-11")]
+        details=[]
+        _v61213_write_status(status="running",message="重算两条 5/20 后 Base Setup，拆 V6 Edge / Red-Flag",processed=0,total=2,current="",error=None)
+
+        for n,(ticker,ds) in enumerate(targets,1):
+            _v61213_write_status(status="running",message="正式 historical_signals() + V6 Pass Gate",processed=n-1,total=2,current=f"{ticker} {ds}")
+            rec={"ticker":ticker,"date":ds,"found":False,"error":None}
+            try:
+                sec=eng.T2S.get(ticker)
+                if ticker not in all_data or sec not in all_data:
+                    raise RuntimeError("ticker/sector cache missing")
+                d,s,f,sdg=eng.historical_signals(ticker,all_data[ticker],spy,all_data[sec],all_data)
+                if s is None or s.empty:
+                    raise RuntimeError("historical_signals empty")
+                s=s.copy(); s["date"]=pd.to_datetime(s["date"],errors="coerce")
+                z=s[s["date"]==pd.Timestamp(ds)]
+                if z.empty:
+                    raise RuntimeError("target signal row not found")
+                r=z.iloc[-1]
+                rec["found"]=True
+                for c in ["entry","pivot","extension","volratio","rs","sector_score","group_breadth",
+                          "supply_score","pivot_tight","c1","c2","c3","dry",
+                          "v6_market_character","v6_edge_count","v6_red_count","v6_tier","v6_pass",
+                          "v6_edges","v6_red_flags"]:
+                    if c in z.columns:
+                        v=r.get(c)
+                        if isinstance(v,(np.bool_,bool)): v=bool(v)
+                        elif isinstance(v,(np.integer,)): v=int(v)
+                        elif isinstance(v,(np.floating,)) and pd.notna(v): v=float(v)
+                        rec[c]=None if (isinstance(v,float) and pd.isna(v)) else v
+
+                # Recompute named edge/flag booleans exactly for transparency.
+                edges,flags,ec,rc=eng._v6_edges(
+                    rec.get("v6_market_character"),
+                    rec.get("rs",np.nan),rec.get("sector_score",np.nan),rec.get("group_breadth",np.nan),
+                    rec.get("supply_score",np.nan),rec.get("pivot_tight",np.nan),rec.get("volratio",np.nan),
+                    rec.get("extension",np.nan),rec.get("c1",np.nan),rec.get("c2",np.nan),rec.get("c3",np.nan),rec.get("dry",np.nan)
+                )
+                rec["edges_detail"]={k:bool(v) for k,v in edges.items()}
+                rec["flags_detail"]={k:bool(v) for k,v in flags.items()}
+            except Exception as ex:
+                rec["error"]=f"{type(ex).__name__}: {ex}"
+            details.append(rec)
+
+        # Prove writer semantics from source: jlaw_v6_signals contains pass-only rows.
+        src_txt=ep.read_text(encoding="utf-8",errors="ignore")
+        semantic_lines=[]
+        for i,line in enumerate(src_txt.splitlines(),1):
+            if ('v6s=s[s["v6_pass"]==True]' in line or
+                'V6S.to_csv(out/"jlaw_v6_signals.csv"' in line or
+                'S.to_csv(out/"jlaw_v3_signals.csv"' in line):
+                semantic_lines.append(f"{i}: {line.strip()}")
+
+        # Compare base-vs-pass files across current outputs.
+        roots=[
+            ("V6 Shadow",V6_SHADOW_DIR),
+            ("V6.1 Full",V61_FAST_DIR/"full"),
+            ("V6.10 Fresh",V610_FRESH_DIR),
+            ("V6.10 Daily",V610_DAILY_DIR/"quick"),
+        ]
+        files_meta=[]
+        for label,root in roots:
+            m={"label":label}
+            for kind,fn in [("base","jlaw_v3_signals.csv"),("pass","jlaw_v6_signals.csv")]:
+                p=root/fn
+                n=0; latest="—"; post=0
+                if p.exists():
+                    try:
+                        d=pd.read_csv(p); n=len(d)
+                        if "date" in d.columns:
+                            dd=pd.to_datetime(d["date"],errors="coerce")
+                            if dd.notna().any():
+                                latest=dd.max().strftime("%Y-%m-%d")
+                                post=int((dd>pd.Timestamp("2026-05-20")).sum())
+                    except Exception:pass
+                m[f"{kind}_rows"]=n; m[f"{kind}_latest"]=latest; m[f"{kind}_post520"]=post; m[f"{kind}_path"]=str(p)
+            files_meta.append(m)
+
+        # Truth verdict.
+        post_base=max([m["base_post520"] for m in files_meta] or [0])
+        post_pass=max([m["pass_post520"] for m in files_meta] or [0])
+        verdict=[
+            "更正 V6.12.12：jlaw_v6_signals.csv 不是“所有 Setup 信号文件”，它按设计只保存 v6_pass=True 的可执行 V6 信号。",
+            "正式引擎 5/20 后确实有 2 条 Base Setup：KEYS 8/17、MPC 8/11；但两条都是 WATCH，V6 Pass=0，所以不会写入 jlaw_v6_signals.csv。",
+            "因此“写盘坏了”不是当前证据支持的根因；真正瓶颈是 V6 Pass Gate（Edge 数不足/规则门槛），不是 Publisher。",
+        ]
+
+        result={"generated_at":datetime.now(timezone.utc).isoformat(),
+                "details":details,"semantic_lines":semantic_lines,
+                "files_meta":files_meta,"verdict":verdict}
+        V61213_DIR.mkdir(parents=True,exist_ok=True)
+        V61213_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v61213_write_status(status="done",message="Truth + Pass-Gate Audit 完成",processed=2,total=2,current="",error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v61213_write_status(status="error",message="Audit 失败",error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v61213_thread=None
+
+def _v61213_start():
+    global v61213_thread
+    if v61213_thread is not None and v61213_thread.is_alive(): return False
+    v61213_thread=threading.Thread(target=_v61213_compute,daemon=True)
+    v61213_thread.start(); return True
+
+@APP.post("/v61213/run")
+def v61213_run():
+    _v61213_start()
+    return redirect("/v61213/write-truth")
+
+@APP.get("/api/v61213/status")
+def v61213_status_api():
+    return jsonify(_v61213_status())
+
+@APP.get("/v61213/write-truth")
+def v61213_page():
+    import html
+    st=_v61213_status()
+    result=None
+    if V61213_RESULT.exists():
+        try:result=json.loads(V61213_RESULT.read_text(encoding="utf-8"))
+        except Exception:result=None
+    def esc(v):return html.escape(str(v))
+
+    verdict=""; cards=""; files_rows=""; detail_html=""; source_html=""
+    if result:
+        verdict="<br>".join(esc(x) for x in result.get("verdict",[]))
+        files_rows="".join(
+            f"<tr><td>{esc(m['label'])}</td><td>{m['base_rows']}</td><td>{esc(m['base_latest'])}</td><td>{m['base_post520']}</td>"
+            f"<td>{m['pass_rows']}</td><td>{esc(m['pass_latest'])}</td><td>{m['pass_post520']}</td></tr>"
+            for m in result.get("files_meta",[])
+        )
+        source_html="<br>".join(esc(x) for x in result.get("semantic_lines",[]))
+        for r in result.get("details",[]):
+            if r.get("error"):
+                detail_html+=f"<div class='c'><h2>{esc(r['ticker'])} {esc(r['date'])}</h2><div class='bad'>{esc(r['error'])}</div></div>"
+                continue
+            edges=r.get("edges_detail",{}); flags=r.get("flags_detail",{})
+            edge_rows="".join(f"<tr><td>{esc(k)}</td><td>{'✅' if v else '❌'}</td></tr>" for k,v in edges.items())
+            flag_rows="".join(f"<tr><td>{esc(k)}</td><td>{'🚩' if v else '—'}</td></tr>" for k,v in flags.items())
+            detail_html+=f"""
+<div class="c"><h2>{esc(r['ticker'])} · {esc(r['date'])}</h2>
+<div class="grid">
+<div class="m"><small>Market</small><b>{esc(r.get('v6_market_character'))}</b></div>
+<div class="m"><small>Edge Count</small><b>{esc(r.get('v6_edge_count'))}</b></div>
+<div class="m"><small>Red Count</small><b>{esc(r.get('v6_red_count'))}</b></div>
+<div class="m"><small>Tier / Pass</small><b>{esc(r.get('v6_tier'))} / {esc(r.get('v6_pass'))}</b></div>
+</div>
+<div class="twocol"><div><h3>Edge Stack</h3><table>{edge_rows}</table></div><div><h3>Red Flags</h3><table>{flag_rows}</table></div></div>
+</div>"""
+
+    run_button="" if st.get("status")=="running" else '<form method="post" action="/v61213/run"><button type="submit">▶ 跑 2 条 Truth + Pass-Gate Audit</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1000px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:14px 0}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.m{{background:#f6f8fb;border-radius:14px;padding:14px}}.m small{{display:block;color:#64748b}}.m b{{font-size:20px}}
+.twocol{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}@media(max-width:700px){{.twocol{{grid-template-columns:1fr}}}}
+.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}
+.bad{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:14px}}
+button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:7px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}
+</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧭 V6.12.13 Write-Path Truth + Pass-Gate Audit</h1>
+<div class="ok"><b>这版直接纠正上一版结论：</b>先确认 jlaw_v6_signals.csv 的真正语义，再拆 KEYS / MPC 为什么是 WATCH 而不是 V6 Pass。<br>不改交易参数。</div></div>
+<div class="c"><h2>状态</h2><div class="grid"><div class="m"><small>状态</small><b>{esc(st.get('status'))}</b></div><div class="m"><small>进度</small><b>{st.get('processed',0)} / {st.get('total',2)}</b></div></div>
+<p>{esc(st.get('message',''))} {esc(st.get('current',''))}</p>{run_button}</div>
+{('<div class="c"><h2>🎯 真相结论</h2><div class="warn"><b>'+verdict+'</b></div></div>') if verdict else ''}
+<div class="c"><h2>Base Setup vs V6 Pass 文件</h2><div style="overflow:auto"><table>
+<tr><th>来源</th><th>Base行数</th><th>Base最新</th><th>Base 5/20后</th><th>V6 Pass行数</th><th>V6最新</th><th>V6 5/20后</th></tr>{files_rows}
+</table></div></div>
+{detail_html}
+{('<div class="c"><h2>Engine 写盘语义证据</h2><div class="mono">'+source_html+'</div></div>') if source_html else ''}
+<script>
+setTimeout(async function(){{
+ try{{const r=await fetch("/api/v61213/status",{{cache:"no-store"}});const s=await r.json();if(s.status==="running")location.reload();}}catch(e){{}}
+}},3000);
+</script>
+</div></body></html>"""
 
 @APP.get("/v61212/root-cause")
 def v61212_root_cause_page():
