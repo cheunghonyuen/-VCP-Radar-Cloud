@@ -4225,7 +4225,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.5</h1><div class="muted">当前研究版：V6.3.9.5 Publisher Test · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.9.6</h1><div class="muted">当前研究版：V6.3.9.6 Publisher Control Panel · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4245,7 +4245,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.9.5 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.9.6 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -5074,14 +5074,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 <div style="margin-top:8px;font-size:14px">
 检查地址：<code>/publisher/health</code>
 </div>
-<div style="margin-top:10px">
-<a href="/publisher/test-page" style="text-decoration:none">
-<button type="button">🧪 Cloud Publisher 安全测试</button>
+<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+<a href="/publisher/control" style="text-decoration:none;flex:1;min-width:220px">
+<button type="button" style="width:100%">☁️ 打开自动发布控制台</button>
+</a>
+<a href="/publisher/test-page" style="text-decoration:none;flex:1;min-width:220px">
+<button type="button" style="width:100%">🧪 安全测试</button>
 </a>
 </div>
 </div>
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.9.5 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.9.6 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -6429,6 +6432,147 @@ def publisher_test():
         return jsonify({"ok": True, "message": "publisher test commit created", **result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@APP.get("/publisher/control")
+def publisher_control():
+    return """
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VCP Cloud Publisher</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:720px;margin:auto}
+.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 2px 10px rgba(0,0,0,.06)}
+h1{font-size:26px;margin:0 0 8px}label{font-weight:800;display:block;margin:14px 0 6px}
+input[type=file],input[type=password],input[type=text]{width:100%;box-sizing:border-box;font-size:16px;padding:12px;border:1px solid #d1d5db;border-radius:12px;background:white}
+button{width:100%;font-size:18px;font-weight:900;padding:14px;border:0;border-radius:12px;background:#111827;color:white;margin-top:14px}
+.small{font-size:14px;color:#64748b}.ok{color:#166534}.bad{color:#991b1b}
+pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:10px;min-height:80px}
+.warn{background:#fff7ed;border:1px solid #fed7aa;padding:12px;border-radius:12px}
+</style>
+</head>
+<body><div class="wrap">
+<div class="card">
+<h1>☁️ VCP Cloud Publisher</h1>
+<p>以后不用去 GitHub 改名上传。这里选我给你的 Python 文件，系统会自动发布到 GitHub，Railway 再自动 Deploy。</p>
+<div class="warn">
+<b>安全：</b>只允许 <code>app.py / app_v*.py / app-*.py / jlaw_*.py</code>。<br>
+发布前会检查 UTF-8 和 Python 语法。
+</div>
+
+<form id="f">
+<label>1. 选择新版 Python 文件</label>
+<input id="file" name="file" type="file" accept=".py,text/x-python" required>
+
+<label>2. Publisher 密码</label>
+<input id="secret" name="secret" type="password" autocomplete="current-password" placeholder="Railway 里设置的 PUBLISH_SECRET" required>
+
+<label>3. Commit 备注（可留空）</label>
+<input id="message" name="message" type="text" placeholder="例如：V6.4 Context Veto">
+
+<button type="submit">🚀 发布到 GitHub + 触发 Railway</button>
+</form>
+
+<p class="small">app_v*.py 会自动作为 <b>app.py</b> 发布；jlaw_*.py 保持原文件名。</p>
+<pre id="out">等待发布…</pre>
+</div>
+</div>
+
+<script>
+document.getElementById("f").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const out=document.getElementById("out");
+  const file=document.getElementById("file").files[0];
+  const secret=document.getElementById("secret").value;
+  const message=document.getElementById("message").value;
+  if(!file){ out.textContent="请选择 .py 文件"; return; }
+
+  const fd=new FormData();
+  fd.append("file",file);
+  fd.append("message",message);
+
+  out.className="";
+  out.textContent="正在检查并提交 GitHub…";
+
+  try{
+    const r=await fetch("/publisher/upload",{
+      method:"POST",
+      headers:{"X-Publish-Secret":secret},
+      body:fd
+    });
+    const j=await r.json();
+    out.className=j.ok?"ok":"bad";
+    out.textContent=JSON.stringify(j,null,2);
+  }catch(err){
+    out.className="bad";
+    out.textContent=String(err);
+  }
+});
+</script>
+</body></html>
+"""
+
+@APP.post("/publisher/upload")
+def publisher_upload():
+    if not _publisher_auth_ok(request):
+        return jsonify({"ok":False,"error":"Publisher 密码错误"}), 401
+
+    if "file" not in request.files:
+        return jsonify({"ok":False,"error":"没有收到文件"}), 400
+
+    f=request.files["file"]
+    original=(f.filename or "").strip()
+    if not original:
+        return jsonify({"ok":False,"error":"文件名为空"}), 400
+
+    # Safe target mapping.
+    if original == "app.py" or original.startswith("app_v") or original.startswith("app-"):
+        target="app.py"
+    elif original.startswith("jlaw_") and original.endswith(".py"):
+        target=original
+    else:
+        return jsonify({
+            "ok":False,
+            "error":"只允许 app.py / app_v*.py / app-*.py / jlaw_*.py"
+        }), 400
+
+    data=f.read()
+    if len(data) > PUBLISH_MAX_BYTES:
+        return jsonify({"ok":False,"error":f"文件过大：{len(data)} bytes"}), 400
+
+    try:
+        source=data.decode("utf-8")
+    except Exception:
+        return jsonify({"ok":False,"error":"文件必须是 UTF-8 Python 文本"}), 400
+
+    # Syntax-check before publishing.
+    try:
+        compile(source, original, "exec")
+    except SyntaxError as e:
+        return jsonify({
+            "ok":False,
+            "error":f"Python 语法错误：line {e.lineno}: {e.msg}"
+        }), 400
+
+    msg=(request.form.get("message") or "").strip()
+    if not msg:
+        msg=f"Cloud publish {target} via VCP Publisher"
+
+    try:
+        result=_gh_publish(target,data,msg)
+        return jsonify({
+            "ok":True,
+            "message":"GitHub 发布成功；Railway 应自动开始 Deploy",
+            "original_file":original,
+            "target":target,
+            **result
+        })
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}), 500
 
 @APP.get("/publisher/test-page")
 def publisher_test_page():
