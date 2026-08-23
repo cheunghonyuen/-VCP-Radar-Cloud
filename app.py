@@ -3686,6 +3686,170 @@ def v63_summary():
                 exposure_rows.append(sm)
                 exposure_years.extend(yy)
 
+
+    bottleneck_rows=[]
+
+    def _bottleneck_sim(source, top_n=2, max_positions=8, single_cap=0.25,
+                        target_exposure=0.80, initial_equity=100000.0, label=""):
+        if source is None or source.empty or "date" not in source.columns or "return_pct" not in source.columns:
+            return None
+
+        D=source.copy()
+        D["date"]=pd.to_datetime(D["date"],errors="coerce")
+        D=D[D["date"].notna()].copy()
+        if D.empty:
+            return None
+
+        power=(D["v6_market_character"].astype(str)=="POWER_TREND") if "v6_market_character" in D.columns else pd.Series(False,index=D.index)
+        ext=pd.to_numeric(D["extension"],errors="coerce") if "extension" in D.columns else pd.Series(999.0,index=D.index)
+        vol=pd.to_numeric(D["volratio"],errors="coerce") if "volratio" in D.columns else pd.Series(0.0,index=D.index)
+        rs2=pd.to_numeric(D["rs"],errors="coerce") if "rs" in D.columns else pd.Series(0.0,index=D.index)
+
+        D["_power"]=power.astype(int)
+        D["_goodvol"]=(vol>=1.8).astype(int)
+        D["_goodloc"]=(ext<=0.01).astype(int)
+        D["_vol"]=vol.fillna(0.0)
+        D["_ext"]=ext.fillna(999.0)
+        D["_rs2"]=rs2.fillna(0.0)
+
+        D=D.sort_values(
+            ["date","_power","_goodvol","_goodloc","_vol","_ext","_rs2"],
+            ascending=[True,False,False,False,False,True,False]
+        ).copy()
+        D["_rank"]=D.groupby("date").cumcount()+1
+        D=D[D["_rank"]<=int(top_n)].copy()
+        if D.empty:
+            return None
+
+        hold=pd.to_numeric(D["hold_days"],errors="coerce").fillna(20).clip(lower=1).round().astype(int) if "hold_days" in D.columns else pd.Series(20,index=D.index)
+        D["_exit_date"]=[d+pd.offsets.BDay(int(h)) for d,h in zip(D["date"],hold)]
+        D["_ret"]=pd.to_numeric(D["return_pct"],errors="coerce").fillna(0.0)
+
+        stop=pd.to_numeric(D["stop_pct"],errors="coerce").abs() if "stop_pct" in D.columns else pd.Series(0.07,index=D.index)
+        D["_stop"]=stop.where((stop>0.005)&(stop<0.30),0.07)
+
+        equity=cash=float(initial_equity)
+        open_pos=[]
+        snapshots=[]
+        skip_capacity=0
+        skip_no_signal_gap=0
+        cap_bind_count=0
+        cash_bind_count=0
+        executed=0
+
+        def close_due(day):
+            nonlocal cash,equity,open_pos
+            due=[p for p in open_pos if p["exit_date"]<=day]
+            keep=[p for p in open_pos if p["exit_date"]>day]
+            for p in due:
+                cash += p["capital"]*(1.0+p["ret"])
+            open_pos=keep
+            equity=cash+sum(p["capital"] for p in open_pos)
+
+        all_days=sorted(D["date"].dropna().unique())
+
+        for day,g in D.groupby("date",sort=True):
+            close_due(day)
+            equity=cash+sum(p["capital"] for p in open_pos)
+
+            for _,r in g.sort_values("_rank").iterrows():
+                if len(open_pos)>=int(max_positions):
+                    skip_capacity += 1
+                    continue
+
+                invested=sum(p["capital"] for p in open_pos)
+                current_exposure=invested/equity if equity>0 else 0.0
+                gap=max(float(target_exposure)-current_exposure,0.0)
+                remaining_slots=max(int(max_positions)-len(open_pos),1)
+
+                equal_fill=equity*gap/remaining_slots
+                risk_cap=equity*0.006/float(r["_stop"])
+                single_cap_amt=equity*float(single_cap)
+
+                raw=min(equal_fill,risk_cap,single_cap_amt,cash)
+
+                # Diagnose which limit binds.
+                min_val=min(equal_fill,risk_cap,single_cap_amt,cash)
+                if abs(single_cap_amt-min_val)<1e-9:
+                    cap_bind_count += 1
+                if abs(cash-min_val)<1e-9:
+                    cash_bind_count += 1
+
+                if raw<100:
+                    continue
+
+                cash-=raw
+                open_pos.append({
+                    "exit_date":r["_exit_date"],
+                    "capital":float(raw),
+                    "ret":float(r["_ret"])
+                })
+                executed += 1
+                equity=cash+sum(p["capital"] for p in open_pos)
+
+            invested=sum(p["capital"] for p in open_pos)
+            exp=invested/equity if equity>0 else 0.0
+            snapshots.append({
+                "date":day,
+                "exposure":exp,
+                "open":len(open_pos),
+                "signal_count":int(len(g))
+            })
+
+        for day in sorted({p["exit_date"] for p in open_pos}):
+            close_due(day)
+            invested=sum(p["capital"] for p in open_pos)
+            exp=invested/equity if equity>0 else 0.0
+            snapshots.append({"date":day,"exposure":exp,"open":len(open_pos),"signal_count":0})
+
+        snap=pd.DataFrame(snapshots)
+        if snap.empty:
+            return None
+
+        avg_exp=float(snap["exposure"].mean())
+        below_60=float((snap["exposure"]<0.60).mean())
+        below_40=float((snap["exposure"]<0.40).mean())
+        full_pos=float((snap["open"]>=int(max_positions)).mean())
+        avg_open=float(snap["open"].mean())
+        avg_signals=float(snap["signal_count"].mean())
+
+        # crude attribution:
+        # signal scarcity = low exposure while not full and no/low daily candidate count
+        scarcity=((snap["exposure"]<float(target_exposure)-0.10) &
+                  (snap["open"]<int(max_positions)) &
+                  (snap["signal_count"]<int(top_n)))
+        signal_scarcity_rate=float(scarcity.mean())
+
+        return {
+            "name":label,
+            "top_n":int(top_n),
+            "max_positions":int(max_positions),
+            "single_cap":float(single_cap),
+            "avg_exposure":avg_exp,
+            "below_60":below_60,
+            "below_40":below_40,
+            "avg_open":avg_open,
+            "full_position_rate":full_pos,
+            "avg_daily_signals":avg_signals,
+            "signal_scarcity_rate":signal_scarcity_rate,
+            "capacity_skips":int(skip_capacity),
+            "single_cap_bind":int(cap_bind_count),
+            "cash_bind":int(cash_bind_count),
+            "executed":int(executed),
+        }
+
+    if len(T):
+        for label,tn,mp,cap in [
+            ("Top2 · 8仓 · 单股25%",2,8,0.25),
+            ("Top3 · 8仓 · 单股25%",3,8,0.25),
+            ("Top3 · 12仓 · 单股25%",3,12,0.25),
+            ("Top3 · 12仓 · 单股35%",3,12,0.35),
+            ("Top4 · 12仓 · 单股25%",4,12,0.25),
+        ]:
+            row=_bottleneck_sim(T,top_n=tn,max_positions=mp,single_cap=cap,target_exposure=0.80,label=label)
+            if row:
+                bottleneck_rows.append(row)
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
             "validation_core":validation_core,"validation_core_eras":validation_core_eras,
@@ -3700,7 +3864,8 @@ def v63_summary():
             "demand_rank_diag":demand_rank_diag,
             "portfolio_rows":portfolio_rows,"portfolio_years":portfolio_years,
             "portfolio_audit":portfolio_audit,"portfolio_audit_years":portfolio_audit_years,
-            "exposure_rows":exposure_rows,"exposure_years":exposure_years}
+            "exposure_rows":exposure_rows,"exposure_years":exposure_years,
+            "bottleneck_rows":bottleneck_rows}
 
 def run_v63():
     import importlib.util
@@ -5182,7 +5347,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.6.2</h1><div class="muted">当前研究版：V6.6.2 Exposure Lab · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.6.3</h1><div class="muted">当前研究版：V6.6.3 Exposure Bottleneck · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -5202,7 +5367,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.6.2 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.6.3 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -7009,6 +7174,17 @@ setTimeout(poll,5000);
 document.addEventListener("DOMContentLoaded", function(){
   try{
     const top=document.querySelector(".top");
+    if(top && !document.getElementById("v663-shortcut")){
+      const box=document.createElement("div");
+      box.id="v663-shortcut"; box.className="card";
+      box.style.cssText="margin:10px 0;border:2px solid #60a5fa";
+      box.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧱 V6.6.3 Exposure Bottleneck</h2><div class="muted">不重跑：查资金为什么填不满80%</div></div><a href="/v663/exposure-bottleneck"><button type="button">打开 Bottleneck</button></a></div>';
+      top.insertAdjacentElement("afterend",box);
+    }
+  }catch(e){}
+
+  try{
+    const top=document.querySelector(".top");
     if(top && !document.getElementById("v662-shortcut")){
       const box=document.createElement("div");
       box.id="v662-shortcut"; box.className="card";
@@ -7156,7 +7332,7 @@ document.addEventListener("DOMContentLoaded", function(){
     const currentLink = document.querySelector('.quick-nav a.primary');
     if(currentLink){
       currentLink.href="#v63-current";
-      currentLink.textContent="🚀 V6.6.2 当前版";
+      currentLink.textContent="🚀 V6.6.3 当前版";
     }
   }catch(e){
     console.error("safe UI init failed", e);
@@ -7420,6 +7596,70 @@ h1{font-size:26px;margin:0 0 8px}h2{font-size:21px;margin:18px 0 10px}
 
 
 
+
+
+@APP.get("/v663/exposure-bottleneck")
+def v663_exposure_bottleneck_page():
+    s=v63_summary()
+    rows=s.get("bottleneck_rows",[]) if s.get("available") else []
+    tpl=r"""
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V6.6.3 Exposure Bottleneck</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#111827;margin:0;padding:16px}
+.wrap{max-width:940px;margin:auto}.card{background:#fff;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:0 0 8px}.grid{display:grid;grid-template-columns:1fr;gap:10px}
+.item{border:1px solid #e5e7eb;border-radius:14px;padding:14px}.name{font-weight:900;font-size:18px}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.metric{background:#f8fafc;border-radius:10px;padding:10px}
+.metric small{display:block;color:#64748b}.metric b{font-size:19px}.back{display:inline-block;background:#111827;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font-weight:800}
+.note{background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:12px}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body><div class="wrap">
+<a class="back" href="/">← 返回主仪表盘</a>
+
+<div class="card">
+<h1>🧱 V6.6.3 Exposure Bottleneck</h1>
+<div class="note">
+不改选股、不重跑。只查为什么 Target 80% 实际平均资金使用率只能到约46%。<br><br>
+<b>要分清三件事：</b><br>
+1. 信号不够：没有足够候选可买。<br>
+2. 仓位上限：8仓/12仓把新信号挡住。<br>
+3. 单股上限：每只最多25%是否限制资金投入。<br><br>
+所以这页比较 Top2/Top3/Top4、8仓/12仓、单股25%/35%。
+</div>
+</div>
+
+<div class="card">
+<h2>瓶颈诊断</h2>
+<div class="grid">
+{% for r in rows %}
+<div class="item">
+<div class="name">{{r.name}}</div>
+<div class="metrics">
+<div class="metric"><small>平均资金使用率</small><b>{{"%.1f%%"|format(r.avg_exposure*100)}}</b></div>
+<div class="metric"><small>平均持仓数</small><b>{{"%.1f"|format(r.avg_open)}}</b></div>
+<div class="metric"><small>低于60%资金的时间</small><b>{{"%.1f%%"|format(r.below_60*100)}}</b></div>
+<div class="metric"><small>低于40%资金的时间</small><b>{{"%.1f%%"|format(r.below_40*100)}}</b></div>
+<div class="metric"><small>达到最大仓位的时间</small><b>{{"%.1f%%"|format(r.full_position_rate*100)}}</b></div>
+<div class="metric"><small>平均每日候选数</small><b>{{"%.2f"|format(r.avg_daily_signals)}}</b></div>
+<div class="metric"><small>“信号不足”占比</small><b>{{"%.1f%%"|format(r.signal_scarcity_rate*100)}}</b></div>
+<div class="metric"><small>因满仓跳过</small><b>{{r.capacity_skips}}</b></div>
+<div class="metric"><small>单股上限触发次数</small><b>{{r.single_cap_bind}}</b></div>
+<div class="metric"><small>现金不足触发</small><b>{{r.cash_bind}}</b></div>
+<div class="metric"><small>实际执行交易</small><b>{{r.executed}}</b></div>
+<div class="metric"><small>配置</small><b>Top{{r.top_n}} / {{r.max_positions}}仓</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+</div>
+</div></body></html>
+"""
+    return render_template_string(tpl,rows=rows)
 
 @APP.get("/v662/exposure-lab")
 def v662_exposure_lab_page():
