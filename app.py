@@ -2546,9 +2546,52 @@ def v63_summary():
                     if len(g):
                         validation_core_eras.append({"name":nm,**_v6_shadow_metrics(g)})
 
+    validation_core_recent_trades=[]
+    validation_core_feature_compare=[]
+
+    if "ticker" in T.columns:
+        tick=T["ticker"].astype(str)
+        V=T[tick.isin(set(V5_VALIDATION))].copy()
+        if all(c in V.columns for c in ["v6_market_character","volratio","rs"]):
+            vv=pd.to_numeric(V["volratio"],errors="coerce")
+            rr=pd.to_numeric(V["rs"],errors="coerce")
+            C=V[(V["v6_market_character"].astype(str)=="POWER_TREND")&(vv>=1.8)&(rr>=90)].copy()
+
+            if "date" in C.columns:
+                C["date"]=pd.to_datetime(C["date"],errors="coerce")
+                R=C[(C["date"]>=pd.Timestamp("2022-01-01"))&(C["date"]<=pd.Timestamp("2026-12-31"))].copy()
+                for _,r in R.sort_values("date").iterrows():
+                    item={}
+                    for c in ["ticker","date","return_pct","volratio","rs","rs_raw","supply_score",
+                              "sector_score","leader_score","group_breadth","extension",
+                              "v6_edge_count","v6_red_count","v6_tier","v6_rank"]:
+                        if c in R.columns:
+                            v=r.get(c)
+                            if c=="date":
+                                item[c]=v.strftime("%Y-%m-%d") if pd.notna(v) else ""
+                            elif isinstance(v,(int,float)) and pd.isna(v):
+                                item[c]=None
+                            else:
+                                item[c]=v
+                    validation_core_recent_trades.append(item)
+
+                early=C[C["date"]<pd.Timestamp("2022-01-01")]
+                recentc=C[C["date"]>=pd.Timestamp("2022-01-01")]
+                for c in ["volratio","rs","rs_raw","supply_score","sector_score","leader_score",
+                          "group_breadth","extension","v6_edge_count","v6_red_count"]:
+                    if c not in C.columns: continue
+                    def _med(df):
+                        s=pd.to_numeric(df[c],errors="coerce").dropna()
+                        return float(s.median()) if len(s) else None
+                    validation_core_feature_compare.append({
+                        "feature":c,"early":_med(early),"recent":_med(recentc)
+                    })
+
     return {"available":True,"rows":rows,"trades":int(len(T)),"eras":eras,"recent":recent,
             "rsbands":rsbands,"cohort_rows":cohort_rows,"recent_rs2_bands":recent_rs2_bands,
-            "validation_core":validation_core,"validation_core_eras":validation_core_eras}
+            "validation_core":validation_core,"validation_core_eras":validation_core_eras,
+            "validation_core_recent_trades":validation_core_recent_trades,
+            "validation_core_feature_compare":validation_core_feature_compare}
 
 def run_v63():
     import importlib.util
@@ -4013,7 +4056,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.3.7</h1><div class="muted">当前研究版：V6.3.7 Validation CORE Robustness · 最新版本优先 · 历史版本收纳在下方</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.3.8</h1><div class="muted">当前研究版：V6.3.8 Recent Validation Fault Isolation · 最新版本优先 · 历史版本收纳在下方</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -4033,7 +4076,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 
 
 <div class="quick-nav">
-<a class="primary" href="#v62-current">🚀 V6.3.7 当前版</a>
+<a class="primary" href="#v62-current">🚀 V6.3.8 当前版</a>
 <a href="#v61-fast">⚡ V6.1 Fast</a>
 <a href="#research-archive">历史版本</a>
 <a href="#top-candidates">Top 候选</a>
@@ -4853,7 +4896,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card current-card" id="v63-current" style="margin-top:18px;border:2px solid #b7d4ff">
-<h2 style="margin:0 0 8px">🚀 V6.3.7 RS2 + Feature Store</h2>
+<h2 style="margin:0 0 8px">🚀 V6.3.8 RS2 + Feature Store</h2>
 <div class="muted" style="margin-bottom:10px">
 底层升级：RS 改成每日横截面 Percentile Ranking，并保留 uncapped RS Raw。
 Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复计算。
@@ -4980,7 +5023,7 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 </div>
 
 {% for group_name in ["BASE","VOLUME","RS2","SUPPLY","ENTRY","SECTOR","GROUP"] %}
-<details {% if group_name in ["BASE","VOLUME","RS2"] %}open{% endif %} style="margin-top:10px">
+<details open style="margin-top:10px">
 <summary style="font-weight:900;cursor:pointer">{{group_name}}</summary>
 <div class="mobile-metrics">
 {% for r in v63_summary.validation_core if r.group == group_name %}
@@ -5011,6 +5054,36 @@ Feature Store 只建立一次；Peer/Group RS 直接读取缓存，避免重复�
 </div>
 </div>
 {% endfor %}
+</div>
+
+<h3 style="margin-top:18px">🩺 Validation CORE · 2022–2026 逐笔</h3>
+<div class="muted" style="margin-bottom:8px">因为最近时期只有4笔且 PF 0.83，这里直接看是哪4笔拖累，不再继续盲调阈值。</div>
+<div class="mobile-metrics">
+{% for r in v63_summary.validation_core_recent_trades %}
+<div class="metric-card">
+<div class="name">{{r.ticker or "?"}} · {{r.date}}</div>
+<div class="metric-grid">
+<div class="metric-box"><small>收益</small><b>{% if r.return_pct is not none %}{{"%.2f%%"|format(r.return_pct*100)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Vol / RS2</small><b>{% if r.volratio is not none %}{{"%.2f"|format(r.volratio)}}x{% else %}-{% endif %} / {% if r.rs is not none %}{{"%.1f"|format(r.rs)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Supply / Sector</small><b>{% if r.supply_score is not none %}{{"%.1f"|format(r.supply_score)}}{% else %}-{% endif %} / {% if r.sector_score is not none %}{{"%.1f"|format(r.sector_score)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Leader / Group</small><b>{% if r.leader_score is not none %}{{"%.1f"|format(r.leader_score)}}{% else %}-{% endif %} / {% if r.group_breadth is not none %}{{"%.1f"|format(r.group_breadth)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Extension</small><b>{% if r.extension is not none %}{{"%.2f%%"|format(r.extension*100)}}{% else %}-{% endif %}</b></div>
+<div class="metric-box"><small>Edge / Red / Tier / Rank</small><b>{{r.v6_edge_count or "-"}} / {{r.v6_red_count or "-"}} / {{r.v6_tier or "-"}} / {{r.v6_rank or "-"}}</b></div>
+</div>
+</div>
+{% endfor %}
+</div>
+
+<h3 style="margin-top:16px">早期 vs 最近 · 特征中位数</h3>
+<div class="scroll">
+<table style="min-width:620px">
+<tr><th>特征</th><th>2007–2021</th><th>2022–2026</th></tr>
+{% for r in v63_summary.validation_core_feature_compare %}
+<tr><td><b>{{r.feature}}</b></td>
+<td>{% if r.early is not none %}{{"%.3f"|format(r.early)}}{% else %}-{% endif %}</td>
+<td>{% if r.recent is not none %}{{"%.3f"|format(r.recent)}}{% else %}-{% endif %}</td></tr>
+{% endfor %}
+</table>
 </div>
 </details>
 {% endif %}
