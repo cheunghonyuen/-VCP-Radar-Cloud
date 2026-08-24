@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616b-shortcut" style="border:3px solid #ef4444"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.16B Failure / Stop Research</h2><div class="muted">冻结 Big Winner DNA · -4/-5/-6/-7% + Structural Stop · 检查误杀大赢家</div></div><a href="/v616b/stop-research"><button type="button">打开 V6.16B</button></a></div></div>
 <div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
 <div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
 
@@ -9980,6 +9981,273 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16B FAILURE / STOP RESEARCH =================
+V616B_DIR=DATA_DIR/'jlaw_v616b_stop_research'
+V616B_STATUS=V616B_DIR/'status.json'
+V616B_RESULT=V616B_DIR/'result.json'
+V616B_REPORT=V616B_DIR/'stop_report.csv'
+V616B_DETAIL=V616B_DIR/'stop_detail.csv'
+v616b_thread=None
+
+def _v616b_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616B_STATUS.exists():
+        try:x.update(json.loads(V616B_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v616b_write(**kw):
+    V616B_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v616b_status();x.update(kw)
+    V616B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v616b_stop_path(d, entry_idx, entry_price, stop_pct=None, structural=None, horizon=60):
+    if entry_idx<0 or entry_idx>=len(d) or not np.isfinite(entry_price) or entry_price<=0:return None
+    end=min(len(d)-1,entry_idx+horizon-1)
+    f=d.iloc[entry_idx:end+1].copy()
+    if f.empty:return None
+
+    ma10=d.close.rolling(10).mean()
+    ma20=d.close.rolling(20).mean()
+
+    exit_idx=end
+    exit_price=float(d.close.iloc[end])
+    reason='TIME'
+    stop_hit=False
+
+    fixed_level=entry_price*(1-stop_pct) if stop_pct is not None else None
+
+    for i in range(entry_idx,end+1):
+        lo=float(d.low.iloc[i]); op=float(d.open.iloc[i]); cl=float(d.close.iloc[i])
+
+        if fixed_level is not None and lo<=fixed_level:
+            exit_idx=i
+            exit_price=min(op,fixed_level) if op<fixed_level else fixed_level
+            reason=f'FIXED_{int(stop_pct*100)}'
+            stop_hit=True
+            break
+
+        if structural=='LOW_3D':
+            if i-entry_idx>=2:
+                ref=float(d.low.iloc[max(entry_idx,i-3):i].min())
+                if lo<ref:
+                    exit_idx=i
+                    exit_price=min(op,ref) if op<ref else ref
+                    reason='STRUCT_LOW3'
+                    stop_hit=True
+                    break
+
+        if structural=='MA20_CLOSE':
+            if pd.notna(ma20.iloc[i]) and cl<ma20.iloc[i]:
+                if i+1<=end:
+                    exit_idx=i+1; exit_price=float(d.open.iloc[i+1]); reason='MA20_NEXT_OPEN'
+                else:
+                    exit_idx=i; exit_price=cl; reason='MA20_CLOSE'
+                stop_hit=True
+                break
+
+        if structural=='MA10_THEN20':
+            # first 10MA violation warns, 20MA violation exits next open
+            if pd.notna(ma20.iloc[i]) and cl<ma20.iloc[i]:
+                if i+1<=end:
+                    exit_idx=i+1; exit_price=float(d.open.iloc[i+1]); reason='MA20_NEXT_OPEN'
+                else:
+                    exit_idx=i; exit_price=cl; reason='MA20_CLOSE'
+                stop_hit=True
+                break
+
+    realized=float(exit_price/entry_price-1)
+    future=d.iloc[entry_idx:end+1]
+    mfe=float(future.high.max()/entry_price-1)
+    mae=float(future.low.min()/entry_price-1)
+
+    # If stopped, inspect what the stock later did within the original 60D window.
+    post=d.iloc[min(exit_idx+1,end):end+1]
+    post_mfe=np.nan
+    if stop_hit and len(post):
+        post_mfe=float(post.high.max()/entry_price-1)
+
+    return {
+        'realized':realized,'mfe':mfe,'mae':mae,'stop_hit':stop_hit,
+        'reason':reason,'exit_idx':exit_idx,'post_mfe':post_mfe,
+        'bw20':mfe>=.20,'bw30':mfe>=.30,'bw50':mfe>=.50,
+        'false_stop20':bool(stop_hit and np.isfinite(post_mfe) and post_mfe>=.20),
+        'false_stop30':bool(stop_hit and np.isfinite(post_mfe) and post_mfe>=.30),
+        'false_stop50':bool(stop_hit and np.isfinite(post_mfe) and post_mfe>=.50),
+    }
+
+def _v616b_build_entries():
+    # Rebuild exactly from V6.16A logic so stop research starts from frozen entry definitions.
+    S=pd.read_csv(V615D_SNAP)
+    S['obs_date']=pd.to_datetime(S.obs_date,errors='coerce')
+    for c in ['ret60','ret120','ret252','vol_vs20']:
+        S[c]=pd.to_numeric(S[c],errors='coerce')
+    S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy()
+    S['year']=S.obs_date.dt.year.astype(int)
+
+    picks=[]
+    for y in sorted(S.year.unique()):
+        tr=S[S.year<y];te=S[S.year==y]
+        if len(tr)<1000 or len(te)<50:continue
+        q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
+        a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy();a['group']='CORE_AB'
+        b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy();b['group']='CORE_AB'
+        pp=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)&(te.ret20>=.20 if 'ret20' in te.columns else False)][['ticker','obs_date']].copy() if 'ret20' in te.columns else pd.DataFrame(columns=['ticker','obs_date'])
+        if len(pp): pp['group']='POWER_PLAY'
+        picks.extend([a,b])
+        if len(pp):picks.append(pp)
+
+    D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date','group'])
+    return D
+
+def _v616b_run():
+    global v616b_thread
+    t0=time.time()
+    try:
+        D=_v616b_build_entries()
+        ticks=sorted(D.ticker.unique())
+        tests=[
+            ('STOP_4',.04,None),
+            ('STOP_5',.05,None),
+            ('STOP_6',.06,None),
+            ('STOP_7',.07,None),
+            ('STRUCT_LOW3',None,'LOW_3D'),
+            ('STRUCT_MA20',None,'MA20_CLOSE'),
+            ('STRUCT_MA10_20',None,'MA10_THEN20'),
+        ]
+        total=len(ticks)
+        _v616b_write(status='running',message='Frozen DNA/Entry → Stop Replay',processed=0,total=total,elapsed_sec=0,error=None)
+        rows=[]
+
+        for k,t in enumerate(ticks,1):
+            d=_v616a_price(t)
+            if d is not None:
+                im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+                tg=D[D.ticker.eq(t)]
+
+                for _,r in tg.iterrows():
+                    dt=pd.Timestamp(r.obs_date).normalize()
+                    if dt not in im:continue
+                    oi=im[dt]
+                    if oi>=len(d)-61:continue
+
+                    entries=_v616a_entries(d,oi)
+
+                    # Core AB uses CONTROL and RE_STRENGTH only; Power Play uses its own first-pullback proxy.
+                    allowed=[]
+                    if r['group']=='CORE_AB':
+                        for m in ['CONTROL','RE_STRENGTH']:
+                            if m in entries:allowed.append(m)
+                    else:
+                        if 'POWER_PLAY_PB' in entries:allowed.append('POWER_PLAY_PB')
+
+                    for entry_method in allowed:
+                        ei,px,delay=entries[entry_method]
+                        for stop_name,sp,struct in tests:
+                            z=_v616b_stop_path(d,ei,px,stop_pct=sp,structural=struct,horizon=60)
+                            if z is None:continue
+                            rows.append({
+                                'ticker':t,'obs_date':str(dt.date()),'group':r['group'],'entry_method':entry_method,
+                                'stop':stop_name,'delay':delay,'realized':z['realized'],'mfe':z['mfe'],'mae':z['mae'],
+                                'stop_hit':z['stop_hit'],'reason':z['reason'],'bw20':z['bw20'],'bw30':z['bw30'],'bw50':z['bw50'],
+                                'false_stop20':z['false_stop20'],'false_stop30':z['false_stop30'],'false_stop50':z['false_stop50'],
+                                'post_mfe':z['post_mfe']
+                            })
+            _v616b_write(status='running',message='Frozen DNA/Entry → Stop Replay',processed=k,total=total,current=t,elapsed_sec=round(time.time()-t0,1))
+
+        X=pd.DataFrame(rows)
+        if X.empty:raise RuntimeError('没有生成 Stop Research 结果')
+        X.to_csv(V616B_DETAIL,index=False)
+
+        reps=[]
+        for (grp,entry,stop),g in X.groupby(['group','entry_method','stop']):
+            wins=g[g.realized>0];loss=g[g.realized<=0]
+            gp=float(wins.realized.sum()) if len(wins) else 0.0
+            gl=abs(float(loss.realized.sum())) if len(loss) else 0.0
+            pf=gp/gl if gl>0 else np.nan
+            avgwin=float(wins.realized.mean()) if len(wins) else 0.0
+            avgloss=float(loss.realized.mean()) if len(loss) else 0.0
+            wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
+
+            stopped=g[g.stop_hit]
+            false20=float(stopped.false_stop20.mean()) if len(stopped) else 0.0
+            false30=float(stopped.false_stop30.mean()) if len(stopped) else 0.0
+            false50=float(stopped.false_stop50.mean()) if len(stopped) else 0.0
+
+            reps.append({
+                'group':grp,'entry':entry,'stop':stop,'n':len(g),
+                'stop_rate':float(g.stop_hit.mean()),
+                'avg_return':float(g.realized.mean()),
+                'win_rate':float((g.realized>0).mean()),
+                'pf':float(pf) if np.isfinite(pf) else np.nan,
+                'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':float(wl) if np.isfinite(wl) else np.nan,
+                'bw20_universe':float(g.bw20.mean()),'bw30_universe':float(g.bw30.mean()),'bw50_universe':float(g.bw50.mean()),
+                'false_stop20':false20,'false_stop30':false30,'false_stop50':false50,
+                'stopped_n':int(len(stopped)),
+                'avg_original_mae':float(g.mae.mean()),
+            })
+
+        R=pd.DataFrame(reps)
+        # Diagnostic rank: PF first, then avg return, then lower false-stop30.
+        R=R.sort_values(['group','entry','pf','avg_return','false_stop30'],ascending=[True,True,False,False,True])
+        R.to_csv(V616B_REPORT,index=False)
+
+        result={
+            'generated_at':datetime.now(timezone.utc).isoformat(),
+            'elapsed_sec':round(time.time()-t0,2),
+            'rows':int(len(X)),
+            'methods':R.to_dict('records'),
+            'rule_note':'Selection DNA frozen from V6.15F. Core entry compares CONTROL and RE_STRENGTH; Power Play tested separately on POWER_PLAY_PB. No break-even, add-on, trailing winner exit, or sizing.',
+            'warning':'Existing 455-file cache still has survivorship-bias limits. This is stop research, not final system proof.'
+        }
+        V616B_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v616b_write(status='done',message='V6.16B Failure / Stop Research 完成',processed=total,total=total,current='',elapsed_sec=result['elapsed_sec'],error=None)
+
+    except Exception as ex:
+        traceback.print_exc()
+        _v616b_write(status='error',message='V6.16B 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v616b_thread=None
+
+def _v616b_start():
+    global v616b_thread
+    if v616b_thread is not None and v616b_thread.is_alive():return False
+    v616b_thread=threading.Thread(target=_v616b_run,daemon=True);v616b_thread.start();return True
+
+@APP.post('/v616b/run')
+def v616b_run():
+    _v616b_start();return redirect('/v616b/stop-research')
+
+@APP.get('/api/v616b/status')
+def v616b_status_api():return jsonify(_v616b_status())
+
+@APP.get('/v616b/stop-research')
+def v616b_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v616b_status();r={}
+    if V616B_RESULT.exists():
+        try:r=json.loads(V616B_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    trs=''
+    for x in r.get('methods',[]):
+        trs+=f"<tr><td>{e(x.get('group'))}</td><td>{e(x.get('entry'))}</td><td><b>{e(x.get('stop'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('stop_rate',0):.1%}</td><td>{x.get('avg_return',0):.1%}</td><td>{x.get('win_rate',0):.1%}</td><td><b>{x.get('pf',0) if x.get('pf') is not None else 0:.2f}</b></td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('false_stop20',0):.1%}</td><td>{x.get('false_stop30',0):.1%}</td><td>{x.get('false_stop50',0):.1%}</td></tr>"
+
+    btn='' if s.get('status')=='running' else '<form method="post" action="/v616b/run"><button>▶ 跑 V6.16B Failure / Stop Research</button></form>'
+
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1280px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1200px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🛡️ V6.16B · Failure / Stop Research</h1><div class="info"><b>只研究止损。</b>冻结 V6.15F Big Winner DNA；CORE_AB 与 POWER_PLAY 分组。比较固定 -4/-5/-6/-7% 与结构 Stop，同时统计 False Stop：被止损后原本还能成为 +20/+30/+50% Winner 的比例。暂不加 Break-even / 加仓 / Winner Exit。</div></div>
+<div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(s.get("message",""))}　{s.get("processed",0)}/{s.get("total",0)}　{e(s.get("current",""))}　耗时 {s.get("elapsed_sec",0)} 秒</p>{btn}</div>
+<div class="c"><h2>Stop A/B</h2><div class="warn">不要只看谁亏得最少。重点同时看 <b>PF、Avg Return、Avg Win/Loss、False Stop 20/30/50</b>。止损太紧如果大量误杀未来 +30/+50% Winner，也不能用。</div><div style="overflow:auto"><table><tr><th>Group</th><th>Entry</th><th>Stop</th><th>N</th><th>Stop率</th><th>AvgRet</th><th>胜率</th><th>PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>FalseStop20</th><th>FalseStop30</th><th>FalseStop50</th></tr>{trs}</table></div></div>
+<div class="c"><div class="warn"><b>规则：</b>{e(r.get("rule_note","冻结选股与Entry，只测试Stop。"))}<br><b>限制：</b>{e(r.get("warning","现有cache仍有幸存者偏差限制。"))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch("/api/v616b/status",{{cache:"no-store"}}),x=await q.json();if(x.status==="running")location.reload()}}catch(e){{}}}},1500)</script>
+</div></body></html>'''
 
 
 # ================= V6.16A ENTRY LOCATION RESEARCH =================
