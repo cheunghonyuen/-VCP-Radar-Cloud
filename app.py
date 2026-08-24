@@ -13046,9 +13046,22 @@ def _v615b_read_manifest():
     except Exception:return pd.DataFrame()
 
 
+# Shared manifest writes can come from legacy recovery/scheduler and the V6.17 overnight worker.
+# Use a process lock + unique temp file so concurrent writers cannot steal the same .tmp file.
+_v615b_manifest_lock=threading.RLock()
 def _v615b_atomic_manifest(M):
-    tmp=V615B_MANIFEST.with_suffix(".tmp")
-    M.to_csv(tmp,index=False);tmp.replace(V615B_MANIFEST)
+    import uuid
+    V615B_MANIFEST.parent.mkdir(parents=True,exist_ok=True)
+    tmp=V615B_MANIFEST.with_name(V615B_MANIFEST.name+f".{uuid.uuid4().hex}.tmp")
+    with _v615b_manifest_lock:
+        try:
+            M.to_csv(tmp,index=False)
+            os.replace(str(tmp),str(V615B_MANIFEST))
+        finally:
+            try:
+                if tmp.exists(): tmp.unlink()
+            except Exception:
+                pass
 
 
 def _v615b_wait_rate():
@@ -17628,19 +17641,8 @@ def _v617o_engine():
             try:
                 if p.exists():p.unlink()
             except Exception:pass
-        # RUN-NOW FIX: do not perform a full 16,450-row filesystem reconciliation at startup.
-        # It is unnecessary for resuming the queue and was the startup failure point on Railway.
         M=_v617o_prepare_manifest()
-        if M is None or M.empty:
-            raise RuntimeError("manifest 为空，无法继续")
-        # Normalize only the few columns the queue actually needs; preserve all existing cache rows.
-        if "verified" not in M.columns: M["verified"]=False
-        if "status" not in M.columns: M["status"]=""
-        if "error" not in M.columns: M["error"]=""
-        if "ended" not in M.columns: M["ended"]=False
-        # A verified row is authoritative even if an old status string is stale.
-        vv=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
-        M.loc[vv,"status"]="DONE"
+        M=_v617o_reconcile_files(M)
         _v615b_atomic_manifest(M)
 
         while True:
@@ -17783,6 +17785,7 @@ def v617_overnight_page():
     <div class="c"><h2>状态：{e(s.get("status"))}</h2>
     <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
     <p>{e(s.get("message"))}</p>
+    {f'<div style="background:#fff1f2;border:1px solid #fda4af;border-radius:12px;padding:12px;margin:10px 0"><b>错误详情：</b>{e(s.get("error"))}</div>' if s.get("error") else ''}
     <p>当前：{e(s.get("current",""))}</p>
     <p>批次：{int(s.get("batch",0) or 0)} · 阶段：{e(s.get("phase",""))}</p>
     <p>完整历史股票：<b>{int(s.get("completed",0) or 0)} / {int(s.get("total",0) or 0)}</b></p>
