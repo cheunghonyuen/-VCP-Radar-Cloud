@@ -9971,8 +9971,10 @@ V615B_QUEUE = V615B_DIR / "queue.csv"
 V615B_FAILURES = V615B_DIR / "failures.csv"
 V615B_COVERAGE = V615B_DIR / "coverage.csv"
 V615B_STOP = V615B_DIR / "STOP"
-V615B_GO = float(os.environ.get("V615B_COVERAGE_GO", str(V615A_COVERAGE_GO)))
-V615B_LOCKBOX = float(os.environ.get("V615B_COVERAGE_LOCKBOX", str(V615A_COVERAGE_LOCKBOX)))
+# Keep startup independent of V6.15A declaration order.
+# These defaults intentionally mirror V6.15A (GO=80%, LOCKBOX=95%).
+V615B_GO = float(os.environ.get("V615B_COVERAGE_GO", "0.80"))
+V615B_LOCKBOX = float(os.environ.get("V615B_COVERAGE_LOCKBOX", "0.95"))
 V615B_WORKERS = max(1, int(os.environ.get("V615B_WORKERS", "2")))
 # Use the account-safe Tiingo throttle already configured in the app unless explicitly overridden.
 V615B_REQUEST_GAP = float(os.environ.get("V615B_REQUEST_GAP_SECONDS", str(current_gap)))
