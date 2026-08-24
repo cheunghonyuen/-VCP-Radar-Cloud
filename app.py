@@ -17527,6 +17527,24 @@ def _v617o_write(**kw):
     V617O_STATUS.write_text(json.dumps(d,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     return d
 
+def _v617o_thread_alive():
+    return v617o_thread is not None and v617o_thread.is_alive()
+
+def _v617o_reconcile_stale_state(auto_resume=True):
+    """Railway restart leaves JSON state but kills daemon threads.
+    Never trust persisted running/cooldown without a live thread."""
+    s=_v617o_status()
+    stale=str(s.get("status","")) in ("running","cooldown") and not _v617o_thread_alive()
+    if stale:
+        _v617o_write(status="resume_ready",
+            message="检测到 Railway 重启后的旧运行状态；进度已保留，准备从断点继续",
+            error=None)
+        if auto_resume:
+            # Start a fresh supervisor from persisted manifest/cache.
+            _v617o_start()
+        return True
+    return False
+
 def _v617o_manifest_is_full():
     if not V615B_MANIFEST.exists():return False
     try:
@@ -17700,12 +17718,25 @@ def _v617o_supervisor():
 def _v617o_start():
     global v617o_thread
     if v617o_thread is not None and v617o_thread.is_alive():return False
+    # Railway may persist old status JSON while threads disappear on deploy.
+    # Reset only transient status; DO NOT delete cache/manifest/progress.
+    try:
+        _v615b_write_status(status="resume_ready",message="后台线程重新建立；从现有 manifest/cache 继续",error=None)
+    except Exception:pass
+    _v617o_write(status="starting",message="后台线程重新建立；从现有 manifest/cache 继续",error=None)
     v617o_thread=threading.Thread(target=_v617o_supervisor,daemon=True)
     v617o_thread.start();return True
 
 @APP.route("/v617/overnight/run",methods=["GET","POST"])
 def v617_overnight_run():
-    _v617o_start();return redirect("/v617/overnight")
+    # Explicit manual resume clears old stop flags but preserves manifest/cache/checkpoints.
+    for p in [V617O_STOP,V615B_STOP]:
+        try:
+            if p.exists():p.unlink()
+        except Exception:pass
+    _v617o_reconcile_stale_state(auto_resume=False)
+    _v617o_start()
+    return redirect("/v617/overnight")
 
 @APP.get("/v617/overnight/stop")
 def v617_overnight_stop():
@@ -17721,10 +17752,11 @@ def v617_overnight_status_api():
 @APP.get("/v617/overnight")
 def v617_overnight_page():
     import html
+    _v617o_reconcile_stale_state(auto_resume=True)
     e=lambda x:html.escape(str(x));s=_v617o_status();b=_v615b_status()
     # IMPORTANT: builder runs synchronously inside the overnight supervisor.
     # Read builder status LIVE; otherwise the page falsely stays at 0/0 until the whole pass ends.
-    worker_active=str(b.get("status","")) in ("running","rate_limited","paused")
+    worker_active=_v617o_thread_alive() and str(b.get("status","")) in ("running","rate_limited","paused")
     cov=float((b.get("coverage") if worker_active else s.get("coverage",b.get("coverage",0))) or 0)
     ecov=float((b.get("ended_coverage") if worker_active else s.get("ended_coverage",b.get("ended_coverage",0))) or 0)
     live_completed=int((b.get("completed") if worker_active else s.get("completed",b.get("completed",0))) or 0)
@@ -17732,7 +17764,8 @@ def v617_overnight_page():
     live_failed=int((b.get("failed") if worker_active else s.get("failed",b.get("failed",0))) or 0)
     live_message=str(b.get("message","")) if worker_active and b.get("message") else str(s.get("message",""))
     live_current=str(b.get("current","")) if worker_active else ""
-    running=s.get("status") in ("running","cooldown")
+    # UI running state is based on the ACTUAL live supervisor thread, never stale JSON.
+    running=_v617o_thread_alive()
     btn="" if running else '<a href="/v617/overnight/run"><button>开始 / 继续整晚扩展</button></a>'
     stop='<a href="/v617/overnight/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -17740,7 +17773,9 @@ def v617_overnight_page():
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
     <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；普通失败不会停整批；只有遇到429才自动保存并等待后继续。</div></div>
-    <div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(live_message)}</p>
+    <div class="c"><h2>状态：{e(s.get("status"))}</h2>
+    <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
+    <p>{e(live_message)}</p>
     <p>{("当前：" + e(live_current)) if live_current else ""}</p>
     <p>完整历史股票：{live_completed} / {live_total}</p>
     <p>全部覆盖：<b>{cov:.1%}</b>（最终要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
