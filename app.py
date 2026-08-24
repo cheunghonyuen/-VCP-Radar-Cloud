@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616f-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F Dynamic Exit Research</h2><div class="muted">HOLD120 Control · +2R后动态退出 · 20/50MA / RSI / 量价 / Composite · 最长252交易日</div></div><a href="/v616f/dynamic-exit"><button type="button">打开 V6.16F</button></a></div></div>
+<div class="card" id="v616f-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.1 Post-120 Dynamic Exit</h2><div class="muted">前120日不碰赢家 · +2R赢家才延长 · HOLD180/252 + 20/50MA/量价/Composite</div></div><a href="/v616f1/post120-exit"><button type="button">打开 V6.16F</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616f_dynamic_exit'
+V616F_DIR=DATA_DIR/'jlaw_v616f1_post120_dynamic_exit'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'dynamic_exit_report.csv'
+V616F_REPORT=V616F_DIR/'post120_dynamic_exit_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10027,25 +10027,16 @@ def _v616f_manage(d,ei,px,mode,horizon=252):
 
     close=d.close.astype(float)
     vol=d.volume.astype(float) if 'volume' in d.columns else pd.Series(np.nan,index=d.index)
-    ma10=close.rolling(10).mean()
     ma20=close.rolling(20).mean()
     ma50=close.rolling(50).mean()
     v50=vol.rolling(50).mean()
 
-    # RSI14, calculated only from information known at each close.
-    delta=close.diff()
-    up=delta.clip(lower=0).rolling(14).mean()
-    dn=(-delta.clip(upper=0)).rolling(14).mean()
-    rs=up/dn.replace(0,np.nan)
-    rsi=100-(100/(1+rs))
-
     initial_stop=px*.93
+    day120=min(end,ei+119)
     peak=px
     exit_idx=end
     exit_px=float(close.iloc[end])
     reason='TIME252'
-
-    # Dynamic exit is allowed only after the trade proves itself (+2R = +14%).
     armed=False
     below20=0
     below50=0
@@ -10055,46 +10046,56 @@ def _v616f_manage(d,ei,px,mode,horizon=252):
         op=float(d.open.iloc[i]); hi=float(d.high.iloc[i]); lo=float(d.low.iloc[i]); cl=float(close.iloc[i])
         peak=max(peak,hi)
 
+        # -7% initial stop remains active from entry; "do not touch winners before 120"
+        # means no winner-management exit before day 120.
         if lo<=initial_stop:
             exit_idx=i
             exit_px=min(op,initial_stop) if op<initial_stop else initial_stop
             reason='STOP7'
             break
 
-        if not armed and peak/px-1>=.14:
+        if peak/px-1>=.14:
             armed=True
 
         if mode=='HOLD_120_CONTROL':
-            if i>=min(end,ei+119):
+            if i>=day120:
                 exit_idx=i;exit_px=cl;reason='HOLD120';break
             continue
 
-        if not armed:
+        # Extension is only for proven winners. If +2R was never reached by day 120,
+        # do not invent a new holding thesis: close at day 120 like control.
+        if i<day120:
+            continue
+        if i==day120 and not armed:
+            exit_idx=i;exit_px=cl;reason='DAY120_NOT_ARMED';break
+
+        if mode=='HOLD_180':
+            if i>=min(end,ei+179):
+                exit_idx=i;exit_px=cl;reason='HOLD180';break
+            continue
+        if mode=='HOLD_252':
+            if i>=end:
+                exit_idx=i;exit_px=cl;reason='HOLD252';break
             continue
 
-        # Single-indicator exits require persistence, not one noisy day.
+        # Dynamic signals are completely ignored before day 120.
         if pd.notna(ma20.iloc[i]) and cl<ma20.iloc[i]: below20+=1
         else: below20=0
         if pd.notna(ma50.iloc[i]) and cl<ma50.iloc[i]: below50+=1
         else: below50=0
 
         trigger=False
-        if mode=='20MA_2CLOSE':
+        if mode=='POST120_20MA_2CLOSE':
             trigger=below20>=2
-        elif mode=='50MA_2CLOSE':
+        elif mode=='POST120_50MA_2CLOSE':
             trigger=below50>=2
-        elif mode=='RSI40_2CLOSE':
-            if i>=1 and pd.notna(rsi.iloc[i]) and pd.notna(rsi.iloc[i-1]):
-                trigger=(float(rsi.iloc[i])<40 and float(rsi.iloc[i-1])<40)
-        elif mode=='PRICE_VOLUME_BREAK':
-            # Trend weakness + distribution-like volume; never volume decline alone.
+        elif mode=='POST120_PRICE_VOLUME_BREAK':
             if pd.notna(ma20.iloc[i]) and pd.notna(v50.iloc[i]) and v50.iloc[i]>0:
                 trigger=(below20>=2 and float(vol.iloc[i])>1.5*float(v50.iloc[i]))
-        elif mode=='TREND_COMPOSITE':
+        elif mode=='POST120_TREND_COMPOSITE':
             weak=0
             if below20>=2: weak+=1
             if below50>=1: weak+=1
-            if pd.notna(rsi.iloc[i]) and float(rsi.iloc[i])<45: weak+=1
             if pd.notna(v50.iloc[i]) and v50.iloc[i]>0 and cl<ma20.iloc[i] and float(vol.iloc[i])>1.3*float(v50.iloc[i]): weak+=1
             weak_combo = weak_combo+1 if weak>=2 else 0
             trigger=weak_combo>=2
@@ -10142,7 +10143,7 @@ def _v616f_run():
         D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
 
         ticks=sorted(D.ticker.unique())
-        modes=['HOLD_120_CONTROL','20MA_2CLOSE','50MA_2CLOSE','RSI40_2CLOSE','PRICE_VOLUME_BREAK','TREND_COMPOSITE']
+        modes=['HOLD_120_CONTROL','HOLD_180','HOLD_252','POST120_20MA_2CLOSE','POST120_50MA_2CLOSE','POST120_PRICE_VOLUME_BREAK','POST120_TREND_COMPOSITE']
         A={}
 
         def bucket(key):
@@ -10231,14 +10232,14 @@ def _v616f_run():
 
         res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),
              'overall':O.to_dict('records'),'yearly':R.to_dict('records'),
-             'rule_note':'V6.16F Strict OOS. Frozen DNA + CONTROL entry + -7% initial stop. HOLD120 is control. Dynamic exits activate only after +2R. Indicators use close-known data; exits execute next open.',
-             'acceptance':'Dynamic exit must improve Avg Return and median yearly PF vs HOLD120 while preserving BW50 within 3pp and BW100 within 5pp. RSI/volume alone are never sufficient for the composite rule.',
+             'rule_note':'V6.16F.1 Strict OOS. Frozen DNA + CONTROL entry + -7% initial stop. No winner-management exit before day 120. Only trades that reached +2R may extend beyond day 120; post-120 indicators use close-known data and execute next open.',
+             'acceptance':'Post-120 extension must beat HOLD120 on Avg Return and median yearly PF while preserving BW50 within 3pp and BW100 within 5pp. Compare HOLD180/HOLD252 with post-120 20MA, 50MA, price-volume and composite exits.',
              'warning':'Existing cache still has survivorship-bias limits until delisted/historical universe coverage is complete.'}
         V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616f_write(status='done',message='V6.16F Dynamic Exit Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616f_write(status='done',message='V6.16F.1 Post-120 Dynamic Exit 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
     except Exception as ex:
         traceback.print_exc()
-        _v616f_write(status='error',message='V6.16F 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+        _v616f_write(status='error',message='V6.16F.1 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
     finally:v616f_thread=None
 
 def _v616f_start():
@@ -10246,15 +10247,15 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616f/run')
+@APP.post('/v616f1/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616f/dynamic-exit')
+    _v616f_start();return redirect('/v616f1/post120-exit')
 
-@APP.get('/api/v616f/status')
+@APP.get('/api/v616f1/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616f/dynamic-exit')
+@APP.get('/v616f1/post120-exit')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x));s=_v616f_status();r={}
@@ -10264,9 +10265,9 @@ def v616f_page():
     trs=''
     for x in r.get('overall',[]):
         trs+=f"<tr><td><b>{e(x.get('mode'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avg_hold',0):.1f}</td><td>{x.get('avg_giveback',0):.1%}</td><td>{x.get('capture_bw30',0) if x.get('capture_bw30') is not None else 0:.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td><td>{x.get('capture_bw100',0) if x.get('capture_bw100') is not None else 0:.1%}</td><td>{'PASS' if x.get('pass_vs_control') else '—'}</td></tr>"
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f/run"><button>▶ 跑 V6.16F Dynamic Exit</button></form>'
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f1/run"><button>▶ 跑 V6.16F.1 Post-120 Exit</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1250px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧭 V6.16F · Dynamic Exit Research</h1><div class="info"><b>HOLD120 = Control，不再假设第120天必须卖。</b> 动态退出只有在交易先达到 +2R 后才允许启动；比较 20MA、50MA、RSI、量价破坏与 Trend Composite。最长观察 252 个交易日。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div><div class="c"><h2>Strict OOS Overall</h2><div style="overflow:auto"><table><tr><th>Exit</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>HoldD</th><th>Giveback</th><th>BW30</th><th>BW50</th><th>BW100</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1250px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧭 V6.16F.1 · Post-120 Dynamic Exit</h1><div class="info"><b>前120个交易日不做赢家管理。</b> -7% 初始止损照常；只有曾达到 +2R 的赢家才允许在第120日后继续持有。比较 HOLD180 / HOLD252 / 20MA / 50MA / 量价破坏 / Trend Composite，最长252个交易日。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div><div class="c"><h2>Strict OOS Overall</h2><div style="overflow:auto"><table><tr><th>Exit</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>HoldD</th><th>Giveback</th><th>BW30</th><th>BW50</th><th>BW100</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f1/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
