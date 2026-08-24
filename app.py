@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6137-shortcut" style="border:3px solid #2563eb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛟 V6.13.7 False-Reject Big Winner Escape</h2><div class="muted">冻结 V6.13.6 Gate，专门研究被误杀的大赢家为什么还能跑出来</div></div><a href="/v6137/false-reject-escape"><button type="button">打开 V6.13.7</button></a></div></div>
 <div class="card" id="v6136-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.6 RS + Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：只验证 RS≥90 + Low Extension</div></div><a href="/v6136/rs-extension-holdout"><button type="button">打开 V6.13.6</button></a></div></div>
 <div class="card" id="v6135-shortcut" style="border:3px solid #9333ea"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.13.5 Immediate Failure Autopsy</h2><div class="muted">Fast Replay：优先保住 Big Winner，再找能排除 Immediate Failure 的进场前特征</div></div><a href="/v6135/immediate-failure-autopsy"><button type="button">打开 V6.13.5</button></a></div></div>
 <div class="card" id="v6134-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.4 Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：Development 定Cut，未来年份只验证</div></div><a href="/v6134/entry-extension-holdout"><button type="button">打开 V6.13.4</button></a></div></div>
@@ -9947,6 +9948,184 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.13.7 FALSE-REJECT BIG WINNER ESCAPE · FAST AUTOPSY =================
+# Freeze V6.13.6 gate. Do NOT optimize thresholds.
+# Study only: why do rejected >=20% MFE winners survive while rejected Immediate Failures fail?
+V6137_DIR = DATA_DIR / "jlaw_v6137_false_reject_escape"
+V6137_STATUS = V6137_DIR / "status.json"
+V6137_RESULT = V6137_DIR / "result.json"
+v6137_thread = None
+
+def _v6137_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"error":None,"elapsed_sec":0}
+    if V6137_STATUS.exists():
+        try:s.update(json.loads(V6137_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6137_write_status(**kw):
+    V6137_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6137_status();s.update(kw)
+    V6137_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6137_compute():
+    global v6137_thread
+    t0=time.time()
+    try:
+        if not V6133_DETAIL.exists():
+            raise RuntimeError("缺少 V6.13.3 features.csv；请先跑 V6.13.3")
+        F=pd.read_csv(V6133_DETAIL)
+        F["entry_date"]=pd.to_datetime(F["entry_date"],errors="coerce")
+        feats=["initial_risk","support_count","support_cluster","pullback_depth","vol_vs_v20",
+               "vol_vs_breakout","rs","breakout_volratio","entry_extension","entry_vs_ma10",
+               "entry_vs_ma20","preday_vol_vs_v20","breakout_to_entry_days"]
+        for c in ["return_pct","mfe"]+feats:
+            if c in F.columns:F[c]=pd.to_numeric(F[c],errors="coerce")
+        F=F.dropna(subset=["entry_date","entry_extension","rs","mfe"]).copy()
+
+        # Exact V6.13.6 split/cut logic; frozen, no tuning.
+        dev=F[F["entry_date"] < pd.Timestamp("2022-01-01")].copy()
+        hold=F[F["entry_date"] >= pd.Timestamp("2022-01-01")].copy()
+        split_date=pd.Timestamp("2022-01-01")
+        if len(dev)<30 or len(hold)<20:
+            F2=F.sort_values("entry_date").reset_index(drop=True)
+            k=max(30,min(len(F2)-20,int(len(F2)*0.70)))
+            split_date=F2.iloc[k]["entry_date"]
+            dev=F[F["entry_date"] < split_date].copy()
+            hold=F[F["entry_date"] >= split_date].copy()
+        dev_rs=dev[dev["rs"]>=90].copy()
+        if len(dev_rs)<20:raise RuntimeError("Development RS>=90 样本不足")
+        cut=float(dev_rs["entry_extension"].median())
+
+        gate=(hold["rs"]>=90)&(hold["entry_extension"]<cut)
+        rejected=hold[~gate].copy()
+        frbw=rejected[rejected["mfe"]>=.20].copy()
+        rif=rejected[rejected["group"].astype(str).eq("IMMEDIATE_FAILURE")].copy()
+
+        _v6137_write_status(status="running",message="锁定 V6.13.6 被拒样本，解剖误杀 Big Winners",processed=1,total=3,error=None,elapsed_sec=round(time.time()-t0,2))
+
+        # Descriptive comparison only. No thresholds approved here.
+        comp=[]
+        for f in feats:
+            a=pd.to_numeric(rif[f],errors="coerce").dropna()
+            b=pd.to_numeric(frbw[f],errors="coerce").dropna()
+            pool=pd.to_numeric(rejected[f],errors="coerce").dropna()
+            if len(a)<2 or len(b)<1 or len(pool)<5:continue
+            sd=float(pool.std(ddof=0)) if len(pool)>1 else 0
+            eff=float((b.median()-a.median())/sd) if sd>1e-12 else 0
+            comp.append(dict(feature=f,if_n=len(a),if_median=float(a.median()),
+                             false_reject_bw_n=len(b),false_reject_bw_median=float(b.median()),
+                             effect=eff))
+        comp=sorted(comp,key=lambda x:abs(x["effect"]),reverse=True)
+
+        # Candidate escape characteristics: median splits INSIDE rejected holdout only.
+        # This is discovery, deliberately not called a validated rule.
+        cand=[]
+        for f in feats:
+            x=pd.to_numeric(rejected[f],errors="coerce")
+            if x.notna().sum()<5:continue
+            c=float(x.median())
+            for direction,m in [("LOW",x<c),("HIGH",x>=c)]:
+                z=rejected[m.fillna(False)]
+                if len(z)<2:continue
+                bw_saved=int((z["mfe"]>=.20).sum())
+                if_left=int((z["group"].astype(str)=="IMMEDIATE_FAILURE").sum())
+                bw_total=max(1,len(frbw)); if_total=max(1,len(rif))
+                cand.append(dict(
+                    feature=f,direction=direction,cut=c,trades=int(len(z)),
+                    false_reject_bw_saved=bw_saved,
+                    false_reject_bw_save_rate=float(bw_saved/bw_total),
+                    rejected_if_reintroduced=if_left,
+                    rejected_if_reintro_rate=float(if_left/if_total),
+                    escape_precision=float(bw_saved/max(1,len(z)))
+                ))
+        cand=sorted(cand,key=lambda x:(x["false_reject_bw_save_rate"],
+                                      -x["rejected_if_reintro_rate"],
+                                      x["escape_precision"]),reverse=True)
+
+        _v6137_write_status(status="running",message="生成 Escape 特征候选；不自动采用",processed=2,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            split_date=str(pd.Timestamp(split_date).date()),
+            frozen_rs_threshold=90.0,
+            frozen_extension_cut=cut,
+            holdout_n=int(len(hold)),
+            accepted_by_v6136=int(gate.sum()),
+            rejected_by_v6136=int((~gate).sum()),
+            false_reject_bigwinners=int(len(frbw)),
+            rejected_immediate_failures=int(len(rif)),
+            false_reject_rows=[
+                {k:(str(v.date()) if k=="entry_date" and pd.notna(v) else (None if pd.isna(v) else v))
+                 for k,v in row.items()}
+                for row in frbw[["entry_date","return_pct","mfe","rs","entry_extension"]].to_dict("records")
+            ],
+            comparisons=comp,
+            escape_candidates=cand[:20],
+            note="Discovery only. V6.13.6 thresholds frozen. Escape candidates are NOT validated and must not be added to Radar until independent validation."
+        )
+        V6137_DIR.mkdir(parents=True,exist_ok=True)
+        V6137_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6137_write_status(status="done",message="V6.13.7 False-Reject Big Winner Escape 完成",processed=3,total=3,elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v6137_write_status(status="error",message="V6.13.7 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v6137_thread=None
+
+def _v6137_start():
+    global v6137_thread
+    if v6137_thread is not None and v6137_thread.is_alive():return False
+    v6137_thread=threading.Thread(target=_v6137_compute,daemon=True)
+    v6137_thread.start();return True
+
+@APP.post("/v6137/run")
+def v6137_run():
+    _v6137_start();return redirect("/v6137/false-reject-escape")
+
+@APP.get("/api/v6137/status")
+def v6137_status_api():
+    return jsonify(_v6137_status())
+
+@APP.get("/v6137/false-reject-escape")
+def v6137_page():
+    import html
+    esc=lambda x:html.escape(str(x)); st=_v6137_status(); r=None
+    if V6137_RESULT.exists():
+        try:r=json.loads(V6137_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    summary="";rows="";comp="";cand=""
+    if r:
+        summary=f"""<div class="stats">
+        <b>Frozen Gate:</b> RS≥90 + Extension&lt;{r.get('frozen_extension_cut',0):.2%}　
+        <b>Holdout:</b> {r.get('holdout_n',0)}　
+        <b>Gate接受:</b> {r.get('accepted_by_v6136',0)}　
+        <b>Gate拒绝:</b> {r.get('rejected_by_v6136',0)}　
+        <b>误杀Big Winner:</b> {r.get('false_reject_bigwinners',0)}　
+        <b>拒绝的Immediate Failure:</b> {r.get('rejected_immediate_failures',0)}</div>"""
+        for x in r.get("false_reject_rows",[]):
+            rows+=f"<tr><td>{esc(x.get('entry_date'))}</td><td>{float(x.get('return_pct') or 0):.2%}</td><td><b>{float(x.get('mfe') or 0):.2%}</b></td><td>{float(x.get('rs') or 0):.1f}</td><td>{float(x.get('entry_extension') or 0):.2%}</td></tr>"
+        for x in r.get("comparisons",[])[:15]:
+            comp+=f"<tr><td><b>{esc(x['feature'])}</b></td><td>{x['if_n']}</td><td>{x['if_median']:.3f}</td><td>{x['false_reject_bw_n']}</td><td>{x['false_reject_bw_median']:.3f}</td><td><b>{x['effect']:+.2f}</b></td></tr>"
+        for x in r.get("escape_candidates",[])[:15]:
+            cand+=f"<tr><td><b>{esc(x['feature'])}</b></td><td>{x['direction']}</td><td>{x['cut']:.3f}</td><td>{x['trades']}</td><td>{x['false_reject_bw_saved']}</td><td>{x['false_reject_bw_save_rate']:.1%}</td><td>{x['rejected_if_reintroduced']}</td><td>{x['rejected_if_reintro_rate']:.1%}</td><td>{x['escape_precision']:.1%}</td></tr>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6137/run"><button>⚡ 跑 False-Reject Escape Autopsy</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.stats{{line-height:1.8}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🛟 V6.13.7 · False-Reject Big Winner Escape</h1><div class="info"><b>不优化 V6.13.6 Gate。</b>固定 RS≥90 和旧 Extension Cut，只研究 Holdout 中被 Gate 错杀的 ≥20% MFE Big Winners，看看它们有什么特征能与真正 Immediate Failure 分开。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div>
+<div class="c">{summary}</div>
+<div class="c"><h2>被 V6.13.6 错杀的 Big Winners</h2><div class="scroll"><table><tr><th>Entry Date</th><th>Final Return</th><th>MFE</th><th>RS</th><th>Entry Extension</th></tr>{rows}</table></div></div>
+<div class="c"><h2>False-Reject Big Winner vs Rejected Immediate Failure</h2><div class="scroll"><table><tr><th>特征</th><th>IF N</th><th>IF Median</th><th>FR-BW N</th><th>FR-BW Median</th><th>差异强度</th></tr>{comp}</table></div></div>
+<div class="c"><h2>Escape 候选 · 只作 Discovery</h2><div class="warn">这里不是新 Gate，也不是已验证规则。我们先看哪些条件能救回被错杀的大赢家，同时少放回 Immediate Failure；下一步才做独立验证。</div><div class="scroll"><table><tr><th>特征</th><th>方向</th><th>Cut</th><th>重放交易</th><th>救回BW</th><th>BW救回率</th><th>放回IF</th><th>IF放回率</th><th>Escape Precision</th></tr>{cand}</table></div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6137/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>'''
 
 
 # ================= V6.13.6 RS + ENTRY EXTENSION · STRICT HOLDOUT =================
