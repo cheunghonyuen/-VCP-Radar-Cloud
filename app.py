@@ -6959,6 +6959,14 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615d-shortcut" style="border:3px solid #ec4899">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><h2 style="margin:0">🧬 V6.15D Big Winner Factor Discovery</h2>
+    <div class="muted">只找 Big Winner DNA · 单因子 + 少量两因子组合 · 不训练权重</div></div>
+    <a href="/v615d/factor-discovery"><button type="button">打开 V6.15D</button></a>
+  </div>
+</div>
+
 <div class="card" id="v615c-shortcut" style="border:3px solid #8b5cf6">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
     <div>
@@ -9964,6 +9972,243 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.15D BIG WINNER FACTOR DISCOVERY =================
+V615D_DIR = DATA_DIR / "jlaw_v615d_factor_discovery"
+V615D_STATUS = V615D_DIR / "status.json"
+V615D_FACTOR = V615D_DIR / "factor_report.csv"
+V615D_COMBO = V615D_DIR / "combo_report.csv"
+V615D_SNAP = V615D_DIR / "factor_snapshots.csv"
+V615D_RESULT = V615D_DIR / "result.json"
+v615d_thread = None
+
+def _v615d_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","elapsed_sec":0,"error":None}
+    if V615D_STATUS.exists():
+        try:s.update(json.loads(V615D_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v615d_write_status(**kw):
+    V615D_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v615d_status();s.update(kw)
+    V615D_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v615d_read_local(path):
+    return _v615c_read_local_csv(path)
+
+def _pct(a,b):
+    try:
+        a=float(a);b=float(b)
+        return a/b-1 if np.isfinite(a) and np.isfinite(b) and b!=0 else np.nan
+    except Exception:return np.nan
+
+def _v615d_enrich_ticker(ticker,d):
+    rows=[]
+    if d is None or len(d)<320:return rows
+    c=d["close"].astype(float)
+    h=d["high"].astype(float)
+    l=d["low"].astype(float)
+    v=pd.to_numeric(d["volume"],errors="coerce")
+    ma10=c.rolling(10).mean();ma20=c.rolling(20).mean();ma50=c.rolling(50).mean()
+    ma150=c.rolling(150).mean();ma200=c.rolling(200).mean()
+    v20=v.rolling(20).mean();v50=v.rolling(50).mean()
+    atr20=(h-l).rolling(20).mean()/c.replace(0,np.nan)
+    ret20=c/c.shift(20)-1
+    ret60=c/c.shift(60)-1
+    ret120=c/c.shift(120)-1
+    ret252=c/c.shift(252)-1
+    range20=(h.rolling(20).max()-l.rolling(20).min())/c.replace(0,np.nan)
+    range50=(h.rolling(50).max()-l.rolling(50).min())/c.replace(0,np.nan)
+
+    for idx in range(259,len(d)-60,20):
+        fm=_v615c_forward_metrics(d,idx,60)
+        if fm is None:continue
+        mfe,mae=fm
+        close=float(c.iloc[idx])
+        hi52=float(h.iloc[max(0,idx-251):idx+1].max())
+        lo52=float(l.iloc[max(0,idx-251):idx+1].min())
+        ma200_slope=np.nan
+        if idx>=20 and pd.notna(ma200.iloc[idx]) and pd.notna(ma200.iloc[idx-20]) and ma200.iloc[idx-20]!=0:
+            ma200_slope=float(ma200.iloc[idx]/ma200.iloc[idx-20]-1)
+
+        # JLaw-aligned technical concepts, expressed as explicit quantitative proxies.
+        trend_template=bool(
+            pd.notna(ma50.iloc[idx]) and pd.notna(ma150.iloc[idx]) and pd.notna(ma200.iloc[idx]) and
+            close>ma50.iloc[idx]>ma150.iloc[idx]>ma200.iloc[idx] and (pd.isna(ma200_slope) or ma200_slope>0)
+        )
+        near_high=float(close/hi52) if hi52>0 else np.nan
+        off_low=float(close/lo52-1) if lo52>0 else np.nan
+        vol_dry=float(v.iloc[idx]/v20.iloc[idx]) if pd.notna(v.iloc[idx]) and pd.notna(v20.iloc[idx]) and v20.iloc[idx]>0 else np.nan
+        vol50ratio=float(v20.iloc[idx]/v50.iloc[idx]) if pd.notna(v20.iloc[idx]) and pd.notna(v50.iloc[idx]) and v50.iloc[idx]>0 else np.nan
+        ma10_dist=_pct(close,ma10.iloc[idx]) if pd.notna(ma10.iloc[idx]) else np.nan
+        ma20_dist=_pct(close,ma20.iloc[idx]) if pd.notna(ma20.iloc[idx]) else np.nan
+
+        rows.append(dict(
+            ticker=ticker,obs_date=str(pd.Timestamp(d.iloc[idx]["date"]).date()),
+            bw15=bool(mfe>=.15),bw20=bool(mfe>=.20),bw30=bool(mfe>=.30),
+            mfe60=float(mfe),mae60=float(mae),
+            trend_template=trend_template,
+            near_52w_high=near_high,
+            off_52w_low=off_low,
+            ma200_slope20=ma200_slope,
+            ret20=float(ret20.iloc[idx]) if pd.notna(ret20.iloc[idx]) else np.nan,
+            ret60=float(ret60.iloc[idx]) if pd.notna(ret60.iloc[idx]) else np.nan,
+            ret120=float(ret120.iloc[idx]) if pd.notna(ret120.iloc[idx]) else np.nan,
+            ret252=float(ret252.iloc[idx]) if pd.notna(ret252.iloc[idx]) else np.nan,
+            atr20=float(atr20.iloc[idx]) if pd.notna(atr20.iloc[idx]) else np.nan,
+            range20=float(range20.iloc[idx]) if pd.notna(range20.iloc[idx]) else np.nan,
+            range50=float(range50.iloc[idx]) if pd.notna(range50.iloc[idx]) else np.nan,
+            vol_vs20=vol_dry,
+            vol20_vs50=vol50ratio,
+            ma10_dist=ma10_dist,
+            ma20_dist=ma20_dist,
+        ))
+    return rows
+
+def _v615d_quantile_rules(S):
+    # Pre-declared JLaw-related proxies. No free-form threshold sweep.
+    rules=[]
+    def add(name,concept,proxy,mask):
+        rules.append((name,concept,proxy,mask))
+    if S.empty:return rules
+
+    q=lambda col,p: float(pd.to_numeric(S[col],errors="coerce").quantile(p))
+    add("Trend Template","Stage 2 / MA structure","50MA>150MA>200MA, price>50MA, 200MA rising",S["trend_template"].fillna(False))
+    add("Near 52W High ≥85%","Near highs / leadership","Close / 52W high ≥ 0.85",pd.to_numeric(S["near_52w_high"],errors="coerce")>=.85)
+    add("Near 52W High ≥90%","Near highs / leadership","Close / 52W high ≥ 0.90",pd.to_numeric(S["near_52w_high"],errors="coerce")>=.90)
+    add("Off 52W Low ≥30%","Strong prior advance","Close at least 30% above 52W low",pd.to_numeric(S["off_52w_low"],errors="coerce")>=.30)
+    add("60D Momentum Top Quartile","Relative/absolute strength proxy","60D return ≥ dataset 75th pct",pd.to_numeric(S["ret60"],errors="coerce")>=q("ret60",.75))
+    add("120D Momentum Top Quartile","Relative/absolute strength proxy","120D return ≥ dataset 75th pct",pd.to_numeric(S["ret120"],errors="coerce")>=q("ret120",.75))
+    add("252D Momentum Top Quartile","Relative/absolute strength proxy","252D return ≥ dataset 75th pct",pd.to_numeric(S["ret252"],errors="coerce")>=q("ret252",.75))
+    add("ATR20 Low Quartile","Volatility contraction proxy","20D avg range/close ≤ 25th pct",pd.to_numeric(S["atr20"],errors="coerce")<=q("atr20",.25))
+    add("Range20 Low Quartile","Tightness / contraction proxy","20D high-low range ≤ 25th pct",pd.to_numeric(S["range20"],errors="coerce")<=q("range20",.25))
+    add("Range50 Low Quartile","Base tightness proxy","50D high-low range ≤ 25th pct",pd.to_numeric(S["range50"],errors="coerce")<=q("range50",.25))
+    add("Volume Dry-up ≤0.8x","Supply dry-up proxy","Current volume ≤ 0.8 × 20D average",pd.to_numeric(S["vol_vs20"],errors="coerce")<=.80)
+    add("20D Volume < 50D Volume","Supply contraction proxy","20D avg volume < 50D avg volume",pd.to_numeric(S["vol20_vs50"],errors="coerce")<1.0)
+    add("Close near 10MA ±3%","Low-risk location proxy","|Close/10MA-1| ≤3%",pd.to_numeric(S["ma10_dist"],errors="coerce").abs()<=.03)
+    add("Close near 20MA ±4%","Support / low-risk location proxy","|Close/20MA-1| ≤4%",pd.to_numeric(S["ma20_dist"],errors="coerce").abs()<=.04)
+    return rules
+
+def _v615d_eval_mask(S,mask,name,concept,proxy):
+    mask=pd.Series(mask,index=S.index).fillna(False)
+    n=int(mask.sum());base=float(S["bw20"].mean()) if len(S) else 0.0
+    g=S[mask]
+    if n==0:return None
+    by_year=[]
+    if "year" not in S.columns:S["year"]=pd.to_datetime(S["obs_date"]).dt.year
+    for y,yy in S.groupby("year"):
+        gg=yy[mask.loc[yy.index]]
+        if len(gg)>=20:
+            by_year.append(float(gg["bw20"].mean() / max(float(yy["bw20"].mean()),1e-9)))
+    return dict(
+        factor=name,concept=concept,proxy=proxy,n=n,share=n/max(len(S),1),
+        bw15=float(g["bw15"].mean()),bw20=float(g["bw20"].mean()),bw30=float(g["bw30"].mean()),
+        lift20=float(g["bw20"].mean()/base) if base>0 else 0.0,
+        avg_mfe=float(g["mfe60"].mean()),avg_mae=float(g["mae60"].mean()),
+        year_median_lift=float(np.median(by_year)) if by_year else np.nan,
+        years_ge1=int(sum(x>=1.0 for x in by_year)),years_tested=int(len(by_year))
+    )
+
+def _v615d_run():
+    global v615d_thread
+    t0=time.time()
+    try:
+        V615D_DIR.mkdir(parents=True,exist_ok=True)
+        files=sorted(MARKET_DIR.glob("*.csv"))
+        allrows=[]
+        total=len(files)
+        _v615d_write_status(status="running",message="从现有缓存生成 JLaw Factor Proxies",processed=0,total=total,error=None)
+        for i,p in enumerate(files,1):
+            t=p.stem.upper()
+            _v615d_write_status(status="running",message="生成 Point-in-Time Factor Snapshots",processed=i-1,total=total,current=t,elapsed_sec=round(time.time()-t0,1))
+            d,err=_v615d_read_local(p)
+            if d is None:continue
+            allrows.extend(_v615d_enrich_ticker(t,d))
+        S=pd.DataFrame(allrows)
+        if S.empty:raise RuntimeError("没有生成 Factor snapshots")
+        S["year"]=pd.to_datetime(S["obs_date"]).dt.year
+        S.to_csv(V615D_SNAP,index=False)
+
+        rules=_v615d_quantile_rules(S)
+        reps=[];masks={}
+        for name,concept,proxy,mask in rules:
+            masks[name]=pd.Series(mask,index=S.index).fillna(False)
+            r=_v615d_eval_mask(S,masks[name],name,concept,proxy)
+            if r:reps.append(r)
+        F=pd.DataFrame(reps).sort_values(["year_median_lift","lift20","n"],ascending=[False,False,False])
+        F.to_csv(V615D_FACTOR,index=False)
+
+        # Only combinations of the strongest 8 single factors; no arbitrary threshold search.
+        eligible=F[(F["n"]>=max(200,int(len(S)*.02)))].head(8)["factor"].tolist()
+        combos=[]
+        for i in range(len(eligible)):
+            for j in range(i+1,len(eligible)):
+                a,b=eligible[i],eligible[j]
+                r=_v615d_eval_mask(S,masks[a] & masks[b],f"{a} + {b}","Two-factor JLaw proxy combination","Pre-declared rule intersection")
+                if r and r["n"]>=max(100,int(len(S)*.01)):combos.append(r)
+        C=pd.DataFrame(combos)
+        if len(C):C=C.sort_values(["year_median_lift","lift20","n"],ascending=[False,False,False])
+        C.to_csv(V615D_COMBO,index=False)
+
+        res={
+            "generated_at":datetime.now(timezone.utc).isoformat(),
+            "elapsed_sec":round(time.time()-t0,2),
+            "tickers":int(total),"snapshots":int(len(S)),
+            "primary_label":"60D MFE >= 20%",
+            "base_bw15":float(S["bw15"].mean()),"base_bw20":float(S["bw20"].mean()),"base_bw30":float(S["bw30"].mean()),
+            "factor_count":int(len(F)),"combo_count":int(len(C)),
+            "top_factors":F.head(10).to_dict("records"),
+            "top_combos":C.head(10).to_dict("records") if len(C) else [],
+            "warning":"Discovery only on existing cache. No weights trained. Quantile thresholds are proxies, not claimed as exact JLaw rules. Must pass later OOS/lockbox."
+        }
+        V615D_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v615d_write_status(status="done",message="V6.15D Factor Discovery 完成",processed=total,total=total,current="",elapsed_sec=res["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v615d_write_status(status="error",message="V6.15D 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,1))
+    finally:v615d_thread=None
+
+def _v615d_start():
+    global v615d_thread
+    if v615d_thread is not None and v615d_thread.is_alive():return False
+    v615d_thread=threading.Thread(target=_v615d_run,daemon=True);v615d_thread.start();return True
+
+@APP.post("/v615d/run")
+def v615d_run():
+    _v615d_start();return redirect("/v615d/factor-discovery")
+
+@APP.get("/api/v615d/status")
+def v615d_status_api():return jsonify(_v615d_status())
+
+@APP.get("/v615d/factor-discovery")
+def v615d_page():
+    import html
+    esc=lambda x:html.escape(str(x));s=_v615d_status();r={}
+    if V615D_RESULT.exists():
+        try:r=json.loads(V615D_RESULT.read_text(encoding="utf-8"))
+        except Exception:r={}
+    F=pd.DataFrame(r.get("top_factors",[]));C=pd.DataFrame(r.get("top_combos",[]))
+    def rows(df):
+        z=""
+        for _,x in df.iterrows():
+            z+=f"<tr><td>{esc(x.get('factor'))}</td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('bw20',0)):.1%}</td><td><b>{float(x.get('lift20',0)):.2f}×</b></td><td>{float(x.get('bw30',0)):.1%}</td><td>{float(x.get('avg_mae',0)):.1%}</td><td>{float(x.get('year_median_lift',0) or 0):.2f}×</td><td>{int(x.get('years_ge1',0))}/{int(x.get('years_tested',0))}</td></tr>"
+        return z
+    runbtn="" if s.get("status")=="running" else '<form method="post" action="/v615d/run"><button>▶ 跑 Big Winner Factor Discovery</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:22px}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}table{{font-size:10px}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧬 V6.15D · Big Winner Factor Discovery</h1><div class="info"><b>目标只看 Big Winner。</b>Primary 标签固定：未来60交易日 MFE≥20%。只用现有 Local Cache，不下载 Tiingo，不优化 Entry/Stop/Exit，不训练黑箱权重。先看 JLaw 技术概念的量化 Proxy 是否提高 Big Winner Lift，并检查年度稳定性。</div></div>
+<div class="c"><h2>状态：{esc(s.get('status'))}</h2><p>{esc(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{esc(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{runbtn}</div>
+<div class="grid"><div class="m"><small>Snapshots</small><b>{r.get('snapshots',0):,}</b></div><div class="m"><small>Base ≥15%</small><b>{r.get('base_bw15',0):.1%}</b></div><div class="m"><small>Base ≥20%</small><b>{r.get('base_bw20',0):.1%}</b></div><div class="m"><small>Base ≥30%</small><b>{r.get('base_bw30',0):.1%}</b></div></div>
+<div class="c"><h2>单因子 · JLaw Concept → Quant Proxy</h2><div class="warn">Discovery 排名优先看 <b>年度中位 Lift</b> 与跨年一致性，不只看整体 Lift；避免被少数牛市年份骗到。</div><div style="overflow:auto"><table><tr><th>Factor</th><th>N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Avg MAE</th><th>Year Med Lift</th><th>Years≥1</th></tr>{rows(F)}</table></div></div>
+<div class="c"><h2>两因子组合 · 仅 Top 单因子交集</h2><div class="warn">这里只组合最强的8个单因子，不扫描几千种阈值，不做权重优化。</div><div style="overflow:auto"><table><tr><th>Combo</th><th>N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Avg MAE</th><th>Year Med Lift</th><th>Years≥1</th></tr>{rows(C)}</table></div></div>
+<div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','Existing cache discovery only; later OOS required.'))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615d/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+</div></body></html>"""
 
 
 # ================= V6.15C EXISTING LOCAL CACHE VALIDATION =================
