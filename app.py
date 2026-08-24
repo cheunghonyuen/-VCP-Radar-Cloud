@@ -6960,6 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616f-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F Dynamic Exit Research</h2><div class="muted">HOLD120 Control · +2R后动态退出 · 20/50MA / RSI / 量价 / Composite · 最长252交易日</div></div><a href="/v616f/dynamic-exit"><button type="button">打开 V6.16F</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -9997,6 +9998,275 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16F DYNAMIC EXIT RESEARCH =================
+V616F_DIR=DATA_DIR/'jlaw_v616f_dynamic_exit'
+V616F_STATUS=V616F_DIR/'status.json'
+V616F_RESULT=V616F_DIR/'result.json'
+V616F_REPORT=V616F_DIR/'dynamic_exit_report.csv'
+v616f_thread=None
+
+def _v616f_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616F_STATUS.exists():
+        try:x.update(json.loads(V616F_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v616f_write(**kw):
+    V616F_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v616f_status();x.update(kw)
+    V616F_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v616f_manage(d,ei,px,mode,horizon=252):
+    end=min(len(d)-1,ei+horizon-1)
+    if end<=ei:return None
+
+    close=d.close.astype(float)
+    vol=d.volume.astype(float) if 'volume' in d.columns else pd.Series(np.nan,index=d.index)
+    ma10=close.rolling(10).mean()
+    ma20=close.rolling(20).mean()
+    ma50=close.rolling(50).mean()
+    v50=vol.rolling(50).mean()
+
+    # RSI14, calculated only from information known at each close.
+    delta=close.diff()
+    up=delta.clip(lower=0).rolling(14).mean()
+    dn=(-delta.clip(upper=0)).rolling(14).mean()
+    rs=up/dn.replace(0,np.nan)
+    rsi=100-(100/(1+rs))
+
+    initial_stop=px*.93
+    peak=px
+    exit_idx=end
+    exit_px=float(close.iloc[end])
+    reason='TIME252'
+
+    # Dynamic exit is allowed only after the trade proves itself (+2R = +14%).
+    armed=False
+    below20=0
+    below50=0
+    weak_combo=0
+
+    for i in range(ei,end+1):
+        op=float(d.open.iloc[i]); hi=float(d.high.iloc[i]); lo=float(d.low.iloc[i]); cl=float(close.iloc[i])
+        peak=max(peak,hi)
+
+        if lo<=initial_stop:
+            exit_idx=i
+            exit_px=min(op,initial_stop) if op<initial_stop else initial_stop
+            reason='STOP7'
+            break
+
+        if not armed and peak/px-1>=.14:
+            armed=True
+
+        if mode=='HOLD_120_CONTROL':
+            if i>=min(end,ei+119):
+                exit_idx=i;exit_px=cl;reason='HOLD120';break
+            continue
+
+        if not armed:
+            continue
+
+        # Single-indicator exits require persistence, not one noisy day.
+        if pd.notna(ma20.iloc[i]) and cl<ma20.iloc[i]: below20+=1
+        else: below20=0
+        if pd.notna(ma50.iloc[i]) and cl<ma50.iloc[i]: below50+=1
+        else: below50=0
+
+        trigger=False
+        if mode=='20MA_2CLOSE':
+            trigger=below20>=2
+        elif mode=='50MA_2CLOSE':
+            trigger=below50>=2
+        elif mode=='RSI40_2CLOSE':
+            if i>=1 and pd.notna(rsi.iloc[i]) and pd.notna(rsi.iloc[i-1]):
+                trigger=(float(rsi.iloc[i])<40 and float(rsi.iloc[i-1])<40)
+        elif mode=='PRICE_VOLUME_BREAK':
+            # Trend weakness + distribution-like volume; never volume decline alone.
+            if pd.notna(ma20.iloc[i]) and pd.notna(v50.iloc[i]) and v50.iloc[i]>0:
+                trigger=(below20>=2 and float(vol.iloc[i])>1.5*float(v50.iloc[i]))
+        elif mode=='TREND_COMPOSITE':
+            weak=0
+            if below20>=2: weak+=1
+            if below50>=1: weak+=1
+            if pd.notna(rsi.iloc[i]) and float(rsi.iloc[i])<45: weak+=1
+            if pd.notna(v50.iloc[i]) and v50.iloc[i]>0 and cl<ma20.iloc[i] and float(vol.iloc[i])>1.3*float(v50.iloc[i]): weak+=1
+            weak_combo = weak_combo+1 if weak>=2 else 0
+            trigger=weak_combo>=2
+
+        if trigger:
+            if i+1<=end:
+                exit_idx=i+1;exit_px=float(d.open.iloc[i+1]);reason=mode+'_NEXT_OPEN'
+            else:
+                exit_idx=i;exit_px=cl;reason=mode+'_CLOSE'
+            break
+
+    realized=float(exit_px/px-1)
+    path=d.iloc[ei:end+1]
+    mfe=float(path.high.max()/px-1)
+    mae=float(path.low.min()/px-1)
+    return {
+        'return':realized,'mfe':mfe,'mae':mae,'held':int(exit_idx-ei+1),
+        'max_giveback':max(0.0,mfe-realized),'reason':reason,
+        'bw20':mfe>=.20,'bw30':mfe>=.30,'bw50':mfe>=.50,'bw100':mfe>=1.00,
+        'cap20':realized>=.10,'cap30':realized>=.20,'cap50':realized>=.30,'cap100':realized>=.50
+    }
+
+def _v616f_run():
+    global v616f_thread
+    t0=time.time()
+    try:
+        # Strict time-WF candidate stream, same frozen DNA concept as V6.16E.
+        S=pd.read_csv(V615D_SNAP)
+        S['obs_date']=pd.to_datetime(S['obs_date'],errors='coerce')
+        for c in ['ret60','ret120','ret252','vol_vs20']:
+            S[c]=pd.to_numeric(S[c],errors='coerce')
+        S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy()
+        S['year']=S.obs_date.dt.year.astype(int)
+
+        picks=[]
+        for y in sorted(S.year.unique()):
+            tr=S[S.year<y]; te=S[S.year==y]
+            if len(tr)<1000 or len(te)<50:continue
+            q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
+            a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
+            a['test_year']=y
+            b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
+            b['test_year']=y
+            picks.extend([a,b])
+        D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
+
+        ticks=sorted(D.ticker.unique())
+        modes=['HOLD_120_CONTROL','20MA_2CLOSE','50MA_2CLOSE','RSI40_2CLOSE','PRICE_VOLUME_BREAK','TREND_COMPOSITE']
+        A={}
+
+        def bucket(key):
+            if key not in A:
+                A[key]={'n':0,'sum':0.0,'win_n':0,'loss_n':0,'win_sum':0.0,'loss_sum':0.0,
+                        'hold_sum':0.0,'give_sum':0.0,'mae_sum':0.0,
+                        'bw20':0,'bw30':0,'bw50':0,'bw100':0,
+                        'cap20':0,'cap30':0,'cap50':0,'cap100':0}
+            return A[key]
+
+        _v616f_write(status='running',message='Strict OOS Dynamic Exit Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+
+        for k,t in enumerate(ticks,1):
+            d=_v616a_price(t)
+            if d is not None:
+                im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+                for _,r in D[D.ticker.eq(t)].iterrows():
+                    dt=pd.Timestamp(r.obs_date).normalize()
+                    if dt not in im:continue
+                    oi=im[dt]
+                    if oi>=len(d)-253:continue
+                    E=_v616a_entries(d,oi)
+                    if 'CONTROL' not in E:continue
+                    ei,px,delay=E['CONTROL']
+
+                    for mode in modes:
+                        z=_v616f_manage(d,ei,px,mode,252)
+                        if z is None:continue
+                        b=bucket((int(r['test_year']),mode))
+                        b['n']+=1;b['sum']+=z['return'];b['hold_sum']+=z['held'];b['give_sum']+=z['max_giveback'];b['mae_sum']+=z['mae']
+                        if z['return']>0:b['win_n']+=1;b['win_sum']+=z['return']
+                        else:b['loss_n']+=1;b['loss_sum']+=z['return']
+                        for q in [20,30,50,100]:
+                            if z['bw'+str(q)]:
+                                b['bw'+str(q)]+=1
+                                if z['cap'+str(q)]:b['cap'+str(q)]+=1
+
+            _v616f_write(status='running',message='Dynamic Exit · Streaming stats',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+
+        rows=[]
+        for (year,mode),b in sorted(A.items()):
+            n=b['n']
+            if n<=0:continue
+            gp=b['win_sum'];gl=abs(b['loss_sum'])
+            avgwin=gp/b['win_n'] if b['win_n'] else 0.0
+            avgloss=b['loss_sum']/b['loss_n'] if b['loss_n'] else 0.0
+            rows.append({
+                'year':year,'mode':mode,'n':n,'avg_return':b['sum']/n,'win_rate':b['win_n']/n,
+                'pf':gp/gl if gl>0 else np.nan,'avg_win':avgwin,'avg_loss':avgloss,
+                'win_loss_ratio':avgwin/abs(avgloss) if avgloss<0 else np.nan,
+                'avg_hold':b['hold_sum']/n,'avg_giveback':b['give_sum']/n,'avg_mae':b['mae_sum']/n,
+                'capture_bw20':b['cap20']/b['bw20'] if b['bw20'] else np.nan,
+                'capture_bw30':b['cap30']/b['bw30'] if b['bw30'] else np.nan,
+                'capture_bw50':b['cap50']/b['bw50'] if b['bw50'] else np.nan,
+                'capture_bw100':b['cap100']/b['bw100'] if b['bw100'] else np.nan,
+            })
+        R=pd.DataFrame(rows).replace([np.inf,-np.inf],np.nan)
+        if R.empty:raise RuntimeError('没有生成 V6.16F 结果')
+        R.to_csv(V616F_REPORT,index=False)
+
+        overall=[]
+        for mode,g in R.groupby('mode'):
+            w=g['n'].astype(float)
+            def wa(c):
+                v=pd.to_numeric(g[c],errors='coerce');m=v.notna()&(w>0)
+                return float(np.average(v[m],weights=w[m])) if m.any() else np.nan
+            overall.append({
+                'mode':mode,'n':int(g.n.sum()),'avg_return':wa('avg_return'),
+                'median_year_pf':float(g.pf.dropna().median()) if g.pf.notna().any() else np.nan,
+                'avg_win':wa('avg_win'),'avg_loss':wa('avg_loss'),'win_loss_ratio':wa('win_loss_ratio'),
+                'avg_hold':wa('avg_hold'),'avg_giveback':wa('avg_giveback'),'avg_mae':wa('avg_mae'),
+                'capture_bw20':wa('capture_bw20'),'capture_bw30':wa('capture_bw30'),
+                'capture_bw50':wa('capture_bw50'),'capture_bw100':wa('capture_bw100'),
+                'positive_years':int((g.avg_return>0).sum()),'years':int(g.year.nunique())
+            })
+        O=pd.DataFrame(overall)
+        control=O[O['mode'].eq('HOLD_120_CONTROL')].iloc[0]
+        O['avgret_delta']=O.avg_return-control.avg_return
+        O['pf_delta']=O.median_year_pf-control.median_year_pf
+        O['bw50_delta']=O.capture_bw50-control.capture_bw50
+        O['bw100_delta']=O.capture_bw100-control.capture_bw100
+
+        # Promotion requires better expectancy/PF without materially killing the right tail.
+        O['pass_vs_control']=(O.avg_return>control.avg_return)&(O.median_year_pf>=control.median_year_pf)&(O.capture_bw50>=control.capture_bw50-.03)&(O.capture_bw100>=control.capture_bw100-.05)
+        O=O.sort_values(['pass_vs_control','avg_return','median_year_pf'],ascending=[False,False,False])
+
+        res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),
+             'overall':O.to_dict('records'),'yearly':R.to_dict('records'),
+             'rule_note':'V6.16F Strict OOS. Frozen DNA + CONTROL entry + -7% initial stop. HOLD120 is control. Dynamic exits activate only after +2R. Indicators use close-known data; exits execute next open.',
+             'acceptance':'Dynamic exit must improve Avg Return and median yearly PF vs HOLD120 while preserving BW50 within 3pp and BW100 within 5pp. RSI/volume alone are never sufficient for the composite rule.',
+             'warning':'Existing cache still has survivorship-bias limits until delisted/historical universe coverage is complete.'}
+        V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v616f_write(status='done',message='V6.16F Dynamic Exit Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v616f_write(status='error',message='V6.16F 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v616f_thread=None
+
+def _v616f_start():
+    global v616f_thread
+    if v616f_thread is not None and v616f_thread.is_alive():return False
+    v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
+
+@APP.post('/v616f/run')
+def v616f_run():
+    _v616f_start();return redirect('/v616f/dynamic-exit')
+
+@APP.get('/api/v616f/status')
+def v616f_status_api():
+    return jsonify(_v616f_status())
+
+@APP.get('/v616f/dynamic-exit')
+def v616f_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v616f_status();r={}
+    if V616F_RESULT.exists():
+        try:r=json.loads(V616F_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    trs=''
+    for x in r.get('overall',[]):
+        trs+=f"<tr><td><b>{e(x.get('mode'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avg_hold',0):.1f}</td><td>{x.get('avg_giveback',0):.1%}</td><td>{x.get('capture_bw30',0) if x.get('capture_bw30') is not None else 0:.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td><td>{x.get('capture_bw100',0) if x.get('capture_bw100') is not None else 0:.1%}</td><td>{'PASS' if x.get('pass_vs_control') else '—'}</td></tr>"
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f/run"><button>▶ 跑 V6.16F Dynamic Exit</button></form>'
+    err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1250px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧭 V6.16F · Dynamic Exit Research</h1><div class="info"><b>HOLD120 = Control，不再假设第120天必须卖。</b> 动态退出只有在交易先达到 +2R 后才允许启动；比较 20MA、50MA、RSI、量价破坏与 Trend Composite。最长观察 252 个交易日。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div><div class="c"><h2>Strict OOS Overall</h2><div style="overflow:auto"><table><tr><th>Exit</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>HoldD</th><th>Giveback</th><th>BW30</th><th>BW50</th><th>BW100</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
