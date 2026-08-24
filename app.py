@@ -6961,7 +6961,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h322/daily-mtm"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
-<div class="card" id="v616i4-shortcut" style="border:3px solid #10b981"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16I.5 Opportunity-Cost Admission Gate</h2><div class="muted">Low-memory · 10-slot · test whether a candidate deserves a scarce long-hold slot</div></div><a href="/v616i5/opportunity-gate"><button type="button">打开 V6.16I.5</button></a></div></div>
+<div class="card" id="v616i4-shortcut" style="border:3px solid #10b981"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16I.6 满仓强换弱 / Replacement Test</h2><div class="muted">Low-memory · 10-slot · test whether a candidate deserves a scarce long-hold slot</div></div><a href="/v616i6/replacement"><button type="button">打开 V6.16I.6</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10687,27 +10687,27 @@ def v616f_page():
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3.2.2 Daily MTM Low-Disk</h1><div class="info"><b>Low-Disk Daily MTM. Reuses the existing Local Cache; does not duplicate the full historical price map to Railway disk.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2>{click_note}<p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h322/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running'||x.status==='aggregating'||(x.status==='idle'&&location.search.includes('started=')))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
-# ================= V6.16I.5 CAPITAL ADMISSION / SIGNAL RANKING =================
-V616I5_DIR=DATA_DIR/'jlaw_v616i5_opportunity_gate'
-V616I5_STATUS=V616I5_DIR/'status.json'
-V616I5_RESULT=V616I5_DIR/'result.json'
-V616I5_REPORT=V616I5_DIR/'capital_admission_report.csv'
-v616i5_thread=None
+# ================= V6.16I.6 CAPITAL ADMISSION / SIGNAL RANKING =================
+V616I6_DIR=DATA_DIR/'jlaw_v616i6_replacement'
+V616I6_STATUS=V616I6_DIR/'status.json'
+V616I6_RESULT=V616I6_DIR/'result.json'
+V616I6_REPORT=V616I6_DIR/'capital_admission_report.csv'
+v616i6_thread=None
 
-def _v616i5_status():
-    s={'version':'V6.16I.5','status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
-    if V616I5_STATUS.exists():
-        try:s.update(json.loads(V616I5_STATUS.read_text(encoding='utf-8')))
+def _v616i6_status():
+    s={'version':'V6.16I.6','status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616I6_STATUS.exists():
+        try:s.update(json.loads(V616I6_STATUS.read_text(encoding='utf-8')))
         except Exception:pass
     return s
 
-def _v616i5_write(**kw):
-    V616I5_DIR.mkdir(parents=True,exist_ok=True)
-    s=_v616i5_status();s.update(kw)
-    V616I5_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+def _v616i6_write(**kw):
+    V616I6_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v616i6_status();s.update(kw)
+    V616I6_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     return s
 
-def _v616i5_pct_vec(sorted_arr,values,higher=True):
+def _v616i6_pct_vec(sorted_arr,values,higher=True):
     vals=pd.to_numeric(pd.Series(values),errors='coerce').to_numpy(dtype=float)
     out=np.full(len(vals),np.nan,dtype=float)
     if sorted_arr is None or len(sorted_arr)<20:return out
@@ -10717,7 +10717,7 @@ def _v616i5_pct_vec(sorted_arr,values,higher=True):
         out[good]=p if higher else 1.0-p
     return out
 
-def _v616i5_nanmean_cols(*cols):
+def _v616i6_nanmean_cols(*cols):
     A=np.column_stack(cols).astype(float)
     cnt=np.sum(np.isfinite(A),axis=1)
     sm=np.nansum(A,axis=1)
@@ -10726,20 +10726,38 @@ def _v616i5_nanmean_cols(*cols):
     out[good]=sm[good]/cnt[good]
     return out
 
-def _v616i5_close_on(compact_prices,ticker,dt_ns,last_value):
+def _v616i6_close_on(compact_prices,ticker,dt_ns,last_value):
     pair=compact_prices.get(str(ticker))
     if pair is None:return last_value
-    dns,cls=pair
-    j=np.searchsorted(dns,np.int64(dt_ns),side='left')
-    if j<len(dns) and dns[j]==np.int64(dt_ns):return float(cls[j])
+    dns,_ops,cls=pair
+    j=np.searchsorted(dns,np.int64(dt_ns),side='right')-1
+    if j>=0:return float(cls[j])
     return last_value
 
-def _v616i5_run():
-    global v616i5_thread
+def _v616i6_open_on(compact_prices,ticker,dt_ns,last_value):
+    pair=compact_prices.get(str(ticker))
+    if pair is None:return last_value
+    dns,ops,_cls=pair
+    j=np.searchsorted(dns,np.int64(dt_ns),side='left')
+    if j<len(dns) and dns[j]==np.int64(dt_ns):return float(ops[j])
+    return last_value
+
+def _v616i6_ma50_on(compact_prices,ticker,dt_ns):
+    pair=compact_prices.get(str(ticker))
+    if pair is None:return np.nan
+    dns,_ops,cls=pair
+    j=np.searchsorted(dns,np.int64(dt_ns),side='right')
+    if j<=0:return np.nan
+    lo=max(0,j-50)
+    z=cls[lo:j].astype(float,copy=False)
+    return float(np.nanmean(z)) if len(z)>=20 else np.nan
+
+def _v616i6_run():
+    global v616i6_thread
     t0=time.time()
     try:
-        V616I5_DIR.mkdir(parents=True,exist_ok=True)
-        _v616i5_write(status='running',message='Phase 1/4 · Reuse H.3.2.2 Trade Metadata',processed=0,total=4,current='',elapsed_sec=0,error=None)
+        V616I6_DIR.mkdir(parents=True,exist_ok=True)
+        _v616i6_write(status='running',message='Phase 1/4 · Reuse H.3.2.2 Trade Metadata',processed=0,total=4,current='',elapsed_sec=0,error=None)
         if not V616H32_META_CACHE.exists():raise RuntimeError('缺少 H.3.2.2 trade_meta.pkl')
         T=pd.read_pickle(V616H32_META_CACHE).copy()
         if T.empty:raise RuntimeError('H.3.2.2 Trade Metadata 为空')
@@ -10759,7 +10777,7 @@ def _v616i5_run():
         needed=sorted(T.ticker.astype(str).unique())
         compact_prices={}
         ticker_str=T.ticker.astype(str)
-        _v616i5_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=0,total=len(needed),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+        _v616i6_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=0,total=len(needed),current='',elapsed_sec=round(time.time()-t0,1),error=None)
         for k,tic in enumerate(needed,1):
             d=_v616a_price(tic)
             if d is not None and len(d):
@@ -10771,14 +10789,16 @@ def _v616i5_run():
                     liq_ser=pd.Series(dv.to_numpy(dtype=float),index=d['date'])
                     vals=[liq_ser.get(pd.Timestamp(T.at[i,'entry_date']),np.nan) for i in rows_idx]
                     T.loc[rows_idx,'liq20']=np.asarray(vals,dtype=float)
-                good=d['date'].notna() & close.notna()
+                open_px=pd.to_numeric(d['open'],errors='coerce') if 'open' in d.columns else close
+                good=d['date'].notna() & close.notna() & open_px.notna()
                 if good.any():
                     dates_ns=d.loc[good,'date'].astype('int64').to_numpy(dtype=np.int64,copy=True)
+                    opens=open_px.loc[good].to_numpy(dtype=np.float32,copy=True)
                     closes=close.loc[good].to_numpy(dtype=np.float32,copy=True)
-                    compact_prices[str(tic)]=(dates_ns,closes)
-                del d,close,volume,dv
+                    compact_prices[str(tic)]=(dates_ns,opens,closes)
+                del d,close,open_px,volume,dv
             if k%10==0 or k==len(needed):
-                _v616i5_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=k,total=len(needed),current=tic,elapsed_sec=round(time.time()-t0,1),error=None)
+                _v616i6_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=k,total=len(needed),current=tic,elapsed_sec=round(time.time()-t0,1),error=None)
         if not compact_prices:raise RuntimeError('Local Cache 无可用价格')
 
         score_cols=['DNA_SCORE','MOMENTUM_STRENGTH','LIQUIDITY','BASE_QUALITY','COMPOSITE']
@@ -10788,7 +10808,7 @@ def _v616i5_run():
         for y in sorted(int(x) for x in year_series.dropna().unique()):
             if int((year_series<y).sum())>=300 and int((year_series==y).sum())>=30:eligible_years.append(y)
         if not eligible_years:raise RuntimeError('没有可用于 strict OOS 的年份')
-        _v616i5_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · 0/{len(eligible_years)} years',processed=0,total=len(eligible_years),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+        _v616i6_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · 0/{len(eligible_years)} years',processed=0,total=len(eligible_years),current='',elapsed_sec=round(time.time()-t0,1),error=None)
 
         feature_specs=[('ret60',True),('ret120',True),('ret252',True),('near_52w_high',True),('liq20',True),('atr20',False),('range20',False),('range50',False),('vol_vs20',False),('vol20_vs50',False)]
         valid_years=[]
@@ -10801,30 +10821,30 @@ def _v616i5_run():
                     arr=pd.to_numeric(tr[col],errors='coerce').dropna().to_numpy(dtype=float)
                     cache[col]=np.sort(arr) if len(arr) else None
                 else:cache[col]=None
-            p60=_v616i5_pct_vec(cache.get('ret60'),te.get('ret60'),True)
-            p120=_v616i5_pct_vec(cache.get('ret120'),te.get('ret120'),True)
-            p252=_v616i5_pct_vec(cache.get('ret252'),te.get('ret252'),True)
-            phigh=_v616i5_pct_vec(cache.get('near_52w_high'),te.get('near_52w_high'),True)
-            pliq=_v616i5_pct_vec(cache.get('liq20'),te.get('liq20'),True)
-            patr=_v616i5_pct_vec(cache.get('atr20'),te.get('atr20'),False)
-            pr20=_v616i5_pct_vec(cache.get('range20'),te.get('range20'),False)
-            pr50=_v616i5_pct_vec(cache.get('range50'),te.get('range50'),False)
-            pvd=_v616i5_pct_vec(cache.get('vol_vs20'),te.get('vol_vs20'),False)
-            pvc=_v616i5_pct_vec(cache.get('vol20_vs50'),te.get('vol20_vs50'),False)
+            p60=_v616i6_pct_vec(cache.get('ret60'),te.get('ret60'),True)
+            p120=_v616i6_pct_vec(cache.get('ret120'),te.get('ret120'),True)
+            p252=_v616i6_pct_vec(cache.get('ret252'),te.get('ret252'),True)
+            phigh=_v616i6_pct_vec(cache.get('near_52w_high'),te.get('near_52w_high'),True)
+            pliq=_v616i6_pct_vec(cache.get('liq20'),te.get('liq20'),True)
+            patr=_v616i6_pct_vec(cache.get('atr20'),te.get('atr20'),False)
+            pr20=_v616i6_pct_vec(cache.get('range20'),te.get('range20'),False)
+            pr50=_v616i6_pct_vec(cache.get('range50'),te.get('range50'),False)
+            pvd=_v616i6_pct_vec(cache.get('vol_vs20'),te.get('vol_vs20'),False)
+            pvc=_v616i6_pct_vec(cache.get('vol20_vs50'),te.get('vol20_vs50'),False)
             trend=te['trend_template'].fillna(False).astype(bool).to_numpy(dtype=float) if 'trend_template' in te.columns else np.zeros(len(te))
-            mom=_v616i5_nanmean_cols(p60,p120,p252)
-            bq=_v616i5_nanmean_cols(phigh,patr,pr20,pr50,pvd,pvc)
-            dna=_v616i5_nanmean_cols(p60,p120,p252,phigh,pvd,trend)
-            comp=_v616i5_nanmean_cols(dna,mom,pliq,bq)
+            mom=_v616i6_nanmean_cols(p60,p120,p252)
+            bq=_v616i6_nanmean_cols(phigh,patr,pr20,pr50,pvd,pvc)
+            dna=_v616i6_nanmean_cols(p60,p120,p252,phigh,pvd,trend)
+            comp=_v616i6_nanmean_cols(dna,mom,pliq,bq)
             T.loc[te_idx,'MOMENTUM_STRENGTH']=mom;T.loc[te_idx,'LIQUIDITY']=pliq;T.loc[te_idx,'BASE_QUALITY']=bq;T.loc[te_idx,'DNA_SCORE']=dna;T.loc[te_idx,'COMPOSITE']=comp
             valid_years.append(y)
-            _v616i5_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · year {y} · {yi}/{len(eligible_years)}',processed=yi,total=len(eligible_years),current=str(y),elapsed_sec=round(time.time()-t0,1),error=None)
+            _v616i6_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · year {y} · {yi}/{len(eligible_years)}',processed=yi,total=len(eligible_years),current=str(y),elapsed_sec=round(time.time()-t0,1),error=None)
 
         V=T[year_series.isin(valid_years)].copy()
         if V.empty:raise RuntimeError('没有 strict OOS cohort')
         first_ns=np.int64(pd.Timestamp(V.entry_date.min()).normalize().value);last_ns=np.int64(pd.Timestamp(V.base_exit_date.max()).normalize().value)
         chunks=[]
-        for dns,_cls in compact_prices.values():
+        for dns,_ops,_cls in compact_prices.values():
             lo=np.searchsorted(dns,first_ns,side='left');hi=np.searchsorted(dns,last_ns,side='right')
             if hi>lo:chunks.append(dns[lo:hi])
         if not chunks:raise RuntimeError('没有 MTM 日历')
@@ -10834,127 +10854,191 @@ def _v616i5_run():
         for idx,r in recs.items():
             entries.setdefault(np.int64(pd.Timestamp(r['entry_date']).value),[]).append(idx)
             exits.setdefault(np.int64(pd.Timestamp(r['base_exit_date']).value),[]).append(idx)
-        # Opportunity-cost gates: candidate can be rejected even when a slot is free.
-        # Scores are already strict point-in-time / earlier-year calibrated in Phase 3.
-        gates=[
-            ('FIRST_COME',None),
-            ('COMPOSITE_50',('COMPOSITE',0.50)),
-            ('COMPOSITE_65',('COMPOSITE',0.65)),
-            ('COMPOSITE_75',('COMPOSITE',0.75)),
-            ('COMPOSITE_85',('COMPOSITE',0.85)),
-            ('DNA_75',('DNA_SCORE',0.75)),
-            ('DYNAMIC_COMPOSITE','DYNAMIC'),
-            ('QUALITY_CONFLUENCE','CONFLUENCE'),
+        # ---------- Phase 4: FULL-BOOK STRONG-REPLACES-WEAK ----------
+        # Free slots always follow original FIRST_COME. Replacement is considered only when all 10 slots are full.
+        # Decision uses admission-time candidate score + incumbent information known by candidate obs_date close.
+        # Execution: sell incumbent at new candidate entry-date open, then buy candidate at its existing entry price.
+        # Conservative friction: 0.10% on replacement sale and 0.10% on replacement buy.
+        strategies=[
+            ('不换仓（原策略）','CONTROL',None),
+            ('分数高10%才换','GAP',0.10),
+            ('分数高20%才换','GAP',0.20),
+            ('分数高30%才换','GAP',0.30),
+            ('弱趋势+高15%才换','TREND_GAP',0.15),
+            ('亏损仓+高10%才换','LOSER_GAP',0.10),
+            ('保护大赢家混合换仓','HYBRID',0.15),
         ]
         slots=10
+        friction=0.001  # 0.10% each replacement leg
+        max_replacements_per_day=1
 
+        # Keep original deterministic FIRST_COME order.
         entries={};exits={}
         for idx,r in recs.items():
             entries.setdefault(np.int64(pd.Timestamp(r['entry_date']).value),[]).append(idx)
             exits.setdefault(np.int64(pd.Timestamp(r['base_exit_date']).value),[]).append(idx)
 
-        # Research-only labels for capture diagnostics; NEVER used by gate decisions.
+        # Future returns are diagnostics ONLY, never used by replacement decisions.
         future_ret={}
         for idx,r in recs.items():
-            ep=float(r['entry_px']); xp=float(r['base_exit_px'])
+            ep=float(r['entry_px']);xp=float(r['base_exit_px'])
             future_ret[idx]=(xp/ep-1.0) if ep>0 else np.nan
         all_bw100=sum(1 for v in future_ret.values() if np.isfinite(v) and v>=1.0)
         all_bw200=sum(1 for v in future_ret.values() if np.isfinite(v) and v>=2.0)
 
-        def gate_pass(gate_name,gate_def,idx,free_slots):
-            if gate_name=='FIRST_COME':
-                return True
-            r=recs[idx]
-            if isinstance(gate_def,tuple):
-                col,thr=gate_def
-                v=r.get(col,np.nan)
-                return bool(pd.notna(v) and float(v)>=float(thr))
-            if gate_def=='DYNAMIC':
-                # Scarcer remaining capacity => demand higher COMPOSITE.
-                # Pre-declared, no optimization inside test years.
-                if free_slots>=5:thr=0.50
-                elif free_slots>=3:thr=0.65
-                elif free_slots==2:thr=0.75
-                else:thr=0.85
-                v=r.get('COMPOSITE',np.nan)
-                return bool(pd.notna(v) and float(v)>=thr)
-            if gate_def=='CONFLUENCE':
-                vals=[r.get('DNA_SCORE',np.nan),r.get('MOMENTUM_STRENGTH',np.nan),
-                      r.get('LIQUIDITY',np.nan),r.get('BASE_QUALITY',np.nan)]
-                good=sum(pd.notna(v) and float(v)>=0.65 for v in vals)
-                comp=r.get('COMPOSITE',np.nan)
-                return bool(pd.notna(comp) and float(comp)>=0.60 and good>=2)
-            return False
+        def incumbent_snapshot(pos_item,candidate_obs_ns):
+            idx,p=pos_item
+            cur=_v616i6_close_on(compact_prices,p['ticker'],candidate_obs_ns,p['entry_px'])
+            ma50=_v616i6_ma50_on(compact_prices,p['ticker'],candidate_obs_ns)
+            ret=(cur/p['entry_px']-1.0) if p['entry_px']>0 else np.nan
+            entry_comp=float(p.get('entry_composite',np.nan))
+            peak_ret=(p.get('peak_close',p['entry_px'])/p['entry_px']-1.0) if p['entry_px']>0 else np.nan
+            below50=bool(np.isfinite(ma50) and cur<ma50)
+            return {
+                'idx':idx,'cur':cur,'ma50':ma50,'ret':ret,'entry_comp':entry_comp,
+                'peak_ret':peak_ret,'below50':below50
+            }
 
-        def simulate(gate_name,gate_def,si):
-            _v616i5_write(status='running',message=f'Phase 4/4 · {gate_name} · 0%',
-                          processed=0,total=len(calendar_ns),current=gate_name,
+        def choose_replacement(mode,gap,candidate_idx,pos):
+            if mode=='CONTROL' or not pos:return None
+            cand=recs[candidate_idx]
+            new_comp=cand.get('COMPOSITE',np.nan)
+            if pd.isna(new_comp):return None
+            new_comp=float(new_comp)
+            obs_ns=np.int64(pd.Timestamp(cand['obs_date']).value)
+
+            snaps=[incumbent_snapshot(it,obs_ns) for it in pos.items()]
+            snaps=[s for s in snaps if np.isfinite(s['entry_comp'])]
+            if not snaps:return None
+
+            # Protect established winners: do not sacrifice a position that has already reached +50%.
+            if mode=='GAP':
+                eligible=[s for s in snaps if s['peak_ret']<0.50 and new_comp-s['entry_comp']>=gap]
+            elif mode=='TREND_GAP':
+                eligible=[s for s in snaps if s['peak_ret']<0.50 and s['below50'] and new_comp-s['entry_comp']>=gap]
+            elif mode=='LOSER_GAP':
+                eligible=[s for s in snaps if s['peak_ret']<0.50 and s['ret']<=0.0 and new_comp-s['entry_comp']>=gap]
+            elif mode=='HYBRID':
+                eligible=[s for s in snaps if
+                          s['peak_ret']<0.50 and
+                          new_comp>=0.75 and
+                          (s['below50'] or s['ret']<=0.0) and
+                          new_comp-s['entry_comp']>=gap]
+            else:
+                eligible=[]
+
+            if not eligible:return None
+            # Replace weakest entry-quality incumbent; tie-break by worse current return.
+            eligible.sort(key=lambda s:(s['entry_comp'],s['ret'],str(recs[s['idx']].get('ticker',''))))
+            return eligible[0]
+
+        def simulate(label,mode,gap,si):
+            _v616i6_write(status='running',message=f'Phase 4/4 · {label} · 0%',
+                          processed=0,total=len(calendar_ns),current=label,
                           elapsed_sec=round(time.time()-t0,1),error=None)
 
             cash=1.0;pos={};lastpx={}
-            skipped_capacity=0;rejected_gate=0;admitted=0
-            eligible_signals=0;cash_wait_days=0
+            admitted=0;skipped_capacity=0
+            replacement_count=0;replacement_attempts=0
+            replacement_cost=0.0;protected_winner_blocks=0
             eq_dates=[];eq_vals=[];expo_vals=[];open_vals=[]
             admitted_ids=set()
             step=max(1,len(calendar_ns)//20)
 
             for di,dt_ns in enumerate(calendar_ns,1):
-                for idx in exits.get(np.int64(dt_ns),[]):
+                dt_ns=np.int64(dt_ns)
+
+                # Normal scheduled exits first.
+                for idx in exits.get(dt_ns,[]):
                     p=pos.pop(idx,None)
                     if p is not None:
                         cash+=p['shares']*float(recs[idx]['base_exit_px'])
 
+                # Update marks / peaks before today's admissions.
                 hv=0.0
                 for idx,p in pos.items():
-                    cp=_v616i5_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
-                    lastpx[idx]=cp;hv+=p['shares']*cp
+                    cp=_v616i6_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
+                    lastpx[idx]=cp
+                    p['peak_close']=max(float(p.get('peak_close',p['entry_px'])),float(cp))
+                    hv+=p['shares']*cp
                 equity_now=cash+hv
                 target=equity_now/slots if equity_now>0 else 0.0
-                cash_capacity=int(np.floor((cash+1e-12)/target)) if target>0 else 0
-                free_slots=max(0,min(slots-len(pos),cash_capacity))
 
-                cand=list(entries.get(np.int64(dt_ns),[]))
-                if cand:
-                    eligible_signals+=len(cand)
+                today=list(entries.get(dt_ns,[]))
+                replacements_today=0
 
-                # Preserve deterministic FIRST_COME ordering within a gate.
-                # Gate decides "take or wait"; it does not rank candidates.
-                accepted=[]
-                for idx in cand:
-                    if gate_pass(gate_name,gate_def,idx,free_slots):
-                        accepted.append(idx)
-                    else:
-                        rejected_gate+=1
-
-                if free_slots>0 and cand and not accepted:
-                    cash_wait_days+=1
-
-                for idx in accepted:
-                    if len(pos)>=slots or cash+1e-12<target:
+                for idx in today:
+                    r=recs[idx]
+                    px=float(r['entry_px'])
+                    if not np.isfinite(px) or px<=0:
                         skipped_capacity+=1
                         continue
-                    px=float(recs[idx]['entry_px'])
-                    if not np.isfinite(px) or px<=0:
-                        skipped_capacity+=1;continue
-                    cash-=target
-                    pos[idx]={'ticker':str(recs[idx]['ticker']),
-                              'shares':target/px,'entry_px':px}
-                    lastpx[idx]=px
-                    admitted+=1;admitted_ids.add(idx)
 
+                    # If a slot is genuinely free, preserve original FIRST_COME exactly.
+                    cash_capacity=int(np.floor((cash+1e-12)/target)) if target>0 else 0
+                    if len(pos)<slots and cash_capacity>0:
+                        invest=target
+                        cash-=invest
+                        pos[idx]={
+                            'ticker':str(r['ticker']),'shares':invest/px,'entry_px':px,
+                            'entry_composite':float(r.get('COMPOSITE',np.nan)),
+                            'peak_close':px
+                        }
+                        lastpx[idx]=px;admitted+=1;admitted_ids.add(idx)
+                        continue
+
+                    # Full book: only replacement strategies may challenge an incumbent.
+                    if len(pos)>=slots and mode!='CONTROL' and replacements_today<max_replacements_per_day:
+                        replacement_attempts+=1
+                        victim=choose_replacement(mode,gap,idx,pos)
+                        if victim is not None:
+                            vid=victim['idx'];vp=pos.get(vid)
+                            if vp is not None:
+                                sale_px=_v616i6_open_on(compact_prices,vp['ticker'],dt_ns,lastpx.get(vid,vp['entry_px']))
+                                gross=vp['shares']*sale_px
+                                sale_net=gross*(1.0-friction)
+                                sale_cost=gross*friction
+
+                                # Use only proceeds freed by the replaced leg; no extra leverage/cash injection.
+                                buy_cash=sale_net
+                                buy_cost=buy_cash*friction
+                                net_invest=buy_cash*(1.0-friction)
+
+                                pos.pop(vid,None)
+                                cash+=sale_net
+                                cash-=buy_cash
+
+                                pos[idx]={
+                                    'ticker':str(r['ticker']),
+                                    'shares':net_invest/px,
+                                    'entry_px':px,
+                                    'entry_composite':float(r.get('COMPOSITE',np.nan)),
+                                    'peak_close':px
+                                }
+                                lastpx[idx]=px
+                                replacement_cost+=sale_cost+buy_cost
+                                replacement_count+=1;replacements_today+=1
+                                admitted+=1;admitted_ids.add(idx)
+                                continue
+
+                    skipped_capacity+=1
+
+                # End-of-day daily MTM.
                 hv=0.0
                 for idx,p in pos.items():
-                    cp=_v616i5_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
-                    lastpx[idx]=cp;hv+=p['shares']*cp
+                    cp=_v616i6_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
+                    lastpx[idx]=cp
+                    p['peak_close']=max(float(p.get('peak_close',p['entry_px'])),float(cp))
+                    hv+=p['shares']*cp
                 eq=cash+hv
-                eq_dates.append(np.int64(dt_ns));eq_vals.append(float(eq))
+                eq_dates.append(dt_ns);eq_vals.append(float(eq))
                 expo_vals.append(float(hv/eq) if eq>0 else np.nan)
                 open_vals.append(len(pos))
 
                 if di%step==0 or di==len(calendar_ns):
-                    _v616i5_write(status='running',
-                                  message=f'Phase 4/4 · {gate_name} · {int(round(di/len(calendar_ns)*100))}%',
-                                  processed=di,total=len(calendar_ns),current=gate_name,
+                    _v616i6_write(status='running',
+                                  message=f'Phase 4/4 · {label} · {int(round(di/len(calendar_ns)*100))}%',
+                                  processed=di,total=len(calendar_ns),current=label,
                                   elapsed_sec=round(time.time()-t0,1),error=None)
 
             eq=np.asarray(eq_vals,dtype=float)
@@ -10974,26 +11058,26 @@ def _v616i5_run():
             bw200_adm=sum(1 for i in admitted_ids if np.isfinite(future_ret.get(i,np.nan)) and future_ret[i]>=2.0)
 
             return {
-                'strategy':gate_name,'end_equity':end_eq,'cagr':float(cagr),
+                'strategy':label,'mode':mode,
+                'end_equity':end_eq,'cagr':float(cagr),
                 'maxdd_mtm':maxdd,'calmar':calmar,
                 'avg_exposure':float(np.nanmean(np.asarray(expo_vals,dtype=float))),
                 'avg_open_slots':float(np.mean(np.asarray(open_vals,dtype=float))),
-                'admitted':int(admitted),
-                'rejected_gate':int(rejected_gate),
-                'skipped_capacity':int(skipped_capacity),
-                'signals':int(eligible_signals),
-                'cash_wait_days':int(cash_wait_days),
+                'admitted':int(admitted),'skipped_capacity':int(skipped_capacity),
+                'replacement_count':int(replacement_count),
+                'replacement_attempts':int(replacement_attempts),
+                'replacement_cost':float(replacement_cost),
                 'bw100_capture':float(bw100_adm/all_bw100) if all_bw100 else np.nan,
                 'bw200_capture':float(bw200_adm/all_bw200) if all_bw200 else np.nan,
                 'worst_year':float(min(annual.values())) if annual else np.nan,
                 'annual':annual
             }
 
-        results=[simulate(name,gdef,i) for i,(name,gdef) in enumerate(gates,1)]
-        control=next(x for x in results if x['strategy']=='FIRST_COME');ctrlann=control['annual'];rows=[]
+        results=[simulate(label,mode,gap,i) for i,(label,mode,gap) in enumerate(strategies,1)]
+        control=next(x for x in results if x['mode']=='CONTROL');ctrlann=control['annual'];rows=[]
         for x in results:
-            ann=x.pop('annual');common=sorted(set(ctrlann)&set(ann));wins=sum(ann[y]>ctrlann[y] for y in common) if x['strategy']!='FIRST_COME' else 0;x['delta_cagr_vs_first']=x['cagr']-control['cagr'];x['delta_maxdd_vs_first']=x['maxdd_mtm']-control['maxdd_mtm'];x['delta_calmar_vs_first']=x['calmar']-control['calmar'];x['win_years_vs_first']=int(wins);x['compare_years']=int(len(common));x['screen_pass']=bool(
-                x['strategy']!='FIRST_COME' and
+            ann=x.pop('annual');common=sorted(set(ctrlann)&set(ann));wins=sum(ann[y]>ctrlann[y] for y in common) if x['mode']!='CONTROL' else 0;x['delta_cagr_vs_first']=x['cagr']-control['cagr'];x['delta_maxdd_vs_first']=x['maxdd_mtm']-control['maxdd_mtm'];x['delta_calmar_vs_first']=x['calmar']-control['calmar'];x['win_years_vs_first']=int(wins);x['compare_years']=int(len(common));x['screen_pass']=bool(
+                x['mode']!='CONTROL' and
                 x['delta_cagr_vs_first']>0 and
                 x['delta_maxdd_vs_first']>=-0.03 and
                 len(common)>0 and
@@ -11001,43 +11085,43 @@ def _v616i5_run():
                 x.get('bw100_capture',0)>=0.70
             );rows.append(x)
         O=pd.DataFrame(rows).sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False])
-        try:O.to_csv(V616I5_REPORT,index=False)
+        try:O.to_csv(V616I6_REPORT,index=False)
         except OSError:pass
-        res={'version':'V6.16I.5','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'overall':O.replace({np.nan:None}).to_dict('records'),'acceptance':'Opportunity-cost gate must beat FIRST_COME on Daily-MTM CAGR, not worsen MaxDD by more than 3pp, beat FIRST_COME in at least 60% of comparable OOS years, and preserve at least 70% of +100% winners.','rule_note':'Frozen DNA + CONTROL entry + -7% stop + HOLD1260. 10-slot, no margin. Gate may deliberately leave cash idle even when a slot is free. No add-on, no exit retuning, no forced replacement. Gate uses only admission-time scores.','score_note':'Pre-declared gates: COMPOSITE >= 0.50/0.65/0.75/0.85, DNA >= 0.75, dynamic COMPOSITE threshold based on free slots, and a fixed quality-confluence gate. Score calibration remains strict earlier-year only.','memory_note':'Low-memory engine retains only compact int64 dates + float32 closes per ticker. Full OHLCV is released after liquidity extraction; no second close_lookup is built.','cache_note':'Reuses H.3.2.2 trade metadata + existing Local Cache.','warning':'Existing universe still has survivorship-bias limits until historical/delisted coverage is complete.'}
-        V616I5_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v616i5_write(status='done',message='V6.16I.5 Opportunity-Cost Admission Gate 完成',processed=6,total=6,current='',elapsed_sec=round(time.time()-t0,2),error=None)
+        res={'version':'V6.16I.6','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'overall':O.replace({np.nan:None}).to_dict('records'),'acceptance':'换仓方案必须提高账户年化收益，最大回撤不能比原策略恶化超过3个百分点，至少60%的可比较年份胜出，并保留至少70%的翻倍大赢家。','rule_note':'冻结选股DNA、CONTROL买点、-7%止损、HOLD1260。只有10仓满仓时才允许换仓；有空位时完全沿用原FIRST_COME。换仓判断只用新候选入场前已知数据，执行按新候选入场日开盘；每个换仓卖出和买入各计0.10%摩擦成本。','score_note':'测试分数优势10/20/30%、弱趋势+15%、亏损仓+10%、保护大赢家混合规则。已达到+50%的持仓不允许被换掉。','memory_note':'Low-memory engine retains only compact int64 dates + float32 open/close per ticker. Full OHLCV is released after liquidity extraction; no second close_lookup is built.','cache_note':'Reuses H.3.2.2 trade metadata + existing Local Cache.','warning':'Existing universe still has survivorship-bias limits until historical/delisted coverage is complete.'}
+        V616I6_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v616i6_write(status='done',message='V6.16I.6 满仓强换弱 / Replacement Test 完成',processed=6,total=6,current='',elapsed_sec=round(time.time()-t0,2),error=None)
     except Exception as ex:
-        traceback.print_exc();_v616i5_write(status='error',message='V6.16I.5 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
-    finally:v616i5_thread=None
+        traceback.print_exc();_v616i6_write(status='error',message='V6.16I.6 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v616i6_thread=None
 
-def _v616i5_start():
-    global v616i5_thread
-    if v616i5_thread is not None and v616i5_thread.is_alive():return False
-    try:_v616i5_write(status='starting',message='Starting V6.16I.5 low-memory worker',processed=0,total=4,error=None)
+def _v616i6_start():
+    global v616i6_thread
+    if v616i6_thread is not None and v616i6_thread.is_alive():return False
+    try:_v616i6_write(status='starting',message='Starting V6.16I.6 low-memory worker',processed=0,total=4,error=None)
     except OSError:return False
-    v616i5_thread=threading.Thread(target=_v616i5_run,daemon=True);v616i5_thread.start();return True
+    v616i6_thread=threading.Thread(target=_v616i6_run,daemon=True);v616i6_thread.start();return True
 
-@APP.route('/v616i5/run',methods=['GET','POST'])
-def v616i5_run_route():
-    alive=v616i5_thread is not None and v616i5_thread.is_alive();started=_v616i5_start();code='1' if started else ('2' if alive else '0');return redirect('/v616i5/opportunity-gate?started='+str(int(time.time()))+'&ok='+code)
+@APP.route('/v616i6/run',methods=['GET','POST'])
+def v616i6_run_route():
+    alive=v616i6_thread is not None and v616i6_thread.is_alive();started=_v616i6_start();code='1' if started else ('2' if alive else '0');return redirect('/v616i6/replacement?started='+str(int(time.time()))+'&ok='+code)
 
-@APP.get('/api/v616i5/status')
-def v616i5_status_api():return jsonify(_v616i5_status())
+@APP.get('/api/v616i6/status')
+def v616i6_status_api():return jsonify(_v616i6_status())
 
-@APP.get('/v616i5/opportunity-gate')
-def v616i5_page():
+@APP.get('/v616i6/replacement')
+def v616i6_page():
     import html
-    e=lambda x:html.escape(str(x));s=_v616i5_status();r={}
-    if V616I5_RESULT.exists():
+    e=lambda x:html.escape(str(x));s=_v616i6_status();r={}
+    if V616I6_RESULT.exists():
         try:
-            z=json.loads(V616I5_RESULT.read_text(encoding='utf-8'))
-            if z.get('version')=='V6.16I.5':r=z
+            z=json.loads(V616I6_RESULT.read_text(encoding='utf-8'))
+            if z.get('version')=='V6.16I.6':r=z
         except Exception:pass
     rows=''
     for x in r.get('overall',[]):
-        rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_first',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{x.get('avg_open_slots',0):.1f}</td><td>{int(x.get('admitted',0))}</td><td>{int(x.get('rejected_gate',0))}</td><td>{int(x.get('skipped_capacity',0))}</td><td>{x.get('bw100_capture',0):.1%}</td><td>{x.get('bw200_capture',0):.1%}</td><td>{int(x.get('win_years_vs_first',0))}/{int(x.get('compare_years',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>"
+        rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{x.get('end_equity',0):.2f}倍</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_first',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{int(x.get('replacement_count',0))}</td><td>{x.get('replacement_cost',0):.3f}</td><td>{x.get('bw100_capture',0):.1%}</td><td>{x.get('bw200_capture',0):.1%}</td><td>{int(x.get('win_years_vs_first',0))}/{int(x.get('compare_years',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{'采用候选' if x.get('screen_pass') else '-'}</td></tr>"
 
-    btn='' if s.get('status') in ('starting','running') else '<a href="/v616i5/run"><button type="button">Run V6.16I.5 Opportunity Gate</button></a>';err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;min-width:1350px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>🎯 V6.16I.5 · Opportunity-Cost Admission Gate</h1><div class="info"><b>Opportunity-Cost Gate。</b> 不再研究同日排序；研究一个候选是否值得占用长期仓位。Gate 不通过时即使有空位也保留现金。底层继续使用 I.4 Low-Memory Engine。</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Daily-MTM Opportunity-Cost Results</h2><div style="overflow:auto"><table><tr><th>Gate</th><th>End Equity</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>Calmar</th><th>Exposure</th><th>Avg Slots</th><th>Admitted</th><th>Gate Reject</th><th>Capacity Skip</th><th>BW100 Capture</th><th>BW200 Capture</th><th>Win Years</th><th>Worst Year</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Memory:</b> {e(r.get('memory_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616i5/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    btn='' if s.get('status') in ('starting','running') else '<a href="/v616i6/run"><button type="button">运行 V6.16I.6 满仓强换弱</button></a>';err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;min-width:1350px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>🔄 V6.16I.6 · 满仓时强换弱测试</h1><div class="info"><b>满仓强换弱。</b> 有空位时完全照旧买；只有10个仓位全部占满，新候选明显强于当前弱仓时才测试换仓。已涨成大赢家的持仓优先保护。</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>严格样本外账户结果（每日按市价计算）</h2><div style="overflow:auto"><table><tr><th>方案</th><th>最终资金</th><th>年化收益</th><th>年化变化</th><th>最大回撤</th><th>收益回撤比</th><th>换仓次数</th><th>换仓成本</th><th>翻倍赢家保留</th><th>涨2倍赢家保留</th><th>胜出年份</th><th>最差年份</th><th>结论</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Memory:</b> {e(r.get('memory_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616i6/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
