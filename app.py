@@ -17483,3 +17483,36 @@ def _deferred_app_startup():
 
 # Never block Gunicorn/Railway startup on recovery, Volume I/O, scheduler, or cache work.
 threading.Thread(target=_deferred_app_startup, daemon=True).start()
+
+# ==================== V6.17 PRODUCTION CANDIDATE ====================
+# Frozen production baseline promoted from the validated V6.16 research branch.
+# Research experiments remain available in legacy routes but are NOT part of the
+# production decision engine unless separately promoted after strict OOS testing.
+
+V617_VERSION = "V6.17 Production Candidate"
+V617_PRODUCTION_RULES = {
+    "entry": "Frozen DNA + CONTROL entry",
+    "initial_stop": "-7%",
+    "winner_hold": "HOLD1260",
+    "portfolio": "10 slots, no margin",
+    "admission": "FIRST_COME baseline",
+    "addon": "OFF — Daily-MTM tests did not beat BASE_ONLY",
+    "opportunity_gate": "OFF — tested gates reduced CAGR",
+    "replacement": "OFF — tested full-book replacement did not improve baseline",
+    "valuation": "Daily mark-to-market for portfolio risk metrics",
+}
+
+@APP.get('/v617/production')
+def v617_production_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    s=read_state()
+    rows=''.join(f"<tr><td><b>{e(k)}</b></td><td>{e(v)}</td></tr>" for k,v in V617_PRODUCTION_RULES.items())
+    status=e(s.get('status','idle')); msg=e(s.get('message',''))
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
+    <div class="c"><h1>🚀 V6.17 · Production Candidate</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
+    <div class="c"><h2>生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><div class="ok"><b>Production baseline:</b> Daily-MTM BASE_ONLY / FIRST_COME account benchmark from the validated branch: End Equity 31.45x, CAGR 23.12%, MaxDD -38.30%, Calmar 0.60. These are research/backtest figures, not a guarantee of future performance.</div></div>
+    </div></body></html>'''
