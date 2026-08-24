@@ -1,4 +1,5 @@
 import re
+import shutil
 import base64
 import hmac
 import os, json, time, threading, traceback, io, math
@@ -17534,18 +17535,71 @@ def _v617o_manifest_is_full():
         return len(m)>=1000
     except Exception:return False
 
+def _v617o_find_old_full_manifest():
+    # Prefer any previously-built full manifest/backup before touching Tiingo master.
+    candidates=[]
+    for root in [V615B_DIR, DATA_DIR/"jlaw_v615b_historical_cache", DATA_DIR]:
+        if not root.exists():continue
+        for p in root.glob("manifest*.csv"):
+            try:
+                n=sum(1 for _ in open(p,encoding="utf-8",errors="ignore"))-1
+                if n>=1000:candidates.append((n,p))
+            except Exception:pass
+    if not candidates:return None
+    candidates.sort(key=lambda x:x[0],reverse=True)
+    return candidates[0][1]
+
 def _v617o_prepare_full_manifest():
-    # Preserve all price CSVs. Only manifest/queue are archived if they are the old small-validation set.
-    if _v617o_manifest_is_full():return
+    # Preserve all price CSVs. First restore an older full manifest if available.
+    if _v617o_manifest_is_full():
+        try:
+            m=pd.read_csv(V615B_MANIFEST)
+            _v617o_write(status="running",message=f"已找到现有完整 manifest：{len(m):,} listings",
+                         total=int(len(m)),completed=int(m.get("verified",pd.Series(dtype=bool)).astype(str).str.lower().isin(["true","1","yes"]).sum()))
+        except Exception:pass
+        return
+
     V615B_DIR.mkdir(parents=True,exist_ok=True)
+    _v617o_write(status="running",message="启动阶段 1/3：寻找旧的完整 manifest / backup",total=0,completed=0)
+
+    old_full=_v617o_find_old_full_manifest()
+    if old_full is not None:
+        _v617o_write(status="running",message=f"启动阶段 2/3：恢复旧 full manifest：{old_full.name}")
+        M=pd.read_csv(old_full)
+        # Keep exact old progress/verified flags and derive a fresh queue.
+        M.to_csv(V615B_MANIFEST,index=False)
+        qcols=[c for c in ["listing_id","ticker","startDate","endDate","ended","ticker_reused_or_duplicate"] if c in M.columns]
+        M[qcols].to_csv(V615B_QUEUE,index=False)
+        verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M.columns else pd.Series(False,index=M.index)
+        _v617o_write(status="running",message=f"启动阶段 3/3：已恢复 {len(M):,} listings，开始断点续跑",
+                     total=int(len(M)),completed=int(verified.sum()))
+        return
+
+    # No full backup: archive only small manifest/queue, never price cache.
     stamp=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     for p in [V615B_MANIFEST,V615B_QUEUE]:
         if p.exists():
-            try:p.replace(V615B_DIR/f"{p.stem}_small_backup_{stamp}{p.suffix}")
+            try:shutil.copy2(p,V615B_DIR/f"{p.stem}_small_backup_{stamp}{p.suffix}")
             except Exception:pass
-    # force=True rebuilds the master manifest only; worker itself is later run force=False,
-    # so existing MARKET_DIR cache and V615B price files are still reused.
+
+    # Make the previously invisible bootstrap visible in UI.
+    if V615A_MASTER.exists():
+        try:
+            master_rows=sum(1 for _ in open(V615A_MASTER,encoding="utf-8",errors="ignore"))-1
+        except Exception:master_rows=0
+        _v617o_write(status="running",message=f"启动阶段 2/3：读取已缓存 Tiingo master（约 {master_rows:,} 行）")
+    else:
+        _v617o_write(status="running",message="启动阶段 2/3：首次下载 Tiingo supported-tickers master（通常几十秒）")
+
+    raw=_v615a_download_master(False)
+    _v617o_write(status="running",message=f"启动阶段 2/3：Tiingo master 已读取 {len(raw):,} 行，正在生成 US STOCK manifest")
     _v615b_prepare_universe(force=True)
+
+    M=_v615b_read_manifest()
+    if M.empty:raise RuntimeError("full manifest 建立后仍为空")
+    verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M.columns else pd.Series(False,index=M.index)
+    _v617o_write(status="running",message=f"启动阶段 3/3：完整 manifest 已建立 {len(M):,} listings，开始补历史数据",
+                 total=int(len(M)),completed=int(verified.sum()))
 
 def _v617o_supervisor():
     global v617o_thread
@@ -17643,8 +17697,16 @@ def v617_overnight_status_api():
 def v617_overnight_page():
     import html
     e=lambda x:html.escape(str(x));s=_v617o_status();b=_v615b_status()
-    cov=float(s.get("coverage",b.get("coverage",0)) or 0)
-    ecov=float(s.get("ended_coverage",b.get("ended_coverage",0)) or 0)
+    # IMPORTANT: builder runs synchronously inside the overnight supervisor.
+    # Read builder status LIVE; otherwise the page falsely stays at 0/0 until the whole pass ends.
+    worker_active=str(b.get("status","")) in ("running","rate_limited","paused")
+    cov=float((b.get("coverage") if worker_active else s.get("coverage",b.get("coverage",0))) or 0)
+    ecov=float((b.get("ended_coverage") if worker_active else s.get("ended_coverage",b.get("ended_coverage",0))) or 0)
+    live_completed=int((b.get("completed") if worker_active else s.get("completed",b.get("completed",0))) or 0)
+    live_total=int((b.get("total") if worker_active else s.get("total",b.get("total",0))) or 0)
+    live_failed=int((b.get("failed") if worker_active else s.get("failed",b.get("failed",0))) or 0)
+    live_message=str(b.get("message","")) if worker_active and b.get("message") else str(s.get("message",""))
+    live_current=str(b.get("current","")) if worker_active else ""
     running=s.get("status") in ("running","cooldown")
     btn="" if running else '<a href="/v617/overnight/run"><button>开始 / 继续整晚扩展</button></a>'
     stop='<a href="/v617/overnight/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
@@ -17653,11 +17715,12 @@ def v617_overnight_page():
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
     <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；遇到429自动保存并等待后继续。</div></div>
-    <div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(s.get("message"))}</p>
-    <p>完整历史股票：{int(s.get("completed",b.get("completed",0)) or 0)} / {int(s.get("total",b.get("total",0)) or 0)}</p>
+    <div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(live_message)}</p>
+    <p>{("当前：" + e(live_current)) if live_current else ""}</p>
+    <p>完整历史股票：{live_completed} / {live_total}</p>
     <p>全部覆盖：<b>{cov:.1%}</b>（最终要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
     <p>退市/结束股票覆盖：<b>{ecov:.1%}</b>（最终要求 ≥90%）</p><progress max="1" value="{min(1,ecov)}"></progress>
-    <p>失败 listing：{int(s.get("failed",b.get("failed",0)) or 0)} · 自动轮次：{int(s.get("cycle",0) or 0)}</p>
+    <p>失败 listing：{live_failed} · 自动轮次：{int(s.get("cycle",0) or 0)}</p>
     {btn}{stop}</div>
     <div class="c"><div class="ok"><b>今晚目标：</b>已有缓存不重下；全历史 manifest 重建后持续补缺口。达到95%/90%门槛即停止扩展，下一步才运行冻结规则的大样本 OOS / Daily-MTM。</div></div>
     <script>setTimeout(()=>location.reload(),10000)</script></div></body></html>"""
