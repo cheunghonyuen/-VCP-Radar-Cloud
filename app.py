@@ -6160,7 +6160,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.17</h1><div class="muted">Production Candidate · 主系统已冻结当前最佳规则；研究分支继续独立测试，不阻塞生产版</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.17</h1><div class="muted">Production Candidate · 主规则已冻结；今晚可运行全历史股票池 Final Validation，不调参数</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -12918,13 +12918,16 @@ V615B_GO = float(os.environ.get("V615B_COVERAGE_GO", "0.80"))
 V615B_LOCKBOX = float(os.environ.get("V615B_COVERAGE_LOCKBOX", "0.95"))
 V615B_WORKERS = max(1, int(os.environ.get("V615B_WORKERS", "2")))
 # Use the account-safe Tiingo throttle already configured in the app unless explicitly overridden.
-V615B_REQUEST_GAP = float(os.environ.get("V615B_REQUEST_GAP_SECONDS", str(current_gap)))
+# V6.17 overnight full-history build uses its own conservative throttle.
+# Default 1.5 seconds/request (~2400/hour max before network latency); override only with V617_FULL_REQUEST_GAP_SECONDS.
+V615B_REQUEST_GAP = max(0.5, float(os.environ.get("V617_FULL_REQUEST_GAP_SECONDS", "1.5")))
 V615B_MAX_RETRIES = max(1, int(os.environ.get("V615B_MAX_RETRIES", "3")))
 V615B_MIN_BARS = max(5, int(os.environ.get("V615B_MIN_BARS", "20")))
 # V6.15B.3: validate the data pipeline on a deliberately small, balanced sample first.
 V615B_VALIDATION_N = max(20, int(os.environ.get("V615B_VALIDATION_N", "200")))
 V615B_VALIDATION_ENDED_SHARE = min(0.80, max(0.20, float(os.environ.get("V615B_VALIDATION_ENDED_SHARE", "0.50"))))
-V615B_VALIDATION_MODE = os.environ.get("V615B_VALIDATION_MODE", "1").strip().lower() not in ("0","false","no","off")
+# V6.17 Final Validation: FULL historical universe. Small-validation mode is frozen OFF.
+V615B_VALIDATION_MODE = False
 v615b_thread = None
 v615b_rate_lock = threading.Lock()
 v615b_last_request = 0.0
@@ -13150,19 +13153,21 @@ def _v615b_snapshot_coverage(M):
 
 
 def _v615b_update_summary(M,t0=None,message=None,status=None,current=""):
-    if M is None or M.empty:return _v615b_write_status(status=status or "idle",message=message or "无manifest")
+    if M is None or M.empty:
+        return _v615b_write_status(status=status or "idle",message=message or "无manifest")
     verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
     ended=M["ended"].astype(str).str.lower().isin(["true","1","yes"])
-    C=_v615b_snapshot_coverage(M)
-    hist=C[pd.to_datetime(C["snapshot"]).dt.year<=2020] if len(C) else C
-    cov=float(hist.coverage.median()) if len(hist) else 0.0
-    ev=pd.to_numeric(C["ended_coverage"],errors="coerce").dropna() if len(C) else pd.Series(dtype=float)
-    ended_cov=float(ev.median()) if len(ev) else 0.0
-    return _v615b_write_status(status=status or "running",message=message or "Historical Cache Builder",
+    # Fast O(1)-style aggregate for overnight progress. Full snapshot coverage is written at completion.
+    cov=float(verified.mean()) if len(M) else 0.0
+    ended_cov=float(verified[ended].mean()) if ended.any() else 0.0
+    return _v615b_write_status(
+        status=status or "running",message=message or "Historical Cache Builder",
         processed=int((M.status.astype(str)!="PENDING").sum()),total=int(len(M)),current=current,
         completed=int(verified.sum()),failed=int(M.status.astype(str).eq("FAILED").sum()),
-        ended_completed=int((verified & ended).sum()),ended_total=int(ended.sum()),coverage=cov,ended_coverage=ended_cov,
-        elapsed_sec=(round(time.time()-t0,1) if t0 else 0),error=None)
+        ended_completed=int((verified & ended).sum()),ended_total=int(ended.sum()),
+        coverage=cov,ended_coverage=ended_cov,
+        elapsed_sec=(round(time.time()-t0,1) if t0 else 0),error=None
+    )
 
 
 def _v615b_worker(force=False):
@@ -13224,7 +13229,10 @@ def _v615b_worker(force=False):
                     pd.DataFrame(failures).to_csv(V615B_FAILURES,mode="a",header=not V615B_FAILURES.exists(),index=False);failures=[]
         _v615b_atomic_manifest(M)
         if failures:pd.DataFrame(failures).to_csv(V615B_FAILURES,mode="a",header=not V615B_FAILURES.exists(),index=False)
-        s=_v615b_update_summary(M,t0,"V6.15B Historical Cache Builder 完成",status="done",current="")
+        # Expensive point-in-time coverage audit only once at the end, not once per request.
+        try:_v615b_snapshot_coverage(M)
+        except Exception:traceback.print_exc()
+        s=_v615b_update_summary(M,t0,"V6.17 Full Historical Cache Builder 完成",status="done",current="")
         if V615B_VALIDATION_MODE:
             verified_mask=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
             ended_mask=M["ended"].astype(str).str.lower().isin(["true","1","yes"])
@@ -17497,6 +17505,164 @@ def _deferred_app_startup():
 # Never block Gunicorn/Railway startup on recovery, Volume I/O, scheduler, or cache work.
 threading.Thread(target=_deferred_app_startup, daemon=True).start()
 
+
+# ==================== V6.17 OVERNIGHT FULL HISTORY VALIDATION ====================
+V617O_DIR=DATA_DIR/"v617_overnight_full_validation"
+V617O_STATUS=V617O_DIR/"status.json"
+V617O_STOP=V617O_DIR/"STOP"
+v617o_thread=None
+
+def _v617o_status():
+    d={"status":"idle","message":"尚未启动全历史扩展","cycle":0,"coverage":0.0,"ended_coverage":0.0,
+       "completed":0,"total":0,"failed":0,"error":None}
+    if V617O_STATUS.exists():
+        try:d.update(json.loads(V617O_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return d
+
+def _v617o_write(**kw):
+    V617O_DIR.mkdir(parents=True,exist_ok=True)
+    d=_v617o_status();d.update(kw)
+    V617O_STATUS.write_text(json.dumps(d,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return d
+
+def _v617o_manifest_is_full():
+    if not V615B_MANIFEST.exists():return False
+    try:
+        m=pd.read_csv(V615B_MANIFEST)
+        # The old small validator used ~200 listings. A genuine full master is thousands.
+        return len(m)>=1000
+    except Exception:return False
+
+def _v617o_prepare_full_manifest():
+    # Preserve all price CSVs. Only manifest/queue are archived if they are the old small-validation set.
+    if _v617o_manifest_is_full():return
+    V615B_DIR.mkdir(parents=True,exist_ok=True)
+    stamp=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    for p in [V615B_MANIFEST,V615B_QUEUE]:
+        if p.exists():
+            try:p.replace(V615B_DIR/f"{p.stem}_small_backup_{stamp}{p.suffix}")
+            except Exception:pass
+    # force=True rebuilds the master manifest only; worker itself is later run force=False,
+    # so existing MARKET_DIR cache and V615B price files are still reused.
+    _v615b_prepare_universe(force=True)
+
+def _v617o_supervisor():
+    global v617o_thread
+    try:
+        if V617O_STOP.exists():
+            try:V617O_STOP.unlink()
+            except Exception:pass
+        _v617o_write(status="running",message="建立/恢复完整历史 Universe",cycle=0,error=None)
+        _v617o_prepare_full_manifest()
+
+        cycle=0
+        while True:
+            if V617O_STOP.exists():
+                _v617o_write(status="paused",message="已手动暂停；缓存和进度全部保留")
+                return
+
+            cycle+=1
+            _v617o_write(status="running",message=f"第 {cycle} 轮补历史数据",cycle=cycle,error=None)
+
+            # Run existing proven cache worker synchronously inside supervisor.
+            _v615b_worker(False)
+            s=_v615b_status()
+            cov=float(s.get("coverage",0) or 0)
+            ecov=float(s.get("ended_coverage",0) or 0)
+            _v617o_write(status="running",message=str(s.get("message","")),
+                         cycle=cycle,coverage=cov,ended_coverage=ecov,
+                         completed=int(s.get("completed",0) or 0),total=int(s.get("total",0) or 0),
+                         failed=int(s.get("failed",0) or 0))
+
+            # Final-validation coverage gates.
+            if cov>=0.95 and ecov>=0.90:
+                _v617o_write(status="coverage_ready",
+                    message="历史覆盖达标：可以进入冻结大样本 OOS / Daily-MTM",
+                    coverage=cov,ended_coverage=ecov,cycle=cycle)
+                return
+
+            st=str(s.get("status",""))
+            if st=="rate_limited":
+                # Safe hourly cooldown; no user interaction needed overnight.
+                _v617o_write(status="cooldown",message="Tiingo 429：进度已保存，自动等待65分钟后继续",
+                             coverage=cov,ended_coverage=ecov,cycle=cycle)
+                for _ in range(65):
+                    if V617O_STOP.exists():
+                        _v617o_write(status="paused",message="冷却期间已手动暂停")
+                        return
+                    time.sleep(60)
+                continue
+
+            # If a full pass ended below coverage because some listings failed,
+            # retry failures after a shorter cooldown. Existing verified files are skipped.
+            if st in ("done","error"):
+                if int(s.get("failed",0) or 0)>0:
+                    _v617o_write(status="cooldown",message="仍有失败 listing；20分钟后自动重试失败项",
+                                 coverage=cov,ended_coverage=ecov,cycle=cycle)
+                    for _ in range(20):
+                        if V617O_STOP.exists():return
+                        time.sleep(60)
+                    continue
+                # No failures but still below gate: stop and report; don't loop forever.
+                _v617o_write(status="needs_review",
+                    message="全队列已完成但覆盖仍未达最终门槛；需要检查缺失/歧义 listing",
+                    coverage=cov,ended_coverage=ecov,cycle=cycle)
+                return
+
+            time.sleep(30)
+    except Exception as ex:
+        traceback.print_exc()
+        _v617o_write(status="error",message="Overnight Full Validation 失败",
+                     error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v617o_thread=None
+
+def _v617o_start():
+    global v617o_thread
+    if v617o_thread is not None and v617o_thread.is_alive():return False
+    v617o_thread=threading.Thread(target=_v617o_supervisor,daemon=True)
+    v617o_thread.start();return True
+
+@APP.route("/v617/overnight/run",methods=["GET","POST"])
+def v617_overnight_run():
+    _v617o_start();return redirect("/v617/overnight")
+
+@APP.get("/v617/overnight/stop")
+def v617_overnight_stop():
+    V617O_DIR.mkdir(parents=True,exist_ok=True);V617O_STOP.write_text("stop",encoding="utf-8")
+    try:V615B_STOP.write_text("stop",encoding="utf-8")
+    except Exception:pass
+    return redirect("/v617/overnight")
+
+@APP.get("/api/v617/overnight/status")
+def v617_overnight_status_api():
+    return jsonify(_v617o_status())
+
+@APP.get("/v617/overnight")
+def v617_overnight_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v617o_status();b=_v615b_status()
+    cov=float(s.get("coverage",b.get("coverage",0)) or 0)
+    ecov=float(s.get("ended_coverage",b.get("ended_coverage",0)) or 0)
+    running=s.get("status") in ("running","cooldown")
+    btn="" if running else '<a href="/v617/overnight/run"><button>开始 / 继续整晚扩展</button></a>'
+    stop='<a href="/v617/overnight/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
+    <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
+    <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
+    <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；遇到429自动保存并等待后继续。</div></div>
+    <div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(s.get("message"))}</p>
+    <p>完整历史股票：{int(s.get("completed",b.get("completed",0)) or 0)} / {int(s.get("total",b.get("total",0)) or 0)}</p>
+    <p>全部覆盖：<b>{cov:.1%}</b>（最终要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
+    <p>退市/结束股票覆盖：<b>{ecov:.1%}</b>（最终要求 ≥90%）</p><progress max="1" value="{min(1,ecov)}"></progress>
+    <p>失败 listing：{int(s.get("failed",b.get("failed",0)) or 0)} · 自动轮次：{int(s.get("cycle",0) or 0)}</p>
+    {btn}{stop}</div>
+    <div class="c"><div class="ok"><b>今晚目标：</b>已有缓存不重下；全历史 manifest 重建后持续补缺口。达到95%/90%门槛即停止扩展，下一步才运行冻结规则的大样本 OOS / Daily-MTM。</div></div>
+    <script>setTimeout(()=>location.reload(),10000)</script></div></body></html>"""
+
+
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
@@ -17526,6 +17692,6 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/overnight">🌙 整晚全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
