@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6135-shortcut" style="border:3px solid #9333ea"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.13.5 Immediate Failure Autopsy</h2><div class="muted">Fast Replay：优先保住 Big Winner，再找能排除 Immediate Failure 的进场前特征</div></div><a href="/v6135/immediate-failure-autopsy"><button type="button">打开 V6.13.5</button></a></div></div>
 <div class="card" id="v6134-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.4 Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：Development 定Cut，未来年份只验证</div></div><a href="/v6134/entry-extension-holdout"><button type="button">打开 V6.13.4</button></a></div></div>
 <div class="card" id="v6133-shortcut" style="border:3px solid #7c3aed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.13.3 META Failure Autopsy</h2><div class="muted">Fast Replay：冻结META，找 Loser vs Big Winner 的进场前差异；不调参数</div></div><a href="/v6133/failure-autopsy"><button type="button">打开 V6.13.3</button></a></div></div>
 <div class="card" id="v6132-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.13.2 Fast Replay + Winner Management</h2><div class="muted">不重跑选股：冻结 V6.13.1 META，直接测试 10MA/20MA Winner Exit</div></div><a href="/v6132/winner-replay"><button type="button">打开 V6.13.2</button></a></div></div>
@@ -9943,6 +9944,188 @@ def v6132_page():
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
 
 
+
+
+
+# ================= V6.13.5 IMMEDIATE FAILURE VS BIG WINNER · FAST AUTOPSY =================
+# Diagnostic only. Priority: preserve big winners first, then reject immediate failures.
+V6135_DIR = DATA_DIR / "jlaw_v6135_immediate_failure_autopsy"
+V6135_STATUS = V6135_DIR / "status.json"
+V6135_RESULT = V6135_DIR / "result.json"
+V6135_DETAIL = V6135_DIR / "diagnostic.csv"
+v6135_thread = None
+
+def _v6135_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"error":None,"elapsed_sec":0}
+    if V6135_STATUS.exists():
+        try:s.update(json.loads(V6135_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6135_write_status(**kw):
+    V6135_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6135_status();s.update(kw)
+    V6135_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6135_compute():
+    global v6135_thread
+    t0=time.time()
+    try:
+        if not V6133_DETAIL.exists():
+            raise RuntimeError("缺少 V6.13.3 features.csv；请先跑 V6.13.3")
+        F=pd.read_csv(V6133_DETAIL)
+        for c in ["return_pct","mfe","initial_risk","support_count","support_cluster","pullback_depth",
+                  "vol_vs_v20","vol_vs_breakout","rs","breakout_volratio","entry_extension",
+                  "entry_vs_ma10","entry_vs_ma20","preday_vol_vs_v20","breakout_to_entry_days"]:
+            if c in F.columns:F[c]=pd.to_numeric(F[c],errors="coerce")
+        if "group" not in F.columns:raise RuntimeError("features.csv 缺少 group")
+        IF=F[F["group"].astype(str).eq("IMMEDIATE_FAILURE")].copy()
+        BW=F[pd.to_numeric(F["mfe"],errors="coerce")>=.20].copy()
+        if len(IF)<20 or len(BW)<3:raise RuntimeError("Immediate Failure / Big Winner 样本不足")
+        _v6135_write_status(status="running",message="比较 Immediate Failure vs Big Winner",processed=0,total=3,error=None,elapsed_sec=0)
+
+        features=["initial_risk","support_count","support_cluster","pullback_depth","vol_vs_v20","vol_vs_breakout",
+                  "rs","breakout_volratio","entry_extension","entry_vs_ma10","entry_vs_ma20",
+                  "preday_vol_vs_v20","breakout_to_entry_days"]
+
+        comparisons=[]
+        for f in features:
+            a=pd.to_numeric(IF[f],errors="coerce").dropna()
+            b=pd.to_numeric(BW[f],errors="coerce").dropna()
+            allv=pd.to_numeric(F[f],errors="coerce").dropna()
+            if len(a)<10 or len(b)<3 or len(allv)<30:continue
+            sd=float(allv.std(ddof=0)) if len(allv)>1 else 0
+            effect=float((b.median()-a.median())/sd) if sd>1e-12 else 0.0
+            comparisons.append(dict(
+                feature=f,
+                immediate_n=int(len(a)),bigwinner_n=int(len(b)),
+                immediate_median=float(a.median()),
+                bigwinner_median=float(b.median()),
+                effect=effect
+            ))
+        comparisons=sorted(comparisons,key=lambda x:abs(x["effect"]),reverse=True)
+
+        _v6135_write_status(status="running",message="做 Big Winner 优先的单因子筛选诊断",processed=1,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        # Discovery only: median cut from full sample, both directions.
+        # Rank by preserving BW first; then immediate-failure rejection.
+        single=[]
+        for f in features:
+            x=pd.to_numeric(F[f],errors="coerce")
+            if x.notna().sum()<60:continue
+            cut=float(x.median())
+            for direction,mask in [("LOW",x<cut),("HIGH",x>=cut)]:
+                kept=F[mask.fillna(False)]
+                bw_keep=int((pd.to_numeric(kept["mfe"],errors="coerce")>=.20).sum())/max(1,len(BW))
+                if_reject=1-int((kept["group"].astype(str)=="IMMEDIATE_FAILURE").sum())/max(1,len(IF))
+                single.append(dict(
+                    feature=f,direction=direction,cut=cut,trades=int(len(kept)),
+                    bigwinner_retention=float(bw_keep),
+                    immediate_failure_rejection=float(if_reject),
+                    avg_return=float(pd.to_numeric(kept["return_pct"],errors="coerce").mean()),
+                    pf=float(_v6134_pf(kept["return_pct"]))
+                ))
+        single=sorted(single,key=lambda x:(x["bigwinner_retention"]>=.85,x["bigwinner_retention"],x["immediate_failure_rejection"]),reverse=True)
+
+        # Two-factor combinations only from candidates preserving >=85% BW individually.
+        candidates=[x for x in single if x["bigwinner_retention"]>=.85][:8]
+        combos=[]
+        for i in range(len(candidates)):
+            for j in range(i+1,len(candidates)):
+                a,b=candidates[i],candidates[j]
+                if a["feature"]==b["feature"]:continue
+                xa=pd.to_numeric(F[a["feature"]],errors="coerce")
+                xb=pd.to_numeric(F[b["feature"]],errors="coerce")
+                ma=(xa<a["cut"]) if a["direction"]=="LOW" else (xa>=a["cut"])
+                mb=(xb<b["cut"]) if b["direction"]=="LOW" else (xb>=b["cut"])
+                kept=F[(ma & mb).fillna(False)]
+                if len(kept)<25:continue
+                bw_keep=int((pd.to_numeric(kept["mfe"],errors="coerce")>=.20).sum())/max(1,len(BW))
+                if_reject=1-int((kept["group"].astype(str)=="IMMEDIATE_FAILURE").sum())/max(1,len(IF))
+                combos.append(dict(
+                    rule=f"{a['feature']} {a['direction']} {a['cut']:.4f} + {b['feature']} {b['direction']} {b['cut']:.4f}",
+                    trades=int(len(kept)),
+                    bigwinner_retention=float(bw_keep),
+                    immediate_failure_rejection=float(if_reject),
+                    avg_return=float(pd.to_numeric(kept["return_pct"],errors="coerce").mean()),
+                    pf=float(_v6134_pf(kept["return_pct"]))
+                ))
+        combos=sorted(combos,key=lambda x:(x["bigwinner_retention"]>=.85,x["bigwinner_retention"],x["immediate_failure_rejection"]),reverse=True)
+
+        _v6135_write_status(status="running",message="汇总优先保留 Big Winner 的候选",processed=2,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            full_scan=False,
+            immediate_failures=int(len(IF)),
+            bigwinners=int(len(BW)),
+            comparisons=comparisons,
+            single_factor_candidates=single[:20],
+            two_factor_candidates=combos[:20],
+            note="Discovery only. Priority is Big Winner retention. No candidate is approved without separate temporal holdout."
+        )
+        V6135_DIR.mkdir(parents=True,exist_ok=True)
+        V6135_DETAIL.write_text(F.to_csv(index=False),encoding="utf-8")
+        V6135_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6135_write_status(status="done",message="V6.13.5 Immediate Failure Autopsy 完成",processed=3,total=3,elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v6135_write_status(status="error",message="V6.13.5 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v6135_thread=None
+
+def _v6135_start():
+    global v6135_thread
+    if v6135_thread is not None and v6135_thread.is_alive():return False
+    v6135_thread=threading.Thread(target=_v6135_compute,daemon=True)
+    v6135_thread.start();return True
+
+@APP.post("/v6135/run")
+def v6135_run():
+    _v6135_start();return redirect("/v6135/immediate-failure-autopsy")
+
+@APP.get("/api/v6135/status")
+def v6135_status_api():
+    return jsonify(_v6135_status())
+
+@APP.get("/v6135/immediate-failure-autopsy")
+def v6135_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v6135_status();r=None
+    if V6135_RESULT.exists():
+        try:r=json.loads(V6135_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    comp_html="";single_html="";combo_html=""
+    if r:
+        for x in r.get("comparisons",[])[:15]:
+            comp_html+=(
+                f"<tr><td><b>{esc(x['feature'])}</b></td><td>{x['immediate_n']}</td><td>{x['immediate_median']:.3f}</td>"
+                f"<td>{x['bigwinner_n']}</td><td>{x['bigwinner_median']:.3f}</td><td><b>{x['effect']:+.2f}</b></td></tr>"
+            )
+        for x in r.get("single_factor_candidates",[])[:15]:
+            single_html+=(
+                f"<tr><td><b>{esc(x['feature'])}</b></td><td>{esc(x['direction'])}</td><td>{x['cut']:.3f}</td>"
+                f"<td>{x['trades']}</td><td>{x['bigwinner_retention']:.1%}</td><td>{x['immediate_failure_rejection']:.1%}</td>"
+                f"<td>{x['pf']:.2f}</td><td>{x['avg_return']:.2%}</td></tr>"
+            )
+        for x in r.get("two_factor_candidates",[])[:12]:
+            combo_html+=(
+                f"<tr><td><b>{esc(x['rule'])}</b></td><td>{x['trades']}</td><td>{x['bigwinner_retention']:.1%}</td>"
+                f"<td>{x['immediate_failure_rejection']:.1%}</td><td>{x['pf']:.2f}</td><td>{x['avg_return']:.2%}</td></tr>"
+            )
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6135/run"><button>⚡ 跑 Immediate Failure Autopsy</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧬 V6.13.5 · Immediate Failure vs Big Winner</h1><div class="info"><b>目标不是追 PF。</b>157笔 META 中优先找出怎样保住 Big Winner，同时尽量排除 Immediate Failure。Entry / Stop / Exit 全冻结。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div>
+<div class="c"><h2>Immediate Failure vs Big Winner 特征差异</h2><div class="scroll"><table><tr><th>特征</th><th>IF样本</th><th>IF Median</th><th>BW样本</th><th>BW Median</th><th>差异强度</th></tr>{comp_html}</table></div></div>
+<div class="c"><h2>单因子候选 · Big Winner优先</h2><div class="warn">这里只是 discovery。排序第一优先是 Big Winner 保留率，不是 PF。任何候选必须再做时间 Holdout。</div><div class="scroll"><table><tr><th>特征</th><th>方向</th><th>Cut</th><th>交易</th><th>BW保留</th><th>Immediate Failure排除</th><th>PF</th><th>Avg Return</th></tr>{single_html}</table></div></div>
+<div class="c"><h2>两因子组合候选 · 仍然只是 discovery</h2><div class="scroll"><table><tr><th>规则</th><th>交易</th><th>BW保留</th><th>IF排除</th><th>PF</th><th>Avg Return</th></tr>{combo_html}</table></div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6135/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>'''
 
 
 # ================= V6.13.4 ENTRY EXTENSION · STRICT HOLDOUT =================
