@@ -9980,6 +9980,10 @@ V615B_WORKERS = max(1, int(os.environ.get("V615B_WORKERS", "2")))
 V615B_REQUEST_GAP = float(os.environ.get("V615B_REQUEST_GAP_SECONDS", str(current_gap)))
 V615B_MAX_RETRIES = max(1, int(os.environ.get("V615B_MAX_RETRIES", "3")))
 V615B_MIN_BARS = max(5, int(os.environ.get("V615B_MIN_BARS", "20")))
+# V6.15B.3: validate the data pipeline on a deliberately small, balanced sample first.
+V615B_VALIDATION_N = max(20, int(os.environ.get("V615B_VALIDATION_N", "200")))
+V615B_VALIDATION_ENDED_SHARE = min(0.80, max(0.20, float(os.environ.get("V615B_VALIDATION_ENDED_SHARE", "0.50"))))
+V615B_VALIDATION_MODE = os.environ.get("V615B_VALIDATION_MODE", "1").strip().lower() not in ("0","false","no","off")
 v615b_thread = None
 v615b_rate_lock = threading.Lock()
 v615b_last_request = 0.0
@@ -10017,11 +10021,16 @@ def _v615b_listing_id(ticker,start,end):
 
 
 def _v615b_prepare_universe(force=False):
+    # V6.15B.3 uses its own small-validation manifest. Do not inherit the old 16,450-row
+    # manifest, otherwise the UI/worker would silently continue the full-market run.
     if V615B_QUEUE.exists() and V615B_MANIFEST.exists() and not force:
         try:
             q=pd.read_csv(V615B_QUEUE);m=pd.read_csv(V615B_MANIFEST)
-            if len(q)>1000 and len(m)>1000:return q,m
+            if len(q)>0 and len(m)>0:
+                if (not V615B_VALIDATION_MODE) or len(m)<=V615B_VALIDATION_N:
+                    return q,m
         except Exception:pass
+
     raw=_v615a_download_master(False)
     M=_v615a_normalize_master(raw)
     stocks=M[M["assetType"].astype(str).str.upper().eq("STOCK")].copy()
@@ -10033,18 +10042,56 @@ def _v615b_prepare_universe(force=False):
     stocks["endDate"]=pd.to_datetime(stocks["endDate"],errors="coerce").dt.tz_localize(None)
     stocks=stocks.dropna(subset=["startDate","endDate"])
     stocks["listing_id"]=[_v615b_listing_id(t,s,e) for t,s,e in zip(stocks.ticker,stocks.startDate,stocks.endDate)]
-    # Duplicate/recycled symbols are retained as separate listing rows, never collapsed silently.
     counts=stocks.groupby("ticker")["listing_id"].transform("nunique")
     stocks["ticker_reused_or_duplicate"]=(counts>1)
     stocks["ended"]=(stocks["endDate"] < today-pd.Timedelta(days=14))
-    # Prioritize ended/delisted first, then older histories. This attacks survivorship bias first.
-    stocks=stocks.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).reset_index(drop=True)
+
+    if V615B_VALIDATION_MODE:
+        # Balanced, deterministic sample: 50% ended/delisted + 50% active by default.
+        # Spread selections across listing start years instead of taking only the oldest names.
+        stocks["start_year"]=stocks["startDate"].dt.year.fillna(0).astype(int)
+        ended=stocks[stocks["ended"]].copy()
+        active=stocks[~stocks["ended"]].copy()
+        n_end=min(len(ended), int(round(V615B_VALIDATION_N*V615B_VALIDATION_ENDED_SHARE)))
+        n_act=min(len(active), V615B_VALIDATION_N-n_end)
+        if n_end+n_act < V615B_VALIDATION_N:
+            extra=V615B_VALIDATION_N-(n_end+n_act)
+            if len(ended)-n_end >= extra:n_end+=extra
+            elif len(active)-n_act >= extra:n_act+=extra
+
+        def _spread_sample(df,n):
+            if n<=0 or df.empty:return df.iloc[0:0].copy()
+            # Stable hash ordering within years avoids cherry-picking winners/losers.
+            z=df.copy()
+            z["_h"]=z["listing_id"].astype(str).map(lambda s:int(__import__("hashlib").sha256(s.encode()).hexdigest()[:12],16))
+            years=sorted(z["start_year"].unique())
+            buckets=[]
+            remaining=n
+            for j,y in enumerate(years):
+                g=z[z["start_year"].eq(y)].sort_values("_h")
+                slots=max(0, int(round(remaining/max(1,len(years)-j))))
+                take=min(len(g),slots)
+                if take:buckets.append(g.head(take));remaining-=take
+            chosen=pd.concat(buckets,ignore_index=False) if buckets else z.iloc[0:0]
+            if len(chosen)<n:
+                rest=z.drop(index=chosen.index,errors="ignore").sort_values("_h").head(n-len(chosen))
+                chosen=pd.concat([chosen,rest])
+            return chosen.head(n).drop(columns=["_h"],errors="ignore")
+
+        stocks=pd.concat([_spread_sample(ended,n_end),_spread_sample(active,n_act)],ignore_index=True)
+        stocks=stocks.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).reset_index(drop=True)
+    else:
+        stocks=stocks.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).reset_index(drop=True)
+
     manifest=stocks[["listing_id","ticker","exchange","startDate","endDate","ended","ticker_reused_or_duplicate"]].copy()
     manifest["status"]="PENDING";manifest["bars"]=0;manifest["cache_start"]="";manifest["cache_end"]=""
     manifest["source"]="";manifest["verified"]=False;manifest["error"]=""
     queue=manifest[["listing_id","ticker","startDate","endDate","ended","ticker_reused_or_duplicate"]].copy()
     V615B_DIR.mkdir(parents=True,exist_ok=True);V615B_PRICE_DIR.mkdir(parents=True,exist_ok=True)
     manifest.to_csv(V615B_MANIFEST,index=False);queue.to_csv(V615B_QUEUE,index=False)
+    _v615b_write_status(validation_mode=bool(V615B_VALIDATION_MODE),validation_target=int(V615B_VALIDATION_N),
+                        validation_ended_share=float(V615B_VALIDATION_ENDED_SHARE),
+                        message=f"V6.15B.3 Small Validation 已建立 {len(manifest)} 个 listing")
     return queue,manifest
 
 
@@ -10184,7 +10231,11 @@ def _v615b_worker(force=False):
         if V615B_STOP.exists():
             try:V615B_STOP.unlink()
             except Exception:pass
-        _,M=_v615b_prepare_universe(force=False)
+        # If V6.15B.2 left the 16,450-row manifest, rebuild ONLY the manifest/queue
+        # for the small validation. Existing price files remain reusable and are not deleted.
+        oldM=_v615b_read_manifest()
+        rebuild_small=bool(V615B_VALIDATION_MODE and (oldM.empty or len(oldM)>V615B_VALIDATION_N))
+        _,M=_v615b_prepare_universe(force=rebuild_small)
         # Reconcile already-written files after crash before starting new API requests.
         for i,row in M.iterrows():
             path=V615B_PRICE_DIR/f"{row.listing_id}.csv"
@@ -10233,8 +10284,16 @@ def _v615b_worker(force=False):
         _v615b_atomic_manifest(M)
         if failures:pd.DataFrame(failures).to_csv(V615B_FAILURES,mode="a",header=not V615B_FAILURES.exists(),index=False)
         s=_v615b_update_summary(M,t0,"V6.15B Historical Cache Builder 完成",status="done",current="")
-        verdict="GO_V615C_BIG_WINNER_BENCHMARK" if s.get("coverage",0)>=V615B_GO and s.get("ended_coverage",0)>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE"
-        _v615b_write_status(verdict=verdict)
+        if V615B_VALIDATION_MODE:
+            verified_mask=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+            ended_mask=M["ended"].astype(str).str.lower().isin(["true","1","yes"])
+            all_rate=float(verified_mask.mean()) if len(M) else 0.0
+            ended_rate=float(verified_mask[ended_mask].mean()) if ended_mask.any() else 0.0
+            verdict=("PASS_SMALL_VALIDATION" if all_rate>=0.80 and ended_rate>=0.80 else "NO_GO_FIX_SMALL_VALIDATION")
+            _v615b_write_status(verdict=verdict,validation_verified_rate=all_rate,validation_ended_verified_rate=ended_rate)
+        else:
+            verdict="GO_V615C_BIG_WINNER_BENCHMARK" if s.get("coverage",0)>=V615B_GO and s.get("ended_coverage",0)>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE"
+            _v615b_write_status(verdict=verdict)
     except Exception as ex:
         traceback.print_exc();_v615b_write_status(status="error",message="V6.15B Builder 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,1))
     finally:v615b_thread=None
@@ -10278,9 +10337,9 @@ def v615b_page():
         except Exception:pass
     total=int(s.get("total",0));done=int(s.get("completed",0));pct=(done/total if total else 0.0)
     cov=float(s.get("coverage",0) or 0);ecov=float(s.get("ended_coverage",0) or 0)
-    verdict=s.get("verdict") or ("GO_V615C_BIG_WINNER_BENCHMARK" if cov>=V615B_GO and ecov>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE")
+    verdict=s.get("verdict") or ("SMALL_VALIDATION_NOT_RUN" if V615B_VALIDATION_MODE else ("GO_V615C_BIG_WINNER_BENCHMARK" if cov>=V615B_GO and ecov>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE"))
     running=s.get("status") in ("running",)
-    controls='''<form method="post" action="/v615b/run"><button>▶ 建立 / 继续 Historical Cache</button></form>'''
+    controls='''<form method="post" action="/v615b/run"><button>▶ 开始 / 继续 200只 Small Validation</button></form>'''
     if running:controls='''<form method="post" action="/v615b/stop"><button class="stop">⏸ 安全暂停</button></form>'''
     retry='' if running else '''<form method="post" action="/v615b/retry"><button class="secondary">↻ 重试失败项并继续</button></form>'''
     rows=""
@@ -10294,7 +10353,7 @@ def v615b_page():
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800;margin:4px}}.secondary{{background:#64748b}}.stop{{background:#b91c1c}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:21px}}.bar{{height:14px;background:#e2e8f0;border-radius:8px;overflow:hidden}}.bar i{{display:block;height:100%;width:{pct:.1%};background:#0f766e}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
 <a href="/">← 返回主页</a>
-<div class="c"><h1>🗄️ V6.15B · Historical Price Cache Builder</h1><div class="info"><b>只补数据，不测试策略。</b>退市/结束交易股票优先；每个 listing 独立保存，ticker 重用不再静默覆盖；支持断点续传、429安全暂停、失败记录和文件验证。只有历史Universe与退市股覆盖都≥{V615B_GO:.0%}，才允许进入 Big Winner Benchmark。</div></div>
+<div class="c"><h1>🧪 V6.15B.3 · Small Historical Validation</h1><div class="info"><b>先小量认证，不跑16,450全量。</b>默认验证 {V615B_VALIDATION_N} 个 listing，约 {V615B_VALIDATION_ENDED_SHARE:.0%} 为退市/结束交易、其余为存活股，并跨历史年份稳定抽样。只验证 Point-in-Time Universe → 历史价格 → 文件完整性 → 退市覆盖；不测试选股策略、不训练权重。支持已有缓存复用、断点续传和 Tiingo 429 安全暂停。</div></div>
 <div class="c"><h2>状态：{esc(s.get('status'))}</h2><p>{esc(s.get('message'))}　{esc(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p><div style="display:flex;flex-wrap:wrap">{controls}{retry}</div><div class="bar"><i></i></div><p>{done:,}/{total:,} verified · {pct:.1%}</p></div>
 <div class="c"><h2>Verdict：{esc(verdict)}</h2><div class="grid"><div class="m"><small>Verified Listings</small><b>{done:,}</b></div><div class="m"><small>Failed</small><b>{int(s.get('failed',0)):,}</b></div><div class="m"><small>Historical Coverage</small><b>{cov:.1%}</b></div><div class="m"><small>Ended/Delisted Coverage</small><b>{ecov:.1%}</b></div></div></div>
 <div class="c"><div class="warn"><b>重要：</b>这一步可能需要较长时间，速度受 Tiingo 账户请求限额约束。程序不会为了快而绕过限流；每10项保存一次 manifest，Railway 重启后按“继续”即可。已存在且验证通过的数据不会重复下载。</div></div>
