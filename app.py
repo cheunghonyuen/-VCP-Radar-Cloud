@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616c-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C</button></a></div></div>
 <div class="card" id="v616b-shortcut" style="border:3px solid #ef4444"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.16B Failure / Stop Research</h2><div class="muted">冻结 Big Winner DNA · -4/-5/-6/-7% + Structural Stop · 检查误杀大赢家</div></div><a href="/v616b/stop-research"><button type="button">打开 V6.16B</button></a></div></div>
 <div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
 <div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
@@ -9982,6 +9983,139 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16C EARLY FAILURE SIGNATURE RESEARCH =================
+V616C_DIR=DATA_DIR/'jlaw_v616c_early_failure'
+V616C_STATUS=V616C_DIR/'status.json'; V616C_RESULT=V616C_DIR/'result.json'
+V616C_REPORT=V616C_DIR/'signature_report.csv'; V616C_DETAIL=V616C_DIR/'signature_detail.csv'
+v616c_thread=None
+
+def _v616c_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616C_STATUS.exists():
+        try:x.update(json.loads(V616C_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v616c_write(**kw):
+    V616C_DIR.mkdir(parents=True,exist_ok=True); x=_v616c_status(); x.update(kw)
+    V616C_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v616c_features(d,ei,px,day):
+    j=ei+day
+    if j>=len(d):return None
+    cur=d.iloc[ei:j+1]; ma10=d.close.rolling(10).mean(); ma20=d.close.rolling(20).mean(); v20=d.volume.rolling(20).mean()
+    cl=float(d.close.iloc[j]); op=float(d.open.iloc[j]); hi=float(cur.high.max()); lo=float(cur.low.min())
+    vr=float(d.volume.iloc[j]/v20.iloc[j]) if pd.notna(v20.iloc[j]) and v20.iloc[j]>0 else np.nan
+    g10=float(cl/ma10.iloc[j]-1) if pd.notna(ma10.iloc[j]) and ma10.iloc[j]>0 else np.nan
+    g20=float(cl/ma20.iloc[j]-1) if pd.notna(ma20.iloc[j]) and ma20.iloc[j]>0 else np.nan
+    return {'ret_now':cl/px-1,'mfe_now':hi/px-1,'mae_now':lo/px-1,'close_from_peak':cl/hi-1,
+            'max_close_gain':float(cur.close.max()/px-1),'vol_ratio':vr,'ma10_gap':g10,'ma20_gap':g20,
+            'heavy_red':bool(np.isfinite(vr) and cl<op and vr>=1.0)}
+
+def _v616c_signals(f):
+    return {'NEG_CLOSE':f['ret_now']<0,'LOSS_2':f['ret_now']<=-.02,'LOSS_3':f['ret_now']<=-.03,
+            'NO_FOLLOW_1':f['max_close_gain']<.01,'NO_FOLLOW_2':f['max_close_gain']<.02,
+            'PEAK_GIVEBACK_3':f['close_from_peak']<=-.03,'PEAK_GIVEBACK_5':f['close_from_peak']<=-.05,
+            'HEAVY_RED':f['heavy_red'],'BELOW_MA10':np.isfinite(f['ma10_gap']) and f['ma10_gap']<0,
+            'BELOW_MA20':np.isfinite(f['ma20_gap']) and f['ma20_gap']<0,
+            'NEG_AND_NOFOLLOW':f['ret_now']<0 and f['max_close_gain']<.02,
+            'LOSS2_AND_NOFOLLOW':f['ret_now']<=-.02 and f['max_close_gain']<.02,
+            'NEG_AND_HEAVY_RED':f['ret_now']<0 and f['heavy_red']}
+
+def _v616c_run():
+    global v616c_thread
+    t0=time.time()
+    try:
+        D=_v616b_build_entries(); ticks=sorted(D.ticker.unique()); rows=[]; days=[1,2,3,5]
+        _v616c_write(status='running',message='Replay -7% baseline → D1/D2/D3/D5 failure signatures',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+        for k,t in enumerate(ticks,1):
+            d=_v616a_price(t)
+            if d is not None:
+                im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+                for _,r in D[D.ticker.eq(t)].iterrows():
+                    dt=pd.Timestamp(r.obs_date).normalize()
+                    if dt not in im:continue
+                    oi=im[dt]
+                    if oi>=len(d)-61:continue
+                    E=_v616a_entries(d,oi); methods=['CONTROL','RE_STRENGTH'] if r['group']=='CORE_AB' else ['POWER_PLAY_PB']
+                    for em in methods:
+                        if em not in E:continue
+                        ei,px,delay=E[em]; base=_v616b_stop_path(d,ei,px,stop_pct=.07,horizon=60)
+                        if base is None:continue
+                        end=min(len(d)-1,ei+59)
+                        for day in days:
+                            f=_v616c_features(d,ei,px,day)
+                            if f is None:continue
+                            for sig,hit in _v616c_signals(f).items():
+                                realized=float(base['realized']); early=False; reason='BASE_STOP7'
+                                exi=ei+day+1
+                                if hit and exi<=end and not (base['stop_hit'] and base['exit_idx']<=exi):
+                                    realized=float(d.open.iloc[exi]/px-1); early=True; reason='EARLY_EXIT_NEXT_OPEN'
+                                rows.append({'ticker':t,'obs_date':str(dt.date()),'group':r['group'],'entry':em,'day':day,'signal':sig,
+                                             'hit':bool(hit),'early_exit':early,'reason':reason,'baseline_return':float(base['realized']),
+                                             'strategy_return':realized,'baseline_stop':bool(base['stop_hit']),
+                                             'bw20':bool(base['bw20']),'bw30':bool(base['bw30']),'bw50':bool(base['bw50']),**f})
+            _v616c_write(status='running',message='Replay -7% baseline → D1/D2/D3/D5 failure signatures',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+        X=pd.DataFrame(rows)
+        if X.empty:raise RuntimeError('没有生成 Early Failure 结果')
+        X.to_csv(V616C_DETAIL,index=False)
+        reps=[]
+        def st(v):
+            w=v[v>0];lo=v[v<=0];gp=float(w.sum()) if len(w) else 0;gl=abs(float(lo.sum())) if len(lo) else 0
+            return float(v.mean()),gp/gl if gl>0 else np.nan,float((v>0).mean()),float(w.mean()) if len(w) else 0,float(lo.mean()) if len(lo) else 0
+        for (grp,en,day,sig),g in X.groupby(['group','entry','day','signal']):
+            ba,bp,bw,baw,bal=st(g.baseline_return.astype(float)); sa,sp,sw,saw,sal=st(g.strategy_return.astype(float))
+            h=g[g.hit]; fail=g[g.baseline_stop]
+            reps.append({'group':grp,'entry':en,'day':int(day),'signal':sig,'n':len(g),'hit_n':len(h),'hit_rate':float(g.hit.mean()),
+                         'failure_precision':float(h.baseline_stop.mean()) if len(h) else np.nan,
+                         'failure_recall':float(fail.hit.mean()) if len(fail) else np.nan,
+                         'base_pf':bp,'strategy_pf':sp,'pf_delta':sp-bp if np.isfinite(sp) and np.isfinite(bp) else np.nan,
+                         'base_avg':ba,'strategy_avg':sa,'avg_delta':sa-ba,'strategy_winrate':sw,'strategy_avgwin':saw,'strategy_avgloss':sal,
+                         'kill_bw20':float(h.bw20.mean()) if len(h) else np.nan,'kill_bw30':float(h.bw30.mean()) if len(h) else np.nan,
+                         'kill_bw50':float(h.bw50.mean()) if len(h) else np.nan})
+        R=pd.DataFrame(reps);R['score']=R.avg_delta.fillna(-9)*100+R.pf_delta.fillna(-9)-R.kill_bw30.fillna(1)
+        R=R.sort_values(['group','entry','score'],ascending=[True,True,False]);R.to_csv(V616C_REPORT,index=False)
+        res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'rows':len(X),'methods':R.to_dict('records'),
+             'rule_note':'Frozen V6.15F DNA + V6.16A entries + terminal -7% stop. D1/D2/D3/D5 signals use only information known by that close; exits execute next open. No BE/Add/Winner Exit/sizing.',
+             'acceptance':'Must improve BOTH PF and Avg Return versus fixed -7%, with useful failure precision/recall and low BW20/30/50 kill rates. Otherwise keep simple -7%.',
+             'warning':'Discovery on existing 455-file cache; survivorship-bias limits remain. Later strict time/ticker OOS required.'}
+        V616C_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v616c_write(status='done',message='V6.16C Early Failure Signature Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+    except Exception as ex:
+        traceback.print_exc();_v616c_write(status='error',message='V6.16C 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v616c_thread=None
+
+def _v616c_start():
+    global v616c_thread
+    if v616c_thread is not None and v616c_thread.is_alive():return False
+    v616c_thread=threading.Thread(target=_v616c_run,daemon=True);v616c_thread.start();return True
+
+@APP.post('/v616c/run')
+def v616c_run():_v616c_start();return redirect('/v616c/early-failure')
+@APP.get('/api/v616c/status')
+def v616c_status_api():return jsonify(_v616c_status())
+
+@APP.get('/v616c/early-failure')
+def v616c_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v616c_status();r={}
+    if V616C_RESULT.exists():
+        try:r=json.loads(V616C_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    trs=''
+    for x in r.get('methods',[])[:80]:
+        trs+=f"<tr><td>{e(x.get('group'))}</td><td>{e(x.get('entry'))}</td><td>D{int(x.get('day',0))}</td><td><b>{e(x.get('signal'))}</b></td><td>{int(x.get('hit_n',0)):,}</td><td>{x.get('hit_rate',0):.1%}</td><td>{x.get('failure_precision',0) if x.get('failure_precision') is not None else 0:.1%}</td><td>{x.get('failure_recall',0) if x.get('failure_recall') is not None else 0:.1%}</td><td>{x.get('base_pf',0) if x.get('base_pf') is not None else 0:.2f}</td><td><b>{x.get('strategy_pf',0) if x.get('strategy_pf') is not None else 0:.2f}</b></td><td>{x.get('pf_delta',0) if x.get('pf_delta') is not None else 0:+.2f}</td><td>{x.get('base_avg',0):.2%}</td><td><b>{x.get('strategy_avg',0):.2%}</b></td><td>{x.get('avg_delta',0):+.2%}</td><td>{x.get('strategy_avgloss',0):.1%}</td><td>{x.get('kill_bw20',0) if x.get('kill_bw20') is not None else 0:.1%}</td><td>{x.get('kill_bw30',0) if x.get('kill_bw30') is not None else 0:.1%}</td><td>{x.get('kill_bw50',0) if x.get('kill_bw50') is not None else 0:.1%}</td></tr>"
+    btn='' if s.get('status')=='running' else '<form method="post" action="/v616c/run"><button>▶ 跑 V6.16C Early Failure Research</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:10.5px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a><div class="c"><h1>🧬 V6.16C · Early Failure Signature Research</h1><div class="info"><b>-7% 是最后保险。</b>冻结选股 DNA、Entry 与 terminal -7% Stop；只研究 D1/D2/D3/D5 当时已经出现的失败证据。信号触发后下一交易日开盘退出，避免 look-ahead。</div></div>
+<div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{btn}</div>
+<div class="c"><h2>Failure Signature Ranking</h2><div class="warn">必须同时提高 <b>PF + Avg Return</b>，并检查 Failure Precision / Recall 与 BW20/30/50 Kill Rate。只是让 Avg Loss 好看、却误杀大赢家的规则直接淘汰。</div><div style="overflow:auto"><table><tr><th>Group</th><th>Entry</th><th>Day</th><th>Signal</th><th>Hit N</th><th>Hit%</th><th>Failure Precision</th><th>Failure Recall</th><th>Base PF</th><th>New PF</th><th>ΔPF</th><th>Base Avg</th><th>New Avg</th><th>ΔAvg</th><th>AvgLoss</th><th>Kill BW20</th><th>Kill BW30</th><th>Kill BW50</th></tr>{trs}</table></div></div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
 
 
 # ================= V6.16B FAILURE / STOP RESEARCH =================
