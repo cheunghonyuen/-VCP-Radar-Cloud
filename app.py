@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616h2-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.2 Portfolio Capital Timeline</h2><div class="muted">Account-level CAGR / cash capacity / add-on fill · 10-slot vs 20-slot · MFE & QUALITY</div></div><a href="/v616h2/portfolio-timeline"><button type="button">打开 V6.16H.2</button></a></div></div>
+<div class="card" id="v616h3-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3 Daily MTM Portfolio Simulator</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h3/daily-mtm"><button type="button">打开 V6.16H.3</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616h2_portfolio_timeline'
+V616F_DIR=DATA_DIR/'jlaw_v616h3_daily_mtm'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'portfolio_timeline_report.csv'
+V616F_REPORT=V616F_DIR/'daily_mtm_portfolio_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10127,7 +10127,7 @@ def _v616f_run():
         S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy()
         S['year']=S.obs_date.dt.year.astype(int)
 
-        # Frozen selection stream.
+        # Freeze the same validated selection stream.
         picks=[]
         for y in sorted(S.year.unique()):
             tr=S[S.year<y]; te=S[S.year==y]
@@ -10139,81 +10139,24 @@ def _v616f_run():
             b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
             b['test_year']=y
             picks.extend([a,b])
-
         D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
         ticks=sorted(D.ticker.unique())
-        trades=[]
 
-        def build_trade_path(d,ei,px):
-            # Base leg: exact CONTROL entry price, -7% stop, max day1260.
-            end=ei+1259
-            if end>=len(d):
-                return None
+        # Cache full price frames in-memory once for this run.
+        price_map={}
+        trade_rows=[]
 
-            base_exit_idx=end
-            base_exit_px=float(d.iloc[end]['close'])
-            base_reason='HOLD1260'
-            for j in range(ei,end+1):
-                op=float(d.iloc[j]['open'])
-                lo=float(d.iloc[j]['low'])
-                if lo<=px*.93:
-                    base_exit_idx=j
-                    base_exit_px=min(op,px*.93) if op<px*.93 else px*.93
-                    base_reason='BASE_STOP7'
-                    break
-
-            # Day252 close-known features.
-            cp_end=ei+251
-            x=d.iloc[ei:cp_end+1].copy()
-            c=x['close'].astype(float)
-            h=x['high'].astype(float)
-            ma100=c.rolling(100).mean()
-            n=min(63,len(c))
-            yy=np.log(c.iloc[-n:].values)
-            xx=np.arange(n,dtype=float)
-
-            feats={
-                'cp_ret':float(c.iloc[-1]/px-1),
-                'cp_mfe':float(h.max()/px-1),
-                'cp_close_to_peak':float(c.iloc[-1]/h.max()-1),
-                'cp_above100':float((c.iloc[99:]>=ma100.iloc[99:]).mean()),
-                'cp_slope63':float(np.polyfit(xx,yy,1)[0])
-            }
-
-            # Day253 next-open add-on leg.
-            ai=ei+252
-            apx=float(d.iloc[ai]['open'])
-            add_exit_idx=end
-            add_exit_px=float(d.iloc[end]['close'])
-            add_reason='ADD_HOLD_TO1260'
-            for j in range(ai,end+1):
-                op=float(d.iloc[j]['open'])
-                lo=float(d.iloc[j]['low'])
-                if lo<=apx*.93:
-                    add_exit_idx=j
-                    add_exit_px=min(op,apx*.93) if op<apx*.93 else apx*.93
-                    add_reason='ADD_STOP7'
-                    break
-
-            return {
-                'entry_date':pd.Timestamp(d.iloc[ei]['date']),
-                'base_exit_date':pd.Timestamp(d.iloc[base_exit_idx]['date']),
-                'base_ret':float(base_exit_px/px-1),
-                'base_reason':base_reason,
-                'addon_date':pd.Timestamp(d.iloc[ai]['date']),
-                'addon_exit_date':pd.Timestamp(d.iloc[add_exit_idx]['date']),
-                'addon_ret':float(add_exit_px/apx-1),
-                'addon_reason':add_reason,
-                **feats
-            }
-
-        _v616f_write(status='running',message='Build exact trade event timeline',
+        _v616f_write(status='running',message='Build trade metadata + price map',
                      processed=0,total=len(ticks),elapsed_sec=0,error=None)
 
         for k,t in enumerate(ticks,1):
             d=_v616a_price(t)
-            if d is not None:
+            if d is not None and len(d):
+                d=d.copy()
+                d['date']=pd.to_datetime(d['date']).dt.normalize()
+                price_map[t]=d
                 im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+
                 for _,r in D[D.ticker.eq(t)].iterrows():
                     dt=pd.Timestamp(r.obs_date).normalize()
                     if dt not in im:
@@ -10224,26 +10167,80 @@ def _v616f_run():
                     ei,px,_=E['CONTROL']
                     if ei+1259>=len(d):
                         continue
-                    z=build_trade_path(d,ei,px)
-                    if z is None:
-                        continue
-                    trades.append({
+
+                    # Day252 features
+                    cp_end=ei+251
+                    x=d.iloc[ei:cp_end+1].copy()
+                    c=x['close'].astype(float)
+                    h=x['high'].astype(float)
+                    ma100=c.rolling(100).mean()
+                    n=min(63,len(c))
+                    yy=np.log(c.iloc[-n:].values)
+                    xx=np.arange(n,dtype=float)
+
+                    # Base exact exit
+                    base_exit_idx=ei+1259
+                    base_exit_px=float(d.iloc[base_exit_idx]['close'])
+                    base_reason='HOLD1260'
+                    for j in range(ei,ei+1260):
+                        op=float(d.iloc[j]['open']); lo=float(d.iloc[j]['low'])
+                        if lo<=px*.93:
+                            base_exit_idx=j
+                            base_exit_px=min(op,px*.93) if op<px*.93 else px*.93
+                            base_reason='BASE_STOP7'
+                            break
+
+                    # Add-on exact day253 open + independent -7% stop
+                    ai=ei+252
+                    apx=float(d.iloc[ai]['open'])
+                    add_exit_idx=ei+1259
+                    add_exit_px=float(d.iloc[add_exit_idx]['close'])
+                    add_reason='ADD_HOLD_TO1260'
+                    for j in range(ai,ei+1260):
+                        op=float(d.iloc[j]['open']); lo=float(d.iloc[j]['low'])
+                        if lo<=apx*.93:
+                            add_exit_idx=j
+                            add_exit_px=min(op,apx*.93) if op<apx*.93 else apx*.93
+                            add_reason='ADD_STOP7'
+                            break
+
+                    trade_rows.append({
                         'ticker':t,
-                        'obs_date':str(dt.date()),
+                        'obs_date':dt,
                         'test_year':int(r['test_year']),
-                        **z
+                        'entry_idx':int(ei),
+                        'entry_date':pd.Timestamp(d.iloc[ei]['date']),
+                        'entry_px':float(px),
+                        'base_exit_idx':int(base_exit_idx),
+                        'base_exit_date':pd.Timestamp(d.iloc[base_exit_idx]['date']),
+                        'base_exit_px':float(base_exit_px),
+                        'base_reason':base_reason,
+                        'addon_idx':int(ai),
+                        'addon_date':pd.Timestamp(d.iloc[ai]['date']),
+                        'addon_px':float(apx),
+                        'addon_exit_idx':int(add_exit_idx),
+                        'addon_exit_date':pd.Timestamp(d.iloc[add_exit_idx]['date']),
+                        'addon_exit_px':float(add_exit_px),
+                        'addon_reason':add_reason,
+                        'cp_ret':float(c.iloc[-1]/px-1),
+                        'cp_mfe':float(h.max()/px-1),
+                        'cp_close_to_peak':float(c.iloc[-1]/h.max()-1),
+                        'cp_above100':float((c.iloc[99:]>=ma100.iloc[99:]).mean()),
+                        'cp_slope63':float(np.polyfit(xx,yy,1)[0])
                     })
 
-            _v616f_write(status='running',message='Build exact trade event timeline',
+            _v616f_write(status='running',message='Build trade metadata + price map',
                          processed=k,total=len(ticks),current=t,
                          elapsed_sec=round(time.time()-t0,1))
 
-        T=pd.DataFrame(trades).replace([np.inf,-np.inf],np.nan).dropna()
+        T=pd.DataFrame(trade_rows).replace([np.inf,-np.inf],np.nan).dropna()
         if T.empty:
-            raise RuntimeError('没有生成 H.2 trade timeline')
+            raise RuntimeError('没有生成 H.3 trade metadata')
 
-        # Strict walk-forward Day252 signals for ONLY the two candidates promoted from H.1.
-        sig_rows=[]
+        # Strict walk-forward signals; only the two H.2 finalists.
+        T['MFE252_Q75']=False
+        T['QUALITY_2OF4']=False
+
         for y in sorted(T.test_year.unique()):
             tr=T[T.test_year<y].copy()
             te=T[T.test_year==y].copy()
@@ -10256,57 +10253,70 @@ def _v616f_run():
             q_ab100=float(tr.cp_above100.quantile(.75))
             q_slope=float(tr.cp_slope63.quantile(.75))
 
-            s_mfe=te.cp_mfe>=q_mfe
+            idx=te.index
+            T.loc[idx,'MFE252_Q75']=te.cp_mfe>=q_mfe
+
             score=(
                 (te.cp_ret>=q_ret).astype(int)+
                 (te.cp_close_to_peak>=q_peak).astype(int)+
                 (te.cp_above100>=q_ab100).astype(int)+
                 (te.cp_slope63>=q_slope).astype(int)
             )
+            T.loc[idx,'QUALITY_2OF4']=score>=2
 
-            for idx,row in te.iterrows():
-                sig_rows.append({
-                    'idx':int(idx),
-                    'MFE252_Q75':bool(s_mfe.loc[idx]),
-                    'QUALITY_2OF4':bool(score.loc[idx]>=2)
-                })
+        # Keep only years that had valid earlier-year calibration.
+        valid=T[T.test_year.isin(
+            sorted(T[T.MFE252_Q75 | T.QUALITY_2OF4].test_year.unique())
+        )].copy()
+        if valid.empty:
+            raise RuntimeError('没有 strict walk-forward valid cohort')
 
-        SIG=pd.DataFrame(sig_rows).set_index('idx')
-        T=T.loc[T.index.intersection(SIG.index)].copy()
-        T['MFE252_Q75']=SIG.loc[T.index,'MFE252_Q75'].astype(bool)
-        T['QUALITY_2OF4']=SIG.loc[T.index,'QUALITY_2OF4'].astype(bool)
-
-        if T.empty:
-            raise RuntimeError('没有严格 walk-forward signal cohort')
-
-        # Portfolio simulation:
-        # - start equity = 1.0
-        # - no margin
-        # - base position size = 1/slots of CURRENT equity at entry
-        # - if no cash for a new base entry, skip it
-        # - add-on size = 50% or 100% of ORIGINAL base-dollar allocation
-        # - if insufficient cash on add-on date, take as much as available only if >=25% of requested;
-        #   otherwise skip add-on. Report fill rate.
-        # - realized P&L posts on each leg's exit date.
-        slot_grid=[10,20]
         variants=[
             ('BASE_ONLY',None,0.0),
-            ('MFE252_Q75','MFE252_Q75',0.50),
-            ('MFE252_Q75','MFE252_Q75',1.00),
-            ('QUALITY_2OF4','QUALITY_2OF4',0.50),
             ('QUALITY_2OF4','QUALITY_2OF4',1.00),
+            ('MFE252_Q75','MFE252_Q75',1.00)
         ]
+        slots=10
 
-        def simulate(slots,signal_col,addon_mult):
-            events=[]
-            for idx,r in T.iterrows():
-                events.append((pd.Timestamp(r.entry_date),0,'BASE_ENTRY',idx))
+        # Build master trading-date calendar from all cached symbols.
+        all_dates=set()
+        for d in price_map.values():
+            all_dates.update(pd.to_datetime(d['date']).dt.normalize().tolist())
+        calendar=sorted(all_dates)
+        if not calendar:
+            raise RuntimeError('没有价格日历')
+
+        # Restrict to first relevant entry through last relevant exit.
+        first_date=min(valid.entry_date.min(),valid.addon_date.min())
+        last_date=max(valid.base_exit_date.max(),valid.addon_exit_date.max())
+        calendar=[x for x in calendar if first_date<=x<=last_date]
+
+        # Fast daily close lookup
+        close_lookup={}
+        open_lookup={}
+        for t,d in price_map.items():
+            close_lookup[t]=dict(zip(d.date,d.close.astype(float)))
+            open_lookup[t]=dict(zip(d.date,d.open.astype(float)))
+
+        def px_close(t,dt,last_px=None):
+            z=close_lookup.get(t,{})
+            if dt in z:
+                return float(z[dt])
+            return last_px
+
+        def simulate(label,signal_col,addon_mult):
+            # Events
+            base_entries={}
+            base_exits={}
+            add_entries={}
+            add_exits={}
+
+            for idx,r in valid.iterrows():
+                base_entries.setdefault(pd.Timestamp(r.entry_date),[]).append(idx)
+                base_exits.setdefault(pd.Timestamp(r.base_exit_date),[]).append(idx)
                 if signal_col is not None and bool(r[signal_col]):
-                    events.append((pd.Timestamp(r.addon_date),1,'ADD_ENTRY',idx))
-                events.append((pd.Timestamp(r.base_exit_date),2,'BASE_EXIT',idx))
-                if signal_col is not None and bool(r[signal_col]):
-                    events.append((pd.Timestamp(r.addon_exit_date),3,'ADD_EXIT',idx))
-            events.sort(key=lambda x:(x[0],x[1]))
+                    add_entries.setdefault(pd.Timestamp(r.addon_date),[]).append(idx)
+                    add_exits.setdefault(pd.Timestamp(r.addon_exit_date),[]).append(idx)
 
             cash=1.0
             base_pos={}
@@ -10316,32 +10326,69 @@ def _v616f_run():
             filled_add=0
             partial_add=0
             skipped_add=0
-            eq_curve=[]
-            last_date=None
-            max_open=0
-            gross_exposure_peak=0.0
+            equity_rows=[]
+            last_close={}
 
-            for dt,_,etype,idx in events:
-                r=T.loc[idx]
+            for dt in calendar:
+                # 1) Exits first: release cash at known execution prices
+                for idx in base_exits.get(dt,[]):
+                    if idx in base_pos:
+                        p=base_pos.pop(idx)
+                        r=valid.loc[idx]
+                        cash += p['shares']*float(r.base_exit_px)
 
-                if etype=='BASE_ENTRY':
-                    equity_now=cash+sum(v['cost'] for v in base_pos.values())+sum(v['cost'] for v in add_pos.values())
+                for idx in add_exits.get(dt,[]):
+                    if idx in add_pos:
+                        p=add_pos.pop(idx)
+                        r=valid.loc[idx]
+                        cash += p['shares']*float(r.addon_exit_px)
+
+                # Mark current holdings before new entries to size on current equity
+                holdings_value=0.0
+                for idx,p in base_pos.items():
+                    t=p['ticker']
+                    cp=px_close(t,dt,last_close.get((idx,'b'),p['entry_px']))
+                    if cp is not None:
+                        last_close[(idx,'b')]=cp
+                        holdings_value += p['shares']*cp
+
+                for idx,p in add_pos.items():
+                    t=p['ticker']
+                    cp=px_close(t,dt,last_close.get((idx,'a'),p['entry_px']))
+                    if cp is not None:
+                        last_close[(idx,'a')]=cp
+                        holdings_value += p['shares']*cp
+
+                equity_now=cash+holdings_value
+
+                # 2) Base entries: 1/10 of current MTM equity
+                for idx in base_entries.get(dt,[]):
+                    r=valid.loc[idx]
                     target=equity_now/float(slots)
-                    if cash+1e-12 < target:
+                    px=float(r.entry_px)
+                    if cash+1e-12 < target or px<=0:
                         skipped_base+=1
-                    else:
-                        cash-=target
-                        base_pos[idx]={'cost':target,'ret':float(r.base_ret)}
+                        continue
+                    shares=target/px
+                    cash-=target
+                    base_pos[idx]={
+                        'ticker':r.ticker,
+                        'shares':shares,
+                        'entry_px':px,
+                        'cost':target
+                    }
+                    last_close[(idx,'b')]=px
 
-                elif etype=='ADD_ENTRY':
+                # 3) Add-on entries: exact day253 open, request 100% of original base cost
+                for idx in add_entries.get(dt,[]):
                     if idx not in base_pos:
                         continue
                     requested_add+=1
+                    r=valid.loc[idx]
                     request=base_pos[idx]['cost']*float(addon_mult)
                     fill=min(request,cash)
-                    if request<=0:
-                        continue
-                    ratio=fill/request
+                    ratio=fill/request if request>0 else 0.0
+
                     if ratio>=.999:
                         filled_add+=1
                     elif ratio>=.25:
@@ -10349,101 +10396,172 @@ def _v616f_run():
                     else:
                         skipped_add+=1
                         fill=0.0
+
                     if fill>0:
+                        px=float(r.addon_px)
+                        shares=fill/px
                         cash-=fill
-                        add_pos[idx]={'cost':fill,'ret':float(r.addon_ret)}
+                        add_pos[idx]={
+                            'ticker':r.ticker,
+                            'shares':shares,
+                            'entry_px':px,
+                            'cost':fill
+                        }
+                        last_close[(idx,'a')]=px
 
-                elif etype=='BASE_EXIT':
-                    if idx in base_pos:
-                        p=base_pos.pop(idx)
-                        cash+=p['cost']*(1.0+p['ret'])
+                # 4) Daily MTM after today's events
+                holdings_value=0.0
+                gross_cost=0.0
+                for idx,p in base_pos.items():
+                    cp=px_close(p['ticker'],dt,last_close.get((idx,'b'),p['entry_px']))
+                    if cp is not None:
+                        last_close[(idx,'b')]=cp
+                        holdings_value += p['shares']*cp
+                    gross_cost += p['cost']
 
-                elif etype=='ADD_EXIT':
-                    if idx in add_pos:
-                        p=add_pos.pop(idx)
-                        cash+=p['cost']*(1.0+p['ret'])
+                for idx,p in add_pos.items():
+                    cp=px_close(p['ticker'],dt,last_close.get((idx,'a'),p['entry_px']))
+                    if cp is not None:
+                        last_close[(idx,'a')]=cp
+                        holdings_value += p['shares']*cp
+                    gross_cost += p['cost']
 
-                gross=sum(v['cost'] for v in base_pos.values())+sum(v['cost'] for v in add_pos.values())
-                equity_book=cash+gross
-                max_open=max(max_open,len(base_pos)+len(add_pos))
-                gross_exposure_peak=max(gross_exposure_peak,gross/equity_book if equity_book>0 else 0)
+                equity=cash+holdings_value
+                exposure=holdings_value/equity if equity>0 else np.nan
+                cash_pct=cash/equity if equity>0 else np.nan
 
-                if last_date!=dt:
-                    eq_curve.append((dt,equity_book))
-                    last_date=dt
-                else:
-                    eq_curve[-1]=(dt,equity_book)
+                equity_rows.append({
+                    'date':dt,
+                    'equity':equity,
+                    'cash':cash,
+                    'holdings':holdings_value,
+                    'exposure':exposure,
+                    'cash_pct':cash_pct,
+                    'open_base':len(base_pos),
+                    'open_add':len(add_pos)
+                })
 
-            if not eq_curve:
-                return None
+            curve=pd.DataFrame(equity_rows).drop_duplicates('date',keep='last').sort_values('date')
+            if curve.empty:
+                return None,None
 
-            curve=pd.DataFrame(eq_curve,columns=['date','equity']).drop_duplicates('date',keep='last').sort_values('date')
-            # realized/book-cost curve; conservative enough for capacity comparison, not mark-to-market DD.
-            start_eq=1.0
-            end_eq=float(cash)
+            start_eq=float(curve.equity.iloc[0])
+            end_eq=float(curve.equity.iloc[-1])
             years=max((curve.date.iloc[-1]-curve.date.iloc[0]).days/365.25,1/365.25)
-            cagr=(end_eq/start_eq)**(1/years)-1 if end_eq>0 else -1.0
+            cagr=(end_eq/start_eq)**(1/years)-1 if end_eq>0 and start_eq>0 else -1.0
+
             rollmax=curve.equity.cummax()
             dd=curve.equity/rollmax-1
             maxdd=float(dd.min())
+            calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
+
+            # Calendar-year returns from daily MTM equity
+            curve['year']=pd.to_datetime(curve.date).dt.year
+            yr=[]
+            for y,g in curve.groupby('year'):
+                if len(g)<2: continue
+                yret=float(g.equity.iloc[-1]/g.equity.iloc[0]-1)
+                yr.append({'year':int(y),'return':yret})
+            Y=pd.DataFrame(yr)
+            best_year=float(Y['return'].max()) if not Y.empty else np.nan
+            worst_year=float(Y['return'].min()) if not Y.empty else np.nan
+            positive_years=int((Y['return']>0).sum()) if not Y.empty else 0
+            total_years=int(len(Y))
+
             add_fill=(filled_add+partial_add)/requested_add if requested_add else np.nan
-            return {
-                'slots':int(slots),
-                'signal':'BASE_ONLY' if signal_col is None else signal_col,
+
+            summary={
+                'signal':label,
                 'addon_mult':float(addon_mult),
+                'slots':slots,
                 'start_equity':start_eq,
                 'end_equity':end_eq,
                 'cagr':float(cagr),
-                'maxdd_book':maxdd,
+                'maxdd_mtm':maxdd,
+                'calmar':calmar,
+                'avg_exposure':float(curve.exposure.dropna().mean()),
+                'median_exposure':float(curve.exposure.dropna().median()),
+                'peak_exposure':float(curve.exposure.dropna().max()),
+                'avg_cash_pct':float(curve.cash_pct.dropna().mean()),
+                'min_cash_pct':float(curve.cash_pct.dropna().min()),
                 'skipped_base':int(skipped_base),
                 'requested_add':int(requested_add),
                 'filled_add':int(filled_add),
                 'partial_add':int(partial_add),
                 'skipped_add':int(skipped_add),
                 'addon_fill_rate':float(add_fill) if pd.notna(add_fill) else None,
-                'max_open_legs':int(max_open),
-                'peak_gross_exposure':float(gross_exposure_peak)
+                'max_open_base':int(curve.open_base.max()),
+                'max_open_add':int(curve.open_add.max()),
+                'best_year':best_year,
+                'worst_year':worst_year,
+                'positive_years':positive_years,
+                'total_years':total_years
             }
+            return summary,curve
 
         results=[]
-        for slots in slot_grid:
-            for label,scol,mult in variants:
-                z=simulate(slots,scol,mult)
-                if z is not None:
-                    results.append(z)
+        equity_curves={}
+        yearly_all=[]
+
+        for label,scol,mult in variants:
+            s,c=simulate(label,scol,mult)
+            if s is None:
+                continue
+            results.append(s)
+            equity_curves[label]=c[['date','equity','exposure','cash_pct']].copy()
+            cc=c.copy()
+            cc['year']=pd.to_datetime(cc.date).dt.year
+            for y,g in cc.groupby('year'):
+                if len(g)<2: continue
+                yearly_all.append({
+                    'signal':label,
+                    'year':int(y),
+                    'return':float(g.equity.iloc[-1]/g.equity.iloc[0]-1),
+                    'maxdd':float((g.equity/g.equity.cummax()-1).min()),
+                    'avg_exposure':float(g.exposure.dropna().mean())
+                })
 
         O=pd.DataFrame(results)
         if O.empty:
-            raise RuntimeError('没有生成 H.2 portfolio simulation')
+            raise RuntimeError('没有生成 H.3 MTM portfolio results')
 
-        # Compare each addon variant against BASE_ONLY within the same slot count.
-        O['delta_cagr_vs_base']=np.nan
-        O['delta_dd_vs_base']=np.nan
-        for slots in slot_grid:
-            b=O[(O.slots.eq(slots))&(O.signal.eq('BASE_ONLY'))].iloc[0]
-            m=O.slots.eq(slots)
-            O.loc[m,'delta_cagr_vs_base']=O.loc[m,'cagr']-float(b.cagr)
-            O.loc[m,'delta_dd_vs_base']=O.loc[m,'maxdd_book']-float(b.maxdd_book)
+        base=O[O.signal.eq('BASE_ONLY')].iloc[0]
+        O['delta_cagr_vs_base']=O.cagr-float(base.cagr)
+        O['delta_maxdd_vs_base']=O.maxdd_mtm-float(base.maxdd_mtm)
+        O['delta_calmar_vs_base']=O.calmar-float(base.calmar)
 
-        # Research screen: positive CAGR lift, acceptable capacity, and no catastrophic DD deterioration.
         O['screen_pass']=(
             (O.delta_cagr_vs_base>0)&
-            ((O.addon_fill_rate.isna())|(O.addon_fill_rate>=.80))&
-            (O.delta_dd_vs_base>=-.10)
+            (O.delta_calmar_vs_base>=0)&
+            ((O.addon_fill_rate.isna())|(O.addon_fill_rate>=.80))
         )
         O.loc[O.signal.eq('BASE_ONLY'),'screen_pass']=False
-        O=O.sort_values(['slots','screen_pass','cagr'],ascending=[True,False,False])
+
+        O=O.sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False])
         O.to_csv(V616F_REPORT,index=False)
+
+        # Persist compact equity curves for audit/replay.
+        curve_out={}
+        for k,c in equity_curves.items():
+            curve_out[k]=[
+                {'date':str(pd.Timestamp(r.date).date()),
+                 'equity':float(r.equity),
+                 'exposure':float(r.exposure) if pd.notna(r.exposure) else None,
+                 'cash_pct':float(r.cash_pct) if pd.notna(r.cash_pct) else None}
+                for _,r in c.iterrows()
+            ]
 
         res={
             'generated_at':datetime.now(timezone.utc).isoformat(),
             'elapsed_sec':round(time.time()-t0,2),
             'overall':O.replace({np.nan:None}).to_dict('records'),
-            'acceptance':'Portfolio gate: conditional add-on must improve CAGR versus BASE_ONLY within the same slot count, achieve at least 80% add-on fill rate, and not worsen book-cost max drawdown by more than 10 percentage points.',
-            'rule_note':'Frozen DNA + CONTROL entry + -7% base stop + HOLD1260. Day252 strict walk-forward signal; day253 next-open add-on; add-on has its own -7% stop. Only MFE252_Q75 and QUALITY_2OF4 are compared at +50% and +100%.',
-            'capital_note':'No margin. Base position target is 1/slots of current book equity. Tests 10-slot and 20-slot accounts. Add-on uses 50% or 100% of original base-dollar allocation. Cash shortage causes partial fill only when at least 25% of requested size is available; otherwise add-on is skipped.',
-            'dd_note':'MaxDD shown here is a conservative book-cost / realized-event timeline, not daily mark-to-market portfolio drawdown. A final production simulator must mark every open position to market daily before claiming final MaxDD/CAGR.',
-            'warning':'Existing cached universe still has survivorship-bias limits until delisted/historical coverage is complete.'
+            'yearly':yearly_all,
+            'equity_curves':curve_out,
+            'acceptance':'Final MTM portfolio gate for this research branch: add-on must beat BASE_ONLY on CAGR and not reduce Calmar, while achieving at least 80% add-on fill rate.',
+            'rule_note':'10-slot, no margin. Frozen DNA + CONTROL entry + -7% base stop + HOLD1260. Day252 strict walk-forward signal; day253 next-open exact add-on; add-on leg has its own -7% stop. Only QUALITY_2OF4 +100% and MFE252_Q75 +100% challenge BASE_ONLY.',
+            'mtm_note':'Every open base/add-on leg is marked to the daily close using cached price history. MaxDD and Calmar are therefore daily mark-to-market portfolio statistics, unlike H.2 book-cost event DD.',
+            'capacity_note':'New base positions target 10% of current MTM equity. No margin. Add-ons request 100% of original base-dollar allocation; partial fill is allowed only when at least 25% of requested size is available.',
+            'warning':'Current universe still has survivorship-bias limits until historical/delisted coverage is complete; therefore these are not yet final production claims.'
         }
 
         V616F_RESULT.write_text(
@@ -10453,7 +10571,7 @@ def _v616f_run():
 
         _v616f_write(
             status='done',
-            message='V6.16H.2 Portfolio Capital Timeline 完成',
+            message='V6.16H.3 Daily MTM Portfolio Simulator 完成',
             processed=len(ticks),
             total=len(ticks),
             current='',
@@ -10465,7 +10583,7 @@ def _v616f_run():
         traceback.print_exc()
         _v616f_write(
             status='error',
-            message='V6.16H.2 失败',
+            message='V6.16H.3 失败',
             error=f'{type(ex).__name__}: {ex}',
             elapsed_sec=round(time.time()-t0,1)
         )
@@ -10477,15 +10595,15 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616h2/run')
+@APP.post('/v616h3/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616h2/portfolio-timeline')
+    _v616f_start();return redirect('/v616h3/daily-mtm')
 
-@APP.get('/api/v616h2/status')
+@APP.get('/api/v616h3/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616h2/portfolio-timeline')
+@APP.get('/v616h3/daily-mtm')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
@@ -10494,10 +10612,10 @@ def v616f_page():
         except Exception:pass
     rows=''
     for x in r.get('overall',[]):
-        rows += f"<tr><td>{int(x.get('slots',0))}</td><td><b>{e(x.get('signal'))}</b></td><td>{'—' if x.get('signal')=='BASE_ONLY' else '+'+format(x.get('addon_mult',0),'.0%')}</td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_base',0):+.2%}</td><td>{x.get('maxdd_book',0):.2%}</td><td>{x.get('delta_dd_vs_base',0):+.2%}</td><td>{'-' if x.get('addon_fill_rate') is None else format(x.get('addon_fill_rate',0),'.1%')}</td><td>{int(x.get('skipped_base',0))}</td><td>{int(x.get('skipped_add',0))}</td><td>{int(x.get('partial_add',0))}</td><td>{int(x.get('max_open_legs',0))}</td><td>{x.get('peak_gross_exposure',0):.1%}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h2/run"><button>Run V6.16H.2 Portfolio Timeline</button></form>'
+        rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>{'—' if x.get('signal')=='BASE_ONLY' else '+100%'}</td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_base',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('delta_maxdd_vs_base',0):+.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('delta_calmar_vs_base',0) or 0:+.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{x.get('avg_cash_pct',0):.1%}</td><td>{'-' if x.get('addon_fill_rate') is None else format(x.get('addon_fill_rate',0),'.1%')}</td><td>{int(x.get('skipped_base',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{int(x.get('positive_years',0))}/{int(x.get('total_years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h3/run"><button>Run V6.16H.3 Daily MTM</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:nth-child(2),td:nth-child(2){{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.2 Portfolio Capital Timeline</h1><div class="info"><b>Now testing the account, not isolated trades.</b> No margin. Compare BASE_ONLY versus MFE252_Q75 / QUALITY_2OF4 add-ons at +50% and +100%, under 10-slot and 20-slot capital capacity.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Portfolio Capacity Matrix</h2><div style="overflow:auto"><table><tr><th>Slots</th><th>Signal</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD*</th><th>Delta DD</th><th>Add Fill%</th><th>Skip Base</th><th>Skip Add</th><th>Partial Add</th><th>Max Open Legs</th><th>Peak Gross</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Capital:</b> {e(r.get('capital_note',''))}<br><b>DD note:</b> {e(r.get('dd_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h2/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3 Daily Mark-to-Market Portfolio Simulator</h1><div class="info"><b>Final account-level check for this branch.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h3/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
