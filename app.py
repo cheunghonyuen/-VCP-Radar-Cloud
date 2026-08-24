@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h322/daily-mtm"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
+<div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16I Capital Admission / Signal Ranking</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616i/capital-ranking"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10569,7 +10569,7 @@ def _v616f_run():
             'overall':O.replace({np.nan:None}).to_dict('records'),
             'monthly_equity_audit':audits,
             'cache_note':'Low-disk build caches only small trade metadata. It never writes a duplicate full-history price_map; prices are read from the existing Local Cache and held in RAM only during the run.',
-            'acceptance':'Daily MTM gate: add-on must beat BASE_ONLY on CAGR and not reduce Calmar, while achieving at least 80% add-on fill rate.',
+            'acceptance':'Admission gate: ranking must beat FIRST_COME on Daily-MTM CAGR, not worsen MaxDD by more than 3pp, and improve results in at least 60% of strict OOS test years. Ranking features must be known at the admission decision; no future winner information, no Day252 add-on, and no entry/exit retuning.',
             'rule_note':'10-slot, no margin. Frozen DNA + CONTROL entry + -7% base stop + HOLD1260. Day252 strict walk-forward signal; day253 next-open exact add-on; independent -7% add-on stop. Only QUALITY_2OF4 +100% and MFE252_Q75 +100% challenge BASE_ONLY.',
             'mtm_note':'Every open leg is marked to each trading day close. MaxDD and Calmar are daily mark-to-market portfolio statistics.',
             'disk_note':'H.3.1 failed because it duplicated the entire historical price map to disk. H.3.2 removes that duplication and deletes only H.3.1 temporary duplicate artifacts, never the original Local Cache.',
@@ -10588,7 +10588,7 @@ def _v616f_run():
             except OSError:
                 pass
 
-        _v616f_write(status='done',message='V6.16H.3.2.2 Daily MTM Low-Disk 完成',
+        _v616f_write(status='done',message='V6.16I Capital Admission / Signal Ranking 完成',
                      processed=4,total=4,current='',elapsed_sec=round(time.time()-t0,2),error=None)
 
     except Exception as ex:
@@ -10649,19 +10649,19 @@ def _v616f_start():
     v616f_thread.start()
     return True
 
-@APP.route('/v616h322/run', methods=['GET','POST'])
+@APP.route('/v616i/run', methods=['GET','POST'])
 def v616f_run():
     alive = v616f_thread is not None and v616f_thread.is_alive()
     started=_v616f_start()
     stamp=str(int(time.time()))
     code='1' if started else ('2' if alive else '0')
-    return redirect('/v616h322/daily-mtm?started='+stamp+'&ok='+code)
+    return redirect('/v616i/capital-ranking?started='+stamp+'&ok='+code)
 
-@APP.get('/api/v616h322/status')
+@APP.get('/api/v616i/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616h322/daily-mtm')
+@APP.get('/v616i/capital-ranking')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
@@ -10682,9 +10682,9 @@ def v616f_page():
     rows=''
     for x in r.get('overall',[]):
         rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>{'—' if x.get('signal')=='BASE_ONLY' else '+100%'}</td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_base',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('delta_maxdd_vs_base',0):+.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('delta_calmar_vs_base',0) or 0:+.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{x.get('avg_cash_pct',0):.1%}</td><td>{'-' if x.get('addon_fill_rate') is None else format(x.get('addon_fill_rate',0),'.1%')}</td><td>{int(x.get('skipped_base',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{int(x.get('positive_years',0))}/{int(x.get('total_years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
-    btn='' if s.get('status') in ('starting','running','aggregating') else '<a href="/v616h322/run" style="text-decoration:none"><button type="button">Run V6.16H.3.2.1 Daily MTM</button></a>'
+    btn='' if s.get('status') in ('starting','running','aggregating') else '<a href="/v616i/run" style="text-decoration:none"><button type="button">Run V6.16I Capital Ranking</button></a>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3.2.2 Daily MTM Low-Disk</h1><div class="info"><b>Low-Disk Daily MTM. Reuses the existing Local Cache; does not duplicate the full historical price map to Railway disk.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2>{click_note}<p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h322/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running'||x.status==='aggregating'||(x.status==='idle'&&location.search.includes('started=')))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16I Capital Admission / Signal Ranking</h1><div class="info"><b>Capital Admission / Signal Ranking. Reuses the existing Local Cache; no full historical rescan. Frozen DNA + CONTROL Entry + -7% stop + HOLD1260. When slots are full, rank simultaneous candidates instead of changing entry/exit rules.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, FIRST_COME control versus deterministic admission ranks under the same 10-slot no-margin account: DNA_SCORE, MOMENTUM_STRENGTH, LIQUIDITY, BASE_QUALITY, and a pre-declared COMPOSITE rank.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2>{click_note}<p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616i/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running'||x.status==='aggregating'||(x.status==='idle'&&location.search.includes('started=')))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
