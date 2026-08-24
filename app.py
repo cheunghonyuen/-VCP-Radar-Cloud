@@ -13215,7 +13215,7 @@ def _v615b_worker(force=False):
             if V615B_STOP.exists():
                 _v615b_atomic_manifest(M);_v615b_update_summary(M,t0,"已手动暂停；进度已保存",status="paused",current="")
                 return
-            t=str(row.ticker);lid=str(row.listing_id);path=V615B_PRICE_DIR/f"{lid}.csv"
+            t=str(row.ticker);lid=str(row.listing_id);path=_v617o_existing_price_path(lid)
             _v615b_update_summary(M,t0,f"补历史价格 {seq}/{total_pending}",status="running",current=f"{t} · {lid}")
             try:
                 x=None;source=""
@@ -17528,6 +17528,74 @@ V617O_STATUS=V617O_DIR/"status.json"
 V617O_STOP=V617O_DIR/"STOP"
 v617o_thread=None
 V617O_BATCH_SIZE=max(20,int(os.environ.get("V617_OVERNIGHT_BATCH_SIZE","200")))
+# Low-disk V6.17: historical listing caches are stored as gzip CSV.
+# Existing .csv files remain readable and are migrated safely on resume.
+V617O_DISK_RESERVE_MB=max(256,int(os.environ.get("V617_OVERNIGHT_DISK_RESERVE_MB","768")))
+
+def _v617o_price_paths(listing_id):
+    lid=str(listing_id)
+    return V615B_PRICE_DIR/f"{lid}.csv.gz", V615B_PRICE_DIR/f"{lid}.csv"
+
+def _v617o_existing_price_path(listing_id):
+    gz,legacy=_v617o_price_paths(listing_id)
+    return gz if gz.exists() else (legacy if legacy.exists() else gz)
+
+def _v617o_write_price(df,listing_id):
+    gz,legacy=_v617o_price_paths(listing_id)
+    gz.parent.mkdir(parents=True,exist_ok=True)
+    tmp=gz.with_name(gz.name+".tmp.gz")
+    try:
+        df.to_csv(tmp,index=False,compression={"method":"gzip","compresslevel":6,"mtime":0})
+        os.replace(str(tmp),str(gz))
+        if legacy.exists():
+            try: legacy.unlink()
+            except Exception: pass
+    finally:
+        try:
+            if tmp.exists(): tmp.unlink()
+        except Exception: pass
+    return gz
+
+def _v617o_migrate_legacy_prices(limit=None):
+    """Compress old listing CSVs one at a time; never holds more than one file in memory."""
+    moved=0; saved=0
+    try:
+        files=list(V615B_PRICE_DIR.glob("*.csv"))
+    except Exception:
+        files=[]
+    if limit is not None: files=files[:int(limit)]
+    for legacy in files:
+        gz=legacy.with_suffix(legacy.suffix+".gz")
+        if gz.exists():
+            try:
+                saved+=max(0,legacy.stat().st_size);legacy.unlink();moved+=1
+            except Exception: pass
+            continue
+        tmp=gz.with_name(gz.name+".tmp.gz")
+        try:
+            import gzip
+            before=legacy.stat().st_size
+            with open(legacy,"rb") as src, gzip.open(tmp,"wb",compresslevel=6,mtime=0) as dst:
+                shutil.copyfileobj(src,dst,length=1024*1024)
+            os.replace(str(tmp),str(gz))
+            after=gz.stat().st_size
+            legacy.unlink()
+            moved+=1;saved+=max(0,before-after)
+        except TypeError:
+            # Python builds where gzip.open has no mtime argument.
+            try:
+                import gzip
+                with open(legacy,"rb") as src, gzip.open(tmp,"wb",compresslevel=6) as dst:
+                    shutil.copyfileobj(src,dst,length=1024*1024)
+                before=legacy.stat().st_size;os.replace(str(tmp),str(gz));after=gz.stat().st_size;legacy.unlink();moved+=1;saved+=max(0,before-after)
+            except Exception: pass
+        except Exception:
+            pass
+        finally:
+            try:
+                if tmp.exists(): tmp.unlink()
+            except Exception: pass
+    return moved,saved
 
 def _v617o_status():
     d={"status":"idle","message":"尚未启动","phase":"","batch":0,"completed":0,"total":0,
@@ -17590,7 +17658,7 @@ def _v617o_reconcile_files(M):
     changed=0
     for i,row in M.iterrows():
         if str(row.get("verified","")).lower() in ("true","1","yes"):continue
-        path=V615B_PRICE_DIR/f"{row.listing_id}.csv"
+        path=_v617o_existing_price_path(row.listing_id)
         if not path.exists():continue
         try:ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
         except Exception:ok=False
@@ -17608,9 +17676,8 @@ def _v617o_one_listing(M,idx,row):
         source="local_market_cache" if x is not None else ""
         if x is None:
             x=_v615b_tiingo_listing(t,row.startDate,row.endDate);source="tiingo"
-        path.parent.mkdir(parents=True,exist_ok=True)
-        # Low-disk mode: write final cache directly, avoiding a second full-size temp copy.
-        x.to_csv(path,index=False)
+        # Low-disk mode: gzip each completed listing immediately.
+        path=_v617o_write_price(x,lid)
         ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
         if not ok:raise RuntimeError(f"verify failed: {err}")
         M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True;M.at[idx,"bars"]=int(b)
@@ -17641,12 +17708,12 @@ def _v617o_disk_free_mb():
     return shutil.disk_usage(str(target)).free/(1024*1024)
 
 def _v617o_cleanup_disk():
-    # Safe cleanup only. Keep manifest and all completed price CSV caches.
+    # Safe cleanup only. Keep manifest and all completed price caches.
     removed=0; seen=set()
     for root in [DATA_DIR,V615B_DIR,V617O_DIR]:
         try:
             if not root.exists(): continue
-            for pat in ("*.tmp","*.part","*.download"):
+            for pat in ("*.tmp","*.tmp.gz","*.part","*.download"):
                 for fp in root.rglob(pat):
                     if str(fp) in seen: continue
                     seen.add(str(fp))
@@ -17664,9 +17731,10 @@ def _v617o_engine():
                 if p.exists():p.unlink()
             except Exception:pass
         removed=_v617o_cleanup_disk()
+        migrated,saved_bytes=_v617o_migrate_legacy_prices()
         free_mb=_v617o_disk_free_mb()
-        if free_mb < 8:
-            _v617o_write(status="disk_full",message=f"磁盘已满/空间不足：剩 {free_mb:.1f} MB；已清理 {removed} 个临时文件。请扩容 Railway Volume 后继续。",phase="disk_preflight",error="No space left on device")
+        if free_mb < V617O_DISK_RESERVE_MB:
+            _v617o_write(status="disk_low",message=f"低磁盘保护：剩 {free_mb:.0f} MB，保留线 {V617O_DISK_RESERVE_MB} MB；已压缩 {migrated} 个旧历史文件并释放约 {saved_bytes/1024/1024:.1f} MB。不会继续写满磁盘。",phase="disk_preflight",error=None)
             return
         M=_v617o_prepare_manifest()
         M=_v617o_reconcile_files(M)
@@ -17728,9 +17796,9 @@ def _v617o_engine():
                              **_v617o_manifest_metrics(M))
 
                 free_mb=_v617o_disk_free_mb()
-                if free_mb < 8:
+                if free_mb < V617O_DISK_RESERVE_MB:
                     _v615b_atomic_manifest(M)
-                    _v617o_write(status="disk_full",message=f"磁盘空间低：剩 {free_mb:.1f} MB；已安全保存进度并停止。扩容后可断点继续。",phase="disk_guard",**_v617o_manifest_metrics(M))
+                    _v617o_write(status="disk_low",message=f"低磁盘保护：剩 {free_mb:.0f} MB，已安全保存进度并暂停；不会写满 Volume。",phase="disk_guard",**_v617o_manifest_metrics(M))
                     return
                 result=_v617o_one_listing(M,idx,row)
                 if seq%10==0 or seq==len(P):
@@ -17813,7 +17881,7 @@ def v617_overnight_page():
     <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
-    <div class="info"><b>批次引擎（修正版）。</b> 不再只认 PENDING：所有「尚未验证且非 FAILED」的股票都会进入待处理队列；失败项先跳过，全部未验证新项跑完后再重试失败项。只有 Tiingo 429 才进入冷却。</div></div>
+    <div class="info"><b>批次引擎（修正版）。</b> 不再只认 PENDING：所有「尚未验证且非 FAILED」的股票都会进入待处理队列；失败项先跳过，全部未验证新项跑完后再重试失败项。只有 Tiingo 429 才进入冷却。<br><b>低磁盘模式：</b>历史文件完成后立即 gzip 压缩；旧 CSV 会在启动时逐个安全压缩；预留至少 768MB 空间，低于保留线自动暂停，不再要求继续买磁盘。</div></div>
     <div class="c"><h2>状态：{e(s.get("status"))}</h2>
     <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
     <p>{e(s.get("message"))}</p>
