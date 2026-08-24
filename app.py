@@ -17540,7 +17540,7 @@ def _v617o_manifest_metrics(M):
     ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M else pd.Series(False,index=ix)
     st=M["status"].astype(str).str.upper() if "status" in M else pd.Series("PENDING",index=ix)
     ended=M["ended"].astype(str).str.lower().isin(["true","1","yes"]) if "ended" in M else pd.Series(False,index=ix)
-    pending=(~ver)&st.eq("PENDING")
+    pending=(~ver)&(~st.eq("FAILED"))
     failed=(~ver)&st.eq("FAILED")
     return dict(
         total=int(len(M)),
@@ -17639,16 +17639,22 @@ def _v617o_engine():
             st=M["status"].astype(str).str.upper()
             ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
 
-            # Phase A: only untouched PENDING. FAILED is excluded completely.
-            P=M[(~ver)&st.eq("PENDING")].copy()
+            # Phase A: process EVERY unverified row that is not explicitly FAILED.
+            # Older manifests use statuses such as NEW / TODO / QUEUED / SKIP / blank,
+            # so treating only literal PENDING as work can incorrectly report pending=0.
+            work=(~ver)&(~st.eq("FAILED"))
+            P=M[work].copy()
             if not P.empty:
                 P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
-                phase="pending"
+                # Normalize the selected batch only; preserve completed cache and manifest rows.
+                M.loc[P.index,"status"]="PENDING"
+                _v615b_atomic_manifest(M)
+                phase="unverified"
             else:
-                # Phase B: only after PENDING is exhausted, retry failed in finite batches.
+                # Phase B: only after all other unverified rows are exhausted, retry FAILED.
                 P=M[(~ver)&st.eq("FAILED")].copy()
                 if P.empty:
-                    _v617o_write(status="needs_review",message="没有待处理或失败项，但覆盖仍未达门槛；需检查 SKIP/歧义 listing",**met)
+                    _v617o_write(status="needs_review",message="没有未验证项目，但覆盖仍未达门槛；检查 manifest 一致性",**met)
                     return
                 P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
                 M.loc[P.index,"status"]="PENDING"
