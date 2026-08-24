@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.13.0</h1><div class="muted">当前研究版：JLaw META / First Pullback Shadow · V6.12.14 Baseline 冻结</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.13.1</h1><div class="muted">当前研究版：JLaw META / First Pullback Shadow · V6.12.14 Baseline 冻结</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -9788,7 +9788,7 @@ def v61213_status_api():
     return jsonify(_v61213_status())
 
 
-# ================= V6.13.0 JLAW META / FIRST-PULLBACK SHADOW =================
+# ================= V6.13.1 JLAW META + RE-STRENGTH SHADOW =================
 # Research-only shadow engine. V6.12.14 baseline remains untouched.
 # Goal: test whether waiting for a low-volume first pullback / META trading area
 # improves entry risk and payoff without killing future big-winner capture.
@@ -9833,6 +9833,46 @@ def _v613_trade_path(d, entry_i, entry_px, stop_px, horizon=60):
         mfe60=float(mfe), mae60=float(mae), hit3r=bool(hit3r),
         stopped=bool(str(reason).startswith("STOP")), reason=reason
     )
+
+
+def _v613_restrength_trigger(x, confirm_i, area_high, max_wait=5):
+    """
+    Causal trigger after META area is identified.
+    No same-bar buy: wait up to 5 sessions for price to prove it is turning back up.
+    Trigger requires:
+      - close > prior day's high (price confirmation)
+      - bullish close (close > open)
+      - close above META trading-area high
+      - close > 10MA when available
+    Entry remains NEXT session open to avoid look-ahead.
+    """
+    start=int(confirm_i)+1
+    end=min(len(x)-2, int(confirm_i)+int(max_wait))
+    for k in range(start,end+1):
+        r=x.iloc[k]; prev=x.iloc[k-1]
+        o,h,l,c=map(float,[r["open"],r["high"],r["low"],r["close"]])
+        prev_high=float(prev["high"])
+        ma10=float(r["ma10"]) if "ma10" in x.columns and pd.notna(r["ma10"]) else np.nan
+        price_ok = c > prev_high
+        bullish = c > o
+        area_ok = c > float(area_high)
+        ma_ok = (not np.isfinite(ma10)) or c > ma10
+        if price_ok and bullish and area_ok and ma_ok:
+            nxt=x.iloc[k+1]
+            entry=float(nxt["open"])
+            # Reject a chase gap after confirmation.
+            if entry<=0 or entry>c*1.03:
+                continue
+            return dict(
+                trigger_i=int(k),
+                trigger_date=pd.Timestamp(r["date"]).strftime("%Y-%m-%d"),
+                trigger_close=float(c),
+                trigger_prev_high=float(prev_high),
+                entry_i=int(k+1),
+                entry_date=pd.Timestamp(nxt["date"]).strftime("%Y-%m-%d"),
+                entry=float(entry),
+            )
+    return None
 
 def _v613_pullback_candidate(d, sig_i, pivot, mode="PULLBACK"):
     """
@@ -9882,12 +9922,22 @@ def _v613_pullback_candidate(d, sig_i, pivot, mode="PULLBACK"):
         cluster=(max(vals)-min(vals))/max(1e-9,float(np.mean(vals))) if len(vals)>=2 else 0.0
         if mode=="META" and (len(anchors)<2 or cluster>0.025):continue
 
-        # Avoid buying a large next-day gap away from the trading area.
-        nxt=x.iloc[j+1]
-        entry=float(nxt["open"])
-        if entry<=0 or entry>c*1.03:continue
+        # V6.13.1: META no longer buys merely because price touched the area.
+        # Wait for a causal re-strength trigger; First Pullback remains unchanged as control.
+        trigger=None
+        if mode=="META":
+            trigger=_v613_restrength_trigger(x,j,max(vals),5)
+            if not trigger:continue
+            entry_i=int(trigger["entry_i"])
+            entry=float(trigger["entry"])
+        else:
+            nxt=x.iloc[j+1]
+            entry_i=int(j+1)
+            entry=float(nxt["open"])
+            if entry<=0 or entry>c*1.03:continue
 
-        recent_low=float(x.iloc[max(i+1,j-2):j+1]["low"].min())
+        recent_end = int(trigger["trigger_i"]) if trigger else j
+        recent_low=float(x.iloc[max(i+1,j-2):recent_end+1]["low"].min())
         support_floor=min(vals)
         structural_ref=min(recent_low,support_floor)
         stop=structural_ref*0.992
@@ -9900,9 +9950,10 @@ def _v613_pullback_candidate(d, sig_i, pivot, mode="PULLBACK"):
 
         return dict(
             setup=("META" if mode=="META" else "FIRST_PULLBACK"),
-            confirm_i=int(j), entry_i=int(j+1),
+            confirm_i=int(j), entry_i=int(entry_i),
             confirm_date=pd.Timestamp(r["date"]).strftime("%Y-%m-%d"),
-            entry_date=pd.Timestamp(nxt["date"]).strftime("%Y-%m-%d"),
+            trigger_date=(trigger["trigger_date"] if trigger else ""),
+            entry_date=(trigger["entry_date"] if trigger else pd.Timestamp(x.iloc[entry_i]["date"]).strftime("%Y-%m-%d")),
             entry=float(entry), stop=float(stop), initial_risk=float(raw_risk),
             pullback_depth=float(depth), vol_vs_v20=float(v/v20) if np.isfinite(v20) and v20 else None,
             vol_vs_breakout=float(v/breakout_vol) if breakout_vol else None,
@@ -10014,6 +10065,22 @@ def _v613_compute():
 
         D=pd.DataFrame(rows)
         if D.empty:raise RuntimeError("没有找到合格 First Pullback / META；请检查缓存或规则")
+
+        # V6.13.1 duplicate consolidation:
+        # repeated breakout signals that resolve to the same ticker / mode / entry day
+        # represent one actual trading opportunity, not multiple independent trades.
+        base_rows=D[D["mode"].astype(str).str.startswith("BASE_MATCHED_")].copy()
+        shadow_rows=D[~D["mode"].astype(str).str.startswith("BASE_MATCHED_")].copy()
+        if not shadow_rows.empty:
+            shadow_rows=shadow_rows.sort_values(
+                ["ticker","mode","entry_date","support_count","initial_risk"],
+                ascending=[True,True,True,False,True]
+            ).drop_duplicates(["ticker","mode","entry_date"],keep="first")
+            keep_pairs=set(shadow_rows["pair_id"].astype(str)+"|"+shadow_rows["mode"].astype(str))
+            base_rows["shadow_mode"]=base_rows["mode"].astype(str).str.replace("BASE_MATCHED_","",regex=False)
+            base_rows["_k"]=base_rows["pair_id"].astype(str)+"|"+base_rows["shadow_mode"].astype(str)
+            base_rows=base_rows[base_rows["_k"].isin(keep_pairs)].drop(columns=["shadow_mode","_k"],errors="ignore")
+        D=pd.concat([base_rows,shadow_rows],ignore_index=True)
         V613_DIR.mkdir(parents=True,exist_ok=True)
         D.to_csv(V613_DETAIL,index=False)
 
@@ -10046,8 +10113,8 @@ def _v613_compute():
                 pullback_depth="2%–12% from post-breakout peak",
                 volume="<=0.85x 20d volume AND <=0.80x breakout volume",
                 supports="Pivot / 10MA / 20MA",
-                meta=">=2 support anchors clustered within 2.5%",
-                entry="next-session open; reject >3% gap away",
+                meta=">=2 support anchors clustered within 2.5%; then wait <=5 sessions for re-strength",
+                entry="META: after close>prior high + bullish close + above area/10MA, next-session open; reject >3% gap",
                 stop="below support/recent low; minimum 1.5%, reject >8%",
                 horizon="60 sessions; conservative stop-first daily bars",
             ),
@@ -10059,7 +10126,7 @@ def _v613_compute():
             examples=examples.to_dict("records"),errors=errors[:100]
         )
         V613_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
-        _v613_write_status(status="done",message="V6.13 META / First Pullback Shadow 完成",processed=len(tickers),total=len(tickers),current="",error=None)
+        _v613_write_status(status="done",message="V6.13.1 META + Re-strength Shadow 完成",processed=len(tickers),total=len(tickers),current="",error=None)
     except Exception as ex:
         traceback.print_exc()
         _v613_write_status(status="error",message="V6.13 Shadow 失败",error=f"{type(ex).__name__}: {ex}")
@@ -10125,8 +10192,8 @@ table{{width:100%;border-collapse:collapse;font-size:12px;min-width:1100px}}th,t
 .note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}
 </style></head><body><div class="w">
 <a href="/">← 返回主页</a>
-<div class="c"><h1>🧪 V6.13 · JLaw META / First Pullback Shadow</h1>
-<div class="note"><b>Baseline 冻结。</b> 同一个原始 Breakout 信号，分别比较原突破入场 vs First Pullback / META 低风险交易区。第一轮只测试入场质量，不加入复杂加仓和 Winner Exit。</div></div>
+<div class="c"><h1>🧪 V6.13.1 · JLaw META + Re-strength Shadow</h1>
+<div class="note"><b>Baseline 冻结。</b> 同一个原始 Breakout 信号，分别比较原突破入场 vs First Pullback / META 低风险交易区。V6.13.1 只增加 Re-strength Trigger + 重复 Breakout 合并；仍不加入复杂加仓和 Winner Exit。</div></div>
 <div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>
 {coverage}
 <div class="c"><h2>是否 Work？</h2>{verdict_html or '<div class="warn">尚无结果。</div>'}</div>
