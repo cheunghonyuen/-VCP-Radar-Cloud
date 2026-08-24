@@ -17651,14 +17651,39 @@ def _v617o_supervisor():
             # If a full pass ended below coverage because some listings failed,
             # retry failures after a shorter cooldown. Existing verified files are skipped.
             if st in ("done","error"):
-                if int(s.get("failed",0) or 0)>0:
-                    _v617o_write(status="cooldown",message="仍有失败 listing；20分钟后自动重试失败项",
-                                 coverage=cov,ended_coverage=ecov,cycle=cycle)
-                    for _ in range(20):
-                        if V617O_STOP.exists():return
-                        time.sleep(60)
+                # IMPORTANT for paid Tiingo overnight runs:
+                # individual failed listings must NOT pause the entire universe.
+                # Continue immediately while any PENDING rows remain; failed rows are retried only after pending work is exhausted.
+                M=_v615b_read_manifest()
+                if M is not None and not M.empty:
+                    stcol=M["status"].astype(str).str.upper() if "status" in M.columns else pd.Series("",index=M.index)
+                    pending_n=int(stcol.eq("PENDING").sum())
+                    failed_n=int(stcol.eq("FAILED").sum())
+                else:
+                    pending_n=0;failed_n=int(s.get("failed",0) or 0)
+
+                if pending_n>0:
+                    _v617o_write(status="running",
+                        message=f"本批完成；仍有 {pending_n:,} 个待处理，立即继续下一批（失败 {failed_n} 个先保留）",
+                        coverage=cov,ended_coverage=ecov,cycle=cycle,failed=failed_n)
+                    time.sleep(2)
                     continue
-                # No failures but still below gate: stop and report; don't loop forever.
+
+                if failed_n>0:
+                    # All pending work is finished. Now retry only failed listings.
+                    # Convert FAILED back to PENDING once, preserving already verified cache.
+                    try:
+                        M.loc[stcol.eq("FAILED"),"status"]="PENDING"
+                        _v615b_atomic_manifest(M)
+                    except Exception:
+                        traceback.print_exc()
+                    _v617o_write(status="running",
+                        message=f"主队列完成；现在回头重试 {failed_n} 个失败 listing",
+                        coverage=cov,ended_coverage=ecov,cycle=cycle,failed=failed_n)
+                    time.sleep(2)
+                    continue
+
+                # No pending and no failed, but coverage still below gate.
                 _v617o_write(status="needs_review",
                     message="全队列已完成但覆盖仍未达最终门槛；需要检查缺失/歧义 listing",
                     coverage=cov,ended_coverage=ecov,cycle=cycle)
@@ -17714,7 +17739,7 @@ def v617_overnight_page():
     <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
-    <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；遇到429自动保存并等待后继续。</div></div>
+    <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；普通失败不会停整批；只有遇到429才自动保存并等待后继续。</div></div>
     <div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(live_message)}</p>
     <p>{("当前：" + e(live_current)) if live_current else ""}</p>
     <p>完整历史股票：{live_completed} / {live_total}</p>
@@ -17722,7 +17747,7 @@ def v617_overnight_page():
     <p>退市/结束股票覆盖：<b>{ecov:.1%}</b>（最终要求 ≥90%）</p><progress max="1" value="{min(1,ecov)}"></progress>
     <p>失败 listing：{live_failed} · 自动轮次：{int(s.get("cycle",0) or 0)}</p>
     {btn}{stop}</div>
-    <div class="c"><div class="ok"><b>今晚目标：</b>已有缓存不重下；全历史 manifest 重建后持续补缺口。达到95%/90%门槛即停止扩展，下一步才运行冻结规则的大样本 OOS / Daily-MTM。</div></div>
+    <div class="c"><div class="ok"><b>今晚目标：</b>已有缓存不重下；全历史 manifest 重建后持续补缺口。持续跑完待处理队列；达到95%/90%门槛即停止扩展，下一步才运行冻结规则的大样本 OOS / Daily-MTM。</div></div>
     <script>setTimeout(()=>location.reload(),10000)</script></div></body></html>"""
 
 
