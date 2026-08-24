@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
 <div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
 
 <div class="card" id="v615e-shortcut" style="border:3px solid #f97316"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.15E Big Winner DNA Multi-Factor</h2><div class="muted">Fast Replay · 看 +20/+30/+40/+50% 右尾 · 不训练权重</div></div><a href="/v615e/multifactor"><button type="button">打开 V6.15E</button></a></div></div>
@@ -9978,6 +9979,112 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16A ENTRY LOCATION RESEARCH =================
+V616A_DIR=DATA_DIR/'jlaw_v616a_entry'; V616A_STATUS=V616A_DIR/'status.json'; V616A_RESULT=V616A_DIR/'result.json'; V616A_REPORT=V616A_DIR/'entry_report.csv'; v616a_thread=None
+def _v616a_status():
+ x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+ if V616A_STATUS.exists():
+  try:x.update(json.loads(V616A_STATUS.read_text(encoding='utf-8')))
+  except:pass
+ return x
+def _v616a_write(**kw):
+ V616A_DIR.mkdir(parents=True,exist_ok=True);x=_v616a_status();x.update(kw);V616A_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+def _v616a_price(t):
+ p=MARKET_DIR/f'{t}.csv'
+ if not p.exists():return None
+ try:
+  z=pd.read_csv(p);dc=next((c for c in ['Date','date'] if c in z.columns),None)
+  if dc is None:return None
+  def pc(a):return next((c for c in a if c in z.columns),None)
+  oc,hc,lc,cc,vc=pc(['Open','open','adjOpen']),pc(['High','high','adjHigh']),pc(['Low','low','adjLow']),pc(['Close','close','adjClose']),pc(['Volume','volume','adjVolume'])
+  if cc is None:return None
+  d=pd.DataFrame({'date':pd.to_datetime(z[dc],errors='coerce',utc=True).dt.tz_convert(None),'open':pd.to_numeric(z[oc] if oc else z[cc],errors='coerce'),'high':pd.to_numeric(z[hc] if hc else z[cc],errors='coerce'),'low':pd.to_numeric(z[lc] if lc else z[cc],errors='coerce'),'close':pd.to_numeric(z[cc],errors='coerce'),'volume':pd.to_numeric(z[vc],errors='coerce') if vc else np.nan}).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date').reset_index(drop=True)
+  return d if len(d)>=320 else None
+ except:return None
+def _v616a_metrics(d,i,px):
+ f=d.iloc[i:min(len(d),i+60)]
+ if f.empty or px<=0:return None
+ return float(f.high.max()/px-1),float(f.low.min()/px-1),float(f.close.iloc[-1]/px-1)
+def _v616a_entries(d,oi):
+ c,h,l,v=d.close,d.high,d.low,d.volume;ma10=c.rolling(10).mean();ma20=c.rolling(20).mean();v20=v.rolling(20).mean();mx=min(len(d)-2,oi+15);o={'CONTROL':(oi,float(c.iloc[oi]),0)}
+ for s in range(oi+1,mx+1):
+  if 'PB10' not in o and pd.notna(ma10.iloc[s]) and l.iloc[s]<=ma10.iloc[s]*1.01 and c.iloc[s]>=ma10.iloc[s]:o['PB10']=(s+1,float(d.open.iloc[s+1]),s-oi)
+  if 'PB20' not in o and pd.notna(ma20.iloc[s]) and l.iloc[s]<=ma20.iloc[s]*1.01 and c.iloc[s]>=ma20.iloc[s]:o['PB20']=(s+1,float(d.open.iloc[s+1]),s-oi)
+  if 'PIVOT' not in o and s>=20:
+   piv=float(h.iloc[s-20:s].max());vr=float(v.iloc[s]/v20.iloc[s]) if pd.notna(v20.iloc[s]) and v20.iloc[s]>0 else np.nan
+   if c.iloc[s]>piv and np.isfinite(vr) and vr>=1.2:o['PIVOT']=(s+1,float(d.open.iloc[s+1]),s-oi)
+ armed=False
+ for s in range(oi+1,mx+1):
+  if (pd.notna(ma10.iloc[s]) and abs(c.iloc[s]/ma10.iloc[s]-1)<=.035) or (pd.notna(ma20.iloc[s]) and abs(c.iloc[s]/ma20.iloc[s]-1)<=.05):armed=True
+  if armed and c.iloc[s]>h.iloc[s-1] and c.iloc[s]>d.open.iloc[s]:o['RE_STRENGTH']=(s+1,float(d.open.iloc[s+1]),s-oi);break
+ if oi>=20 and c.iloc[oi]/c.iloc[oi-20]-1>=.20:
+  armed=False
+  for s in range(oi+1,mx+1):
+   if pd.notna(ma10.iloc[s]) and l.iloc[s]<=ma10.iloc[s]*1.02:armed=True
+   if armed and c.iloc[s]>h.iloc[s-1] and c.iloc[s]>=ma10.iloc[s]:o['POWER_PLAY_PB']=(s+1,float(d.open.iloc[s+1]),s-oi);break
+ return o
+def _v616a_run():
+ global v616a_thread
+ t0=time.time()
+ try:
+  S=pd.read_csv(V615D_SNAP);S['obs_date']=pd.to_datetime(S.obs_date,errors='coerce')
+  for c in ['ret60','ret120','ret252','vol_vs20']:S[c]=pd.to_numeric(S[c],errors='coerce')
+  S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy();S['year']=S.obs_date.dt.year.astype(int)
+  picks=[]
+  for y in sorted(S.year.unique()):
+   tr=S[S.year<y];te=S[S.year==y]
+   if len(tr)<1000 or len(te)<50:continue
+   q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
+   a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy();a['dna']='A'
+   b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy();b['dna']='B'
+   picks.extend([a,b])
+  D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date']);ticks=sorted(D.ticker.unique());rows=[]
+  _v616a_write(status='running',message='Frozen DNA → Entry Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+  for k,t in enumerate(ticks,1):
+   d=_v616a_price(t)
+   if d is not None:
+    im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+    for _,r in D[D.ticker.eq(t)].iterrows():
+     dt=pd.Timestamp(r.obs_date).normalize()
+     if dt not in im:continue
+     oi=im[dt]
+     for m,(ei,px,delay) in _v616a_entries(d,oi).items():
+      z=_v616a_metrics(d,ei,px)
+      if z is None:continue
+      mfe,mae,ret=z;rows.append({'ticker':t,'obs_date':str(dt.date()),'method':m,'delay':delay,'mfe':mfe,'mae':mae,'ret60':ret,'bw20':mfe>=.2,'bw30':mfe>=.3,'bw50':mfe>=.5})
+   _v616a_write(status='running',message='Frozen DNA → Entry Replay',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+  X=pd.DataFrame(rows)
+  if X.empty:raise RuntimeError('no entry rows')
+  baseop=len(X[X.method.eq('CONTROL')]);outrows=[]
+  for m,g in X.groupby('method'):
+   w=g[g.ret60>0];lo=g[g.ret60<=0];aw=float(w.ret60.mean()) if len(w) else 0;al=float(lo.ret60.mean()) if len(lo) else 0
+   outrows.append({'method':m,'n':len(g),'coverage':len(g)/max(baseop,1),'avg_delay':float(g.delay.mean()),'avg_mae':float(g.mae.mean()),'mae5':float((g.mae>=-.05).mean()),'bw20':float(g.bw20.mean()),'bw30':float(g.bw30.mean()),'bw50':float(g.bw50.mean()),'avg_ret60':float(g.ret60.mean()),'winrate':float((g.ret60>0).mean()),'winloss':float(aw/abs(al)) if al<0 else np.nan})
+  R=pd.DataFrame(outrows);c=R[R.method.eq('CONTROL')].iloc[0];R['mae_improve']=R.avg_mae-c.avg_mae;R['bw20_retention']=R.bw20/c.bw20 if c.bw20>0 else np.nan;R.to_csv(V616A_REPORT,index=False)
+  res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'opportunities':int(baseop),'methods':R.to_dict('records'),'warning':'Entry-location research only. Frozen V6.15F DNA; no Stop/BE/Add/Exit. Existing 455-file cache still has survivorship-bias limits.'};V616A_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v616a_write(status='done',message='V6.16A Entry Location Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+ except Exception as ex:traceback.print_exc();_v616a_write(status='error',message='V6.16A 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+ finally:v616a_thread=None
+def _v616a_start():
+ global v616a_thread
+ if v616a_thread is not None and v616a_thread.is_alive():return False
+ v616a_thread=threading.Thread(target=_v616a_run,daemon=True);v616a_thread.start();return True
+@APP.post('/v616a/run')
+def v616a_run():_v616a_start();return redirect('/v616a/entry-location')
+@APP.get('/api/v616a/status')
+def v616a_status_api():return jsonify(_v616a_status())
+@APP.get('/v616a/entry-location')
+def v616a_page():
+ import html
+ e=lambda x:html.escape(str(x));s=_v616a_status();r={}
+ if V616A_RESULT.exists():
+  try:r=json.loads(V616A_RESULT.read_text(encoding='utf-8'))
+  except:pass
+ trs=''
+ for x in r.get('methods',[]):trs+=f"<tr><td><b>{e(x.get('method'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('coverage',0):.1%}</td><td>{x.get('avg_delay',0):.1f}</td><td><b>{x.get('avg_mae',0):.1%}</b></td><td>{x.get('mae5',0):.1%}</td><td>{x.get('bw20',0):.1%}</td><td>{x.get('bw30',0):.1%}</td><td>{x.get('bw50',0):.1%}</td><td>{x.get('bw20_retention',0):.2f}×</td><td>{x.get('avg_ret60',0):.1%}</td><td>{x.get('winrate',0):.1%}</td><td>{x.get('winloss',0) or 0:.2f}×</td></tr>"
+ btn='' if s.get('status')=='running' else '<form method="post" action="/v616a/run"><button>▶ 跑 V6.16A Entry Location Research</button></form>'
+ return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1050px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🎯 V6.16A · Entry Location Research</h1><div class="info"><b>选股 DNA 冻结。</b>沿用 V6.15F A/B，只研究在哪里买。比较 Control、Pivot Breakout、10MA/20MA Pullback、Re-strength、Power Play First Pullback proxy；全部信号次日开盘，不加 Stop/Exit。</div></div><div class="c"><h2>状态：{e(s.get("status"))}</h2><p>{e(s.get("message",""))}　{s.get("processed",0)}/{s.get("total",0)}　{e(s.get("current",""))}　耗时 {s.get("elapsed_sec",0)} 秒</p>{btn}</div><div class="c"><h2>Entry Location 比较</h2><div style="overflow:auto"><table><tr><th>Entry</th><th>N</th><th>Coverage</th><th>等待日</th><th>Avg MAE</th><th>MAE≤5%</th><th>BW20</th><th>BW30</th><th>BW50</th><th>BW20保留</th><th>60D AvgRet</th><th>胜率</th><th>AvgWin/Loss</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>重点：</b>先看 MAE 是否由约 -10% 往 -5%靠，同时不能杀掉 Big Winner 右尾。<br><b>限制：</b>{e(r.get("warning","只做 Entry research；不优化交易管理。"))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch("/api/v616a/status",{{cache:"no-store"}}),x=await q.json();if(x.status==="running")location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.15F STRICT BIG WINNER WALK-FORWARD OOS =================
