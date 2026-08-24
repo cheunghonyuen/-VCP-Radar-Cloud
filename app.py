@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616h31-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.1 Daily MTM Fast-Cache</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h31/daily-mtm"><button type="button">打开 V6.16H.3.1</button></a></div></div>
+<div class="card" id="v616h32-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h32/daily-mtm"><button type="button">打开 V6.16H.3.2</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,13 +10002,13 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616h31_daily_mtm'
+V616F_DIR=DATA_DIR/'jlaw_v616h32_daily_mtm'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'daily_mtm_fastcache_report.csv'
-V616H31_META_CACHE=V616F_DIR/'trade_meta.pkl'
-V616H31_PRICE_CACHE=V616F_DIR/'price_map.pkl'
-V616H31_CURVE_DIR=V616F_DIR/'equity_curves'
+V616F_REPORT=V616F_DIR/'daily_mtm_lowdisk_report.csv'
+V616H32_META_CACHE=V616F_DIR/'trade_meta.pkl'
+# Low-disk build deliberately does NOT persist a duplicate full-history price_map.
+# It reuses the existing per-ticker Local Cache and keeps price frames in RAM only for the current run.
 v616f_thread=None
 
 def _v616f_status():
@@ -10123,26 +10123,44 @@ def _v616f_run():
     global v616f_thread
     t0=time.time()
     try:
-        import pickle
+        import gc
 
-        # ---------- Phase 1: load/build reusable metadata cache ----------
-        T=None
-        price_map=None
+        V616F_DIR.mkdir(parents=True,exist_ok=True)
 
-        if V616H31_META_CACHE.exists() and V616H31_PRICE_CACHE.exists():
+        # ---------- Emergency cleanup of H.3.1 duplicate artifacts ----------
+        # Safe: these are only artifacts created by the failed H.3.1 branch,
+        # never the original Local Cache.
+        cleanup_candidates=[
+            V616F_DIR/'price_map.pkl',
+            V616F_DIR/'equity_curves'
+        ]
+        for p in cleanup_candidates:
             try:
-                _v616f_write(status='running',message='Phase 1/4 · Loading Fast Cache',
-                             processed=0,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
-                T=pd.read_pickle(V616H31_META_CACHE)
-                with open(V616H31_PRICE_CACHE,'rb') as fh:
-                    price_map=pickle.load(fh)
+                if p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    import shutil
+                    shutil.rmtree(p,ignore_errors=True)
+            except Exception:
+                pass
+        gc.collect()
+
+        # ---------- Phase 1: load/build SMALL metadata cache only ----------
+        T=None
+        if V616H32_META_CACHE.exists():
+            try:
+                _v616f_write(status='running',message='Phase 1/4 · Loading Small Metadata Cache',
+                             processed=1,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+                T=pd.read_pickle(V616H32_META_CACHE)
             except Exception:
                 T=None
-                price_map=None
 
-        if T is None or price_map is None:
-            _v616f_write(status='running',message='Phase 1/4 · Building Trade Metadata + Price Map',
-                         processed=0,total=450,current='',elapsed_sec=0,error=None)
+        # price_map is RAM-only for this run.
+        price_map={}
+
+        if T is None or T.empty:
+            _v616f_write(status='running',message='Phase 1/4 · Building Small Trade Metadata',
+                         processed=0,total=450,current='',elapsed_sec=round(time.time()-t0,1),error=None)
 
             S=pd.read_csv(V615D_SNAP)
             S['obs_date']=pd.to_datetime(S['obs_date'],errors='coerce')
@@ -10165,7 +10183,6 @@ def _v616f_run():
 
             D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
             ticks=sorted(D.ticker.unique())
-            price_map={}
             trade_rows=[]
 
             for k,t in enumerate(ticks,1):
@@ -10173,9 +10190,9 @@ def _v616f_run():
                 if d is not None and len(d):
                     d=d.copy()
                     d['date']=pd.to_datetime(d['date']).dt.normalize()
-                    # Keep only columns required by H.3.1 to reduce cache size.
                     keep=[c for c in ['date','open','high','low','close','volume'] if c in d.columns]
                     d=d[keep].copy()
+                    # RAM only
                     price_map[t]=d
                     im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
 
@@ -10203,8 +10220,7 @@ def _v616f_run():
                         base_exit_px=float(d.iloc[base_exit_idx]['close'])
                         base_reason='HOLD1260'
                         for j in range(ei,ei+1260):
-                            op=float(d.iloc[j]['open'])
-                            lo=float(d.iloc[j]['low'])
+                            op=float(d.iloc[j]['open']); lo=float(d.iloc[j]['low'])
                             if lo<=px*.93:
                                 base_exit_idx=j
                                 base_exit_px=min(op,px*.93) if op<px*.93 else px*.93
@@ -10217,8 +10233,7 @@ def _v616f_run():
                         add_exit_px=float(d.iloc[add_exit_idx]['close'])
                         add_reason='ADD_HOLD_TO1260'
                         for j in range(ai,ei+1260):
-                            op=float(d.iloc[j]['open'])
-                            lo=float(d.iloc[j]['low'])
+                            op=float(d.iloc[j]['open']); lo=float(d.iloc[j]['low'])
                             if lo<=apx*.93:
                                 add_exit_idx=j
                                 add_exit_px=min(op,apx*.93) if op<apx*.93 else apx*.93
@@ -10242,21 +10257,40 @@ def _v616f_run():
                             'cp_slope63':float(np.polyfit(xx,yy,1)[0])
                         })
 
-                _v616f_write(status='running',message='Phase 1/4 · Building Trade Metadata + Price Map',
+                _v616f_write(status='running',message='Phase 1/4 · Building Small Trade Metadata',
                              processed=k,total=len(ticks),current=t,
                              elapsed_sec=round(time.time()-t0,1),error=None)
 
             T=pd.DataFrame(trade_rows).replace([np.inf,-np.inf],np.nan).dropna()
             if T.empty:
-                raise RuntimeError('没有生成 H.3.1 trade metadata')
+                raise RuntimeError('没有生成 H.3.2 trade metadata')
 
-            V616F_DIR.mkdir(parents=True,exist_ok=True)
-            T.to_pickle(V616H31_META_CACHE)
-            with open(V616H31_PRICE_CACHE,'wb') as fh:
-                pickle.dump(price_map,fh,pickle.HIGHEST_PROTOCOL)
+            # Small cache only. If even this cannot be saved, continue without failing the research.
+            try:
+                T.to_pickle(V616H32_META_CACHE)
+            except OSError:
+                pass
+
+        # If metadata was loaded from disk, lazily load ONLY tickers actually used by T
+        # from the already-existing Local Cache; do not repeat candidate scanning.
+        if not price_map:
+            needed=sorted(T.ticker.astype(str).unique())
+            _v616f_write(status='running',message='Phase 1/4 · Loading Existing Local Cache Into RAM',
+                         processed=0,total=len(needed),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+            for k,t in enumerate(needed,1):
+                d=_v616a_price(t)
+                if d is not None and len(d):
+                    d=d.copy()
+                    d['date']=pd.to_datetime(d['date']).dt.normalize()
+                    keep=[c for c in ['date','open','high','low','close','volume'] if c in d.columns]
+                    price_map[t]=d[keep].copy()
+                if k%10==0 or k==len(needed):
+                    _v616f_write(status='running',message='Phase 1/4 · Loading Existing Local Cache Into RAM',
+                                 processed=k,total=len(needed),current=t,
+                                 elapsed_sec=round(time.time()-t0,1),error=None)
 
         if T.empty or not price_map:
-            raise RuntimeError('Fast Cache 空')
+            raise RuntimeError('Metadata / Local Cache 空')
 
         # ---------- Phase 2: strict walk-forward signals ----------
         _v616f_write(status='running',message='Phase 2/4 · Strict Walk-Forward Signals',
@@ -10301,15 +10335,15 @@ def _v616f_run():
         ]
         slots=10
 
-        # Build only relevant date range.
         first_date=pd.Timestamp(valid.entry_date.min()).normalize()
         last_date=max(pd.Timestamp(valid.base_exit_date.max()).normalize(),
                       pd.Timestamp(valid.addon_exit_date.max()).normalize())
 
+        # Compact lookup in RAM only.
         date_set=set()
         close_lookup={}
         for t,d in price_map.items():
-            dd=d[(d.date>=first_date)&(d.date<=last_date)].copy()
+            dd=d[(d.date>=first_date)&(d.date<=last_date)]
             if dd.empty:
                 continue
             z=dict(zip(dd.date,dd.close.astype(float)))
@@ -10320,13 +10354,12 @@ def _v616f_run():
         if not calendar:
             raise RuntimeError('没有价格日历')
 
-        # Convert valid rows once to dictionaries to remove thousands of DataFrame .loc calls.
         recs=valid.to_dict('index')
 
         def simulate(label,signal_col,addon_mult,variant_no):
             _v616f_write(status='running',
-                         message=f'Phase 3/4 · Daily MTM {variant_no}/3 · {label}',
-                         processed=variant_no-1,total=3,current=label,
+                         message=f'Phase 3/4 · Daily MTM {variant_no}/3 · {label} · 0%',
+                         processed=0,total=len(calendar),current=label,
                          elapsed_sec=round(time.time()-t0,1),error=None)
 
             base_entries={}; base_exits={}; add_entries={}; add_exits={}
@@ -10342,17 +10375,14 @@ def _v616f_run():
                     add_exits.setdefault(ax,[]).append(idx)
 
             cash=1.0
-            base_pos={}
-            add_pos={}
+            base_pos={}; add_pos={}
             skipped_base=requested_add=filled_add=partial_add=skipped_add=0
             equity_rows=[]
             last_px={}
-
             total_days=len(calendar)
-            progress_step=max(1,total_days//20)
+            step=max(1,total_days//25)
 
             for di,dt in enumerate(calendar,1):
-                # exits first
                 for idx in base_exits.get(dt,[]):
                     p=base_pos.pop(idx,None)
                     if p is not None:
@@ -10363,7 +10393,6 @@ def _v616f_run():
                     if p is not None:
                         cash += p['shares']*float(recs[idx]['addon_exit_px'])
 
-                # current MTM before entries
                 holdings_value=0.0
                 for idx,p in base_pos.items():
                     cp=close_lookup.get(p['ticker'],{}).get(dt,last_px.get(('b',idx),p['entry_px']))
@@ -10376,7 +10405,6 @@ def _v616f_run():
 
                 equity_now=cash+holdings_value
 
-                # base entries
                 for idx in base_entries.get(dt,[]):
                     r=recs[idx]
                     target=equity_now/float(slots)
@@ -10388,7 +10416,6 @@ def _v616f_run():
                     base_pos[idx]={'ticker':r['ticker'],'shares':target/px,'entry_px':px,'cost':target}
                     last_px[('b',idx)]=px
 
-                # add entries
                 for idx in add_entries.get(dt,[]):
                     if idx not in base_pos:
                         continue
@@ -10412,7 +10439,6 @@ def _v616f_run():
                         add_pos[idx]={'ticker':r['ticker'],'shares':fill/px,'entry_px':px,'cost':fill}
                         last_px[('a',idx)]=px
 
-                # end-of-day MTM
                 holdings_value=0.0
                 for idx,p in base_pos.items():
                     cp=close_lookup.get(p['ticker'],{}).get(dt,last_px.get(('b',idx),p['entry_px']))
@@ -10425,22 +10451,22 @@ def _v616f_run():
 
                 equity=cash+holdings_value
                 equity_rows.append({
-                    'date':dt,'equity':equity,'cash':cash,'holdings':holdings_value,
+                    'date':dt,'equity':equity,
                     'exposure':holdings_value/equity if equity>0 else np.nan,
                     'cash_pct':cash/equity if equity>0 else np.nan,
                     'open_base':len(base_pos),'open_add':len(add_pos)
                 })
 
-                if di % progress_step == 0 or di==total_days:
-                    pct=int(round(di/total_days*100))
+                if di%step==0 or di==total_days:
+                    pct=int(round(100*di/total_days))
                     _v616f_write(status='running',
                                  message=f'Phase 3/4 · {label} Daily MTM {pct}%',
                                  processed=di,total=total_days,current=label,
                                  elapsed_sec=round(time.time()-t0,1),error=None)
 
-            curve=pd.DataFrame(equity_rows).drop_duplicates('date',keep='last').sort_values('date')
+            curve=pd.DataFrame(equity_rows).sort_values('date')
             if curve.empty:
-                return None,None
+                return None
 
             start_eq=float(curve.equity.iloc[0])
             end_eq=float(curve.equity.iloc[-1])
@@ -10451,49 +10477,66 @@ def _v616f_run():
             calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
 
             curve['year']=pd.to_datetime(curve.date).dt.year
-            yearly=[]
+            yr=[]
             for y,g in curve.groupby('year'):
-                if len(g)<2:
-                    continue
-                yearly.append(float(g.equity.iloc[-1]/g.equity.iloc[0]-1))
+                if len(g)>=2:
+                    yr.append(float(g.equity.iloc[-1]/g.equity.iloc[0]-1))
 
             fill=(filled_add+partial_add)/requested_add if requested_add else np.nan
 
-            summary={
+            # Downsample equity curve in-memory to month-end only for small audit payload.
+            month_curve=curve.copy()
+            month_curve['month']=pd.to_datetime(month_curve.date).dt.to_period('M')
+            month_curve=month_curve.groupby('month',as_index=False).tail(1)
+            audit=[
+                {
+                    'date':str(pd.Timestamp(r.date).date()),
+                    'equity':round(float(r.equity),6),
+                    'exposure':round(float(r.exposure),6) if pd.notna(r.exposure) else None
+                }
+                for _,r in month_curve.iterrows()
+            ]
+
+            return {
                 'signal':label,'addon_mult':float(addon_mult),'slots':slots,
                 'start_equity':start_eq,'end_equity':end_eq,'cagr':float(cagr),
                 'maxdd_mtm':maxdd,'calmar':calmar,
                 'avg_exposure':float(curve.exposure.dropna().mean()),
-                'median_exposure':float(curve.exposure.dropna().median()),
                 'peak_exposure':float(curve.exposure.dropna().max()),
                 'avg_cash_pct':float(curve.cash_pct.dropna().mean()),
-                'min_cash_pct':float(curve.cash_pct.dropna().min()),
-                'skipped_base':int(skipped_base),'requested_add':int(requested_add),
-                'filled_add':int(filled_add),'partial_add':int(partial_add),
+                'skipped_base':int(skipped_base),
+                'requested_add':int(requested_add),
+                'filled_add':int(filled_add),
+                'partial_add':int(partial_add),
                 'skipped_add':int(skipped_add),
                 'addon_fill_rate':float(fill) if pd.notna(fill) else None,
                 'max_open_base':int(curve.open_base.max()),
                 'max_open_add':int(curve.open_add.max()),
-                'best_year':float(max(yearly)) if yearly else np.nan,
-                'worst_year':float(min(yearly)) if yearly else np.nan,
-                'positive_years':int(sum(1 for x in yearly if x>0)),
-                'total_years':int(len(yearly))
+                'best_year':float(max(yr)) if yr else np.nan,
+                'worst_year':float(min(yr)) if yr else np.nan,
+                'positive_years':int(sum(1 for x in yr if x>0)),
+                'total_years':int(len(yr)),
+                'monthly_curve':audit
             }
-            return summary,curve
 
-        # ---------- Phase 3: run only 3 finalists ----------
+        # ---------- Phase 3 ----------
         results=[]
-        curves={}
         for vi,(label,scol,mult) in enumerate(variants,1):
-            s,c=simulate(label,scol,mult,vi)
-            if s is not None:
-                results.append(s)
-                curves[label]=c
+            z=simulate(label,scol,mult,vi)
+            if z is not None:
+                results.append(z)
 
-        O=pd.DataFrame(results)
-        if O.empty:
-            raise RuntimeError('没有生成 H.3.1 MTM results')
+        if not results:
+            raise RuntimeError('没有生成 H.3.2 MTM results')
 
+        # Separate small summaries from monthly audit curves.
+        audits={}
+        summaries=[]
+        for r in results:
+            audits[r['signal']]=r.pop('monthly_curve')
+            summaries.append(r)
+
+        O=pd.DataFrame(summaries)
         base=O[O.signal.eq('BASE_ONLY')].iloc[0]
         O['delta_cagr_vs_base']=O.cagr-float(base.cagr)
         O['delta_maxdd_vs_base']=O.maxdd_mtm-float(base.maxdd_mtm)
@@ -10506,39 +10549,47 @@ def _v616f_run():
         )
         O.loc[O.signal.eq('BASE_ONLY'),'screen_pass']=False
         O=O.sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False])
-        O.to_csv(V616F_REPORT,index=False)
 
-        # ---------- Phase 4: persist compact audit files; keep result.json small ----------
-        _v616f_write(status='running',message='Phase 4/4 · Saving Results',
+        # ---------- Phase 4: tiny outputs only ----------
+        _v616f_write(status='running',message='Phase 4/4 · Saving Small Results',
                      processed=4,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
 
-        V616H31_CURVE_DIR.mkdir(parents=True,exist_ok=True)
-        curve_files={}
-        for label,c in curves.items():
-            p=V616H31_CURVE_DIR/f"{label.lower()}_equity.csv"
-            c[['date','equity','exposure','cash_pct','open_base','open_add']].to_csv(p,index=False)
-            curve_files[label]=str(p)
+        try:
+            O.to_csv(V616F_REPORT,index=False)
+        except OSError:
+            pass
 
         res={
             'generated_at':datetime.now(timezone.utc).isoformat(),
             'elapsed_sec':round(time.time()-t0,2),
             'overall':O.replace({np.nan:None}).to_dict('records'),
-            'curve_files':curve_files,
-            'cache_note':'H.3.1 persists trade metadata and compact price_map after Phase 1. Re-runs reuse Fast Cache and skip the 450-ticker rebuild unless cache is missing/corrupt.',
+            'monthly_equity_audit':audits,
+            'cache_note':'Low-disk build caches only small trade metadata. It never writes a duplicate full-history price_map; prices are read from the existing Local Cache and held in RAM only during the run.',
             'acceptance':'Daily MTM gate: add-on must beat BASE_ONLY on CAGR and not reduce Calmar, while achieving at least 80% add-on fill rate.',
             'rule_note':'10-slot, no margin. Frozen DNA + CONTROL entry + -7% base stop + HOLD1260. Day252 strict walk-forward signal; day253 next-open exact add-on; independent -7% add-on stop. Only QUALITY_2OF4 +100% and MFE252_Q75 +100% challenge BASE_ONLY.',
-            'mtm_note':'Every open base/add-on leg is marked to each trading day close. MaxDD and Calmar are daily mark-to-market portfolio statistics.',
+            'mtm_note':'Every open leg is marked to each trading day close. MaxDD and Calmar are daily mark-to-market portfolio statistics.',
+            'disk_note':'H.3.1 failed because it duplicated the entire historical price map to disk. H.3.2 removes that duplication and deletes only H.3.1 temporary duplicate artifacts, never the original Local Cache.',
             'warning':'Current universe still has survivorship-bias limits until historical/delisted coverage is complete.'
         }
 
-        V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        # result JSON is intentionally small; if disk is still extremely tight,
+        # status still reaches done after in-memory calculation.
+        try:
+            V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        except OSError:
+            # Fallback: strip audit curve and save only summary
+            res.pop('monthly_equity_audit',None)
+            try:
+                V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            except OSError:
+                pass
 
-        _v616f_write(status='done',message='V6.16H.3.1 Daily MTM Fast-Cache 完成',
-                     processed=4,total=4,current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616f_write(status='done',message='V6.16H.3.2 Daily MTM Low-Disk 完成',
+                     processed=4,total=4,current='',elapsed_sec=round(time.time()-t0,2),error=None)
 
     except Exception as ex:
         traceback.print_exc()
-        _v616f_write(status='error',message='V6.16H.3.1 失败',
+        _v616f_write(status='error',message='V6.16H.3.2 失败',
                      error=f'{type(ex).__name__}: {ex}',
                      elapsed_sec=round(time.time()-t0,1))
     finally:
@@ -10549,15 +10600,15 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616h31/run')
+@APP.post('/v616h32/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616h31/daily-mtm')
+    _v616f_start();return redirect('/v616h32/daily-mtm')
 
-@APP.get('/api/v616h31/status')
+@APP.get('/api/v616h32/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616h31/daily-mtm')
+@APP.get('/v616h32/daily-mtm')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
@@ -10567,9 +10618,9 @@ def v616f_page():
     rows=''
     for x in r.get('overall',[]):
         rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>{'—' if x.get('signal')=='BASE_ONLY' else '+100%'}</td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_base',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('delta_maxdd_vs_base',0):+.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('delta_calmar_vs_base',0) or 0:+.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{x.get('avg_cash_pct',0):.1%}</td><td>{'-' if x.get('addon_fill_rate') is None else format(x.get('addon_fill_rate',0),'.1%')}</td><td>{int(x.get('skipped_base',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{int(x.get('positive_years',0))}/{int(x.get('total_years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h31/run"><button>Run V6.16H.3.1 Daily MTM</button></form>'
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h32/run"><button>Run V6.16H.3.2 Daily MTM</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3.1 Daily MTM Fast-Cache</h1><div class="info"><b>Fast-Cache Daily MTM. Phase 1 is persisted, so later retries do not rebuild all 450 tickers.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h31/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3.2 Daily MTM Low-Disk</h1><div class="info"><b>Low-Disk Daily MTM. Reuses the existing Local Cache; does not duplicate the full historical price map to Railway disk.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h32/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
