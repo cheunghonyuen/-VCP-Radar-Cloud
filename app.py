@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6133-shortcut" style="border:3px solid #7c3aed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.13.3 META Failure Autopsy</h2><div class="muted">Fast Replay：冻结META，找 Loser vs Big Winner 的进场前差异；不调参数</div></div><a href="/v6133/failure-autopsy"><button type="button">打开 V6.13.3</button></a></div></div>
 <div class="card" id="v6132-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.13.2 Fast Replay + Winner Management</h2><div class="muted">不重跑选股：冻结 V6.13.1 META，直接测试 10MA/20MA Winner Exit</div></div><a href="/v6132/winner-replay"><button type="button">打开 V6.13.2</button></a></div></div>
 
 <div class="card" id="v613-shortcut" style="border:3px solid #2563eb">
@@ -9939,6 +9940,145 @@ def v6132_page():
         for x in r.get('winner_diagnostic',[]): diag+=f"<tr><td><b>{esc(x['mode'])}</b></td><td>{x['big_mfe_trades']}</td><td>{x['avg_exit_on_big']:.2%}</td><td>{x['kept_10pct']:.1%}</td><td>{x['kept_20pct']:.1%}</td></tr>"
     run='' if st.get('status')=='running' else '<form method="post" action="/v6132/run"><button>⚡ 跑 Fast Winner Replay</button></form>'
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
+
+
+
+# ================= V6.13.3 META FAILURE AUTOPSY · FAST REPLAY =================
+V6133_DIR = DATA_DIR / "jlaw_v6133_failure_autopsy"
+V6133_STATUS = V6133_DIR / "status.json"
+V6133_RESULT = V6133_DIR / "result.json"
+V6133_DETAIL = V6133_DIR / "features.csv"
+v6133_thread = None
+
+def _v6133_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None,"elapsed_sec":0}
+    if V6133_STATUS.exists():
+        try:s.update(json.loads(V6133_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6133_write_status(**kw):
+    V6133_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6133_status();s.update(kw)
+    V6133_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6133_pf(vals):
+    rr=pd.to_numeric(pd.Series(vals),errors="coerce").dropna(); w=rr[rr>0]; l=rr[rr<0]
+    if len(l) and -l.sum()>0:return float(w.sum()/(-l.sum()))
+    return 99.0 if len(w) else 0.0
+
+def _v6133_group_name(row):
+    ret=float(row.get("return_pct",0) or 0); mfe=float(row.get("mfe60",row.get("mfe",0)) or 0)
+    risk=float(row.get("initial_risk",0) or 0); stopped=bool(row.get("stopped",False)); R=mfe/max(risk,1e-9)
+    if mfe>=.20:return "BIG_MFE_20+"
+    if ret>0:return "WIN"
+    if R>=2:return "2R_THEN_FAIL"
+    if R>=1:return "1R_THEN_FAIL"
+    if stopped:return "IMMEDIATE_FAILURE"
+    return "OTHER_LOSS"
+
+def _v6133_compute():
+    global v6133_thread
+    t0=time.time()
+    try:
+        if not V613_DETAIL.exists():raise RuntimeError("缺少 V6.13.1 trades.csv；请先跑 V6.13.1")
+        raw=pd.read_csv(V613_DETAIL); meta=raw[raw["mode"].astype(str).eq("META")].copy()
+        if meta.empty:raise RuntimeError("V6.13.1 缓存没有 META")
+        meta=meta.sort_values(["ticker","entry_date","support_count","initial_risk"],ascending=[True,True,False,True]).drop_duplicates(["ticker","entry_date"])
+        tickers=sorted(meta["ticker"].astype(str).unique()); by_t={t:g.copy() for t,g in meta.groupby("ticker")}
+        _v6133_write_status(status="running",message="Fast Autopsy：读取固定 META + OHLCV cache",processed=0,total=len(tickers),elapsed_sec=0,error=None)
+        rows=[]; errors=[]
+        for n,t in enumerate(tickers,1):
+            _v6133_write_status(status="running",message="Fast Autopsy：提取进场前特征",processed=n-1,total=len(tickers),current=t,elapsed_sec=round(time.time()-t0,2))
+            try:
+                fp=MARKET_DIR/f"{t}.csv"
+                if not fp.exists():raise RuntimeError("market cache missing")
+                d=pd.read_csv(fp); d.columns=[str(c).lower() for c in d.columns]
+                if "date" not in d.columns:
+                    if "datetime" in d.columns:d=d.rename(columns={"datetime":"date"})
+                    elif "index" in d.columns:d=d.rename(columns={"index":"date"})
+                d["date"]=pd.to_datetime(d["date"],errors="coerce").dt.tz_localize(None)
+                for c in ["open","high","low","close","volume"]:
+                    if c in d.columns:d[c]=pd.to_numeric(d[c],errors="coerce")
+                d=d.dropna(subset=["date","open","high","low","close"]).sort_values("date").reset_index(drop=True)
+                d["ma10"]=d["close"].rolling(10).mean(); d["ma20"]=d["close"].rolling(20).mean(); d["v20"]=d["volume"].rolling(20).mean() if "volume" in d.columns else np.nan
+                for _,tr in by_t[t].iterrows():
+                    edt=pd.Timestamp(tr["entry_date"]); hit=d.index[d["date"]==edt].tolist()
+                    if not hit:continue
+                    ei=int(hit[-1]); entry=float(tr["entry"]); pivot=float(tr.get("pivot",np.nan)); pre=d.iloc[max(0,ei-1)]
+                    ma10=float(pre["ma10"]) if pd.notna(pre.get("ma10",np.nan)) else np.nan; ma20=float(pre["ma20"]) if pd.notna(pre.get("ma20",np.nan)) else np.nan
+                    v20=float(pre["v20"]) if pd.notna(pre.get("v20",np.nan)) else np.nan; pvol=float(pre["volume"]) if pd.notna(pre.get("volume",np.nan)) else np.nan
+                    bd=tr.get("breakout_date",np.nan); breakout=pd.Timestamp(bd) if pd.notna(bd) else pd.NaT; delay=(edt-breakout).days if pd.notna(breakout) else np.nan
+                    rows.append(dict(ticker=t,entry_date=str(tr["entry_date"]),breakout_date=str(tr.get("breakout_date","")),group=_v6133_group_name(tr),
+                        return_pct=float(tr.get("return_pct",np.nan)),mfe=float(tr.get("mfe60",tr.get("mfe",np.nan))),initial_risk=float(tr.get("initial_risk",np.nan)),
+                        support_count=float(tr.get("support_count",np.nan)),support_cluster=float(tr.get("support_cluster",np.nan)),pullback_depth=float(tr.get("pullback_depth",np.nan)),
+                        vol_vs_v20=float(tr.get("vol_vs_v20",np.nan)) if pd.notna(tr.get("vol_vs_v20",np.nan)) else np.nan,
+                        vol_vs_breakout=float(tr.get("vol_vs_breakout",np.nan)) if pd.notna(tr.get("vol_vs_breakout",np.nan)) else np.nan,
+                        rs=float(tr.get("rs",np.nan)),breakout_volratio=float(tr.get("volratio",np.nan)),
+                        entry_extension=float(entry/pivot-1) if np.isfinite(pivot) and pivot>0 else np.nan,
+                        entry_vs_ma10=float(entry/ma10-1) if np.isfinite(ma10) and ma10>0 else np.nan,entry_vs_ma20=float(entry/ma20-1) if np.isfinite(ma20) and ma20>0 else np.nan,
+                        preday_vol_vs_v20=float(pvol/v20) if np.isfinite(pvol) and np.isfinite(v20) and v20>0 else np.nan,
+                        breakout_to_entry_days=float(delay) if pd.notna(delay) else np.nan,market_character=str(tr.get("v6_market_character","")),supports=str(tr.get("supports","")),stopped=bool(tr.get("stopped",False))))
+            except Exception as ex:errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+        F=pd.DataFrame(rows)
+        if F.empty:raise RuntimeError("没有产生 Autopsy 特征")
+        V6133_DIR.mkdir(parents=True,exist_ok=True);F.to_csv(V6133_DETAIL,index=False)
+        outcome=[]
+        for g,z in F.groupby("group",dropna=False):outcome.append(dict(group=str(g),trades=int(len(z)),avg_return=float(pd.to_numeric(z["return_pct"],errors="coerce").mean()),pf=_v6133_pf(z["return_pct"]),avg_mfe=float(pd.to_numeric(z["mfe"],errors="coerce").mean()),avg_risk=float(pd.to_numeric(z["initial_risk"],errors="coerce").mean())))
+        features=["initial_risk","support_count","support_cluster","pullback_depth","vol_vs_v20","vol_vs_breakout","rs","breakout_volratio","entry_extension","entry_vs_ma10","entry_vs_ma20","preday_vol_vs_v20","breakout_to_entry_days"]
+        big=F[pd.to_numeric(F["mfe"],errors="coerce")>=.20];losers=F[pd.to_numeric(F["return_pct"],errors="coerce")<=0];winners=F[pd.to_numeric(F["return_pct"],errors="coerce")>0]
+        feat=[]
+        for f in features:
+            x=pd.to_numeric(F[f],errors="coerce");bw=pd.to_numeric(big[f],errors="coerce").dropna();lo=pd.to_numeric(losers[f],errors="coerce").dropna();wi=pd.to_numeric(winners[f],errors="coerce").dropna()
+            if x.notna().sum()<30:continue
+            pooled=float(x.std(ddof=0)) if x.notna().sum()>1 else 0.0; eff=float((bw.median()-lo.median())/pooled) if len(bw) and len(lo) and pooled>1e-12 else 0.0
+            feat.append(dict(feature=f,available=int(x.notna().sum()),all_median=float(x.median()),loser_median=float(lo.median()) if len(lo) else None,winner_median=float(wi.median()) if len(wi) else None,bigwinner_median=float(bw.median()) if len(bw) else None,big_vs_loser_effect=eff))
+        feat=sorted(feat,key=lambda q:abs(q.get("big_vs_loser_effect",0)),reverse=True)
+        splits=[];base_pf=_v6133_pf(F["return_pct"]);big_total=max(1,int((pd.to_numeric(F["mfe"],errors="coerce")>=.20).sum()));loser_total=max(1,int((pd.to_numeric(F["return_pct"],errors="coerce")<=0).sum()))
+        for f in features:
+            x=pd.to_numeric(F[f],errors="coerce")
+            if x.notna().sum()<60:continue
+            cut=float(x.median())
+            for direction,mask in [("HIGH",x>=cut),("LOW",x<cut)]:
+                z=F[mask.fillna(False)]
+                if len(z)<30:continue
+                splits.append(dict(feature=f,direction=direction,cut=cut,trades=int(len(z)),pf=_v6133_pf(z["return_pct"]),avg_return=float(pd.to_numeric(z["return_pct"],errors="coerce").mean()),bigwinner_retention=float(int((pd.to_numeric(z["mfe"],errors="coerce")>=.20).sum())/big_total),loser_rejection=float(1-int((pd.to_numeric(z["return_pct"],errors="coerce")<=0).sum())/loser_total),pf_delta=float(_v6133_pf(z["return_pct"])-base_pf)))
+        splits=sorted(splits,key=lambda q:(q["bigwinner_retention"]>=.80,q["pf_delta"],q["loser_rejection"]),reverse=True)
+        result=dict(generated_at=datetime.now(timezone.utc).isoformat(),elapsed_sec=round(time.time()-t0,2),full_scan=False,source="V6.13.1 fixed META trades + market OHLCV cache",trades=int(len(F)),tickers=int(F["ticker"].nunique()),base_pf=base_pf,outcomes=outcome,feature_comparison=feat,median_split_diagnostic=splits[:20],errors=errors[:50],note="Diagnostic only. Median splits are discovery, not approved filters; candidates require independent holdout.")
+        V6133_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6133_write_status(status="done",message="V6.13.3 META Failure Autopsy 完成",processed=len(tickers),total=len(tickers),current="",elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc();_v6133_write_status(status="error",message="V6.13.3 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:v6133_thread=None
+
+def _v6133_start():
+    global v6133_thread
+    if v6133_thread is not None and v6133_thread.is_alive():return False
+    v6133_thread=threading.Thread(target=_v6133_compute,daemon=True);v6133_thread.start();return True
+
+@APP.post("/v6133/run")
+def v6133_run():_v6133_start();return redirect("/v6133/failure-autopsy")
+
+@APP.get("/api/v6133/status")
+def v6133_status_api():return jsonify(_v6133_status())
+
+@APP.get("/v6133/failure-autopsy")
+def v6133_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v6133_status();r=None
+    if V6133_RESULT.exists():
+        try:r=json.loads(V6133_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    oh=fh=sh=""
+    if r:
+        for x in r.get("outcomes",[]):oh+=f"<tr><td><b>{esc(x['group'])}</b></td><td>{x['trades']}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('pf',0):.2f}</td><td>{x.get('avg_mfe',0):.2%}</td><td>{x.get('avg_risk',0):.2%}</td></tr>"
+        for x in r.get("feature_comparison",[])[:15]:
+            fmt=lambda v:"—" if v is None else f"{v:.3f}"
+            fh+=f"<tr><td><b>{esc(x['feature'])}</b></td><td>{x['available']}</td><td>{fmt(x.get('loser_median'))}</td><td>{fmt(x.get('winner_median'))}</td><td>{fmt(x.get('bigwinner_median'))}</td><td><b>{x.get('big_vs_loser_effect',0):+.2f}</b></td></tr>"
+        for x in r.get("median_split_diagnostic",[])[:15]:sh+=f"<tr><td><b>{esc(x['feature'])}</b></td><td>{esc(x['direction'])}</td><td>{x['cut']:.3f}</td><td>{x['trades']}</td><td><b>{x['pf']:.2f}</b></td><td>{x['avg_return']:.2%}</td><td>{x['bigwinner_retention']:.1%}</td><td>{x['loser_rejection']:.1%}</td><td>{x['pf_delta']:+.2f}</td></tr>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6133/run"><button>⚡ 跑 Fast Failure Autopsy</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.55}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.13.3 · META Failure Autopsy · Fast Replay</h1><div class="info"><b>不改交易规则。</b>冻结 V6.13.1 META，只诊断 Immediate Failure、1R后失败、2R后失败、Winner、Big Winner，并比较进场前特征。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>失败路径分布</h2><div class="scroll"><table><tr><th>路径</th><th>交易</th><th>Avg Return</th><th>PF</th><th>Avg MFE</th><th>Avg Risk</th></tr>{oh}</table></div></div><div class="c"><h2>Big Winner vs Loser：进场前特征</h2><div class="scroll"><table><tr><th>特征</th><th>有效样本</th><th>Loser Median</th><th>Winner Median</th><th>Big Winner Median</th><th>差异强度</th></tr>{fh}</table></div></div><div class="c"><h2>Median Split · 只作发现，不自动采用</h2><div class="note">这里只做固定 Median Split，不扫几十个阈值。任何看起来提升 PF 的条件都只是候选 Edge，下一步必须独立 Holdout。</div><div class="scroll"><table><tr><th>特征</th><th>方向</th><th>切点</th><th>交易</th><th>PF</th><th>Avg Return</th><th>Big Winner保留</th><th>Loser排除</th><th>PF变化</th></tr>{sh}</table></div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6133/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.13.1 JLAW META + RE-STRENGTH SHADOW =================
