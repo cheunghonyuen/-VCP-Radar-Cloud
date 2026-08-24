@@ -6959,6 +6959,16 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615c-shortcut" style="border:3px solid #8b5cf6">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🧪 V6.15C Existing Cache Validation</h2>
+      <div class="muted">不下载新数据 · 直接用现有 Local Cache 先验证 Big Winner Benchmark</div>
+    </div>
+    <a href="/v615c/existing-cache"><button type="button">打开 V6.15C</button></a>
+  </div>
+</div>
+
 <div class="card" id="v615b-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🗄️ V6.15B Historical Price Cache Builder</h2><div class="muted">先补完整历史Universe/退市股价格；断点续传 + 429安全暂停 + Coverage审计</div></div><a href="/v615b/historical-cache"><button type="button">打开 V6.15B</button></a></div></div>
 <div class="card" id="v615a-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧱 V6.15A Big Winner Data Integrity</h2><div class="muted">先验历史Universe/退市股/价格覆盖；Blocking FAIL 就不进入权重与DNA</div></div><a href="/v615a/data-integrity"><button type="button">打开 V6.15A</button></a></div></div>
 <div class="card" id="v614-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌍 V6.14 True OOS Expansion</h2><div class="muted">冻结现有规则，优先用 V6.13 从未出现过的新股票做独立扩样验证</div></div><a href="/v614/oos-expansion"><button type="button">打开 V6.14</button></a></div></div>
