@@ -6959,6 +6959,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6132-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.13.2 Fast Replay + Winner Management</h2><div class="muted">不重跑选股：冻结 V6.13.1 META，直接测试 10MA/20MA Winner Exit</div></div><a href="/v6132/winner-replay"><button type="button">打开 V6.13.2</button></a></div></div>
+
 <div class="card" id="v613-shortcut" style="border:3px solid #2563eb">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
     <div><h2 style="margin:0">🧪 V6.13 JLaw META / First Pullback Shadow</h2>
@@ -9786,6 +9788,157 @@ def v61213_run():
 @APP.get("/api/v61213/status")
 def v61213_status_api():
     return jsonify(_v61213_status())
+
+
+# ================= V6.13.2 FAST REPLAY + WINNER MANAGEMENT SHADOW =================
+V6132_DIR = DATA_DIR / "jlaw_v6132_winner_replay"
+V6132_STATUS = V6132_DIR / "status.json"
+V6132_RESULT = V6132_DIR / "result.json"
+V6132_DETAIL = V6132_DIR / "trades.csv"
+v6132_thread = None
+
+def _v6132_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None,"elapsed_sec":0}
+    if V6132_STATUS.exists():
+        try:s.update(json.loads(V6132_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6132_write_status(**kw):
+    V6132_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6132_status();s.update(kw)
+    V6132_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6132_path(d, entry_i, entry, initial_stop, mode="BASE", horizon=120):
+    entry_i=int(entry_i); entry=float(entry); init_stop=float(initial_stop)
+    risk=max(1e-9,(entry-init_stop)/entry)
+    end=min(len(d)-2, entry_i + (60 if mode=="BASE" else int(horizon)))
+    stop=init_stop; activated=False; mfe=0.0; mae=0.0
+    exit_px=entry; reason="END_DATA"; hold=0; below10_pending=False; activate_i=None
+    for j in range(entry_i+1,end+1):
+        r=d.iloc[j]; o,h,l,c=map(float,[r['open'],r['high'],r['low'],r['close']])
+        mfe=max(mfe,h/entry-1); mae=min(mae,l/entry-1); hold=j-entry_i
+        if o<=stop: exit_px=o; reason='STOP_GAP'; break
+        if l<=stop: exit_px=stop; reason='STOP'; break
+        if (not activated) and h >= entry*(1+2*risk): activated=True; activate_i=j
+        if mode=='BASE':
+            exit_px=c; reason='HORIZON' if j==end else 'OPEN'; continue
+        ma10=float(r['ma10']) if pd.notna(r.get('ma10',np.nan)) else np.nan
+        ma20=float(r['ma20']) if pd.notna(r.get('ma20',np.nan)) else np.nan
+        if activated:
+            if mode=='20MA_TREND':
+                if np.isfinite(ma20) and c < ma20:
+                    nxt=d.iloc[j+1]; exit_px=float(nxt['open']); reason='20MA_BREAK_NEXT_OPEN'; hold=(j+1)-entry_i; break
+            elif mode=='10_20_HYBRID':
+                if np.isfinite(ma10) and c < ma10:
+                    if below10_pending:
+                        nxt=d.iloc[j+1]; exit_px=float(nxt['open']); reason='10MA_FAIL_RECLAIM'; hold=(j+1)-entry_i; break
+                    below10_pending=True
+                else: below10_pending=False
+                if np.isfinite(ma20) and c < ma20:
+                    nxt=d.iloc[j+1]; exit_px=float(nxt['open']); reason='20MA_BREAK_NEXT_OPEN'; hold=(j+1)-entry_i; break
+        exit_px=c; reason='HORIZON' if j==end else 'OPEN'
+    return dict(return_pct=float(exit_px/entry-1),hold_days=int(hold),mfe=float(mfe),mae=float(mae),
+                activated=bool(activated),activate_day=(int(activate_i-entry_i) if activate_i else None),
+                stopped=bool(str(reason).startswith('STOP')),reason=reason)
+
+def _v6132_metrics(g,label):
+    if g is None or g.empty:return {"label":label,"trades":0}
+    r=pd.to_numeric(g['return_pct'],errors='coerce').dropna(); w=r[r>0]; l=r[r<0]
+    pf=float(w.sum()/(-l.sum())) if len(l) and -l.sum()>0 else (99.0 if len(w) else 0.0)
+    return dict(label=label,trades=int(len(r)),win_rate=float((r>0).mean()),avg_return=float(r.mean()),pf=pf,
+                avg_win=float(w.mean()) if len(w) else 0.0,avg_loss=float(l.mean()) if len(l) else 0.0,
+                winner20=float((r>=.20).mean()),winner30=float((r>=.30).mean()),
+                avg_mfe=float(pd.to_numeric(g['mfe'],errors='coerce').mean()),
+                giveback=float((pd.to_numeric(g['mfe'],errors='coerce')-pd.to_numeric(g['return_pct'],errors='coerce')).mean()),
+                activate_rate=float(pd.to_numeric(g['activated'],errors='coerce').fillna(0).mean()),
+                avg_hold=float(pd.to_numeric(g['hold_days'],errors='coerce').mean()))
+
+def _v6132_compute():
+    global v6132_thread
+    t0=time.time()
+    try:
+        if not V613_DETAIL.exists(): raise RuntimeError('缺少 V6.13.1 trades.csv；请先跑一次 V6.13.1 Full Shadow 建立缓存')
+        raw=pd.read_csv(V613_DETAIL)
+        meta=raw[raw['mode'].astype(str).eq('META')].copy()
+        if meta.empty: raise RuntimeError('V6.13.1 缓存中没有 META trades')
+        meta=meta.sort_values(['ticker','entry_date','support_count','initial_risk'],ascending=[True,True,False,True]).drop_duplicates(['ticker','entry_date'])
+        tickers=sorted(meta['ticker'].astype(str).unique())
+        _v6132_write_status(status='running',message='Fast Replay：直接读取 V6.13.1 META 缓存，不重跑选股',processed=0,total=len(tickers),elapsed_sec=0,error=None)
+        rows=[];errors=[]; by_t={t:g.copy() for t,g in meta.groupby('ticker')}
+        for n,t in enumerate(tickers,1):
+            _v6132_write_status(status='running',message='Fast Replay：10MA/20MA Winner Management',processed=n-1,total=len(tickers),current=t,elapsed_sec=round(time.time()-t0,1))
+            try:
+                fp=MARKET_DIR/f'{t}.csv'
+                if not fp.exists(): raise RuntimeError('market cache missing')
+                d=pd.read_csv(fp); d.columns=[str(c).lower() for c in d.columns]
+                if 'date' not in d.columns:
+                    if 'datetime' in d.columns:d=d.rename(columns={'datetime':'date'})
+                    elif 'index' in d.columns:d=d.rename(columns={'index':'date'})
+                d['date']=pd.to_datetime(d['date'],errors='coerce').dt.tz_localize(None)
+                for c in ['open','high','low','close']:
+                    d[c]=pd.to_numeric(d[c],errors='coerce')
+                d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').reset_index(drop=True)
+                d['ma10']=d['close'].rolling(10).mean(); d['ma20']=d['close'].rolling(20).mean()
+                for _,tr in by_t[t].iterrows():
+                    dt=pd.Timestamp(tr['entry_date']); hits=d.index[d['date']==dt].tolist()
+                    if not hits: continue
+                    ei=int(hits[-1]); entry=float(tr['entry']); stop=float(tr['stop'])
+                    for mode in ['BASE','20MA_TREND','10_20_HYBRID']:
+                        res=_v6132_path(d,ei,entry,stop,mode,120)
+                        rows.append(dict(ticker=t,entry_date=str(tr['entry_date']),supports=str(tr.get('supports','')),
+                                         initial_risk=float(tr.get('initial_risk',np.nan)),mode=mode,entry=entry,stop=stop,**res))
+            except Exception as ex: errors.append({'ticker':t,'error':f'{type(ex).__name__}: {ex}'})
+        D=pd.DataFrame(rows)
+        if D.empty: raise RuntimeError('Fast Replay 没有产生交易')
+        V6132_DIR.mkdir(parents=True,exist_ok=True); D.to_csv(V6132_DETAIL,index=False)
+        metrics=[_v6132_metrics(D[D['mode']==m],m) for m in ['BASE','20MA_TREND','10_20_HYBRID']]
+        diag=[]
+        for m in ['BASE','20MA_TREND','10_20_HYBRID']:
+            z=D[D['mode']==m].copy(); big=z[pd.to_numeric(z['mfe'],errors='coerce')>=.20]
+            diag.append(dict(mode=m,big_mfe_trades=int(len(big)),
+                             avg_exit_on_big=float(pd.to_numeric(big['return_pct'],errors='coerce').mean()) if len(big) else 0,
+                             kept_10pct=float((pd.to_numeric(big['return_pct'],errors='coerce')>=.10).mean()) if len(big) else 0,
+                             kept_20pct=float((pd.to_numeric(big['return_pct'],errors='coerce')>=.20).mean()) if len(big) else 0))
+        result=dict(generated_at=datetime.now(timezone.utc).isoformat(),elapsed_sec=round(time.time()-t0,2),
+                    source='V6.13.1 persisted META trades.csv + market cache',full_scan=False,meta_trades=int(len(meta)),tickers=int(len(tickers)),
+                    metrics=metrics,winner_diagnostic=diag,errors=errors[:50],rules={
+                    'BASE':'V6.13.1 structural stop + 60 sessions',
+                    '20MA_TREND':'same entry/stop; after +2R, exit next open after close below 20MA; max 120 sessions',
+                    '10_20_HYBRID':'same entry/stop; after +2R, 10MA break gets one reclaim day; 20MA break exits next open; max 120 sessions',
+                    'no_repeat_BE':'V6.8/V6.9 already tested break-even family; not repeated here.'})
+        V6132_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v6132_write_status(status='done',message='V6.13.2 Fast Replay + Winner Management 完成',processed=len(tickers),total=len(tickers),current='',elapsed_sec=result['elapsed_sec'],error=None)
+    except Exception as ex:
+        traceback.print_exc(); _v6132_write_status(status='error',message='V6.13.2 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally: v6132_thread=None
+
+def _v6132_start():
+    global v6132_thread
+    if v6132_thread is not None and v6132_thread.is_alive(): return False
+    v6132_thread=threading.Thread(target=_v6132_compute,daemon=True); v6132_thread.start(); return True
+
+@APP.post('/v6132/run')
+def v6132_run():
+    _v6132_start(); return redirect('/v6132/winner-replay')
+
+@APP.get('/api/v6132/status')
+def v6132_status_api(): return jsonify(_v6132_status())
+
+@APP.get('/v6132/winner-replay')
+def v6132_page():
+    import html
+    esc=lambda x:html.escape(str(x)); st=_v6132_status(); r=None
+    if V6132_RESULT.exists():
+        try:r=json.loads(V6132_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    trs='';diag=''
+    if r:
+        for x in r.get('metrics',[]): trs+=f"<tr><td><b>{esc(x['label'])}</b></td><td>{x['trades']}</td><td>{x.get('win_rate',0):.1%}</td><td>{x.get('avg_return',0):.2%}</td><td><b>{x.get('pf',0):.2f}</b></td><td>{x.get('avg_win',0):.2%}</td><td>{x.get('avg_loss',0):.2%}</td><td>{x.get('winner20',0):.1%}</td><td>{x.get('winner30',0):.1%}</td><td>{x.get('giveback',0):.2%}</td><td>{x.get('avg_hold',0):.1f}</td></tr>"
+        for x in r.get('winner_diagnostic',[]): diag+=f"<tr><td><b>{esc(x['mode'])}</b></td><td>{x['big_mfe_trades']}</td><td>{x['avg_exit_on_big']:.2%}</td><td>{x['kept_10pct']:.1%}</td><td>{x['kept_20pct']:.1%}</td></tr>"
+    run='' if st.get('status')=='running' else '<form method="post" action="/v6132/run"><button>⚡ 跑 Fast Winner Replay</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
 
 
 # ================= V6.13.1 JLAW META + RE-STRENGTH SHADOW =================
