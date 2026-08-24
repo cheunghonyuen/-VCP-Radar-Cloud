@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616g-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.3 Extended Exit Matrix</h2><div class="muted">Day252 in-trade behavior -> HOLD504 or HOLD1260 · Strict Walk-Forward · no old-DNA retest</div></div><a href="/v616g/hold-eligibility"><button type="button">打开 V6.16G</button></a></div></div>
+<div class="card" id="v616h-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H Big Winner Add-on / Position Sizing</h2><div class="muted">HOLD1260 frozen · Day252 Winner Signature · +25% / +50% / +100% conditional add-on</div></div><a href="/v616h/addon-sizing"><button type="button">打开 V6.16H</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616g_hold_eligibility'
+V616F_DIR=DATA_DIR/'jlaw_v616h_big_winner_addon'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'hold_eligibility_report.csv'
+V616F_REPORT=V616F_DIR/'addon_sizing_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10269,17 +10269,25 @@ def _v616f_run():
                     'avg_incremental':float((sub.ret1260-sub.ret504).mean())
                 })
 
-                policy=np.where(sig,te.ret1260,te.ret504)
-                policy_rows.append({
-                    'year':int(y),
-                    'signal':name,
-                    'n':int(len(te)),
-                    'eligible_n':n,
-                    'eligible_rate':n/len(te),
-                    'policy_avg_return':float(np.mean(policy)),
-                    'hold504_avg_return':float(te.ret504.mean()),
-                    'hold1260_avg_return':float(te.ret1260.mean())
-                })
+                # H: base HOLD1260 is never replaced. Estimate conditional pyramiding at day252.
+                # Conservative research proxy: incremental leg earns the eligible cohort's
+                # observed 504->1260 incremental return. Exact next-open add-on execution
+                # is the promotion gate for the following implementation stage.
+                eligible_increment=(te.loc[sig,'ret1260']-te.loc[sig,'ret504']).values
+                for addon_size in (0.25,0.50,1.00):
+                    addon_pnl=float(np.sum(eligible_increment)*addon_size/len(te))
+                    strategy=float(te.ret1260.mean()+addon_pnl)
+                    avg_capital=float(1.0 + addon_size*n/len(te))
+                    policy_rows.append({
+                        'year':int(y),'signal':name,'addon_size':addon_size,
+                        'n':int(len(te)),'eligible_n':n,'eligible_rate':n/len(te),
+                        'policy_avg_return':strategy,
+                        'hold504_avg_return':float(te.ret504.mean()),
+                        'hold1260_avg_return':float(te.ret1260.mean()),
+                        'incremental_vs1260':addon_pnl,
+                        'avg_capital_multiple':avg_capital,
+                        'return_on_deployed':strategy/avg_capital
+                    })
 
         R=pd.DataFrame(rows)
         P=pd.DataFrame(policy_rows)
@@ -10287,7 +10295,7 @@ def _v616f_run():
             raise RuntimeError('没有生成 walk-forward eligibility 结果')
 
         overall=[]
-        for name,g in P.groupby('signal'):
+        for (name,addon_size),g in P.groupby(['signal','addon_size']):
             w=g.n.astype(float)
             def wa(col):
                 v=pd.to_numeric(g[col],errors='coerce')
@@ -10303,6 +10311,7 @@ def _v616f_run():
 
             overall.append({
                 'signal':name,
+                'addon_size':float(addon_size),
                 'n':int(g.n.sum()),
                 'eligible_rate':wa('eligible_rate'),
                 'policy_avg_return':wa('policy_avg_return'),
@@ -10310,6 +10319,8 @@ def _v616f_run():
                 'hold1260_avg_return':wa('hold1260_avg_return'),
                 'delta_vs504':wa('policy_avg_return')-wa('hold504_avg_return'),
                 'delta_vs1260':wa('policy_avg_return')-wa('hold1260_avg_return'),
+                'avg_capital_multiple':wa('avg_capital_multiple'),
+                'return_on_deployed':wa('return_on_deployed'),
                 'long_better_rate':wad('long_better_rate'),
                 'mega100_rate':wad('mega100_rate'),
                 'mega200_rate':wad('mega200_rate'),
@@ -10321,10 +10332,10 @@ def _v616f_run():
         O=pd.DataFrame(overall)
         O['screen_pass']=(
             (O.delta_vs504>0)&
-            (O.delta_vs1260>=-.03)&
+            (O.delta_vs1260>0)&
             (O.positive_policy_years>=np.ceil(O.years*.6))
         )
-        O=O.sort_values(['screen_pass','policy_avg_return','avg_incremental_if_eligible'],ascending=[False,False,False])
+        O=O.sort_values(['screen_pass','delta_vs1260','return_on_deployed'],ascending=[False,False,False])
         O.to_csv(V616F_REPORT,index=False)
 
         res={
@@ -10333,13 +10344,13 @@ def _v616f_run():
             'overall':O.replace({np.nan:None}).to_dict('records'),
             'yearly_policy':P.replace({np.nan:None}).to_dict('records'),
             'yearly_diagnostic':R.replace({np.nan:None}).to_dict('records'),
-            'acceptance':'At day252, a HOLD1260 eligibility rule is interesting only if mixed policy (eligible=1260, others=504) beats HOLD504 OOS, stays within 3pp of HOLD1260-for-all, and improves vs504 in at least 60% of test years.',
-            'rule_note':'Strict walk-forward thresholds use earlier years only. Features are post-entry behavior through day252, not the pre-entry DNA factors already studied in V6.15D/E/F. DNA + CONTROL Entry + -7% stop remain frozen.',
-            'dedupe_note':'No re-test of pre-entry MOM60/120/252, VOL_DRY, Trend Template, Near High, Pivot Ready, or the F4 exit rules. This module studies in-trade HOLD ELIGIBILITY only.',
+            'acceptance':'HOLD1260 remains the frozen base. At day252 test +25%, +50%, +100% conditional add-on. Research screen requires positive incremental return versus HOLD1260 and consistency across OOS years. Capital efficiency is reported separately.',
+            'rule_note':'Strict walk-forward thresholds use earlier years only. Frozen V6.15F DNA + CONTROL Entry + -7% initial stop + HOLD1260 base. Day252 post-entry Winner Signatures control add-on sizing only; nobody is sold early.',
+            'dedupe_note':'No re-test of pre-entry DNA or prior exit rules. This is conditional pyramiding into existing winners, not a repeat of the earlier V6.6.x generic exposure/portfolio sizing lab.',
             'warning':'Existing cache still has survivorship-bias limits until historical/delisted universe coverage is complete.'
         }
         V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616f_write(status='done',message='V6.16G Big Winner Hold Eligibility 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616f_write(status='done',message='V6.16H Big Winner Add-on / Position Sizing 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
 
     except Exception as ex:
         traceback.print_exc()
@@ -10352,15 +10363,15 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616g/run')
+@APP.post('/v616h/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616g/hold-eligibility')
+    _v616f_start();return redirect('/v616h/addon-sizing')
 
-@APP.get('/api/v616g/status')
+@APP.get('/api/v616h/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616g/hold-eligibility')
+@APP.get('/v616h/addon-sizing')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
@@ -10369,10 +10380,10 @@ def v616f_page():
         except Exception:pass
     rows=''
     for x in r.get('overall',[]):
-        rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('eligible_rate',0):.1%}</td><td>{x.get('policy_avg_return',0):.2%}</td><td>{x.get('hold504_avg_return',0):.2%}</td><td>{x.get('hold1260_avg_return',0):.2%}</td><td>{x.get('delta_vs504',0):+.2%}</td><td>{x.get('delta_vs1260',0):+.2%}</td><td>{x.get('long_better_rate',0):.1%}</td><td>{x.get('mega100_rate',0):.1%}</td><td>{x.get('mega200_rate',0):.1%}</td><td>{x.get('avg_incremental_if_eligible',0):+.1%}</td><td>{int(x.get('positive_policy_years',0))}/{int(x.get('years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616g/run"><button>Run V6.16G Hold Eligibility</button></form>'
+        rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>+{x.get('addon_size',0):.0%}</td><td>{x.get('eligible_rate',0):.1%}</td><td>{x.get('policy_avg_return',0):.2%}</td><td>{x.get('hold1260_avg_return',0):.2%}</td><td>{x.get('delta_vs1260',0):+.2%}</td><td>{x.get('avg_capital_multiple',1):.3f}x</td><td>{x.get('return_on_deployed',0):.2%}</td><td>{x.get('long_better_rate',0):.1%}</td><td>{x.get('mega100_rate',0):.1%}</td><td>{x.get('mega200_rate',0):.1%}</td><td>{int(x.get('positive_policy_years',0))}/{int(x.get('years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h/run"><button>Run V6.16H Add-on Sizing</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16G Big Winner Hold Eligibility</h1><div class="info"><b>Not another entry or exit study.</b> At trading day252, post-entry behavior decides who upgrades from HOLD504 to HOLD1260. All thresholds come only from earlier years.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Mixed-Hold Policy</h2><div style="overflow:auto"><table><tr><th>Eligibility</th><th>N</th><th>Eligible%</th><th>Policy AvgRet</th><th>All504</th><th>All1260</th><th>Delta vs504</th><th>Delta vs1260</th><th>Long Better</th><th>1260>=100%</th><th>1260>=200%</th><th>Eligible Increment</th><th>Win Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Dedup:</b> {e(r.get('dedupe_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616g/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H Big Winner Add-on / Position Sizing</h1><p><b>Stage 1:</b> fast cached screening. Exact next-open add-on execution is required before promotion.</p><div class="info"><b>HOLD1260 stays frozen.</b> Nobody is sold early. At day252, strict walk-forward Winner Signatures test conditional +25% / +50% / +100% add-on sizing.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Conditional Add-on</h2><div style="overflow:auto"><table><tr><th>Eligibility</th><th>Add</th><th>Eligible%</th><th>Strategy AvgRet</th><th>Base HOLD1260</th><th>Increment</th><th>Avg Capital</th><th>Return/Deployed</th><th>Long Better</th><th>1260>=100%</th><th>1260>=200%</th><th>Win Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Dedup:</b> {e(r.get('dedupe_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
