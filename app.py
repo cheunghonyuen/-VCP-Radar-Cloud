@@ -6960,6 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
 <div>
@@ -9995,6 +9996,207 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
+V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
+V616E_STATUS=V616E_DIR/'status.json'
+V616E_RESULT=V616E_DIR/'result.json'
+V616E_REPORT=V616E_DIR/'winner_hold_oos.csv'
+v616e_thread=None
+
+def _v616e_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616E_STATUS.exists():
+        try:x.update(json.loads(V616E_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v616e_write(**kw):
+    V616E_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v616e_status();x.update(kw)
+    V616E_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v616e_run():
+    global v616e_thread
+    t0=time.time()
+    try:
+        # Rebuild the exact V6.15F frozen Walk-Forward candidate stream.
+        S=pd.read_csv(V615D_SNAP)
+        S['obs_date']=pd.to_datetime(S['obs_date'],errors='coerce')
+        for c in ['ret60','ret120','ret252','vol_vs20']:
+            S[c]=pd.to_numeric(S[c],errors='coerce')
+        S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy()
+        S['year']=S.obs_date.dt.year.astype(int)
+
+        picks=[]
+        for y in sorted(S.year.unique()):
+            tr=S[S.year<y]; te=S[S.year==y]
+            if len(tr)<1000 or len(te)<50:continue
+            q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
+            a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
+            a['group']='CORE_AB'; a['dna']='A'; a['test_year']=y
+            b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
+            b['group']='CORE_AB'; b['dna']='B'; b['test_year']=y
+            picks.extend([a,b])
+
+        D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
+        ticks=sorted(D.ticker.unique())
+        modes=['HOLD_120','HOLD_90']
+        A={}
+
+        def bucket(key):
+            if key not in A:
+                A[key]={'n':0,'sum_ret':0.0,'win_n':0,'loss_n':0,'win_sum':0.0,'loss_sum':0.0,
+                        'finish20_n':0,'finish30_n':0,'finish50_n':0,
+                        'path20_n':0,'path30_n':0,'path50_n':0,
+                        'cap20_n':0,'cap30_n':0,'cap50_n':0}
+            return A[key]
+
+        _v616e_write(status='running',message='Strict Walk-Forward OOS · HOLD120 vs HOLD90',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+
+        for k,t in enumerate(ticks,1):
+            d=_v616a_price(t)
+            if d is not None:
+                im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+                tg=D[D.ticker.eq(t)]
+                for _,r in tg.iterrows():
+                    dt=pd.Timestamp(r.obs_date).normalize()
+                    if dt not in im:continue
+                    oi=im[dt]
+                    if oi>=len(d)-121:continue
+                    E=_v616a_entries(d,oi)
+
+                    # Freeze CORE entry candidate as CONTROL baseline.
+                    if 'CONTROL' not in E:continue
+                    ei,px,delay=E['CONTROL']
+
+                    for mode in modes:
+                        z=_v616d_manage(d,ei,px,mode,120)
+                        if z is None:continue
+                        key=(int(r['test_year']),mode)
+                        b=bucket(key)
+                        b['n']+=1;b['sum_ret']+=z['return']
+                        if z['return']>0:b['win_n']+=1;b['win_sum']+=z['return']
+                        else:b['loss_n']+=1;b['loss_sum']+=z['return']
+                        b['finish20_n']+=int(z['finish20']);b['finish30_n']+=int(z['finish30']);b['finish50_n']+=int(z['finish50'])
+                        b['path20_n']+=int(z['bw20_path']);b['path30_n']+=int(z['bw30_path']);b['path50_n']+=int(z['bw50_path'])
+                        if z['bw20_path'] and z['return']>=.10:b['cap20_n']+=1
+                        if z['bw30_path'] and z['return']>=.20:b['cap30_n']+=1
+                        if z['bw50_path'] and z['return']>=.30:b['cap50_n']+=1
+
+            _v616e_write(status='running',message='Strict Walk-Forward OOS · Streaming',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+
+        _v616e_write(status='aggregating',message='OOS Replay完成 · 生成年度与总体比较',processed=len(ticks),total=len(ticks),current='FINALIZE',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        for (year,mode),b in sorted(A.items()):
+            n=max(b['n'],1);gp=b['win_sum'];gl=abs(b['loss_sum'])
+            pf=gp/gl if gl>0 else np.nan
+            avgwin=gp/b['win_n'] if b['win_n'] else 0.0
+            avgloss=b['loss_sum']/b['loss_n'] if b['loss_n'] else 0.0
+            wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
+            rows.append({
+                'year':year,'mode':mode,'n':b['n'],'avg_return':b['sum_ret']/n,'win_rate':b['win_n']/n,
+                'pf':pf,'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,
+                'finish20':b['finish20_n']/n,'finish30':b['finish30_n']/n,'finish50':b['finish50_n']/n,
+                'capture_bw20':b['cap20_n']/b['path20_n'] if b['path20_n'] else np.nan,
+                'capture_bw30':b['cap30_n']/b['path30_n'] if b['path30_n'] else np.nan,
+                'capture_bw50':b['cap50_n']/b['path50_n'] if b['path50_n'] else np.nan,
+            })
+
+        R=pd.DataFrame(rows)
+        if R.empty:raise RuntimeError('没有生成 V6.16E OOS 结果')
+
+        overall=[]
+        for mode,g in R.groupby('mode'):
+            # weighted by trade count
+            w=g['n'].astype(float)
+            overall.append({
+                'mode':mode,'n':int(g['n'].sum()),
+                'avg_return':float(np.average(g['avg_return'],weights=w)),
+                'median_year_return':float(g['avg_return'].median()),
+                'median_year_pf':float(g['pf'].replace([np.inf,-np.inf],np.nan).dropna().median()) if g['pf'].notna().any() else np.nan,
+                'years_pf_gt1':int((g['pf']>1).sum()),
+                'years_avgret_gt0':int((g['avg_return']>0).sum()),
+                'years':int(g['year'].nunique()),
+                'avg_capture_bw30':float(np.average(g['capture_bw30'].fillna(0),weights=w)),
+                'avg_capture_bw50':float(np.average(g['capture_bw50'].fillna(0),weights=w)),
+            })
+
+        O=pd.DataFrame(overall)
+        R.to_csv(V616E_REPORT,index=False)
+
+        # Strict verdict: HOLD120 must beat HOLD90 on weighted avg return,
+        # median yearly PF, and not lose right-tail capture.
+        verdict='NO_GO'
+        if set(O['mode'])=={'HOLD_120','HOLD_90'}:
+            h120=O[O.mode.eq('HOLD_120')].iloc[0]
+            h90=O[O.mode.eq('HOLD_90')].iloc[0]
+            if (h120.avg_return>h90.avg_return and
+                h120.median_year_pf>=h90.median_year_pf and
+                h120.avg_capture_bw30>=h90.avg_capture_bw30 and
+                h120.avg_capture_bw50>=h90.avg_capture_bw50):
+                verdict='PASS_HOLD_120'
+            elif (h90.avg_return>h120.avg_return and
+                  h90.median_year_pf>=h120.median_year_pf):
+                verdict='PASS_HOLD_90'
+            else:
+                verdict='MIXED_KEEP_BOTH'
+
+        res={
+            'generated_at':datetime.now(timezone.utc).isoformat(),
+            'elapsed_sec':round(time.time()-t0,2),
+            'verdict':verdict,
+            'overall':O.to_dict('records'),
+            'yearly':R.to_dict('records'),
+            'rule_note':'Strict time Walk-Forward OOS. V6.15F DNA frozen; entry frozen to CONTROL baseline; initial stop frozen at -7%. Only HOLD_120 vs HOLD_90 is compared. No exit optimization.',
+            'acceptance':'Promote only if one hold rule wins on weighted Avg Return + median yearly PF while preserving BW30/BW50 capture across future years.',
+            'warning':'Still uses existing 455-file cache, so survivorship-bias limits remain until historical/delisted coverage is complete.'
+        }
+        V616E_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v616e_write(status='done',message='V6.16E Winner Hold Strict OOS 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+
+    except Exception as ex:
+        traceback.print_exc()
+        _v616e_write(status='error',message='V6.16E 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v616e_thread=None
+
+def _v616e_start():
+    global v616e_thread
+    if v616e_thread is not None and v616e_thread.is_alive():return False
+    v616e_thread=threading.Thread(target=_v616e_run,daemon=True);v616e_thread.start();return True
+
+@APP.post('/v616e/run')
+def v616e_run():
+    _v616e_start();return redirect('/v616e/winner-hold-oos')
+
+@APP.get('/api/v616e/status')
+def v616e_status_api():
+    return jsonify(_v616e_status())
+
+@APP.get('/v616e/winner-hold-oos')
+def v616e_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v616e_status();r={}
+    if V616E_RESULT.exists():
+        try:r=json.loads(V616E_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    otr=''
+    for x in r.get('overall',[]):
+        otr+=f"<tr><td><b>{e(x.get('mode'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{int(x.get('years_pf_gt1',0))}/{int(x.get('years',0))}</td><td>{int(x.get('years_avgret_gt0',0))}/{int(x.get('years',0))}</td><td>{x.get('avg_capture_bw30',0):.1%}</td><td>{x.get('avg_capture_bw50',0):.1%}</td></tr>"
+
+    ytr=''
+    for x in r.get('yearly',[]):
+        ytr+=f"<tr><td>{int(x.get('year',0))}</td><td>{e(x.get('mode'))}</td><td>{int(x.get('n',0))}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('win_rate',0):.1%}</td><td>{x.get('pf',0) if x.get('pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('capture_bw30',0) if x.get('capture_bw30') is not None else 0:.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td></tr>"
+
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616e/run"><button>▶ 跑 V6.16E Strict OOS</button></form>'
+
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.verdict{{font-size:24px;font-weight:900;background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:11px;min-width:1100px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.16E · Winner Hold Strict OOS</h1><div class="info"><b>只验证，不优化。</b> 冻结 V6.15F DNA、Entry、-7% Stop；只比较 HOLD_120 vs HOLD_90。每个测试年份的选股阈值只能来自更早年份。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{btn}</div><div class="c"><div class="verdict">Verdict：{e(r.get('verdict','—'))}</div></div><div class="c"><h2>Overall OOS</h2><div style="overflow:auto"><table><tr><th>Mode</th><th>N</th><th>Weighted AvgRet</th><th>Median Year Ret</th><th>Median Year PF</th><th>PF&gt;1 Years</th><th>Positive Years</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{otr}</table></div></div><div class="c"><h2>Year-by-Year Walk-Forward</h2><div style="overflow:auto"><table><tr><th>Year</th><th>Mode</th><th>N</th><th>AvgRet</th><th>Win%</th><th>PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{ytr}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16D WINNER MANAGEMENT / HOLD RESEARCH =================
