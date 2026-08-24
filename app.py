@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6136-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.6 RS + Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：只验证 RS≥90 + Low Extension</div></div><a href="/v6136/rs-extension-holdout"><button type="button">打开 V6.13.6</button></a></div></div>
 <div class="card" id="v6135-shortcut" style="border:3px solid #9333ea"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.13.5 Immediate Failure Autopsy</h2><div class="muted">Fast Replay：优先保住 Big Winner，再找能排除 Immediate Failure 的进场前特征</div></div><a href="/v6135/immediate-failure-autopsy"><button type="button">打开 V6.13.5</button></a></div></div>
 <div class="card" id="v6134-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.4 Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：Development 定Cut，未来年份只验证</div></div><a href="/v6134/entry-extension-holdout"><button type="button">打开 V6.13.4</button></a></div></div>
 <div class="card" id="v6133-shortcut" style="border:3px solid #7c3aed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.13.3 META Failure Autopsy</h2><div class="muted">Fast Replay：冻结META，找 Loser vs Big Winner 的进场前差异；不调参数</div></div><a href="/v6133/failure-autopsy"><button type="button">打开 V6.13.3</button></a></div></div>
@@ -9945,6 +9946,222 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.13.6 RS + ENTRY EXTENSION · STRICT HOLDOUT =================
+# Candidate under validation:
+#   RS >= 90  AND  Entry Extension < development-derived median cut
+# RS threshold is frozen at 90 based on prior design / discovery; only Extension cut is development-derived.
+V6136_DIR = DATA_DIR / "jlaw_v6136_rs_extension_holdout"
+V6136_STATUS = V6136_DIR / "status.json"
+V6136_RESULT = V6136_DIR / "result.json"
+v6136_thread = None
+
+def _v6136_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"error":None,"elapsed_sec":0}
+    if V6136_STATUS.exists():
+        try:s.update(json.loads(V6136_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6136_write_status(**kw):
+    V6136_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6136_status();s.update(kw)
+    V6136_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6136_metrics(z):
+    if z is None or len(z)==0:
+        return {"trades":0,"pf":0.0,"avg_return":0.0,"win_rate":0.0,"bigwinners":0,"immediate_failures":0}
+    r=pd.to_numeric(z["return_pct"],errors="coerce")
+    mfe=pd.to_numeric(z["mfe"],errors="coerce")
+    return dict(
+        trades=int(len(z)),
+        pf=float(_v6134_pf(r)),
+        avg_return=float(r.mean()),
+        win_rate=float((r>0).mean()),
+        bigwinners=int((mfe>=.20).sum()),
+        immediate_failures=int((z["group"].astype(str)=="IMMEDIATE_FAILURE").sum()),
+    )
+
+def _v6136_apply(z, ext_cut):
+    rs=pd.to_numeric(z["rs"],errors="coerce")
+    ext=pd.to_numeric(z["entry_extension"],errors="coerce")
+    return z[(rs>=90) & (ext<float(ext_cut))].copy()
+
+def _v6136_compare(base, filt):
+    b=_v6136_metrics(base);f=_v6136_metrics(filt)
+    bw_total=max(1,b["bigwinners"])
+    if_total=max(1,b["immediate_failures"])
+    return dict(
+        base=b,filtered=f,
+        bigwinner_retention=float(f["bigwinners"]/bw_total),
+        immediate_failure_rejection=float(1-f["immediate_failures"]/if_total),
+        pf_delta=float(f["pf"]-b["pf"]),
+        avg_return_delta=float(f["avg_return"]-b["avg_return"]),
+    )
+
+def _v6136_compute():
+    global v6136_thread
+    t0=time.time()
+    try:
+        if not V6133_DETAIL.exists():
+            raise RuntimeError("缺少 V6.13.3 features.csv；请先跑 V6.13.3")
+        F=pd.read_csv(V6133_DETAIL)
+        F["entry_date"]=pd.to_datetime(F["entry_date"],errors="coerce")
+        for c in ["entry_extension","rs","return_pct","mfe"]:
+            F[c]=pd.to_numeric(F[c],errors="coerce")
+        F=F.dropna(subset=["entry_date","entry_extension","rs","return_pct","mfe"]).copy()
+        if len(F)<60:raise RuntimeError("样本不足")
+
+        _v6136_write_status(status="running",message="Strict Holdout：早期样本定 Extension cut",processed=0,total=3,elapsed_sec=0,error=None)
+
+        # Same strict split as V6.13.4 for comparability.
+        dev=F[F["entry_date"] < pd.Timestamp("2022-01-01")].copy()
+        hold=F[F["entry_date"] >= pd.Timestamp("2022-01-01")].copy()
+        split_date=pd.Timestamp("2022-01-01")
+        if len(dev)<30 or len(hold)<20:
+            F2=F.sort_values("entry_date").reset_index(drop=True)
+            k=max(30,min(len(F2)-20,int(len(F2)*0.70)))
+            split_date=F2.iloc[k]["entry_date"]
+            dev=F[F["entry_date"] < split_date].copy()
+            hold=F[F["entry_date"] >= split_date].copy()
+
+        # Extension cut comes only from Development subset that already meets RS>=90.
+        dev_rs=dev[pd.to_numeric(dev["rs"],errors="coerce")>=90].copy()
+        if len(dev_rs)<20:raise RuntimeError("Development 中 RS>=90 样本不足")
+        ext_cut=float(pd.to_numeric(dev_rs["entry_extension"],errors="coerce").median())
+
+        strict=dict(
+            split_date=str(pd.Timestamp(split_date).date()),
+            rs_threshold=90.0,
+            extension_cut=ext_cut,
+            development=_v6136_compare(dev,_v6136_apply(dev,ext_cut)),
+            holdout=_v6136_compare(hold,_v6136_apply(hold,ext_cut))
+        )
+        _v6136_write_status(status="running",message="Strict Holdout 完成；开始 Walk-Forward",processed=1,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        years=sorted(int(y) for y in F["entry_date"].dt.year.dropna().unique())
+        wf=[]
+        base_parts=[];filtered_parts=[]
+        for y in years:
+            train=F[F["entry_date"].dt.year<y].copy()
+            test=F[F["entry_date"].dt.year==y].copy()
+            train_rs=train[pd.to_numeric(train["rs"],errors="coerce")>=90].copy()
+            if len(train_rs)<20 or len(test)<3:continue
+            cut=float(pd.to_numeric(train_rs["entry_extension"],errors="coerce").median())
+            kept=_v6136_apply(test,cut)
+            cmp=_v6136_compare(test,kept)
+            wf.append(dict(
+                year=int(y),train_n=int(len(train)),train_rs_n=int(len(train_rs)),test_n=int(len(test)),cut=cut,
+                base_pf=cmp["base"]["pf"],filtered_pf=cmp["filtered"]["pf"],
+                base_avg_return=cmp["base"]["avg_return"],filtered_avg_return=cmp["filtered"]["avg_return"],
+                bigwinner_retention=cmp["bigwinner_retention"],
+                immediate_failure_rejection=cmp["immediate_failure_rejection"],
+                pf_delta=cmp["pf_delta"]
+            ))
+            base_parts.append(test)
+            if len(kept):filtered_parts.append(kept)
+
+        wf_base=pd.concat(base_parts,ignore_index=True) if base_parts else F.iloc[0:0].copy()
+        wf_filtered=pd.concat(filtered_parts,ignore_index=True) if filtered_parts else F.iloc[0:0].copy()
+        wf_summary=_v6136_compare(wf_base,wf_filtered) if len(wf_base) else {}
+
+        _v6136_write_status(status="running",message="Walk-Forward 完成；检查预先标准",processed=2,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        ho=strict["holdout"]
+        # Priorities reflect JLaw-style objective: preserve right-tail first.
+        pass_big = ho["bigwinner_retention"] >= 0.80
+        pass_if = ho["immediate_failure_rejection"] >= 0.40
+        pass_pf = ho["filtered"]["pf"] >= max(1.20, ho["base"]["pf"] + 0.10)
+        pass_ret = ho["filtered"]["avg_return"] > ho["base"]["avg_return"]
+
+        verdict="PASS" if (pass_big and pass_if and pass_pf and pass_ret) else (
+            "MIXED" if (pass_big and pass_if and (pass_pf or pass_ret)) else "FAIL"
+        )
+
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            full_scan=False,
+            candidate="RS>=90 + Entry Extension below development-derived median",
+            strict_holdout=strict,
+            walk_forward=wf,
+            walk_forward_oos=wf_summary,
+            verdict=verdict,
+            pass_checks=dict(
+                bigwinner_retention=bool(pass_big),
+                immediate_failure_rejection=bool(pass_if),
+                pf=bool(pass_pf),
+                avg_return=bool(pass_ret),
+            ),
+            note="No parameter sweep. RS threshold frozen at 90. Extension cut comes only from prior/development RS>=90 samples."
+        )
+        V6136_DIR.mkdir(parents=True,exist_ok=True)
+        V6136_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6136_write_status(status="done",message="V6.13.6 RS+Extension Holdout 完成",processed=3,total=3,elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v6136_write_status(status="error",message="V6.13.6 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v6136_thread=None
+
+def _v6136_start():
+    global v6136_thread
+    if v6136_thread is not None and v6136_thread.is_alive():return False
+    v6136_thread=threading.Thread(target=_v6136_compute,daemon=True)
+    v6136_thread.start();return True
+
+@APP.post("/v6136/run")
+def v6136_run():
+    _v6136_start();return redirect("/v6136/rs-extension-holdout")
+
+@APP.get("/api/v6136/status")
+def v6136_status_api():
+    return jsonify(_v6136_status())
+
+@APP.get("/v6136/rs-extension-holdout")
+def v6136_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v6136_status();r=None
+    if V6136_RESULT.exists():
+        try:r=json.loads(V6136_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    strict_html="";wf_html="";vd_html=""
+    if r:
+        sh=r.get("strict_holdout",{});cut=sh.get("extension_cut",0)
+        for label,cmp in [("DEVELOPMENT",sh.get("development",{})),("HOLDOUT",sh.get("holdout",{}))]:
+            if not cmp:continue
+            b=cmp.get("base",{});f=cmp.get("filtered",{})
+            strict_html+=(
+                f"<tr><td><b>{label}</b></td><td>{cut:.2%}</td><td>{b.get('trades',0)}</td><td>{b.get('pf',0):.2f}</td>"
+                f"<td>{f.get('trades',0)}</td><td><b>{f.get('pf',0):.2f}</b></td><td>{b.get('avg_return',0):.2%}</td>"
+                f"<td>{f.get('avg_return',0):.2%}</td><td>{cmp.get('bigwinner_retention',0):.1%}</td>"
+                f"<td>{cmp.get('immediate_failure_rejection',0):.1%}</td></tr>"
+            )
+        for x in r.get("walk_forward",[]):
+            wf_html+=(
+                f"<tr><td><b>{x['year']}</b></td><td>{x['train_n']}</td><td>{x['train_rs_n']}</td><td>{x['test_n']}</td><td>{x['cut']:.2%}</td>"
+                f"<td>{x['base_pf']:.2f}</td><td><b>{x['filtered_pf']:.2f}</b></td><td>{x['base_avg_return']:.2%}</td>"
+                f"<td>{x['filtered_avg_return']:.2%}</td><td>{x['bigwinner_retention']:.1%}</td>"
+                f"<td>{x['immediate_failure_rejection']:.1%}</td><td>{x['pf_delta']:+.2f}</td></tr>"
+            )
+        vd=r.get("verdict","")
+        cls="ok" if vd=="PASS" else ("warn" if vd=="MIXED" else "bad")
+        vd_html=f"<div class='{cls}'><h2 style='margin:0'>Verdict：{esc(vd)}</h2></div>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6136/run"><button>⚡ 跑 RS+Extension Holdout</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.ok,.warn,.bad{{border-radius:14px;padding:14px;margin:12px 0}}.ok{{background:#ecfdf5;border:1px solid #86efac}}.warn{{background:#fff7df;border:1px solid #f1c75b}}.bad{{background:#fef2f2;border:1px solid #fca5a5}}table{{width:100%;border-collapse:collapse;min-width:950px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧪 V6.13.6 · RS≥90 + Entry Extension · Strict Holdout</h1><div class="info"><b>只验证这一个候选。</b> RS门槛固定90；Entry Extension cut 只能由过去/Development 的 RS≥90 样本产生。未来数据不参与定阈值，也不扫参数。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div>
+{vd_html}
+<div class="c"><h2>Strict Holdout</h2><div class="scroll"><table><tr><th>样本</th><th>Extension Cut</th><th>Base N</th><th>Base PF</th><th>Filtered N</th><th>Filtered PF</th><th>Base Avg Ret</th><th>Filtered Avg Ret</th><th>Big Winner保留</th><th>Immediate Failure排除</th></tr>{strict_html}</table></div></div>
+<div class="c"><h2>Walk-Forward · 每年只用过去数据</h2><div class="scroll"><table><tr><th>测试年</th><th>训练N</th><th>训练RS≥90 N</th><th>测试N</th><th>Cut</th><th>Base PF</th><th>Filtered PF</th><th>Base Avg Ret</th><th>Filtered Avg Ret</th><th>BW保留</th><th>IF排除</th><th>PF变化</th></tr>{wf_html}</table></div></div>
+<div class="c"><div class="info"><b>预先通过标准：</b>Big Winner 保留≥80%；Immediate Failure 排除≥40%；Holdout PF≥1.20 且较Base提升≥0.10；Avg Return提升。四项全满足才 PASS。</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6136/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>'''
 
 
 # ================= V6.13.5 IMMEDIATE FAILURE VS BIG WINNER · FAST AUTOPSY =================
