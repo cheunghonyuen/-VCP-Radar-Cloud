@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615b-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🗄️ V6.15B Historical Price Cache Builder</h2><div class="muted">先补完整历史Universe/退市股价格；断点续传 + 429安全暂停 + Coverage审计</div></div><a href="/v615b/historical-cache"><button type="button">打开 V6.15B</button></a></div></div>
 <div class="card" id="v615a-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧱 V6.15A Big Winner Data Integrity</h2><div class="muted">先验历史Universe/退市股/价格覆盖；Blocking FAIL 就不进入权重与DNA</div></div><a href="/v615a/data-integrity"><button type="button">打开 V6.15A</button></a></div></div>
 <div class="card" id="v614-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌍 V6.14 True OOS Expansion</h2><div class="muted">冻结现有规则，优先用 V6.13 从未出现过的新股票做独立扩样验证</div></div><a href="/v614/oos-expansion"><button type="button">打开 V6.14</button></a></div></div>
 <div class="card" id="v6137-shortcut" style="border:3px solid #2563eb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛟 V6.13.7 False-Reject Big Winner Escape</h2><div class="muted">冻结 V6.13.6 Gate，专门研究被误杀的大赢家为什么还能跑出来</div></div><a href="/v6137/false-reject-escape"><button type="button">打开 V6.13.7</button></a></div></div>
@@ -9952,6 +9953,353 @@ def v6132_page():
 
 
 
+
+
+# ================= V6.15B HISTORICAL PRICE CACHE BUILDER =================
+# DATA ENGINEERING ONLY. No factors, no entries, no stops, no PF optimization.
+# Goals:
+#   1) build point-in-time historical listing price cache, including ended/delisted listings;
+#   2) preserve ticker-reuse listings via listing_id = ticker + start/end dates;
+#   3) resume safely after restart / 429 / manual stop;
+#   4) verify each file before counting it toward research coverage;
+#   5) expose coverage audit and keep DNA/weight research blocked until GO threshold.
+V615B_DIR = DATA_DIR / "jlaw_v615b_historical_cache"
+V615B_PRICE_DIR = V615B_DIR / "prices"
+V615B_STATUS = V615B_DIR / "status.json"
+V615B_MANIFEST = V615B_DIR / "manifest.csv"
+V615B_QUEUE = V615B_DIR / "queue.csv"
+V615B_FAILURES = V615B_DIR / "failures.csv"
+V615B_COVERAGE = V615B_DIR / "coverage.csv"
+V615B_STOP = V615B_DIR / "STOP"
+V615B_GO = float(os.environ.get("V615B_COVERAGE_GO", str(V615A_COVERAGE_GO)))
+V615B_LOCKBOX = float(os.environ.get("V615B_COVERAGE_LOCKBOX", str(V615A_COVERAGE_LOCKBOX)))
+V615B_WORKERS = max(1, int(os.environ.get("V615B_WORKERS", "2")))
+# Use the account-safe Tiingo throttle already configured in the app unless explicitly overridden.
+V615B_REQUEST_GAP = float(os.environ.get("V615B_REQUEST_GAP_SECONDS", str(current_gap)))
+V615B_MAX_RETRIES = max(1, int(os.environ.get("V615B_MAX_RETRIES", "3")))
+V615B_MIN_BARS = max(5, int(os.environ.get("V615B_MIN_BARS", "20")))
+v615b_thread = None
+v615b_rate_lock = threading.Lock()
+v615b_last_request = 0.0
+
+
+def _v615b_status():
+    s={"status":"idle","message":"尚未建立历史价格缓存","processed":0,"total":0,"current":"",
+       "completed":0,"failed":0,"ended_completed":0,"ended_total":0,"coverage":0.0,
+       "ended_coverage":0.0,"error":None,"elapsed_sec":0}
+    if V615B_STATUS.exists():
+        try:s.update(json.loads(V615B_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+
+def _v615b_write_status(**kw):
+    V615B_DIR.mkdir(parents=True,exist_ok=True);V615B_PRICE_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v615b_status();s.update(kw)
+    V615B_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+
+def _v615b_safe_date(x):
+    d=pd.to_datetime(x,errors="coerce")
+    return None if pd.isna(d) else pd.Timestamp(d).tz_localize(None).normalize()
+
+
+def _v615b_listing_id(ticker,start,end):
+    s=_v615b_safe_date(start);e=_v615b_safe_date(end)
+    ss=s.strftime("%Y%m%d") if s is not None else "NA"
+    ee=e.strftime("%Y%m%d") if e is not None else "NA"
+    # Make safe for a filename while retaining exact symbol text in manifest.
+    tk=re.sub(r"[^A-Z0-9._-]+","_",str(ticker).upper().strip())
+    return f"{tk}__{ss}__{ee}"
+
+
+def _v615b_prepare_universe(force=False):
+    if V615B_QUEUE.exists() and V615B_MANIFEST.exists() and not force:
+        try:
+            q=pd.read_csv(V615B_QUEUE);m=pd.read_csv(V615B_MANIFEST)
+            if len(q)>1000 and len(m)>1000:return q,m
+        except Exception:pass
+    raw=_v615a_download_master(False)
+    M=_v615a_normalize_master(raw)
+    stocks=M[M["assetType"].astype(str).str.upper().eq("STOCK")].copy()
+    stocks=stocks[stocks["priceCurrency"].eq("USD") & stocks["exchange"].isin(V615A_US_EXCHANGES)].copy()
+    stocks=stocks.dropna(subset=["ticker","startDate","endDate"]).copy()
+    today=pd.Timestamp.utcnow().tz_localize(None).normalize()
+    stocks["ticker"]=stocks["ticker"].astype(str).str.upper().str.strip()
+    stocks["startDate"]=pd.to_datetime(stocks["startDate"],errors="coerce").dt.tz_localize(None)
+    stocks["endDate"]=pd.to_datetime(stocks["endDate"],errors="coerce").dt.tz_localize(None)
+    stocks=stocks.dropna(subset=["startDate","endDate"])
+    stocks["listing_id"]=[_v615b_listing_id(t,s,e) for t,s,e in zip(stocks.ticker,stocks.startDate,stocks.endDate)]
+    # Duplicate/recycled symbols are retained as separate listing rows, never collapsed silently.
+    counts=stocks.groupby("ticker")["listing_id"].transform("nunique")
+    stocks["ticker_reused_or_duplicate"]=(counts>1)
+    stocks["ended"]=(stocks["endDate"] < today-pd.Timedelta(days=14))
+    # Prioritize ended/delisted first, then older histories. This attacks survivorship bias first.
+    stocks=stocks.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).reset_index(drop=True)
+    manifest=stocks[["listing_id","ticker","exchange","startDate","endDate","ended","ticker_reused_or_duplicate"]].copy()
+    manifest["status"]="PENDING";manifest["bars"]=0;manifest["cache_start"]="";manifest["cache_end"]=""
+    manifest["source"]="";manifest["verified"]=False;manifest["error"]=""
+    queue=manifest[["listing_id","ticker","startDate","endDate","ended","ticker_reused_or_duplicate"]].copy()
+    V615B_DIR.mkdir(parents=True,exist_ok=True);V615B_PRICE_DIR.mkdir(parents=True,exist_ok=True)
+    manifest.to_csv(V615B_MANIFEST,index=False);queue.to_csv(V615B_QUEUE,index=False)
+    return queue,manifest
+
+
+def _v615b_read_manifest():
+    if not V615B_MANIFEST.exists():return pd.DataFrame()
+    try:return pd.read_csv(V615B_MANIFEST)
+    except Exception:return pd.DataFrame()
+
+
+def _v615b_atomic_manifest(M):
+    tmp=V615B_MANIFEST.with_suffix(".tmp")
+    M.to_csv(tmp,index=False);tmp.replace(V615B_MANIFEST)
+
+
+def _v615b_wait_rate():
+    global v615b_last_request
+    with v615b_rate_lock:
+        now=time.time();wait=max(0.0,V615B_REQUEST_GAP-(now-v615b_last_request))
+        if wait:time.sleep(wait)
+        v615b_last_request=time.time()
+
+
+def _v615b_tiingo_listing(ticker,start,end):
+    if not TIINGO_TOKEN:raise RuntimeError("TIINGO_TOKEN 未设置")
+    s=_v615b_safe_date(start);e=_v615b_safe_date(end)
+    if s is None or e is None or e<s:raise RuntimeError("invalid listing dates")
+    # Tiingo can return adjusted fields; keep only the listing's own master-date window.
+    url=(f"https://api.tiingo.com/tiingo/daily/{quote(str(ticker))}/prices?"
+         f"startDate={s.strftime('%Y-%m-%d')}&endDate={e.strftime('%Y-%m-%d')}&resampleFreq=daily&token={quote(TIINGO_TOKEN)}")
+    last=None
+    for attempt in range(1,V615B_MAX_RETRIES+1):
+        _v615b_wait_rate()
+        try:
+            req=Request(url,headers={"Accept":"application/json","User-Agent":"VCP-Radar-Cloud/1.3"})
+            with urlopen(req,timeout=60) as r:arr=json.loads(r.read().decode("utf-8",errors="replace"))
+            if not isinstance(arr,list) or not arr:raise RuntimeError("Tiingo empty history")
+            d=pd.DataFrame(arr)
+            d["Date"]=pd.to_datetime(d["date"],errors="coerce",utc=True).dt.tz_convert(None)
+            out=pd.DataFrame({
+                "Date":d["Date"],
+                "Open":d["adjOpen"] if "adjOpen" in d else d["open"],
+                "High":d["adjHigh"] if "adjHigh" in d else d["high"],
+                "Low":d["adjLow"] if "adjLow" in d else d["low"],
+                "Close":d["adjClose"] if "adjClose" in d else d["close"],
+                "Volume":d["adjVolume"] if "adjVolume" in d else d["volume"],
+            })
+            out=out.dropna(subset=["Date","Open","High","Low","Close"]).sort_values("Date")
+            out=out[(out["Date"]>=s)&(out["Date"]<=e)].drop_duplicates("Date",keep="last")
+            if len(out)<V615B_MIN_BARS:raise RuntimeError(f"history too short ({len(out)} bars)")
+            for c in ["Open","High","Low","Close"]:
+                if (pd.to_numeric(out[c],errors="coerce")<=0).any():raise RuntimeError(f"non-positive {c}")
+            return out.reset_index(drop=True)
+        except HTTPError as ex:
+            last=ex
+            if ex.code==429:raise TiingoRateLimitPause("Tiingo HTTP 429；进度已保存，可稍后继续") from ex
+            if ex.code in (404,410):raise RuntimeError(f"Tiingo HTTP {ex.code}: listing unavailable") from ex
+            if attempt<V615B_MAX_RETRIES:time.sleep(min(20,2*attempt));continue
+            raise
+        except (URLError,TimeoutError,RuntimeError) as ex:
+            last=ex
+            if attempt<V615B_MAX_RETRIES:time.sleep(min(20,2*attempt));continue
+            raise
+    raise RuntimeError(str(last) if last else "download failed")
+
+
+def _v615b_try_reuse_local(ticker,start,end):
+    # Reuse existing active-history cache only when it truly spans enough of this listing window.
+    p=MARKET_DIR/f"{ticker}.csv"
+    if not p.exists():return None
+    try:
+        x=pd.read_csv(p);dc="Date" if "Date" in x.columns else ("date" if "date" in x.columns else None)
+        if not dc:return None
+        x[dc]=pd.to_datetime(x[dc],errors="coerce");x=x.dropna(subset=[dc]).sort_values(dc)
+        s=_v615b_safe_date(start);e=_v615b_safe_date(end)
+        x=x[(x[dc]>=s)&(x[dc]<=e)].copy()
+        if len(x)<V615B_MIN_BARS:return None
+        cols={str(c).lower():c for c in x.columns}
+        need=[cols.get(k) for k in ["open","high","low","close","volume"]]
+        if any(c is None for c in need):return None
+        out=pd.DataFrame({"Date":x[dc],"Open":x[need[0]],"High":x[need[1]],"Low":x[need[2]],"Close":x[need[3]],"Volume":x[need[4]]})
+        # Do not count partial files as full historical listing coverage unless they span most of listing's date range.
+        listing_days=max(1,(e-s).days);span=(out["Date"].max()-out["Date"].min()).days
+        if span/listing_days<0.80:return None
+        return out.drop_duplicates("Date",keep="last").reset_index(drop=True)
+    except Exception:return None
+
+
+def _v615b_verify_file(path,start,end):
+    try:
+        x=pd.read_csv(path);x["Date"]=pd.to_datetime(x["Date"],errors="coerce");x=x.dropna(subset=["Date"])
+        if len(x)<V615B_MIN_BARS:return False,0,None,None,"too few bars"
+        if x["Date"].duplicated().any():return False,len(x),x.Date.min(),x.Date.max(),"duplicate dates"
+        if not x["Date"].is_monotonic_increasing:x=x.sort_values("Date")
+        for c in ["Open","High","Low","Close"]:
+            if c not in x.columns:return False,len(x),x.Date.min(),x.Date.max(),f"missing {c}"
+            if (pd.to_numeric(x[c],errors="coerce")<=0).any():return False,len(x),x.Date.min(),x.Date.max(),f"bad {c}"
+        return True,len(x),x.Date.min(),x.Date.max(),""
+    except Exception as ex:return False,0,None,None,f"{type(ex).__name__}: {ex}"
+
+
+def _v615b_snapshot_coverage(M):
+    if M is None or M.empty:return pd.DataFrame()
+    X=M.copy();X["startDate"]=pd.to_datetime(X["startDate"],errors="coerce");X["endDate"]=pd.to_datetime(X["endDate"],errors="coerce")
+    X["verified"]=X["verified"].astype(str).str.lower().isin(["true","1","yes"])
+    rows=[];now=pd.Timestamp.utcnow().tz_localize(None).normalize()
+    for dt in _v615a_snapshot_dates(2007):
+        u=X[(X.startDate<=dt)&(X.endDate>=dt)].copy()
+        good=u[u.verified]
+        ended=u[u["ended"].astype(str).str.lower().isin(["true","1","yes"])]
+        ended_good=ended[ended.verified]
+        rows.append(dict(snapshot=str(dt.date()),expected_listings=len(u),verified_listings=len(good),
+                         coverage=(len(good)/len(u) if len(u) else 0.0),ended_listings=len(ended),
+                         ended_verified=len(ended_good),ended_coverage=(len(ended_good)/len(ended) if len(ended) else None)))
+    C=pd.DataFrame(rows);V615B_DIR.mkdir(parents=True,exist_ok=True);C.to_csv(V615B_COVERAGE,index=False);return C
+
+
+def _v615b_update_summary(M,t0=None,message=None,status=None,current=""):
+    if M is None or M.empty:return _v615b_write_status(status=status or "idle",message=message or "无manifest")
+    verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+    ended=M["ended"].astype(str).str.lower().isin(["true","1","yes"])
+    C=_v615b_snapshot_coverage(M)
+    hist=C[pd.to_datetime(C["snapshot"]).dt.year<=2020] if len(C) else C
+    cov=float(hist.coverage.median()) if len(hist) else 0.0
+    ev=pd.to_numeric(C["ended_coverage"],errors="coerce").dropna() if len(C) else pd.Series(dtype=float)
+    ended_cov=float(ev.median()) if len(ev) else 0.0
+    return _v615b_write_status(status=status or "running",message=message or "Historical Cache Builder",
+        processed=int((M.status.astype(str)!="PENDING").sum()),total=int(len(M)),current=current,
+        completed=int(verified.sum()),failed=int(M.status.astype(str).eq("FAILED").sum()),
+        ended_completed=int((verified & ended).sum()),ended_total=int(ended.sum()),coverage=cov,ended_coverage=ended_cov,
+        elapsed_sec=(round(time.time()-t0,1) if t0 else 0),error=None)
+
+
+def _v615b_worker(force=False):
+    global v615b_thread
+    t0=time.time()
+    try:
+        if V615B_STOP.exists():
+            try:V615B_STOP.unlink()
+            except Exception:pass
+        _,M=_v615b_prepare_universe(force=False)
+        # Reconcile already-written files after crash before starting new API requests.
+        for i,row in M.iterrows():
+            path=V615B_PRICE_DIR/f"{row.listing_id}.csv"
+            if path.exists() and str(row.get("verified","")).lower() not in ("true","1","yes"):
+                ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
+                if ok:
+                    M.at[i,"status"]="DONE";M.at[i,"verified"]=True;M.at[i,"bars"]=b
+                    M.at[i,"cache_start"]=str(pd.Timestamp(cs).date());M.at[i,"cache_end"]=str(pd.Timestamp(ce).date());M.at[i,"source"]="existing_v615b_file";M.at[i,"error"]=""
+        _v615b_atomic_manifest(M);_v615b_update_summary(M,t0,"准备下载队列",status="running")
+
+        pending=M[~M["verified"].astype(str).str.lower().isin(["true","1","yes"]) & ~M.status.astype(str).eq("SKIP_AMBIGUOUS")].copy()
+        # Retry FAILED on manual resume; errors are retained in manifest/failures.
+        pending=pending.sort_values(["ended","startDate","ticker"],ascending=[False,True,True])
+        total_pending=len(pending)
+        failures=[]
+        for seq,(idx,row) in enumerate(pending.iterrows(),1):
+            if V615B_STOP.exists():
+                _v615b_atomic_manifest(M);_v615b_update_summary(M,t0,"已手动暂停；进度已保存",status="paused",current="")
+                return
+            t=str(row.ticker);lid=str(row.listing_id);path=V615B_PRICE_DIR/f"{lid}.csv"
+            _v615b_update_summary(M,t0,f"补历史价格 {seq}/{total_pending}",status="running",current=f"{t} · {lid}")
+            try:
+                x=None;source=""
+                if not force:x=_v615b_try_reuse_local(t,row.startDate,row.endDate)
+                if x is not None:source="local_market_cache"
+                else:
+                    x=_v615b_tiingo_listing(t,row.startDate,row.endDate);source="tiingo"
+                tmp=path.with_suffix(".tmp");x.to_csv(tmp,index=False);tmp.replace(path)
+                ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
+                if not ok:raise RuntimeError(f"verify failed: {err}")
+                M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True;M.at[idx,"bars"]=int(b)
+                M.at[idx,"cache_start"]=str(pd.Timestamp(cs).date());M.at[idx,"cache_end"]=str(pd.Timestamp(ce).date())
+                M.at[idx,"source"]=source;M.at[idx,"error"]=""
+            except TiingoRateLimitPause as ex:
+                M.at[idx,"status"]="PENDING";M.at[idx,"error"]=str(ex);_v615b_atomic_manifest(M)
+                _v615b_update_summary(M,t0,"Tiingo 429：已安全暂停，稍后按继续即可",status="rate_limited",current=t)
+                return
+            except Exception as ex:
+                err=f"{type(ex).__name__}: {ex}"
+                M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=err
+                failures.append(dict(time=datetime.now(timezone.utc).isoformat(),listing_id=lid,ticker=t,error=err))
+            if seq%10==0 or seq==total_pending:
+                _v615b_atomic_manifest(M)
+                if failures:
+                    pd.DataFrame(failures).to_csv(V615B_FAILURES,mode="a",header=not V615B_FAILURES.exists(),index=False);failures=[]
+        _v615b_atomic_manifest(M)
+        if failures:pd.DataFrame(failures).to_csv(V615B_FAILURES,mode="a",header=not V615B_FAILURES.exists(),index=False)
+        s=_v615b_update_summary(M,t0,"V6.15B Historical Cache Builder 完成",status="done",current="")
+        verdict="GO_V615C_BIG_WINNER_BENCHMARK" if s.get("coverage",0)>=V615B_GO and s.get("ended_coverage",0)>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE"
+        _v615b_write_status(verdict=verdict)
+    except Exception as ex:
+        traceback.print_exc();_v615b_write_status(status="error",message="V6.15B Builder 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,1))
+    finally:v615b_thread=None
+
+
+def _v615b_start(force=False):
+    global v615b_thread
+    if v615b_thread is not None and v615b_thread.is_alive():return False
+    v615b_thread=threading.Thread(target=_v615b_worker,args=(force,),daemon=True);v615b_thread.start();return True
+
+
+@APP.post("/v615b/run")
+def v615b_run():
+    _v615b_start(False);return redirect("/v615b/historical-cache")
+
+
+@APP.post("/v615b/stop")
+def v615b_stop():
+    V615B_DIR.mkdir(parents=True,exist_ok=True);V615B_STOP.write_text("stop",encoding="utf-8");return redirect("/v615b/historical-cache")
+
+
+@APP.post("/v615b/retry")
+def v615b_retry():
+    if V615B_MANIFEST.exists():
+        try:
+            M=pd.read_csv(V615B_MANIFEST);mask=M.status.astype(str).eq("FAILED");M.loc[mask,"status"]="PENDING";_v615b_atomic_manifest(M)
+        except Exception:pass
+    _v615b_start(False);return redirect("/v615b/historical-cache")
+
+
+@APP.get("/api/v615b/status")
+def v615b_status_api():return jsonify(_v615b_status())
+
+
+@APP.get("/v615b/historical-cache")
+def v615b_page():
+    import html
+    esc=lambda x:html.escape(str(x));s=_v615b_status();M=_v615b_read_manifest();C=pd.DataFrame()
+    if V615B_COVERAGE.exists():
+        try:C=pd.read_csv(V615B_COVERAGE)
+        except Exception:pass
+    total=int(s.get("total",0));done=int(s.get("completed",0));pct=(done/total if total else 0.0)
+    cov=float(s.get("coverage",0) or 0);ecov=float(s.get("ended_coverage",0) or 0)
+    verdict=s.get("verdict") or ("GO_V615C_BIG_WINNER_BENCHMARK" if cov>=V615B_GO and ecov>=V615B_GO else "NO_GO_KEEP_BUILDING_CACHE")
+    running=s.get("status") in ("running",)
+    controls='''<form method="post" action="/v615b/run"><button>▶ 建立 / 继续 Historical Cache</button></form>'''
+    if running:controls='''<form method="post" action="/v615b/stop"><button class="stop">⏸ 安全暂停</button></form>'''
+    retry='' if running else '''<form method="post" action="/v615b/retry"><button class="secondary">↻ 重试失败项并继续</button></form>'''
+    rows=""
+    if len(C):
+        for _,r in C.tail(12).iterrows():
+            rows+=f"<tr><td>{esc(r.get('snapshot'))}</td><td>{int(r.get('expected_listings',0)):,}</td><td>{int(r.get('verified_listings',0)):,}</td><td><b>{float(r.get('coverage',0)):.1%}</b></td><td>{int(r.get('ended_listings',0)):,}</td><td>{int(r.get('ended_verified',0)):,}</td><td><b>{float(r.get('ended_coverage',0) or 0):.1%}</b></td></tr>"
+    failrows=""
+    if len(M):
+        F=M[M.status.astype(str).eq("FAILED")].tail(20)
+        for _,r in F.iterrows():failrows+=f"<tr><td>{esc(r.get('ticker'))}</td><td>{esc(r.get('listing_id'))}</td><td>{esc(str(r.get('error',''))[:160])}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800;margin:4px}}.secondary{{background:#64748b}}.stop{{background:#b91c1c}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:21px}}.bar{{height:14px;background:#e2e8f0;border-radius:8px;overflow:hidden}}.bar i{{display:block;height:100%;width:{pct:.1%};background:#0f766e}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🗄️ V6.15B · Historical Price Cache Builder</h1><div class="info"><b>只补数据，不测试策略。</b>退市/结束交易股票优先；每个 listing 独立保存，ticker 重用不再静默覆盖；支持断点续传、429安全暂停、失败记录和文件验证。只有历史Universe与退市股覆盖都≥{V615B_GO:.0%}，才允许进入 Big Winner Benchmark。</div></div>
+<div class="c"><h2>状态：{esc(s.get('status'))}</h2><p>{esc(s.get('message'))}　{esc(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p><div style="display:flex;flex-wrap:wrap">{controls}{retry}</div><div class="bar"><i></i></div><p>{done:,}/{total:,} verified · {pct:.1%}</p></div>
+<div class="c"><h2>Verdict：{esc(verdict)}</h2><div class="grid"><div class="m"><small>Verified Listings</small><b>{done:,}</b></div><div class="m"><small>Failed</small><b>{int(s.get('failed',0)):,}</b></div><div class="m"><small>Historical Coverage</small><b>{cov:.1%}</b></div><div class="m"><small>Ended/Delisted Coverage</small><b>{ecov:.1%}</b></div></div></div>
+<div class="c"><div class="warn"><b>重要：</b>这一步可能需要较长时间，速度受 Tiingo 账户请求限额约束。程序不会为了快而绕过限流；每10项保存一次 manifest，Railway 重启后按“继续”即可。已存在且验证通过的数据不会重复下载。</div></div>
+<div class="c"><h2>最近12个年度 Coverage</h2><div class="scroll"><table><tr><th>Snapshot</th><th>应有 listings</th><th>Verified</th><th>Coverage</th><th>Ended</th><th>Ended Verified</th><th>Ended Coverage</th></tr>{rows}</table></div></div>
+<details class="c"><summary><b>最近失败项</b></summary><div class="scroll"><table><tr><th>Ticker</th><th>Listing ID</th><th>Error</th></tr>{failrows}</table></div></details>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615b/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},5000)</script>
+</div></body></html>'''
 
 
 # ================= V6.15A BIG WINNER DATA INTEGRITY BENCHMARK =================
