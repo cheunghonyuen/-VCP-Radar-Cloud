@@ -6959,7 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616c-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C</button></a></div></div>
+<div class="card" id="v616c1-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C.1 Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C.1</button></a></div></div>
 <div class="card" id="v616b-shortcut" style="border:3px solid #ef4444"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.16B Failure / Stop Research</h2><div class="muted">冻结 Big Winner DNA · -4/-5/-6/-7% + Structural Stop · 检查误杀大赢家</div></div><a href="/v616b/stop-research"><button type="button">打开 V6.16B</button></a></div></div>
 <div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
 <div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
@@ -10059,14 +10059,21 @@ def _v616c_run():
                                              'strategy_return':realized,'baseline_stop':bool(base['stop_hit']),
                                              'bw20':bool(base['bw20']),'bw30':bool(base['bw30']),'bw50':bool(base['bw50']),**f})
             _v616c_write(status='running',message='Replay -7% baseline → D1/D2/D3/D5 failure signatures',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
-        X=pd.DataFrame(rows)
+        _v616c_write(status='aggregating',message='450/450完成 · 正在快速汇总 Failure Signatures',processed=len(ticks),total=len(ticks),current='AGGREGATING',elapsed_sec=round(time.time()-t0,1),error=None)
+        X=pd.DataFrame.from_records(rows)
         if X.empty:raise RuntimeError('没有生成 Early Failure 结果')
-        X.to_csv(V616C_DETAIL,index=False)
+        # V6.16C.1: do NOT write the huge row-level detail CSV here.
+        # That file can contain hundreds of thousands of rows and was the likely 450/450 bottleneck on Railway.
+        # Keep only compact aggregated reports/results for Fast Replay.
         reps=[]
         def st(v):
             w=v[v>0];lo=v[v<=0];gp=float(w.sum()) if len(w) else 0;gl=abs(float(lo.sum())) if len(lo) else 0
             return float(v.mean()),gp/gl if gl>0 else np.nan,float((v>0).mean()),float(w.mean()) if len(w) else 0,float(lo.mean()) if len(lo) else 0
-        for (grp,en,day,sig),g in X.groupby(['group','entry','day','signal']):
+        grouped=list(X.groupby(['group','entry','day','signal'],sort=False,observed=True))
+        gtotal=len(grouped)
+        for gi,((grp,en,day,sig),g) in enumerate(grouped,1):
+            if gi==1 or gi%20==0 or gi==gtotal:
+                _v616c_write(status='aggregating',message='快速汇总 Failure Signatures',processed=gi,total=gtotal,current=f'{grp} / {en} / D{day} / {sig}',elapsed_sec=round(time.time()-t0,1),error=None)
             ba,bp,bw,baw,bal=st(g.baseline_return.astype(float)); sa,sp,sw,saw,sal=st(g.strategy_return.astype(float))
             h=g[g.hit]; fail=g[g.baseline_stop]
             reps.append({'group':grp,'entry':en,'day':int(day),'signal':sig,'n':len(g),'hit_n':len(h),'hit_rate':float(g.hit.mean()),
@@ -10083,7 +10090,7 @@ def _v616c_run():
              'acceptance':'Must improve BOTH PF and Avg Return versus fixed -7%, with useful failure precision/recall and low BW20/30/50 kill rates. Otherwise keep simple -7%.',
              'warning':'Discovery on existing 455-file cache; survivorship-bias limits remain. Later strict time/ticker OOS required.'}
         V616C_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616c_write(status='done',message='V6.16C Early Failure Signature Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616c_write(status='done',message='V6.16C.1 Early Failure Signature Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
     except Exception as ex:
         traceback.print_exc();_v616c_write(status='error',message='V6.16C 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
     finally:v616c_thread=None
@@ -10111,11 +10118,11 @@ def v616c_page():
     btn='' if s.get('status')=='running' else '<form method="post" action="/v616c/run"><button>▶ 跑 V6.16C Early Failure Research</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:10.5px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
-<a href="/">← 返回主页</a><div class="c"><h1>🧬 V6.16C · Early Failure Signature Research</h1><div class="info"><b>-7% 是最后保险。</b>冻结选股 DNA、Entry 与 terminal -7% Stop；只研究 D1/D2/D3/D5 当时已经出现的失败证据。信号触发后下一交易日开盘退出，避免 look-ahead。</div></div>
+<a href="/">← 返回主页</a><div class="c"><h1>🧬 V6.16C.1 · Early Failure Signature Research</h1><div class="info"><b>-7% 是最后保险。</b>冻结选股 DNA、Entry 与 terminal -7% Stop；只研究 D1/D2/D3/D5 当时已经出现的失败证据。信号触发后下一交易日开盘退出，避免 look-ahead。</div></div>
 <div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{btn}</div>
 <div class="c"><h2>Failure Signature Ranking</h2><div class="warn">必须同时提高 <b>PF + Avg Return</b>，并检查 Failure Precision / Recall 与 BW20/30/50 Kill Rate。只是让 Avg Loss 好看、却误杀大赢家的规则直接淘汰。</div><div style="overflow:auto"><table><tr><th>Group</th><th>Entry</th><th>Day</th><th>Signal</th><th>Hit N</th><th>Hit%</th><th>Failure Precision</th><th>Failure Recall</th><th>Base PF</th><th>New PF</th><th>ΔPF</th><th>Base Avg</th><th>New Avg</th><th>ΔAvg</th><th>AvgLoss</th><th>Kill BW20</th><th>Kill BW30</th><th>Kill BW50</th></tr>{trs}</table></div></div>
 <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
 
 
 # ================= V6.16B FAILURE / STOP RESEARCH =================
@@ -10544,7 +10551,7 @@ def v615f_page():
  trs=''
  for x in r.get('summary',[]):trs+=f"<tr><td><b>{esc(x.get('candidate'))}</b></td><td>{int(x.get('selected_n',0)):,}</td><td>{x.get('bw20',0):.1%}</td><td><b>{x.get('lift20',0):.2f}×</b></td><td>{x.get('bw30',0):.1%}</td><td><b>{x.get('lift30',0):.2f}×</b></td><td>{x.get('bw40',0):.1%}</td><td>{x.get('bw50',0):.1%}</td><td>{x.get('median_year_lift30',0):.2f}×</td><td>{int(x.get('positive_lift30_years',0))}/{max(1,int(x.get('years',0)))}</td><td>{x.get('avg_mae',0):.1%}</td></tr>"
  btn='' if st.get('status')=='running' else '<form method="post" action="/v615f/run"><button>▶ 跑 V6.15F Strict OOS</button></form>'
- return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:950px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.15F · Strict Big Winner OOS</h1><div class="info"><b>只验证，不再找因子。</b>冻结 V6.15E A/B。每个测试年的 Momentum 75% cutoff 只由之前年份产生；VOL_DRY 固定≤0.80。不优化 Entry/Stop/Exit。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}　耗时 {st.get('elapsed_sec',0)} 秒</p>{btn}</div><div class="c"><h2>Walk-Forward OOS</h2><div style="overflow:auto"><table><tr><th>候选</th><th>OOS N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Lift30</th><th>BW40</th><th>BW50</th><th>年度中位Lift30</th><th>Lift30&gt;1年份</th><th>Avg MAE</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>重点：</b>看 +20/+30/+40/+50 右尾能否在未来年份持续增强。<br><b>限制：</b>{esc(r.get('warning','现有 cache 尚未完全消除幸存者偏差。'))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615f/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1200)</script></div></body></html>'''
+ return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:950px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.15F · Strict Big Winner OOS</h1><div class="info"><b>只验证，不再找因子。</b>冻结 V6.15E A/B。每个测试年的 Momentum 75% cutoff 只由之前年份产生；VOL_DRY 固定≤0.80。不优化 Entry/Stop/Exit。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}　耗时 {st.get('elapsed_sec',0)} 秒</p>{btn}</div><div class="c"><h2>Walk-Forward OOS</h2><div style="overflow:auto"><table><tr><th>候选</th><th>OOS N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Lift30</th><th>BW40</th><th>BW50</th><th>年度中位Lift30</th><th>Lift30&gt;1年份</th><th>Avg MAE</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>重点：</b>看 +20/+30/+40/+50 右尾能否在未来年份持续增强。<br><b>限制：</b>{esc(r.get('warning','现有 cache 尚未完全消除幸存者偏差。'))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615f/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1200)</script></div></body></html>'''
 
 # ================= V6.15E BIG WINNER DNA MULTI-FACTOR VALIDATION =================
 V615E_DIR = DATA_DIR / "jlaw_v615e_multifactor"
@@ -10757,7 +10764,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class="grid"><div class="m"><small>Base ≥15%</small><b>{b.get('bw15',0):.1%}</b></div><div class="m"><small>Base ≥20%</small><b>{b.get('bw20',0):.1%}</b></div><div class="m"><small>Base ≥30%</small><b>{b.get('bw30',0):.1%}</b></div><div class="m"><small>Base ≥40%</small><b>{b.get('bw40',0):.1%}</b></div><div class="m"><small>Base ≥50%</small><b>{b.get('bw50',0):.1%}</b></div></div>
 <div class="c"><h2>Multi-Factor DNA Ranking</h2><div class="warn">排序偏重 +30/+40/+50% 右尾和年度稳定性。Base Quality / Pivot Ready 是明确标注的 daily-bar Proxy，不冒充 JLaw 原版机械规则。</div><div style="overflow:auto"><table><tr><th>DNA组合</th><th>N</th><th>BW20</th><th>BW30</th><th>BW40</th><th>BW50</th><th>Lift20</th><th>Lift30</th><th>Lift50</th><th>Year Med L30</th><th>Years≥1</th><th>Avg MAE</th></tr>{rows}</table></div></div>
 <div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','Existing-cache validation only; independent OOS remains required.'))}</div></div>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1200)</script>
 </div></body></html>"""
 
 
@@ -10993,7 +11000,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class="c"><h2>单因子 · JLaw Concept → Quant Proxy</h2><div class="warn">Discovery 排名优先看 <b>年度中位 Lift</b> 与跨年一致性，不只看整体 Lift；避免被少数牛市年份骗到。</div><div style="overflow:auto"><table><tr><th>Factor</th><th>N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Avg MAE</th><th>Year Med Lift</th><th>Years≥1</th></tr>{rows(F)}</table></div></div>
 <div class="c"><h2>两因子组合 · 仅 Top 单因子交集</h2><div class="warn">这里只组合最强的8个单因子，不扫描几千种阈值，不做权重优化。</div><div style="overflow:auto"><table><tr><th>Combo</th><th>N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Avg MAE</th><th>Year Med Lift</th><th>Years≥1</th></tr>{rows(C)}</table></div></div>
 <div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','Existing cache discovery only; later OOS required.'))}</div></div>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615d/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615d/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
 
 
@@ -11184,7 +11191,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class="c"><h2>JLaw Base Screen · 暂不加权</h2><div class="warn">只测试：站上50/150/200MA + 距52周高点不超过15%。这不是最终JLaw Factor Library。</div><div class="grid"><div class="m"><small>Screen N</small><b>{r.get('jlaw_base_screen_n',0)}</b></div><div class="m"><small>Screen BW20</small><b>{r.get('jlaw_base_screen_bw20',0):.1%}</b></div><div class="m"><small>Market BW20</small><b>{r.get('base_rate_20',0):.1%}</b></div><div class="m"><small>BW20 Lift</small><b>{r.get('jlaw_base_screen_lift20',0):.2f}×</b></div></div></div>
 <div class="c"><h2>年度分布</h2><div style="overflow:auto"><table><tr><th>Year</th><th>N</th><th>≥15%</th><th>≥20%</th><th>≥30%</th><th>Avg MFE</th><th>Avg MAE</th></tr>{yearly}</table></div></div>
 <div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','现有缓存只用于流程认证。'))}</div></div>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
 
 
@@ -11592,7 +11599,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class="c"><div class="warn"><b>重要：</b>这一步可能需要较长时间，速度受 Tiingo 账户请求限额约束。程序不会为了快而绕过限流；每10项保存一次 manifest，Railway 重启后按“继续”即可。已存在且验证通过的数据不会重复下载。</div></div>
 <div class="c"><h2>最近12个年度 Coverage</h2><div class="scroll"><table><tr><th>Snapshot</th><th>应有 listings</th><th>Verified</th><th>Coverage</th><th>Ended</th><th>Ended Verified</th><th>Ended Coverage</th></tr>{rows}</table></div></div>
 <details class="c"><summary><b>最近失败项</b></summary><div class="scroll"><table><tr><th>Ticker</th><th>Listing ID</th><th>Error</th></tr>{failrows}</table></div></details>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615b/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},5000)</script>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615b/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},5000)</script>
 </div></body></html>'''
 
 
