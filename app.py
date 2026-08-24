@@ -6959,6 +6959,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
+
 <div class="card" id="v615e-shortcut" style="border:3px solid #f97316"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.15E Big Winner DNA Multi-Factor</h2><div class="muted">Fast Replay · 看 +20/+30/+40/+50% 右尾 · 不训练权重</div></div><a href="/v615e/multifactor"><button type="button">打开 V6.15E</button></a></div></div>
 
 <div class="card" id="v615d-shortcut" style="border:3px solid #ec4899">
@@ -9977,6 +9979,63 @@ def v6132_page():
 
 
 
+
+# ================= V6.15F STRICT BIG WINNER WALK-FORWARD OOS =================
+V615F_DIR=DATA_DIR/'jlaw_v615f_strict_oos'; V615F_STATUS=V615F_DIR/'status.json'; V615F_RESULT=V615F_DIR/'result.json'; V615F_REPORT=V615F_DIR/'walkforward_report.csv'; v615f_thread=None
+def _v615f_status():
+ x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+ if V615F_STATUS.exists():
+  try:x.update(json.loads(V615F_STATUS.read_text(encoding='utf-8')))
+  except:pass
+ return x
+def _v615f_write_status(**kw):
+ V615F_DIR.mkdir(parents=True,exist_ok=True);x=_v615f_status();x.update(kw);V615F_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+def _v615f_run():
+ global v615f_thread
+ t0=time.time()
+ try:
+  if not V615D_SNAP.exists():raise RuntimeError('缺少 V6.15D factor_snapshots.csv；请先跑 V6.15D')
+  S=pd.read_csv(V615D_SNAP);S['obs_date']=pd.to_datetime(S['obs_date'],errors='coerce')
+  for c in ['ret60','ret120','ret252','vol_vs20','mfe60','mae60']:S[c]=pd.to_numeric(S[c],errors='coerce')
+  S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20','mfe60','mae60']).copy();S['year']=S.obs_date.dt.year.astype(int)
+  years=sorted(S.year.unique());tests=[y for y in years if len(S[S.year<y])>=1000 and len(S[S.year==y])>=50]
+  candidates=[('A · MOM60 + MOM120 + VOL_DRY',('ret60','ret120')),('B · MOM252 + MOM120 + VOL_DRY',('ret252','ret120'))]
+  rows=[];total=len(tests)*2;done=0;_v615f_write_status(status='running',message='Strict Walk-Forward：每年阈值只由过去数据决定',processed=0,total=total,elapsed_sec=0)
+  for y in tests:
+   train=S[S.year<y];test=S[S.year==y];qs={c:float(train[c].quantile(.75)) for c in ['ret60','ret120','ret252']};base={k:float((test.mfe60>=v).mean()) for k,v in [(15,.15),(20,.20),(30,.30),(40,.40),(50,.50)]}
+   for name,cols in candidates:
+    g=test[(test[cols[0]]>=qs[cols[0]])&(test[cols[1]]>=qs[cols[1]])&(test.vol_vs20<=.80)];r={'year':int(y),'candidate':name,'train_n':len(train),'test_n':len(test),'selected_n':len(g),'avg_mae':float(g.mae60.mean()) if len(g) else np.nan}
+    for k,v in [(15,.15),(20,.20),(30,.30),(40,.40),(50,.50)]:
+     rate=float((g.mfe60>=v).mean()) if len(g) else np.nan;r[f'bw{k}']=rate;r[f'base{k}']=base[k];r[f'lift{k}']=rate/base[k] if len(g) and base[k]>0 else np.nan
+    rows.append(r);done+=1;_v615f_write_status(status='running',message='测试年从未参与 cutoff',processed=done,total=total,current=f'{y} · {name}',elapsed_sec=round(time.time()-t0,2))
+  R=pd.DataFrame(rows);R.to_csv(V615F_REPORT,index=False);summary=[]
+  for name,_ in candidates:
+   z=R[(R.candidate==name)&(R.selected_n>=10)];n=int(z.selected_n.sum());o={'candidate':name,'years':len(z),'selected_n':n,'positive_lift30_years':int((z.lift30>1).sum()),'avg_mae':float(np.average(z.avg_mae,weights=z.selected_n)) if n else np.nan}
+   for k in [15,20,30,40,50]:
+    rate=float(np.average(z[f'bw{k}'],weights=z.selected_n)) if n else np.nan;base=float(np.average(z[f'base{k}'],weights=z.test_n)) if len(z) else np.nan;o[f'bw{k}']=rate;o[f'lift{k}']=rate/base if base else np.nan;o[f'median_year_lift{k}']=float(z[f'lift{k}'].median()) if len(z) else np.nan
+   summary.append(o)
+  result={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'snapshots':len(S),'test_years':tests,'summary':summary,'warning':'Strict time OOS, but existing 455-file cache is not yet survivorship-bias-free; delisted/historical coverage remains incomplete.'};V615F_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v615f_write_status(status='done',message='V6.15F Strict Big Winner OOS 完成',processed=total,total=total,current='',elapsed_sec=result['elapsed_sec'],error=None)
+ except Exception as ex:traceback.print_exc();_v615f_write_status(status='error',message='V6.15F 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+ finally:v615f_thread=None
+def _v615f_start():
+ global v615f_thread
+ if v615f_thread is not None and v615f_thread.is_alive():return False
+ v615f_thread=threading.Thread(target=_v615f_run,daemon=True);v615f_thread.start();return True
+@APP.post('/v615f/run')
+def v615f_run():_v615f_start();return redirect('/v615f/strict-oos')
+@APP.get('/api/v615f/status')
+def v615f_status_api():return jsonify(_v615f_status())
+@APP.get('/v615f/strict-oos')
+def v615f_page():
+ import html
+ esc=lambda x:html.escape(str(x));st=_v615f_status();r={}
+ if V615F_RESULT.exists():
+  try:r=json.loads(V615F_RESULT.read_text(encoding='utf-8'))
+  except:pass
+ trs=''
+ for x in r.get('summary',[]):trs+=f"<tr><td><b>{esc(x.get('candidate'))}</b></td><td>{int(x.get('selected_n',0)):,}</td><td>{x.get('bw20',0):.1%}</td><td><b>{x.get('lift20',0):.2f}×</b></td><td>{x.get('bw30',0):.1%}</td><td><b>{x.get('lift30',0):.2f}×</b></td><td>{x.get('bw40',0):.1%}</td><td>{x.get('bw50',0):.1%}</td><td>{x.get('median_year_lift30',0):.2f}×</td><td>{int(x.get('positive_lift30_years',0))}/{max(1,int(x.get('years',0)))}</td><td>{x.get('avg_mae',0):.1%}</td></tr>"
+ btn='' if st.get('status')=='running' else '<form method="post" action="/v615f/run"><button>▶ 跑 V6.15F Strict OOS</button></form>'
+ return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:950px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.15F · Strict Big Winner OOS</h1><div class="info"><b>只验证，不再找因子。</b>冻结 V6.15E A/B。每个测试年的 Momentum 75% cutoff 只由之前年份产生；VOL_DRY 固定≤0.80。不优化 Entry/Stop/Exit。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}　耗时 {st.get('elapsed_sec',0)} 秒</p>{btn}</div><div class="c"><h2>Walk-Forward OOS</h2><div style="overflow:auto"><table><tr><th>候选</th><th>OOS N</th><th>BW20</th><th>Lift20</th><th>BW30</th><th>Lift30</th><th>BW40</th><th>BW50</th><th>年度中位Lift30</th><th>Lift30&gt;1年份</th><th>Avg MAE</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>重点：</b>看 +20/+30/+40/+50 右尾能否在未来年份持续增强。<br><b>限制：</b>{esc(r.get('warning','现有 cache 尚未完全消除幸存者偏差。'))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615f/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1200)</script></div></body></html>'''
 
 # ================= V6.15E BIG WINNER DNA MULTI-FACTOR VALIDATION =================
 V615E_DIR = DATA_DIR / "jlaw_v615e_multifactor"
