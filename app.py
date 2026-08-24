@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616f32-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.3 Extended Exit Matrix</h2><div class="muted">同批样本公平比较 HOLD504/756/1008/1260 · 检查右尾是否被极少数超级赢家主导</div></div><a href="/v616f32/matched-cohort"><button type="button">打开 V6.16F.3.2</button></a></div></div>
+<div class="card" id="v616f4-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.3 Extended Exit Matrix</h2><div class="muted">HOLD1260 Control · Day504后长期趋势退出 · 200MA / 100+200MA / Long Trend / DD35 / Composite</div></div><a href="/v616f4/adaptive-hold"><button type="button">打开 V6.16F.4</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616f32_matched_cohort'
+V616F_DIR=DATA_DIR/'jlaw_v616f4_big_winner_adaptive'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'matched_cohort_pairwise_report.csv'
+V616F_REPORT=V616F_DIR/'big_winner_adaptive_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10126,25 +10126,46 @@ def _v616f_run():
             S[c]=pd.to_numeric(S[c],errors='coerce')
         S=S.dropna(subset=['obs_date','ret60','ret120','ret252','vol_vs20']).copy()
         S['year']=S.obs_date.dt.year.astype(int)
-
         picks=[]
         for y in sorted(S.year.unique()):
             tr=S[S.year<y]; te=S[S.year==y]
             if len(tr)<1000 or len(te)<50: continue
             q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
-            a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
-            a['test_year']=y
-            b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
-            b['test_year']=y
+            a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy(); a['test_year']=y
+            b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy(); b['test_year']=y
             picks.extend([a,b])
         D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
-
-        horizons=[504,756,1008,1260]
         ticks=sorted(D.ticker.unique())
+        modes=['HOLD1260_CONTROL','ADAPT_200MA','ADAPT_100MA_200MA','ADAPT_LONG_TREND','ADAPT_DD35_CONFIRM','ADAPT_COMPOSITE']
         trades=[]
 
-        _v616f_write(status='running',message='Matched Cohort Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+        def adaptive_manage(d,ei,px,mode,maxh=1260):
+            end=min(len(d)-1,ei+maxh-1); peak=px; reached_2r=False; closes=[]
+            for j in range(ei,end+1):
+                row=d.iloc[j]; c=float(row['close']); h=float(row['high']); lo=float(row['low'])
+                peak=max(peak,h); reached_2r=reached_2r or peak>=px*1.14; closes.append(c)
+                if lo<=px*.93:
+                    return {'return':-.07,'mfe':peak/px-1,'hold_days':j-ei+1,'reason':'STOP_7'}
+                age=j-ei+1
+                if mode=='HOLD1260_CONTROL' or age<504 or not reached_2r: continue
+                ss=pd.Series(closes,dtype=float)
+                ma100=float(ss.iloc[-100:].mean()) if len(ss)>=100 else np.nan
+                ma200=float(ss.iloc[-200:].mean()) if len(ss)>=200 else np.nan
+                dd=c/peak-1 if peak>0 else 0
+                b100=np.isfinite(ma100) and c<ma100; b200=np.isfinite(ma200) and c<ma200
+                sig=False
+                if mode=='ADAPT_200MA': sig=b200
+                elif mode=='ADAPT_100MA_200MA': sig=b100 and b200
+                elif mode=='ADAPT_LONG_TREND': sig=b200 and dd<=-.20
+                elif mode=='ADAPT_DD35_CONFIRM': sig=b200 and dd<=-.35
+                elif mode=='ADAPT_COMPOSITE': sig=sum([bool(b100),bool(b200),bool(dd<=-.25)])>=2
+                if sig and j+1<len(d):
+                    nx=float(d.iloc[j+1]['open'])
+                    return {'return':nx/px-1,'mfe':peak/px-1,'hold_days':j-ei+2,'reason':mode}
+            c=float(d.iloc[end]['close'])
+            return {'return':c/px-1,'mfe':peak/px-1,'hold_days':end-ei+1,'reason':'MAX_HOLD'}
 
+        _v616f_write(status='running',message='Adaptive Winner Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
         for k,t in enumerate(ticks,1):
             d=_v616a_price(t)
             if d is not None:
@@ -10152,117 +10173,54 @@ def _v616f_run():
                 for _,r in D[D.ticker.eq(t)].iterrows():
                     dt=pd.Timestamp(r.obs_date).normalize()
                     if dt not in im: continue
-                    oi=im[dt]
-                    E=_v616a_entries(d,oi)
+                    E=_v616a_entries(d,im[dt])
                     if 'CONTROL' not in E: continue
                     ei,px,_=E['CONTROL']
-
-                    rec={'ticker':t,'obs_date':str(dt.date()),'year':int(r['test_year'])}
-                    any_ok=False
-                    for h in horizons:
-                        if ei+h-1>=len(d): continue
-                        mode='HOLD_504_CONTROL' if h==504 else f'HOLD_{h}'
-                        z=_v616f_manage(d,ei,px,mode,h)
-                        if z is None: continue
-                        rec[f'ret_{h}']=float(z['return'])
-                        rec[f'mfe_{h}']=float(z['mfe'])
-                        any_ok=True
-                    if any_ok and 'ret_504' in rec:
-                        trades.append(rec)
-
-            _v616f_write(status='running',message='Matched Cohort Replay',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
-
+                    if ei+1259>=len(d): continue
+                    for mode in modes:
+                        z=adaptive_manage(d,ei,px,mode,1260)
+                        trades.append({'ticker':t,'obs_date':str(dt.date()),'year':int(r['test_year']),'mode':mode,
+                                       'return':float(z['return']),'mfe':float(z['mfe']),'hold_days':int(z['hold_days']),'reason':z['reason']})
+            _v616f_write(status='running',message='Adaptive Winner Replay',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
         T=pd.DataFrame(trades)
-        if T.empty: raise RuntimeError('没有生成 matched trades')
+        if T.empty: raise RuntimeError('没有生成 adaptive matched trades')
 
-        pairwise=[]
-        yearly=[]
-        verdicts=[]
+        keycounts=T.groupby(['ticker','obs_date'])['mode'].nunique()
+        good=set(keycounts[keycounts.eq(len(modes))].index)
+        idx=list(zip(T.ticker,T.obs_date)); T=T[[x in good for x in idx]].copy()
+        if T.empty: raise RuntimeError('没有完整 matched cohort')
 
-        for cohort in horizons:
-            need=[f'ret_{h}' for h in horizons if h<=cohort]
-            C=T.dropna(subset=need).copy()
-            if C.empty: continue
-
-            for h in horizons:
-                if h>cohort: continue
-                c=f'ret_{h}'
-                vals=pd.to_numeric(C[c],errors='coerce').dropna()
-                if vals.empty: continue
-
-                # yearly metrics
-                yrows=[]
-                for y,g in C.groupby('year'):
-                    v=pd.to_numeric(g[c],errors='coerce').dropna()
-                    if v.empty: continue
-                    wins=v[v>0]; losses=v[v<=0]
-                    gp=float(wins.sum()); gl=abs(float(losses.sum()))
-                    pf=gp/gl if gl>0 else np.nan
-                    yrows.append((y,len(v),float(v.mean()),pf))
-                    yearly.append({'cohort':cohort,'hold':h,'year':int(y),'n':int(len(v)),'avg_return':float(v.mean()),'pf':pf})
-
-                med_pf=float(pd.Series([x[3] for x in yrows]).dropna().median()) if yrows else np.nan
-                avgwin=float(vals[vals>0].mean()) if (vals>0).any() else 0.0
-                avgloss=float(vals[vals<=0].mean()) if (vals<=0).any() else 0.0
-                wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
-
-                pairwise.append({
-                    'cohort':cohort,'hold':h,'mode':f'HOLD_{h}','n':int(len(vals)),
-                    'avg_return':float(vals.mean()),'median_year_pf':med_pf,
-                    'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,
-                    'positive_years':int(sum(1 for x in yrows if x[2]>0)),'years':int(len(yrows))
-                })
-
-            Ptmp=pd.DataFrame([x for x in pairwise if x['cohort']==cohort])
-            if not Ptmp.empty and (Ptmp['hold']==504).any():
-                base=Ptmp[Ptmp['hold'].eq(504)].iloc[0]
-                Ptmp['avgret_delta']=Ptmp.avg_return-base.avg_return
-                Ptmp['pf_delta']=Ptmp.median_year_pf-base.median_year_pf
-                best=Ptmp.sort_values(['avg_return','median_year_pf'],ascending=[False,False]).iloc[0]
-                verdicts.append({
-                    'cohort':cohort,'n':int(best.n),'best_hold':int(best['hold']),
-                    'best_avg_return':float(best.avg_return),'best_median_pf':float(best.median_year_pf)
-                })
-                for idx,row in Ptmp.iterrows():
-                    for rec in pairwise:
-                        if rec['cohort']==cohort and rec['hold']==row['hold']:
-                            rec['avgret_delta']=float(row['avgret_delta'])
-                            rec['pf_delta']=float(row['pf_delta'])
-
-        tail=[]
-        for h in horizons:
-            c=f'ret_{h}'
-            if c not in T.columns: continue
-            v=pd.to_numeric(T[c],errors='coerce').dropna()
-            if len(v)<20: continue
-            pos=v[v>0].sort_values(ascending=False)
-            total=float(pos.sum()) if len(pos) else 0.0
-            k1=max(1,int(np.ceil(len(pos)*.01)))
-            k5=max(1,int(np.ceil(len(pos)*.05)))
-            tail.append({
-                'hold':h,'n':int(len(v)),'median_return':float(v.median()),
-                'p90_return':float(v.quantile(.90)),'p95_return':float(v.quantile(.95)),
-                'p99_return':float(v.quantile(.99)),
-                'top1_profit_share':float(pos.iloc[:k1].sum()/total) if total>0 else np.nan,
-                'top5_profit_share':float(pos.iloc[:k5].sum()/total) if total>0 else np.nan
-            })
-
-        P=pd.DataFrame(pairwise)
-        P.to_csv(V616F_REPORT,index=False)
-
-        res={
-            'generated_at':datetime.now(timezone.utc).isoformat(),
-            'elapsed_sec':round(time.time()-t0,2),
-            'pairwise':pairwise,'verdicts':verdicts,'tail':tail,'yearly':yearly,
-            'rule_note':'V6.16F.3.2 Matched Cohort. Same frozen DNA + CONTROL entry + -7% stop. Longer holds are compared only on the exact same trades with enough future history.',
-            'acceptance':'A longer hold is credible only if it beats HOLD504 on the same cohort on Avg Return and median yearly PF. Tail concentration is reported to detect dependence on a tiny number of monster winners.',
-            'warning':'Existing cache still has survivorship-bias limits until historical/delisted coverage is complete.'
-        }
+        overall=[]; yearly=[]
+        for mode in modes:
+            G=T[T['mode'].eq(mode)].copy(); vals=pd.to_numeric(G['return'],errors='coerce').dropna(); ypf=[]
+            for y,g in G.groupby('year'):
+                v=pd.to_numeric(g['return'],errors='coerce').dropna(); wins=v[v>0]; losses=v[v<=0]
+                pf=float(wins.sum())/abs(float(losses.sum())) if len(losses) and abs(float(losses.sum()))>0 else np.nan
+                ypf.append(pf); yearly.append({'mode':mode,'year':int(y),'n':int(len(v)),'avg_return':float(v.mean()),'pf':pf})
+            wins=vals[vals>0]; losses=vals[vals<=0]; avgwin=float(wins.mean()) if len(wins) else 0; avgloss=float(losses.mean()) if len(losses) else 0
+            pos=wins.sort_values(ascending=False); total=float(pos.sum()); k1=max(1,int(np.ceil(len(pos)*.01))); k5=max(1,int(np.ceil(len(pos)*.05)))
+            overall.append({'mode':mode,'n':int(len(vals)),'avg_return':float(vals.mean()),
+                'median_year_pf':float(pd.Series(ypf).dropna().median()) if ypf else np.nan,
+                'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':avgwin/abs(avgloss) if avgloss<0 else np.nan,
+                'avg_hold':float(G.hold_days.mean()),'median_return':float(vals.median()),
+                'p99':float(vals.quantile(.99)),'top1_profit_share':float(pos.iloc[:k1].sum()/total) if total>0 else np.nan,
+                'top5_profit_share':float(pos.iloc[:k5].sum()/total) if total>0 else np.nan,
+                'exit_rate':float((G.reason!='MAX_HOLD').mean())})
+        O=pd.DataFrame(overall); base=O[O['mode'].eq('HOLD1260_CONTROL')].iloc[0]
+        O['avgret_delta']=O.avg_return-base.avg_return; O['pf_delta']=O.median_year_pf-base.median_year_pf
+        O['pass_vs_control']=(O.avg_return>base.avg_return)&(O.median_year_pf>base.median_year_pf)&(O.top5_profit_share<=base.top5_profit_share+.03)
+        O.loc[O['mode'].eq('HOLD1260_CONTROL'),'pass_vs_control']=False
+        O.to_csv(V616F_REPORT,index=False)
+        res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),
+             'overall':O.replace({np.nan:None}).to_dict('records'),'yearly':yearly,
+             'acceptance':'Adaptive exit must beat HOLD1260 on the exact same 1260-day cohort on BOTH Avg Return and median yearly PF, without increasing Top5% profit concentration by more than 3pp.',
+             'rule_note':'Frozen DNA + CONTROL entry + -7% initial stop. No adaptive winner exit before day 504. Only trades that reached +2R may use adaptive exits. Signals use close-known data and execute next open.',
+             'dedupe_note':'Not re-testing prior 10MA/20MA/Hybrid/Giveback, RSI-alone, volume-alone, or early +2R exit rules already studied.',
+             'warning':'Existing cache still has survivorship-bias limits until historical/delisted coverage is complete.'}
         V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616f_write(status='done',message='V6.16F.3.2 Matched-Cohort Pairwise 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616f_write(status='done',message='V6.16F.4 Big Winner Adaptive Hold 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
     except Exception as ex:
-        traceback.print_exc()
-        _v616f_write(status='error',message='V6.16F.3.2 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+        traceback.print_exc(); _v616f_write(status='error',message='V6.16F.4 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
     finally:
         v616f_thread=None
 
@@ -10271,43 +10229,27 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616f32/run')
+@APP.post('/v616f4/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616f32/matched-cohort')
+    _v616f_start();return redirect('/v616f4/adaptive-hold')
 
-@APP.get('/api/v616f32/status')
+@APP.get('/api/v616f4/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616f32/matched-cohort')
+@APP.get('/v616f4/adaptive-hold')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
     if V616F_RESULT.exists():
         try:r=json.loads(V616F_RESULT.read_text(encoding='utf-8'))
         except Exception:pass
-
     rows=''
-    for x in r.get('pairwise',[]):
-        rows += f"<tr><td>{int(x.get('cohort',0))}</td><td>HOLD_{int(x.get('hold',0))}</td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avgret_delta',0) if x.get('avgret_delta') is not None else 0:+.2%}</td></tr>"
-
-    tails=''
-    for x in r.get('tail',[]):
-        tails += f"<tr><td>HOLD_{int(x.get('hold',0))}</td><td>{int(x.get('n',0)):,}</td><td>{x.get('median_return',0):.2%}</td><td>{x.get('p90_return',0):.1%}</td><td>{x.get('p95_return',0):.1%}</td><td>{x.get('p99_return',0):.1%}</td><td>{x.get('top1_profit_share',0):.1%}</td><td>{x.get('top5_profit_share',0):.1%}</td></tr>"
-
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f32/run"><button>▶ 跑 V6.16F.3.2 Matched Cohort</button></form>'
+    for x in r.get('overall',[]):
+        rows += f"<tr><td>{e(x.get('mode'))}</td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) or 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('win_loss_ratio',0) or 0:.2f}x</td><td>{x.get('avg_hold',0):.1f}</td><td>{x.get('p99',0):.1%}</td><td>{x.get('top5_profit_share',0) or 0:.1%}</td><td>{x.get('exit_rate',0):.1%}</td><td>{x.get('avgret_delta',0):+.2%}</td><td>{'PASS' if x.get('pass_vs_control') else '-'}</td></tr>" 
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f4/run"><button>Run V6.16F.4 Adaptive Hold</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1000px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
-<a href="/">← 返回主页</a>
-<div class="c"><h1>⚖️ V6.16F.3.2 · Matched-Cohort Pairwise</h1><div class="info"><b>只修公平性，不加新规则。</b> HOLD504 / 756 / 1008 / 1260 在完全相同、拥有足够未来历史的交易上比较。</div></div>
-<div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div>
-<div class="c"><h2>Matched Pairwise</h2><div style="overflow:auto"><table><tr><th>Cohort</th><th>Hold</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>W/L</th><th>ΔAvgRet vs504</th></tr>{rows}</table></div></div>
-<div class="c"><h2>Right-Tail Concentration</h2><div style="overflow:auto"><table><tr><th>Hold</th><th>N</th><th>Median</th><th>P90</th><th>P95</th><th>P99</th><th>Top1% Profit Share</th><th>Top5% Profit Share</th></tr>{tails}</table></div></div>
-<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div>
-<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f32/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script>
-</div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1250px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16F.4 Big Winner Adaptive Hold</h1><div class="info"><b>HOLD1260 = Control.</b> Frozen DNA / CONTROL Entry / -7% Stop. Adaptive exits only after day 504 and only for trades that previously reached +2R.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict Matched OOS</h2><div style="overflow:auto"><table><tr><th>Mode</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>W/L</th><th>HoldD</th><th>P99</th><th>Top5% Share</th><th>Exit Rate</th><th>Delta AvgRet</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Dedup:</b> {e(r.get('dedupe_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f4/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
