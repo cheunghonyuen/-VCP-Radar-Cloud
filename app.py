@@ -17507,15 +17507,18 @@ def _deferred_app_startup():
 threading.Thread(target=_deferred_app_startup, daemon=True).start()
 
 
+
 # ==================== V6.17 OVERNIGHT FULL HISTORY VALIDATION ====================
+# Dedicated batch engine. It does NOT reuse the old all-in-one V6.15B worker loop.
 V617O_DIR=DATA_DIR/"v617_overnight_full_validation"
 V617O_STATUS=V617O_DIR/"status.json"
 V617O_STOP=V617O_DIR/"STOP"
 v617o_thread=None
+V617O_BATCH_SIZE=max(20,int(os.environ.get("V617_OVERNIGHT_BATCH_SIZE","200")))
 
 def _v617o_status():
-    d={"status":"idle","message":"尚未启动全历史扩展","cycle":0,"coverage":0.0,"ended_coverage":0.0,
-       "completed":0,"total":0,"failed":0,"error":None}
+    d={"status":"idle","message":"尚未启动","phase":"","batch":0,"completed":0,"total":0,
+       "pending":0,"failed":0,"coverage":0.0,"ended_coverage":0.0,"current":"","error":None}
     if V617O_STATUS.exists():
         try:d.update(json.loads(V617O_STATUS.read_text(encoding="utf-8")))
         except Exception:pass
@@ -17523,226 +17526,198 @@ def _v617o_status():
 
 def _v617o_write(**kw):
     V617O_DIR.mkdir(parents=True,exist_ok=True)
-    d=_v617o_status();d.update(kw)
+    d=_v617o_status(); d.update(kw)
     V617O_STATUS.write_text(json.dumps(d,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     return d
 
-def _v617o_thread_alive():
+def _v617o_alive():
     return v617o_thread is not None and v617o_thread.is_alive()
 
-def _v617o_reconcile_stale_state(auto_resume=True):
-    """Railway restart leaves JSON state but kills daemon threads.
-    Never trust persisted running/cooldown without a live thread."""
-    s=_v617o_status()
-    stale=str(s.get("status","")) in ("running","cooldown") and not _v617o_thread_alive()
-    if stale:
-        _v617o_write(status="resume_ready",
-            message="检测到 Railway 重启后的旧运行状态；进度已保留，准备从断点继续",
-            error=None)
-        if auto_resume:
-            # Start a fresh supervisor from persisted manifest/cache.
-            _v617o_start()
-        return True
-    return False
+def _v617o_manifest_metrics(M):
+    if M is None or M.empty:
+        return dict(total=0,completed=0,pending=0,failed=0,coverage=0.0,ended_coverage=0.0)
+    ix=M.index
+    ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M else pd.Series(False,index=ix)
+    st=M["status"].astype(str).str.upper() if "status" in M else pd.Series("PENDING",index=ix)
+    ended=M["ended"].astype(str).str.lower().isin(["true","1","yes"]) if "ended" in M else pd.Series(False,index=ix)
+    pending=(~ver)&st.eq("PENDING")
+    failed=(~ver)&st.eq("FAILED")
+    return dict(
+        total=int(len(M)),
+        completed=int(ver.sum()),
+        pending=int(pending.sum()),
+        failed=int(failed.sum()),
+        coverage=float(ver.mean()) if len(M) else 0.0,
+        ended_coverage=float(ver[ended].mean()) if ended.any() else 0.0
+    )
 
-def _v617o_manifest_is_full():
-    if not V615B_MANIFEST.exists():return False
-    try:
-        m=pd.read_csv(V615B_MANIFEST)
-        # The old small validator used ~200 listings. A genuine full master is thousands.
-        return len(m)>=1000
-    except Exception:return False
-
-def _v617o_find_old_full_manifest():
-    # Prefer any previously-built full manifest/backup before touching Tiingo master.
+def _v617o_prepare_manifest():
+    M=_v615b_read_manifest()
+    if M is not None and not M.empty and len(M)>=1000:
+        return M
     candidates=[]
-    for root in [V615B_DIR, DATA_DIR/"jlaw_v615b_historical_cache", DATA_DIR]:
+    for root in [V615B_DIR,DATA_DIR]:
         if not root.exists():continue
         for p in root.glob("manifest*.csv"):
             try:
                 n=sum(1 for _ in open(p,encoding="utf-8",errors="ignore"))-1
                 if n>=1000:candidates.append((n,p))
             except Exception:pass
-    if not candidates:return None
-    candidates.sort(key=lambda x:x[0],reverse=True)
-    return candidates[0][1]
-
-def _v617o_prepare_full_manifest():
-    # Preserve all price CSVs. First restore an older full manifest if available.
-    if _v617o_manifest_is_full():
-        try:
-            m=pd.read_csv(V615B_MANIFEST)
-            _v617o_write(status="running",message=f"已找到现有完整 manifest：{len(m):,} listings",
-                         total=int(len(m)),completed=int(m.get("verified",pd.Series(dtype=bool)).astype(str).str.lower().isin(["true","1","yes"]).sum()))
-        except Exception:pass
-        return
-
-    V615B_DIR.mkdir(parents=True,exist_ok=True)
-    _v617o_write(status="running",message="启动阶段 1/3：寻找旧的完整 manifest / backup",total=0,completed=0)
-
-    old_full=_v617o_find_old_full_manifest()
-    if old_full is not None:
-        _v617o_write(status="running",message=f"启动阶段 2/3：恢复旧 full manifest：{old_full.name}")
-        M=pd.read_csv(old_full)
-        # Keep exact old progress/verified flags and derive a fresh queue.
+    if candidates:
+        candidates.sort(reverse=True,key=lambda z:z[0])
+        M=pd.read_csv(candidates[0][1])
         M.to_csv(V615B_MANIFEST,index=False)
-        qcols=[c for c in ["listing_id","ticker","startDate","endDate","ended","ticker_reused_or_duplicate"] if c in M.columns]
-        M[qcols].to_csv(V615B_QUEUE,index=False)
-        verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M.columns else pd.Series(False,index=M.index)
-        _v617o_write(status="running",message=f"启动阶段 3/3：已恢复 {len(M):,} listings，开始断点续跑",
-                     total=int(len(M)),completed=int(verified.sum()))
-        return
+        return M
+    _v617o_write(status="starting",message="建立完整历史股票 manifest",phase="manifest")
+    _,M=_v615b_prepare_universe(force=True)
+    if M is None or M.empty:raise RuntimeError("完整历史 manifest 建立失败")
+    return M
 
-    # No full backup: archive only small manifest/queue, never price cache.
-    stamp=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    for p in [V615B_MANIFEST,V615B_QUEUE]:
-        if p.exists():
-            try:shutil.copy2(p,V615B_DIR/f"{p.stem}_small_backup_{stamp}{p.suffix}")
-            except Exception:pass
+def _v617o_reconcile_files(M):
+    changed=0
+    for i,row in M.iterrows():
+        if str(row.get("verified","")).lower() in ("true","1","yes"):continue
+        path=V615B_PRICE_DIR/f"{row.listing_id}.csv"
+        if not path.exists():continue
+        try:ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
+        except Exception:ok=False
+        if ok:
+            M.at[i,"status"]="DONE";M.at[i,"verified"]=True;M.at[i,"bars"]=int(b)
+            M.at[i,"cache_start"]=str(pd.Timestamp(cs).date());M.at[i,"cache_end"]=str(pd.Timestamp(ce).date())
+            M.at[i,"source"]="existing_v615b_file";M.at[i,"error"]="";changed+=1
+    if changed:_v615b_atomic_manifest(M)
+    return M
 
-    # Make the previously invisible bootstrap visible in UI.
-    if V615A_MASTER.exists():
-        try:
-            master_rows=sum(1 for _ in open(V615A_MASTER,encoding="utf-8",errors="ignore"))-1
-        except Exception:master_rows=0
-        _v617o_write(status="running",message=f"启动阶段 2/3：读取已缓存 Tiingo master（约 {master_rows:,} 行）")
-    else:
-        _v617o_write(status="running",message="启动阶段 2/3：首次下载 Tiingo supported-tickers master（通常几十秒）")
-
-    raw=_v615a_download_master(False)
-    _v617o_write(status="running",message=f"启动阶段 2/3：Tiingo master 已读取 {len(raw):,} 行，正在生成 US STOCK manifest")
-    _v615b_prepare_universe(force=True)
-
-    M=_v615b_read_manifest()
-    if M.empty:raise RuntimeError("full manifest 建立后仍为空")
-    verified=M["verified"].astype(str).str.lower().isin(["true","1","yes"]) if "verified" in M.columns else pd.Series(False,index=M.index)
-    _v617o_write(status="running",message=f"启动阶段 3/3：完整 manifest 已建立 {len(M):,} listings，开始补历史数据",
-                 total=int(len(M)),completed=int(verified.sum()))
-
-def _v617o_supervisor():
-    global v617o_thread
+def _v617o_one_listing(M,idx,row):
+    t=str(row.ticker);lid=str(row.listing_id);path=V615B_PRICE_DIR/f"{lid}.csv"
     try:
-        if V617O_STOP.exists():
-            try:V617O_STOP.unlink()
-            except Exception:pass
-        _v617o_write(status="running",message="建立/恢复完整历史 Universe",cycle=0,error=None)
-        _v617o_prepare_full_manifest()
+        x=_v615b_try_reuse_local(t,row.startDate,row.endDate)
+        source="local_market_cache" if x is not None else ""
+        if x is None:
+            x=_v615b_tiingo_listing(t,row.startDate,row.endDate);source="tiingo"
+        tmp=path.with_suffix(".tmp");x.to_csv(tmp,index=False);tmp.replace(path)
+        ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
+        if not ok:raise RuntimeError(f"verify failed: {err}")
+        M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True;M.at[idx,"bars"]=int(b)
+        M.at[idx,"cache_start"]=str(pd.Timestamp(cs).date());M.at[idx,"cache_end"]=str(pd.Timestamp(ce).date())
+        M.at[idx,"source"]=source;M.at[idx,"error"]=""
+        return "DONE"
+    except TiingoRateLimitPause as ex:
+        M.at[idx,"status"]="PENDING";M.at[idx,"error"]=str(ex)
+        return "RATE_LIMIT"
+    except Exception as ex:
+        M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=f"{type(ex).__name__}: {ex}"
+        return "FAILED"
 
-        cycle=0
+def _v617o_engine():
+    global v617o_thread
+    batch_no=0
+    try:
+        for p in [V617O_STOP,V615B_STOP]:
+            try:
+                if p.exists():p.unlink()
+            except Exception:pass
+        M=_v617o_prepare_manifest()
+        M=_v617o_reconcile_files(M)
+        _v615b_atomic_manifest(M)
+
         while True:
             if V617O_STOP.exists():
-                _v617o_write(status="paused",message="已手动暂停；缓存和进度全部保留")
+                _v615b_atomic_manifest(M)
+                _v617o_write(status="paused",message="已安全暂停；缓存与进度已保存")
                 return
 
-            cycle+=1
-            _v617o_write(status="running",message=f"第 {cycle} 轮补历史数据",cycle=cycle,error=None)
+            met=_v617o_manifest_metrics(M)
+            _v617o_write(status="running",message="准备下一批",phase="pending",**met)
 
-            # Run existing proven cache worker synchronously inside supervisor.
-            _v615b_worker(False)
-            s=_v615b_status()
-            cov=float(s.get("coverage",0) or 0)
-            ecov=float(s.get("ended_coverage",0) or 0)
-            _v617o_write(status="running",message=str(s.get("message","")),
-                         cycle=cycle,coverage=cov,ended_coverage=ecov,
-                         completed=int(s.get("completed",0) or 0),total=int(s.get("total",0) or 0),
-                         failed=int(s.get("failed",0) or 0))
-
-            # Final-validation coverage gates.
-            if cov>=0.95 and ecov>=0.90:
-                _v617o_write(status="coverage_ready",
-                    message="历史覆盖达标：可以进入冻结大样本 OOS / Daily-MTM",
-                    coverage=cov,ended_coverage=ecov,cycle=cycle)
+            if met["coverage"]>=0.95 and met["ended_coverage"]>=0.90:
+                try:_v615b_snapshot_coverage(M)
+                except Exception:pass
+                _v617o_write(status="coverage_ready",message="历史覆盖达到最终门槛，可以进入冻结大样本 OOS / Daily-MTM",**met)
                 return
 
-            st=str(s.get("status",""))
-            if st=="rate_limited":
-                # Safe hourly cooldown; no user interaction needed overnight.
-                _v617o_write(status="cooldown",message="Tiingo 429：进度已保存，自动等待65分钟后继续",
-                             coverage=cov,ended_coverage=ecov,cycle=cycle)
-                for _ in range(65):
-                    if V617O_STOP.exists():
-                        _v617o_write(status="paused",message="冷却期间已手动暂停")
-                        return
-                    time.sleep(60)
+            st=M["status"].astype(str).str.upper()
+            ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+
+            # Phase A: only untouched PENDING. FAILED is excluded completely.
+            P=M[(~ver)&st.eq("PENDING")].copy()
+            if not P.empty:
+                P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
+                phase="pending"
+            else:
+                # Phase B: only after PENDING is exhausted, retry failed in finite batches.
+                P=M[(~ver)&st.eq("FAILED")].copy()
+                if P.empty:
+                    _v617o_write(status="needs_review",message="没有待处理或失败项，但覆盖仍未达门槛；需检查 SKIP/歧义 listing",**met)
+                    return
+                P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
+                M.loc[P.index,"status"]="PENDING"
+                _v615b_atomic_manifest(M)
+                phase="retry_failed"
+
+            batch_no+=1
+            _v617o_write(status="running",message=f"第 {batch_no} 批：{phase} · {len(P)} listings",
+                         phase=phase,batch=batch_no,**_v617o_manifest_metrics(M))
+
+            hit_rate_limit=False
+            for seq,(idx,row) in enumerate(P.iterrows(),1):
+                if V617O_STOP.exists():
+                    _v615b_atomic_manifest(M)
+                    _v617o_write(status="paused",message="已安全暂停；进度已保存",batch=batch_no)
+                    return
+
+                _v617o_write(status="running",message=f"第 {batch_no} 批 {seq}/{len(P)}",
+                             phase=phase,batch=batch_no,current=f"{row.ticker} · {row.listing_id}",
+                             **_v617o_manifest_metrics(M))
+
+                result=_v617o_one_listing(M,idx,row)
+                if seq%10==0 or seq==len(P):
+                    _v615b_atomic_manifest(M)
+
+                if result=="RATE_LIMIT":
+                    _v615b_atomic_manifest(M)
+                    met=_v617o_manifest_metrics(M)
+                    _v617o_write(status="cooldown",message="Tiingo 429：已保存进度；65分钟后自动继续",
+                                 phase=phase,batch=batch_no,**met)
+                    for _ in range(65):
+                        if V617O_STOP.exists():return
+                        time.sleep(60)
+                    hit_rate_limit=True
+                    break
+
+            _v615b_atomic_manifest(M)
+            if hit_rate_limit:
                 continue
+            # Normal batch completion => immediately advance to next untouched batch.
+            continue
 
-            # If a full pass ended below coverage because some listings failed,
-            # retry failures after a shorter cooldown. Existing verified files are skipped.
-            if st in ("done","error"):
-                # IMPORTANT for paid Tiingo overnight runs:
-                # individual failed listings must NOT pause the entire universe.
-                # Continue immediately while any PENDING rows remain; failed rows are retried only after pending work is exhausted.
-                M=_v615b_read_manifest()
-                if M is not None and not M.empty:
-                    stcol=M["status"].astype(str).str.upper() if "status" in M.columns else pd.Series("",index=M.index)
-                    pending_n=int(stcol.eq("PENDING").sum())
-                    failed_n=int(stcol.eq("FAILED").sum())
-                else:
-                    pending_n=0;failed_n=int(s.get("failed",0) or 0)
-
-                if pending_n>0:
-                    _v617o_write(status="running",
-                        message=f"本批完成；仍有 {pending_n:,} 个待处理，立即继续下一批（失败 {failed_n} 个先保留）",
-                        coverage=cov,ended_coverage=ecov,cycle=cycle,failed=failed_n)
-                    time.sleep(2)
-                    continue
-
-                if failed_n>0:
-                    # All pending work is finished. Now retry only failed listings.
-                    # Convert FAILED back to PENDING once, preserving already verified cache.
-                    try:
-                        M.loc[stcol.eq("FAILED"),"status"]="PENDING"
-                        _v615b_atomic_manifest(M)
-                    except Exception:
-                        traceback.print_exc()
-                    _v617o_write(status="running",
-                        message=f"主队列完成；现在回头重试 {failed_n} 个失败 listing",
-                        coverage=cov,ended_coverage=ecov,cycle=cycle,failed=failed_n)
-                    time.sleep(2)
-                    continue
-
-                # No pending and no failed, but coverage still below gate.
-                _v617o_write(status="needs_review",
-                    message="全队列已完成但覆盖仍未达最终门槛；需要检查缺失/歧义 listing",
-                    coverage=cov,ended_coverage=ecov,cycle=cycle)
-                return
-
-            time.sleep(30)
     except Exception as ex:
         traceback.print_exc()
-        _v617o_write(status="error",message="Overnight Full Validation 失败",
-                     error=f"{type(ex).__name__}: {ex}")
+        _v617o_write(status="error",message="整晚批次引擎失败",error=f"{type(ex).__name__}: {ex}")
     finally:
         v617o_thread=None
 
 def _v617o_start():
     global v617o_thread
-    if v617o_thread is not None and v617o_thread.is_alive():return False
-    # Railway may persist old status JSON while threads disappear on deploy.
-    # Reset only transient status; DO NOT delete cache/manifest/progress.
-    try:
-        _v615b_write_status(status="resume_ready",message="后台线程重新建立；从现有 manifest/cache 继续",error=None)
-    except Exception:pass
-    _v617o_write(status="starting",message="后台线程重新建立；从现有 manifest/cache 继续",error=None)
-    v617o_thread=threading.Thread(target=_v617o_supervisor,daemon=True)
-    v617o_thread.start();return True
+    if _v617o_alive():return False
+    _v617o_write(status="starting",message="建立批次后台线程；从现有 manifest/cache 断点继续",error=None)
+    v617o_thread=threading.Thread(target=_v617o_engine,daemon=True)
+    v617o_thread.start()
+    return True
 
 @APP.route("/v617/overnight/run",methods=["GET","POST"])
 def v617_overnight_run():
-    # Explicit manual resume clears old stop flags but preserves manifest/cache/checkpoints.
     for p in [V617O_STOP,V615B_STOP]:
         try:
             if p.exists():p.unlink()
         except Exception:pass
-    _v617o_reconcile_stale_state(auto_resume=False)
     _v617o_start()
     return redirect("/v617/overnight")
 
 @APP.get("/v617/overnight/stop")
 def v617_overnight_stop():
-    V617O_DIR.mkdir(parents=True,exist_ok=True);V617O_STOP.write_text("stop",encoding="utf-8")
-    try:V615B_STOP.write_text("stop",encoding="utf-8")
-    except Exception:pass
+    V617O_DIR.mkdir(parents=True,exist_ok=True)
+    V617O_STOP.write_text("stop",encoding="utf-8")
     return redirect("/v617/overnight")
 
 @APP.get("/api/v617/overnight/status")
@@ -17752,40 +17727,31 @@ def v617_overnight_status_api():
 @APP.get("/v617/overnight")
 def v617_overnight_page():
     import html
-    _v617o_reconcile_stale_state(auto_resume=True)
-    e=lambda x:html.escape(str(x));s=_v617o_status();b=_v615b_status()
-    # IMPORTANT: builder runs synchronously inside the overnight supervisor.
-    # Read builder status LIVE; otherwise the page falsely stays at 0/0 until the whole pass ends.
-    worker_active=_v617o_thread_alive() and str(b.get("status","")) in ("running","rate_limited","paused")
-    cov=float((b.get("coverage") if worker_active else s.get("coverage",b.get("coverage",0))) or 0)
-    ecov=float((b.get("ended_coverage") if worker_active else s.get("ended_coverage",b.get("ended_coverage",0))) or 0)
-    live_completed=int((b.get("completed") if worker_active else s.get("completed",b.get("completed",0))) or 0)
-    live_total=int((b.get("total") if worker_active else s.get("total",b.get("total",0))) or 0)
-    live_failed=int((b.get("failed") if worker_active else s.get("failed",b.get("failed",0))) or 0)
-    live_message=str(b.get("message","")) if worker_active and b.get("message") else str(s.get("message",""))
-    live_current=str(b.get("current","")) if worker_active else ""
-    # UI running state is based on the ACTUAL live supervisor thread, never stale JSON.
-    running=_v617o_thread_alive()
+    e=lambda x:html.escape(str(x))
+    s=_v617o_status()
+    running=_v617o_alive()
+    if not running and str(s.get("status")) in ("running","cooldown","starting"):
+        s=_v617o_write(status="resume_ready",message="Railway 重启后后台线程已停止；缓存/manifest 保留，点继续即可")
+    cov=float(s.get("coverage",0) or 0)
+    ec=float(s.get("ended_coverage",0) or 0)
     btn="" if running else '<a href="/v617/overnight/run"><button>开始 / 继续整晚扩展</button></a>'
     stop='<a href="/v617/overnight/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
+    <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
-    <div class="info"><b>不是调参数。</b> 规则继续锁死。这里只扩大历史 Universe，优先退市/结束股票，复用已有 Cache；普通失败不会停整批；只有遇到429才自动保存并等待后继续。</div></div>
+    <div class="info"><b>批次引擎。</b> 每批只处理新的 PENDING，失败项先跳过；全部新项跑完后才回头补失败。只有429会暂停。</div></div>
     <div class="c"><h2>状态：{e(s.get("status"))}</h2>
     <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
-    <p>{e(live_message)}</p>
-    <p>{("当前：" + e(live_current)) if live_current else ""}</p>
-    <p>完整历史股票：{live_completed} / {live_total}</p>
-    <p>全部覆盖：<b>{cov:.1%}</b>（最终要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
-    <p>退市/结束股票覆盖：<b>{ecov:.1%}</b>（最终要求 ≥90%）</p><progress max="1" value="{min(1,ecov)}"></progress>
-    <p>失败 listing：{live_failed} · 自动轮次：{int(s.get("cycle",0) or 0)}</p>
-    {btn}{stop}</div>
-    <div class="c"><div class="ok"><b>今晚目标：</b>已有缓存不重下；全历史 manifest 重建后持续补缺口。持续跑完待处理队列；达到95%/90%门槛即停止扩展，下一步才运行冻结规则的大样本 OOS / Daily-MTM。</div></div>
-    <script>setTimeout(()=>location.reload(),10000)</script></div></body></html>"""
-
-
+    <p>{e(s.get("message"))}</p>
+    <p>当前：{e(s.get("current",""))}</p>
+    <p>批次：{int(s.get("batch",0) or 0)} · 阶段：{e(s.get("phase",""))}</p>
+    <p>完整历史股票：<b>{int(s.get("completed",0) or 0)} / {int(s.get("total",0) or 0)}</b></p>
+    <p>待处理：{int(s.get("pending",0) or 0)} · 失败：{int(s.get("failed",0) or 0)}</p>
+    <p>全部覆盖：<b>{cov:.1%}</b>（要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
+    <p>退市/结束覆盖：<b>{ec:.1%}</b>（要求 ≥90%）</p><progress max="1" value="{min(1,ec)}"></progress>
+    <p>{btn}{stop}</p></div>
+    <script>setTimeout(()=>location.reload(),8000)</script></div></body></html>"""
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
