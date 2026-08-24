@@ -1,7 +1,7 @@
 import re
 import base64
 import hmac
-import os, json, time, threading, traceback, io, math, zipfile
+import os, json, time, threading, traceback, io, math
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -6159,7 +6159,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.13.2</h1><div class="muted">Daily Forward Runner + Independent Holdout Universe Census</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.13.0</h1><div class="muted">当前研究版：JLaw META / First Pullback Shadow · V6.12.14 Baseline 冻结</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6958,51 +6958,12 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
       <div class="muted">常用入口已放最上面；密码可在本机记住。</div>
     </div>
 
-<div class="card" id="v6132-shortcut" style="border:3px solid #7c3aed">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">🧮 Holdout Universe Census</h2>
-      <div class="muted">统计最近20年可测试的新股票与退市股；排除现有443只，只读取代码清单</div></div>
-    <a href="/v6132/holdout-census"><button type="button">统计可测试股票</button></a>
-  </div>
-</div>
 
-<div class="card" id="v6131-shortcut" style="border:3px solid #16a34a">
+<div class="card" id="v613-shortcut" style="border:3px solid #2563eb">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">📡 V6.13.1 Daily Forward Runner</h2>
-      <div class="muted">每天只查321只缓存的最新交易日；自动记录Champion与Challenger-only</div></div>
-    <a href="/v6131/daily-forward"><button type="button">打开 Daily Runner</button></a>
-  </div>
-</div>
-
-<div class="card" id="v613-shortcut" style="border:3px solid #16a34a">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">🏁 V6.13 Frozen Champion + Shadow</h2>
-      <div class="muted">Champion参数冻结；Dry&lt;1.05只做Shadow，新增信号不进入正式买入清单</div></div>
-    <a href="/v613/frozen-shadow"><button type="button">打开 V6.13</button></a>
-  </div>
-</div>
-
-<div class="card" id="v61217-shortcut" style="border:3px solid #0f766e">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">🧬 V6.12.17 Era × Regime Stability Audit</h2>
-      <div class="muted">拆四个年代与POWER/BULL，排除时代混合造成的假优势</div></div>
-    <a href="/v61217/era-regime"><button type="button">打开 V6.12.17</button></a>
-  </div>
-</div>
-
-<div class="card" id="v61216-shortcut" style="border:3px solid #0891b2">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">🧭 V6.12.16 Historical Analog Expansion</h2>
-      <div class="muted">读取历史交易缓存扩大样本；比较Edge门槛与真实收益，不下载、不重跑</div></div>
-    <a href="/v61216/historical-analogs"><button type="button">打开 V6.12.16</button></a>
-  </div>
-</div>
-
-<div class="card" id="v61215-shortcut" style="border:3px solid #7c3aed">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><h2 style="margin:0">🧪 V6.12.15 Edge Logic Layer Audit</h2>
-      <div class="muted">直接读取12.14结果；查真实门槛、失败距离与逻辑层，不重跑109只</div></div>
-    <a href="/v61215/edge-logic"><button type="button">打开 V6.12.15</button></a>
+    <div><h2 style="margin:0">🧪 V6.13 JLaw META / First Pullback Shadow</h2>
+      <div class="muted">冻结 V6.12.14；Matched A/B 测试低风险回踩交易区是否真的改善 PF / 风险 / Winner Capture</div></div>
+    <a href="/v613/meta-shadow"><button type="button">打开 V6.13</button></a>
   </div>
 </div>
 
@@ -9826,6 +9787,360 @@ def v61213_run():
 def v61213_status_api():
     return jsonify(_v61213_status())
 
+
+# ================= V6.13.0 JLAW META / FIRST-PULLBACK SHADOW =================
+# Research-only shadow engine. V6.12.14 baseline remains untouched.
+# Goal: test whether waiting for a low-volume first pullback / META trading area
+# improves entry risk and payoff without killing future big-winner capture.
+V613_DIR = DATA_DIR / "jlaw_v613_meta_pullback_shadow"
+V613_STATUS = V613_DIR / "status.json"
+V613_RESULT = V613_DIR / "result.json"
+V613_DETAIL = V613_DIR / "trades.csv"
+v613_thread = None
+
+def _v613_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None}
+    if V613_STATUS.exists():
+        try:s.update(json.loads(V613_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v613_write_status(**kw):
+    V613_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v613_status();s.update(kw)
+    V613_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v613_trade_path(d, entry_i, entry_px, stop_px, horizon=60):
+    """Conservative daily-bar shadow exit: gap/stop first; otherwise close at horizon."""
+    entry_i=int(entry_i); entry=float(entry_px); stop=float(stop_px)
+    risk=max(1e-9,(entry-stop)/entry)
+    mfe=0.0; mae=0.0; hit3r=False; reason="END_DATA"; exit_px=entry; hold=0
+    end=min(len(d)-1,entry_i+int(horizon))
+    for j in range(entry_i+1,end+1):
+        r=d.iloc[j]
+        o,h,l,c=map(float,[r["open"],r["high"],r["low"],r["close"]])
+        mfe=max(mfe,h/entry-1.0); mae=min(mae,l/entry-1.0)
+        if h >= entry*(1.0+3.0*risk): hit3r=True
+        hold=j-entry_i
+        if o<=stop:
+            exit_px=o; reason="STOP_GAP"; break
+        if l<=stop:
+            exit_px=stop; reason="STOP"; break
+        exit_px=c; reason="HORIZON" if j==end else "OPEN"
+    return dict(
+        return_pct=float(exit_px/entry-1.0), hold_days=int(hold),
+        mfe60=float(mfe), mae60=float(mae), hit3r=bool(hit3r),
+        stopped=bool(str(reason).startswith("STOP")), reason=reason
+    )
+
+def _v613_pullback_candidate(d, sig_i, pivot, mode="PULLBACK"):
+    """
+    Causal first-pullback detector.
+    Search only bars +2..+15 after breakout; entry is NEXT session open.
+    PULLBACK: low-volume retracement + >=1 support anchor.
+    META: same, but >=2 support anchors clustered in one trading area.
+    """
+    i=int(sig_i)
+    if i<25 or i>=len(d)-3:return None
+    x=d.copy()
+    if "ma10" not in x.columns:x["ma10"]=x["close"].rolling(10).mean()
+    if "ma20" not in x.columns:x["ma20"]=x["close"].rolling(20).mean()
+    if "v20" not in x.columns:x["v20"]=x["volume"].rolling(20).mean()
+    breakout_vol=float(x.iloc[i]["volume"])
+    pivot=float(pivot)
+    peak=float(x.iloc[i]["high"])
+
+    for j in range(i+2,min(i+16,len(x)-1)):
+        r=x.iloc[j]
+        o,h,l,c,v=map(float,[r["open"],r["high"],r["low"],r["close"],r["volume"]])
+        peak=max(peak,float(x.iloc[j-1]["high"]))
+        if peak<=0 or c<=0:continue
+        depth=1.0-c/peak
+        # Typical controlled first pullback: enough to matter, but not a deep failure.
+        if not (0.02 <= depth <= 0.12):continue
+
+        v20=float(r["v20"]) if pd.notna(r["v20"]) else np.nan
+        dry20=bool(np.isfinite(v20) and v20>0 and v/v20<=0.85)
+        dry_breakout=bool(breakout_vol>0 and v/breakout_vol<=0.80)
+        if not (dry20 and dry_breakout):continue
+
+        anchors=[]
+        def near_anchor(name,val,tol):
+            if not np.isfinite(val) or val<=0:return
+            # Bar overlaps a small zone around the support anchor.
+            if l <= val*(1+tol) and h >= val*(1-tol):
+                anchors.append((name,float(val)))
+        near_anchor("PIVOT",pivot,0.018)
+        ma10=float(r["ma10"]) if pd.notna(r["ma10"]) else np.nan
+        ma20=float(r["ma20"]) if pd.notna(r["ma20"]) else np.nan
+        near_anchor("10MA",ma10,0.015)
+        near_anchor("20MA",ma20,0.015)
+        if not anchors:continue
+
+        vals=[a[1] for a in anchors]
+        cluster=(max(vals)-min(vals))/max(1e-9,float(np.mean(vals))) if len(vals)>=2 else 0.0
+        if mode=="META" and (len(anchors)<2 or cluster>0.025):continue
+
+        # Avoid buying a large next-day gap away from the trading area.
+        nxt=x.iloc[j+1]
+        entry=float(nxt["open"])
+        if entry<=0 or entry>c*1.03:continue
+
+        recent_low=float(x.iloc[max(i+1,j-2):j+1]["low"].min())
+        support_floor=min(vals)
+        structural_ref=min(recent_low,support_floor)
+        stop=structural_ref*0.992
+        raw_risk=(entry-stop)/entry
+        if raw_risk<=0:continue
+        # Tiny stops are normalized to 1.5%; >8% means the area is not low-risk enough.
+        if raw_risk<0.015:
+            stop=entry*(1.0-0.015);raw_risk=0.015
+        if raw_risk>0.08:continue
+
+        return dict(
+            setup=("META" if mode=="META" else "FIRST_PULLBACK"),
+            confirm_i=int(j), entry_i=int(j+1),
+            confirm_date=pd.Timestamp(r["date"]).strftime("%Y-%m-%d"),
+            entry_date=pd.Timestamp(nxt["date"]).strftime("%Y-%m-%d"),
+            entry=float(entry), stop=float(stop), initial_risk=float(raw_risk),
+            pullback_depth=float(depth), vol_vs_v20=float(v/v20) if np.isfinite(v20) and v20 else None,
+            vol_vs_breakout=float(v/breakout_vol) if breakout_vol else None,
+            support_count=int(len(anchors)), support_cluster=float(cluster),
+            supports=" + ".join(a[0] for a in anchors),
+            trading_area_low=float(min(vals)), trading_area_high=float(max(vals)),
+        )
+    return None
+
+def _v613_metrics(g, label):
+    if g is None or len(g)==0:
+        return dict(label=label,trades=0)
+    z=g.copy()
+    r=pd.to_numeric(z["return_pct"],errors="coerce").dropna()
+    wins=r[r>0];losses=r[r<0]
+    pf=float(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (99.0 if len(wins) else 0.0)
+    return dict(
+        label=label,trades=int(len(r)),
+        win_rate=float((r>0).mean()) if len(r) else 0.0,
+        avg_return=float(r.mean()) if len(r) else 0.0,
+        pf=pf,
+        avg_win=float(wins.mean()) if len(wins) else 0.0,
+        avg_loss=float(losses.mean()) if len(losses) else 0.0,
+        avg_initial_risk=float(pd.to_numeric(z["initial_risk"],errors="coerce").mean()),
+        avg_mfe60=float(pd.to_numeric(z["mfe60"],errors="coerce").mean()),
+        avg_mae60=float(pd.to_numeric(z["mae60"],errors="coerce").mean()),
+        hit3r=float(pd.to_numeric(z["hit3r"],errors="coerce").fillna(0).mean()),
+        stop_rate=float(pd.to_numeric(z["stopped"],errors="coerce").fillna(0).mean()),
+        winner20=float((pd.to_numeric(z["mfe60"],errors="coerce")>=0.20).mean()),
+        winner30=float((pd.to_numeric(z["mfe60"],errors="coerce")>=0.30).mean()),
+        avg_hold=float(pd.to_numeric(z["hold_days"],errors="coerce").mean()),
+    )
+
+def _v613_compare(base,shadow,min_n):
+    if not base or not shadow or shadow.get("trades",0)<min_n:return "INSUFFICIENT_SAMPLE"
+    risk_ok=shadow.get("avg_initial_risk",9) <= base.get("avg_initial_risk",9)*0.82
+    pf_ok=shadow.get("pf",0) >= base.get("pf",0)*1.08
+    ret_ok=shadow.get("avg_return",-9) >= base.get("avg_return",-9)
+    winner_ok=shadow.get("winner20",0) >= base.get("winner20",0)*0.85
+    if risk_ok and winner_ok and (pf_ok or ret_ok):return "PROMISING"
+    if risk_ok and winner_ok:return "MIXED"
+    return "NOT_CONFIRMED"
+
+def _v613_compute():
+    global v613_thread
+    try:
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v613_engine",str(ep))
+        eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+        all_data={}
+        for t,p in files.items():
+            try:all_data[t]=eng.load(p)
+            except Exception:pass
+        spy=all_data.get("SPY")
+        if spy is None:raise RuntimeError("缺少 SPY 市场缓存")
+
+        cand=_v61212_base_candidates()
+        tickers=sorted({x["ticker"] for x in cand})
+        if not tickers:tickers=sorted(t for t in files if t in getattr(eng,"T2S",{}))
+        _v613_write_status(status="running",message="重放 Base Breakout，寻找 First Pullback / META",processed=0,total=len(tickers),current="",error=None)
+
+        rows=[]; errors=[]; total_signals=0
+        for n,t in enumerate(tickers,1):
+            _v613_write_status(status="running",message="重放 Base Breakout，寻找 First Pullback / META",processed=n-1,total=len(tickers),current=t)
+            try:
+                sec=eng.T2S.get(t)
+                if t not in all_data or not sec or sec not in all_data:continue
+                d,s,_,_=eng.historical_signals(t,all_data[t],spy,all_data[sec],all_data)
+                if s is None or s.empty:continue
+                d=d.copy()
+                d["ma10"]=d["close"].rolling(10).mean()
+                d["v20"]=d["volume"].rolling(20).mean()
+                total_signals+=len(s)
+                for _,sg in s.iterrows():
+                    i=int(sg["idx"]);pivot=float(sg["pivot"])
+                    # Build each shadow independently from the same breakout signal.
+                    pb=_v613_pullback_candidate(d,i,pivot,"PULLBACK")
+                    mt=_v613_pullback_candidate(d,i,pivot,"META")
+                    for mode,sh in [("FIRST_PULLBACK",pb),("META",mt)]:
+                        if not sh:continue
+                        # Matched baseline = same original breakout signal, evaluated with 7% stop.
+                        bentry=float(sg["entry"]);bstop=bentry*0.93
+                        bres=_v613_trade_path(d,i,bentry,bstop,60)
+                        sid=f"{t}|{pd.Timestamp(sg['date']).strftime('%Y-%m-%d')}"
+                        rows.append(dict(
+                            pair_id=sid,ticker=t,breakout_date=pd.Timestamp(sg["date"]).strftime("%Y-%m-%d"),
+                            mode="BASE_MATCHED_"+mode,entry_date=pd.Timestamp(sg["date"]).strftime("%Y-%m-%d"),
+                            entry=bentry,stop=bstop,initial_risk=0.07,pivot=pivot,
+                            supports="BREAKOUT",support_count=0,pullback_depth=0.0,
+                            v6_market_character=str(sg.get("v6_market_character","")),
+                            rs=float(sg.get("rs",np.nan)),volratio=float(sg.get("volratio",np.nan)),
+                            **bres
+                        ))
+                        sres=_v613_trade_path(d,sh["entry_i"],sh["entry"],sh["stop"],60)
+                        rows.append(dict(
+                            pair_id=sid,ticker=t,breakout_date=pd.Timestamp(sg["date"]).strftime("%Y-%m-%d"),
+                            mode=mode,pivot=pivot,
+                            v6_market_character=str(sg.get("v6_market_character","")),
+                            rs=float(sg.get("rs",np.nan)),volratio=float(sg.get("volratio",np.nan)),
+                            **{k:v for k,v in sh.items() if k not in ("setup","entry_i","confirm_i")},
+                            **sres
+                        ))
+            except Exception as ex:
+                errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+
+        D=pd.DataFrame(rows)
+        if D.empty:raise RuntimeError("没有找到合格 First Pullback / META；请检查缓存或规则")
+        V613_DIR.mkdir(parents=True,exist_ok=True)
+        D.to_csv(V613_DETAIL,index=False)
+
+        summaries=[]
+        verdicts={}
+        for shadow_name,min_n in [("FIRST_PULLBACK",50),("META",30)]:
+            sh=D[D["mode"]==shadow_name].copy()
+            ba=D[D["mode"]=="BASE_MATCHED_"+shadow_name].copy()
+            bm=_v613_metrics(ba,"BASE_MATCHED_"+shadow_name)
+            sm=_v613_metrics(sh,shadow_name)
+            summaries.extend([bm,sm])
+            verdicts[shadow_name]=_v613_compare(bm,sm,min_n)
+
+        # Coverage is measured against all original base breakout signals replayed.
+        pb_n=int((D["mode"]=="FIRST_PULLBACK").sum())
+        mt_n=int((D["mode"]=="META").sum())
+        recent=D[D["mode"].isin(["FIRST_PULLBACK","META"])].copy()
+        recent["entry_date"]=pd.to_datetime(recent["entry_date"],errors="coerce")
+        recent=recent.sort_values("entry_date",ascending=False).head(120)
+        cols=["ticker","breakout_date","mode","entry_date","entry","stop","initial_risk","pullback_depth",
+              "supports","support_count","return_pct","mfe60","mae60","hit3r","reason"]
+        examples=recent[[c for c in cols if c in recent.columns]].copy()
+        for c in examples.columns:
+            if pd.api.types.is_datetime64_any_dtype(examples[c]):examples[c]=examples[c].dt.strftime("%Y-%m-%d")
+
+        out=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            rules=dict(
+                search_window="breakout +2..+15 sessions",
+                pullback_depth="2%–12% from post-breakout peak",
+                volume="<=0.85x 20d volume AND <=0.80x breakout volume",
+                supports="Pivot / 10MA / 20MA",
+                meta=">=2 support anchors clustered within 2.5%",
+                entry="next-session open; reject >3% gap away",
+                stop="below support/recent low; minimum 1.5%, reject >8%",
+                horizon="60 sessions; conservative stop-first daily bars",
+            ),
+            total_base_signals=int(total_signals),
+            first_pullback_signals=pb_n,meta_signals=mt_n,
+            first_pullback_coverage=float(pb_n/total_signals) if total_signals else 0.0,
+            meta_coverage=float(mt_n/total_signals) if total_signals else 0.0,
+            summaries=summaries,verdicts=verdicts,
+            examples=examples.to_dict("records"),errors=errors[:100]
+        )
+        V613_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v613_write_status(status="done",message="V6.13 META / First Pullback Shadow 完成",processed=len(tickers),total=len(tickers),current="",error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v613_write_status(status="error",message="V6.13 Shadow 失败",error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v613_thread=None
+
+def _v613_start():
+    global v613_thread
+    if v613_thread is not None and v613_thread.is_alive():return False
+    v613_thread=threading.Thread(target=_v613_compute,daemon=True)
+    v613_thread.start();return True
+
+@APP.post("/v613/run")
+def v613_run():
+    _v613_start()
+    return redirect("/v613/meta-shadow")
+
+@APP.get("/api/v613/status")
+def v613_status_api():
+    return jsonify(_v613_status())
+
+@APP.get("/v613/meta-shadow")
+def v613_page():
+    import html
+    esc=lambda x:html.escape(str(x))
+    st=_v613_status();r=None
+    if V613_RESULT.exists():
+        try:r=json.loads(V613_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    summary_html="";examples_html="";verdict_html="";coverage=""
+    if r:
+        coverage=(f"<div class='grid'><div class='m'><small>Base Breakout</small><b>{r.get('total_base_signals',0)}</b></div>"
+                  f"<div class='m'><small>First Pullback</small><b>{r.get('first_pullback_signals',0)} ({r.get('first_pullback_coverage',0):.1%})</b></div>"
+                  f"<div class='m'><small>META</small><b>{r.get('meta_signals',0)} ({r.get('meta_coverage',0):.1%})</b></div></div>")
+        for k,v in r.get("verdicts",{}).items():
+            cls="ok" if v=="PROMISING" else ("warn" if v in ("MIXED","INSUFFICIENT_SAMPLE") else "bad")
+            verdict_html+=f"<div class='{cls}'><b>{esc(k)}：{esc(v)}</b></div>"
+        for x in r.get("summaries",[]):
+            if not x.get("trades"):continue
+            summary_html+=(
+                f"<tr><td><b>{esc(x['label'])}</b></td><td>{x['trades']}</td>"
+                f"<td>{x.get('win_rate',0):.1%}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('pf',0):.2f}</td>"
+                f"<td>{x.get('avg_win',0):.2%}</td><td>{x.get('avg_loss',0):.2%}</td><td><b>{x.get('avg_initial_risk',0):.2%}</b></td>"
+                f"<td>{x.get('hit3r',0):.1%}</td><td>{x.get('winner20',0):.1%}</td><td>{x.get('winner30',0):.1%}</td>"
+                f"<td>{x.get('avg_mfe60',0):.2%}</td><td>{x.get('avg_mae60',0):.2%}</td><td>{x.get('stop_rate',0):.1%}</td></tr>"
+            )
+        for x in r.get("examples",[]):
+            examples_html+=(
+                f"<tr><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('breakout_date'))}</td><td>{esc(x.get('mode'))}</td>"
+                f"<td>{esc(x.get('entry_date'))}</td><td>{float(x.get('entry',0)):.2f}</td><td>{float(x.get('stop',0)):.2f}</td>"
+                f"<td>{float(x.get('initial_risk',0)):.2%}</td><td>{float(x.get('pullback_depth',0)):.2%}</td>"
+                f"<td>{esc(x.get('supports',''))}</td><td>{float(x.get('return_pct',0)):.2%}</td><td>{float(x.get('mfe60',0)):.2%}</td>"
+                f"<td>{'✓' if x.get('hit3r') else '—'}</td><td>{esc(x.get('reason',''))}</td></tr>"
+            )
+    run="" if st.get("status")=="running" else '<form method="post" action="/v613/run"><button>▶ 跑 V6.13 Shadow Test</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}
+.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.m{{background:#f6f8fb;border-radius:14px;padding:14px}}.m small{{display:block;color:#64748b}}.m b{{font-size:20px}}
+table{{width:100%;border-collapse:collapse;font-size:12px;min-width:1100px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}
+.ok,.warn,.bad{{border-radius:14px;padding:12px;margin:8px 0}}.ok{{background:#ecfdf5;border:1px solid #86efac}}.warn{{background:#fff7df;border:1px solid #f1c75b}}.bad{{background:#fef2f2;border:1px solid #fca5a5}}
+.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}
+</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧪 V6.13 · JLaw META / First Pullback Shadow</h1>
+<div class="note"><b>Baseline 冻结。</b> 同一个原始 Breakout 信号，分别比较原突破入场 vs First Pullback / META 低风险交易区。第一轮只测试入场质量，不加入复杂加仓和 Winner Exit。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>
+{coverage}
+<div class="c"><h2>是否 Work？</h2>{verdict_html or '<div class="warn">尚无结果。</div>'}</div>
+<div class="c"><h2>Matched A/B 核心指标</h2><div class="scroll"><table>
+<tr><th>模型</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>初始风险</th><th>3R命中</th><th>MFE≥20%</th><th>MFE≥30%</th><th>Avg MFE</th><th>Avg MAE</th><th>Stop率</th></tr>
+{summary_html}</table></div></div>
+<details class="c"><summary><b>最近 Shadow 案例</b></summary><div class="scroll"><table>
+<tr><th>股票</th><th>原突破</th><th>模式</th><th>新入场</th><th>Entry</th><th>Stop</th><th>Risk</th><th>Pullback</th><th>Trading Area</th><th>60日结果</th><th>MFE</th><th>3R</th><th>退出</th></tr>
+{examples_html}</table></div></details>
+<div class="c"><div class="note"><b>固定测试规则：</b> +2～+15日找第一次回踩；回撤2%～12%；成交量≤0.85×20日均量且≤0.80×突破量；Pivot/10MA/20MA为支持锚点；META要求≥2个锚点在2.5%区域内汇合；次日开盘入场；结构风险>8%拒绝。没有自动调参。</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v613/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script>
+</div></body></html>"""
+
+
 # ================= V6.12.14 EDGE-GATE CLIFF AUDIT =================
 V61214_DIR=DATA_DIR/"jlaw_v61214_edge_cliff"
 V61214_STATUS=V61214_DIR/"status.json"
@@ -9860,7 +10175,7 @@ def _v61214_compute():
         if not tickers:tickers=sorted(t for t in files if t in getattr(eng,"T2S",{}))
         cutoff=pd.Timestamp("2026-05-20");edges_n=["market_context","relative_strength","group_confirmation","supply_dryup","tight_pivot","demand_confirmation","entry_location","contraction_sequence","volume_dry_before_breakout"]
         vals_n=["rs","sector_score","group_breadth","supply_score","pivot_tight","volratio","extension","c1","c2","c3","dry"]
-        rows=[];errors=[];group_cache={}
+        rows=[];errors=[]
         _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=0,total=len(tickers),current="",error=None)
         for n,t in enumerate(tickers,1):
             _v61214_write_status(status="running",message="逐只重算 Base Setup 与每个 Edge",processed=n-1,total=len(tickers),current=t)
@@ -9938,488 +10253,6 @@ def v61214_page():
         for x in r.get("examples",[]):ex+=f"<tr><td>{x['ticker']}</td><td>{x['date']}</td><td>{x['edge_count']}</td><td>{esc(x['tier'])}</td><td>{'✓' if x['supply_dryup'] else '✕'}</td><td>{'✓' if x['tight_pivot'] else '✕'}</td><td>{'✓' if x['demand_confirmation'] else '✕'}</td><td>{'✓' if x['contraction_sequence'] else '✕'}</td></tr>"
     run="" if st.get("status")=="running" else '<form method="post" action="/v61214/run"><button>▶ 跑 V6.12.14 漏斗审计</button></form>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1080px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:720px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}.note{{background:#eefbf3;border:1px solid #86efac;border-radius:14px;padding:14px}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🔬 V6.12.14 Edge-Gate Cliff Audit</h1><div class="note">只查5/20前后每个 Edge 的通过率和输入缺失率。使用现有缓存，不下载，不改参数。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}</div>{truth}<div class="c"><h2>Edge 漏斗</h2><div class="scroll"><table><tr><th>Edge</th><th>5/20前等长窗口</th><th>5/20后</th><th>变化</th></tr>{edge}</table></div></div><div class="c"><h2>底层输入中位数 / 缺失率</h2><div class="scroll"><table><tr><th>输入</th><th>前中位数</th><th>后中位数</th><th>前缺失</th><th>后缺失</th></tr>{comp}</table></div></div><div class="c"><h2>月度断点</h2><div class="scroll"><table><tr><th>月</th><th>Base</th><th>Pass</th><th>平均Edge</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{month}</table></div></div><details class="c"><summary><b>5/20后逐条案例</b></summary><div class="scroll"><table><tr><th>股票</th><th>日期</th><th>Edge</th><th>Tier</th><th>Supply</th><th>Tight</th><th>Demand</th><th>Contraction</th></tr>{ex}</table></div></details><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v61214/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},3000)</script></div></body></html>"""
-
-# ================= V6.13.2 INDEPENDENT HOLDOUT UNIVERSE CENSUS =================
-@APP.get("/v6132/holdout-census")
-def v6132_holdout_census_page():
-    import html
-    esc=lambda x:html.escape(str(x));url="https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip"
-    try:
-        req=Request(url,headers={"User-Agent":"VCP-Radar-Cloud/6.13.2"})
-        raw=urlopen(req,timeout=45).read()
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            name=next(n for n in z.namelist() if n.lower().endswith(".csv"));U=pd.read_csv(z.open(name))
-    except Exception as ex:
-        return f"<h2>Tiingo代码清单读取失败</h2><pre>{esc(type(ex).__name__+': '+str(ex))}</pre><p>稍后重试；没有下载任何股价。</p>",502
-    U.columns=[str(c).strip() for c in U.columns]
-    cm={c.lower():c for c in U.columns};tc=cm.get("ticker");ec=cm.get("exchange");ac=cm.get("assettype");pc=cm.get("pricecurrency");sc=cm.get("startdate");dc=cm.get("enddate")
-    if not all([tc,ec,ac,pc,sc,dc]):return f"<h2>清单字段不完整</h2><pre>{esc(U.columns.tolist())}</pre>",500
-    U[sc]=pd.to_datetime(U[sc],errors="coerce");U[dc]=pd.to_datetime(U[dc],errors="coerce")
-    U[tc]=U[tc].astype(str).str.upper().str.strip();U[ec]=U[ec].astype(str).str.upper().str.strip()
-    exchanges={"NYSE","NASDAQ","AMEX","NYSE AMERICAN","NYSE MKT","NYSE ARCA","BATS","IEX"}
-    q=U[(U[ac].astype(str).str.upper()=="STOCK")&(U[pc].astype(str).str.upper()=="USD")&U[ec].isin(exchanges)].copy()
-    q=q[q[dc]>=pd.Timestamp("2006-01-01")]
-    q=q[(q[dc]-q[sc]).dt.days>=730]
-    existing={p.stem.upper() for p in MARKET_DIR.glob("*.csv")}
-    q=q[~q[tc].isin(existing)].drop_duplicates(tc)
-    latest=U[dc].max();active_cut=latest-pd.Timedelta(days=14)
-    q["status"]=np.where(q[dc]>=active_cut,"ACTIVE","DELISTED")
-    # Common-like is a mechanical screen only; final classification must use metadata.
-    q["common_like"]=q[tc].str.match(r"^[A-Z]{1,5}(?:-[A-Z])?$")
-    active=q[q["status"]=="ACTIVE"];dead=q[q["status"]=="DELISTED"]
-    clean=q[q["common_like"]];clean_a=clean[clean["status"]=="ACTIVE"];clean_d=clean[clean["status"]=="DELISTED"]
-    exrows="" 
-    for ex,g in q.groupby(ec):exrows+=f"<tr><td>{esc(ex)}</td><td>{len(g)}</td><td>{int((g['status']=='ACTIVE').sum())}</td><td>{int((g['status']=='DELISTED').sum())}</td></tr>"
-    years=""
-    for y,g in dead.assign(end_year=dead[dc].dt.year).groupby("end_year"):
-        if int(y)>=2006:years+=f"<tr><td>{int(y)}</td><td>{len(g)}</td></tr>"
-    sample=dead.sort_values(dc,ascending=False).head(40);sr=""
-    for _,x in sample.iterrows():sr+=f"<tr><td><b>{esc(x[tc])}</b></td><td>{esc(x[ec])}</td><td>{x[sc].date()}</td><td>{x[dc].date()}</td><td>{'是' if x['common_like'] else '需核查'}</td></tr>"
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:14px;line-height:1.65}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.65}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}.k b{{font-size:30px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:650px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>🧮 Independent Holdout Universe Census</h1><div class='note'>范围：2006年至今、USD Stock、美国主要交易所、至少两年价格跨度，并排除现有缓存 {len(existing)} 只。<b>退市股刻意保留</b>，不会因为后来失败而删除。</div></div>
-<div class='c'><div class='grid'><div class='k'>新候选总数<br><b>{len(q):,}</b></div><div class='k'>仍活跃<br><b>{len(active):,}</b></div><div class='k'>近20年退市<br><b>{len(dead):,}</b></div><div class='k'>普通股样式候选<br><b>{len(clean):,}</b></div><div class='k'>其中活跃<br><b>{len(clean_a):,}</b></div><div class='k'>其中退市<br><b>{len(clean_d):,}</b></div></div></div>
-<div class='warn'><b>公平回测规则：</b>只按信号当天是否上市及是否符合价格/流动性条件。以后退市不能事先剔除；跌破止损按实际跳空价，无法成交或破产按最后可实现价格，必要时保守记至−100%。收购退市不能误当破产归零。</div>
-<div class='c'><h2>按交易所</h2><div class='scroll'><table><tr><th>交易所</th><th>总候选</th><th>活跃</th><th>退市</th></tr>{exrows}</table></div></div>
-<details class='c'><summary><b>退市年份分布</b></summary><div class='scroll'><table><tr><th>最后交易年份</th><th>数量</th></tr>{years}</table></div></details>
-<details class='c'><summary><b>最近退市样例</b></summary><div class='scroll'><table><tr><th>代码</th><th>交易所</th><th>开始</th><th>结束</th><th>普通股样式</th></tr>{sr}</table></div></details>
-<div class='c'><b>说明：</b>Tiingo清单也包含保留代码。以上是候选数量；正式下载前还要逐个验证EOD metadata、证券类型及历史可用性。此页只读取清单，没有消耗批量股价下载额度。</div>
-</div></body></html>"""
-
-# ================= V6.13 FROZEN CHAMPION + DRY 1.05 SHADOW =================
-V613_DIR=DATA_DIR/"jlaw_v613_frozen_shadow"
-V613_LOG=V613_DIR/"shadow_log.csv"
-V613_LAUNCH_DATE=pd.Timestamp("2026-08-24")
-V6131_DIR=DATA_DIR/"jlaw_v6131_daily_forward"
-V6131_STATUS=V6131_DIR/"status.json"
-V6131_RESULT=V6131_DIR/"latest.json"
-v6131_thread=None
-
-def _v6131_status():
-    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None}
-    if V6131_STATUS.exists():
-        try:s.update(json.loads(V6131_STATUS.read_text(encoding="utf-8")))
-        except Exception:pass
-    return s
-
-def _v6131_write(**kw):
-    V6131_DIR.mkdir(parents=True,exist_ok=True);s=_v6131_status();s.update(kw)
-    V6131_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8");return s
-
-def _v6131_compute():
-    global v6131_thread
-    try:
-        import importlib.util
-        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
-        if not ep.exists():raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
-        spec=importlib.util.spec_from_file_location("v6131_engine",str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
-        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")};all_data={}
-        for t,p in files.items():
-            try:all_data[t]=eng.load(p)
-            except Exception:pass
-        spy=all_data.get("SPY")
-        if spy is None:raise RuntimeError("缺少SPY缓存")
-        tickers=sorted(t for t in getattr(eng,"T2S",{}) if t in all_data)
-        peers={}
-        for t in tickers:peers.setdefault(eng.T2S.get(t),[]).append(t)
-        rows=[];errors=[]
-        _v6131_write(status="running",message="只检查每只股票最新交易日",processed=0,total=len(tickers),current="",error=None)
-        for n,t in enumerate(tickers,1):
-            _v6131_write(status="running",message="只检查每只股票最新交易日",processed=n-1,total=len(tickers),current=t)
-            try:
-                raw=all_data[t];d=eng.ind(raw)
-                if len(d)<260:continue
-                x=d;date=pd.Timestamp(x.date.iloc[-1]);sp=spy[spy.date<=date]
-                ok,ms=eng.market_ok(sp)
-                if not ok or not eng.stage2(x):continue
-                rsv=eng.rs(x,sp)
-                if rsv<72:continue
-                sec=eng.T2S.get(t);sd=all_data.get(sec);secscore=50
-                if sd is not None:
-                    sx=sd[sd.date<=date]
-                    if len(sx)>=260:secscore=eng.rs(sx,sp)
-                if secscore<58:continue
-                gkey=(sec,date.strftime("%Y-%m-%d"))
-                if gkey in group_cache:breadth,top=group_cache[gkey]
-                else:
-                    strong=top=valid=0
-                    for q in peers.get(sec,[]):
-                        qd=all_data[q][all_data[q].date<=date]
-                        if len(qd)<260:continue
-                        valid+=1;qr=eng.rs(qd,sp);strong+=qr>=70;top+=qr>=85
-                    breadth=100*strong/valid if valid else 0;group_cache[gkey]=(breadth,top)
-                if breadth<30:continue
-                ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
-                if ss<40 or not np.isfinite(tight) or tight>=.16:continue
-                leader=min(100,int(round(min(40,max(0,(rsv-60)*1.5))+min(25,max(0,secscore-55))+min(20,breadth*.2)+(15 if top>=2 else (8 if top>=1 else 0)))))
-                if leader<55:continue
-                prev=float(x.close.iloc[-2]);close=float(x.close.iloc[-1]);ext=close/piv-1
-                breakout=bool(prev<=piv and close>piv and ext<=.03 and vr>=1.20)
-                if not breakout:continue
-                mc=eng._v6_market_character(sp)
-                edges,flags,ec,rc=eng._v6_edges(mc,rsv,secscore,breadth,ss,tight,vr,ext,c1,c2,c3,dry)
-                ct=eng._v6_decision_tier(ec,rc,mc);cp=ct in ("A1","A2","B")
-                new_edges=dict(edges);new_edges["volume_dry_before_breakout"]=bool(np.isfinite(dry) and dry<1.05)
-                nec=int(sum(new_edges.values()));nt=eng._v6_decision_tier(nec,rc,mc);npas=nt in ("A1","A2","B")
-                rows.append({"ticker":t,"date":date.strftime("%Y-%m-%d"),"entry":close,"pivot":float(piv),"extension":float(ext),
-                    "stop_pct":0.07,"rs":float(rsv),"sector_score":float(secscore),"group_breadth":float(breadth),
-                    "supply_score":float(ss),"pivot_tight":float(tight),"volratio":float(vr),"dry":float(dry),
-                    "c1":float(c1) if np.isfinite(c1) else None,"c2":float(c2) if np.isfinite(c2) else None,"c3":float(c3) if np.isfinite(c3) else None,
-                    "v6_market_character":mc,"v6_edges":"|".join(k for k,v in edges.items() if v),
-                    "v6_edge_count":int(ec),"v6_red_count":int(rc),"v6_tier":ct,"v6_pass":bool(cp),
-                    "challenger_edge_count":nec,"challenger_tier":nt,"challenger_pass":bool(npas)})
-            except Exception as ex:errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
-        out={"generated_at":datetime.now(timezone.utc).isoformat(),"universe":len(tickers),"rows":rows,"errors":errors[:100]}
-        V6131_DIR.mkdir(parents=True,exist_ok=True);V6131_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
-        _v6131_write(status="done",message="今日最新交易日检查完成",processed=len(tickers),total=len(tickers),current="",error=None)
-    except Exception as ex:
-        traceback.print_exc();_v6131_write(status="error",message="Daily Runner失败",error=f"{type(ex).__name__}: {ex}")
-    finally:v6131_thread=None
-
-def _v6131_start():
-    global v6131_thread
-    if v6131_thread is not None and v6131_thread.is_alive():return False
-    v6131_thread=threading.Thread(target=_v6131_compute,daemon=True);v6131_thread.start();return True
-
-def _v613_source_rows():
-    rows=[]
-    if V6131_RESULT.exists():
-        try:rows.extend(json.loads(V6131_RESULT.read_text(encoding="utf-8")).get("rows",[]))
-        except Exception:pass
-    if V6127_RESULT.exists():
-        try:
-            q=json.loads(V6127_RESULT.read_text(encoding="utf-8"))
-            rows.extend(x for x in q.get("rows",[]) if x.get("formal_setup"))
-        except Exception:pass
-    if not rows and V61214_RESULT.exists():
-        try:rows=json.loads(V61214_RESULT.read_text(encoding="utf-8")).get("examples",[])
-        except Exception:rows=[]
-    return rows
-
-def _v613_refresh_log():
-    import importlib.util
-    rows=_v613_source_rows();now=datetime.now(timezone.utc).isoformat();out=[]
-    eng=None;ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
-    if ep.exists():
-        try:
-            spec=importlib.util.spec_from_file_location("v613_engine",str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
-        except Exception:eng=None
-    for r in rows:
-        dt=pd.to_datetime(r.get("date"),errors="coerce")
-        if pd.isna(dt):continue
-        ec=int(pd.to_numeric(pd.Series([r.get("v6_edge_count",r.get("edge_count",0))]),errors="coerce").fillna(0).iloc[0])
-        rc=int(pd.to_numeric(pd.Series([r.get("v6_red_count",r.get("red_count",0))]),errors="coerce").fillna(0).iloc[0])
-        dry=pd.to_numeric(pd.Series([r.get("dry")]),errors="coerce").iloc[0]
-        edges=str(r.get("v6_edges",""));champ_tier=str(r.get("v6_tier",r.get("tier","WATCH")))
-        champ=bool(r.get("v6_pass",champ_tier in ("A1","A2","B")))
-        old_dry=("volume_dry_before_breakout" in edges) or (pd.notna(dry) and dry<.85)
-        new_dry=pd.notna(dry) and dry<1.05
-        new_ec=ec+(1 if new_dry and not old_dry else 0)
-        mc=str(r.get("v6_market_character","POWER_TREND" if champ_tier in ("A1","A2","B") else "BULL_TREND"))
-        if eng is not None:
-            try:new_tier=str(eng._v6_decision_tier(new_ec,rc,mc))
-            except Exception:new_tier="REJECT" if rc>0 else ("A1" if new_ec>=8 else "A2" if new_ec>=7 else "B" if new_ec>=6 else "WATCH")
-        else:new_tier="REJECT" if rc>0 else ("A1" if new_ec>=8 else "A2" if new_ec>=7 else "B" if new_ec>=6 else "WATCH")
-        challenger=new_tier in ("A1","A2","B")
-        cohort="CHAMPION" if champ else ("CHALLENGER_ONLY" if challenger else "WATCH")
-        entry=pd.to_numeric(pd.Series([r.get("entry")]),errors="coerce").iloc[0]
-        current_ret=mfe=mae=None;bars=0
-        fp=MARKET_DIR/f"{str(r.get('ticker','')).upper()}.csv"
-        if fp.exists() and pd.notna(entry) and entry>0:
-            try:
-                d=pd.read_csv(fp);d.columns=[str(c).lower() for c in d.columns];dc="date" if "date" in d else "datetime"
-                d["date"]=pd.to_datetime(d[dc],errors="coerce");d=d[d["date"]>=dt]
-                if len(d):
-                    hi=pd.to_numeric(d["high"],errors="coerce");lo=pd.to_numeric(d["low"],errors="coerce");cl=pd.to_numeric(d["close"],errors="coerce")
-                    current_ret=float(cl.iloc[-1]/entry-1);mfe=float(hi.max()/entry-1);mae=float(lo.min()/entry-1);bars=int(len(d))
-            except Exception:pass
-        out.append({"ticker":str(r.get("ticker","")),"signal_date":dt.strftime("%Y-%m-%d"),"recorded_at":now,
-            "sample_type":"FORWARD" if dt>=V613_LAUNCH_DATE else "BACKFILL","cohort":cohort,
-            "champion_pass":champ,"challenger_pass":challenger,"champion_tier":champ_tier,"challenger_tier":new_tier,
-            "old_edge_count":ec,"new_edge_count":new_ec,"red_count":rc,"dry":None if pd.isna(dry) else float(dry),
-            "entry":None if pd.isna(entry) else float(entry),"bars":bars,"current_return":current_ret,"mfe":mfe,"mae":mae})
-    V613_DIR.mkdir(parents=True,exist_ok=True)
-    new=pd.DataFrame(out)
-    if V613_LOG.exists():
-        try:
-            old=pd.read_csv(V613_LOG);new=pd.concat([old,new],ignore_index=True)
-        except Exception:pass
-    if len(new):new=new.sort_values(["signal_date","ticker","recorded_at"]).drop_duplicates(["ticker","signal_date","cohort"],keep="last")
-    new.to_csv(V613_LOG,index=False)
-    return new
-
-@APP.post("/v6131/run")
-def v6131_run_route():
-    _v6131_start();return redirect("/v6131/daily-forward")
-
-@APP.get("/api/v6131/status")
-def v6131_status_api():return jsonify(_v6131_status())
-
-@APP.get("/v6131/daily-forward")
-def v6131_daily_forward_page():
-    import html
-    esc=lambda x:html.escape(str(x));st=_v6131_status();data=None
-    if V6131_RESULT.exists():
-        try:data=json.loads(V6131_RESULT.read_text(encoding="utf-8"))
-        except Exception:data=None
-    rows=(data or {}).get("rows",[]);champ=[x for x in rows if x.get("v6_pass")];chall=[x for x in rows if x.get("challenger_pass") and not x.get("v6_pass")];watch=[x for x in rows if not x.get("challenger_pass")]
-    tr=""
-    for x in sorted(rows,key=lambda z:(not bool(z.get("v6_pass")),not bool(z.get("challenger_pass")),str(z.get("ticker")))):
-        action="正式可买" if x.get("v6_pass") else "Shadow新增" if x.get("challenger_pass") else "等待"
-        tr+=f"<tr><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('date'))}</td><td>{action}</td><td>{esc(x.get('v6_tier'))}</td><td>{esc(x.get('challenger_tier'))}</td><td>{esc(x.get('v6_edge_count'))}→{esc(x.get('challenger_edge_count'))}</td><td>{float(x.get('entry',0)):.2f}</td><td>{float(x.get('pivot',0)):.2f}</td><td>{float(x.get('entry',0))*.93:.2f}</td><td>{float(x.get('dry',0)):.3f}</td><td>{float(x.get('volratio',0)):.2f}x</td><td>{float(x.get('rs',0)):.0f}</td></tr>"
-    run="" if st.get("status")=="running" else '<form method="post" action="/v6131/run"><button>▶ 检查321只最新交易日</button></form>'
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:14px}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}.k b{{font-size:28px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:1050px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>📡 V6.13.1 Daily Forward Runner</h1><div class='note'>只检查完整缓存股票池的最新交易日；不下载、不回放完整历史。正式Champion参数冻结，Challenger-only只做Shadow。</div></div>
-<div class='c'><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message'))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}</p>{run}{'<p style="color:#b91c1c">'+esc(st.get('error'))+'</p>' if st.get('error') else ''}</div>
-<div class='c'><div class='grid'><div class='k'>Champion正式信号<br><b>{len(champ)}</b></div><div class='k'>Challenger-only<br><b>{len(chall)}</b></div><div class='k'>正式Setup总数<br><b>{len(rows)}</b></div></div></div>
-<div class='c'><h2>今日Radar候选</h2><div class='scroll'><table><tr><th>股票</th><th>日期</th><th>状态</th><th>Champion</th><th>Challenger</th><th>Edge</th><th>入场</th><th>Pivot</th><th>7%止损</th><th>Dry</th><th>量比</th><th>RS</th></tr>{tr}</table></div><p><a href='/v613/frozen-shadow'>打开Forward计分板 →</a></p></div>
-<script>setTimeout(async()=>{{try{{let r=await fetch('/api/v6131/status',{{cache:'no-store'}}),s=await r.json();if(s.status==='running')location.reload()}}catch(e){{}}}},4000)</script></div></body></html>"""
-
-@APP.get("/v613/frozen-shadow")
-def v613_frozen_shadow_page():
-    import html
-    esc=lambda x:html.escape(str(x))
-    D=_v613_refresh_log();F=D[D["sample_type"]=="FORWARD"] if len(D) else D
-    def stats(g):
-        r=pd.to_numeric(g.get("current_return"),errors="coerce").dropna() if len(g) else pd.Series(dtype=float)
-        return {"n":int(len(g)),"closed":int(len(r)),"avg":float(r.mean()) if len(r) else 0.0,"win":float((r>0).mean()) if len(r) else 0.0}
-    a=stats(F[F["cohort"]=="CHAMPION"] if len(F) else F);b=stats(F[F["cohort"]=="CHALLENGER_ONLY"] if len(F) else F)
-    rows=""
-    if len(D):
-        for _,x in D.sort_values(["signal_date","ticker"],ascending=False).iterrows():
-            def pct(v):return "-" if pd.isna(v) else f"{float(v):.1%}"
-            rows+=f"<tr><td>{esc(x.get('sample_type'))}</td><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('signal_date'))}</td><td>{esc(x.get('cohort'))}</td><td>{esc(x.get('champion_tier'))}</td><td>{esc(x.get('challenger_tier'))}</td><td>{esc(x.get('old_edge_count'))}→{esc(x.get('new_edge_count'))}</td><td>{esc(x.get('dry'))}</td><td>{pct(x.get('current_return'))}</td><td>{pct(x.get('mfe'))}</td><td>{pct(x.get('mae'))}</td></tr>"
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.freeze{{background:#ecfdf5;border:2px solid #22c55e;border-radius:14px;padding:14px;line-height:1.65}}.shadow{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.k{{background:#f8fafc;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:950px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr}}}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>🏁 V6.13 Frozen Champion + Dry 1.05 Shadow</h1><div class='freeze'><b>CHAMPION 已冻结：</b>正式Dry门槛仍为&lt;0.85，所有其他参数保持不变。<br><b>CHALLENGER：</b>唯一变化是Dry&lt;1.05；Challenger-only信号不进入正式买入清单。</div></div>
-<div class='c'><div class='shadow'><b>前瞻验证从 2026-08-24 开始。</b>旧记录只标记BACKFILL，不计入最终胜负。累计20–30个CHALLENGER_ONLY新信号后才做一次最终比较。</div></div>
-<div class='c'><h2>Forward计分板</h2><div class='grid'><div class='k'><b>Champion</b><h2>{a['n']} 信号</h2><div>已有收益记录 {a['closed']}｜平均 {a['avg']:.2%}｜胜率 {a['win']:.1%}</div></div><div class='k'><b>Challenger-only</b><h2>{b['n']} 信号</h2><div>已有收益记录 {b['closed']}｜平均 {b['avg']:.2%}｜胜率 {b['win']:.1%}</div></div></div></div>
-<div class='c'><h2>Shadow日志</h2><div class='scroll'><table><tr><th>样本</th><th>股票</th><th>信号日</th><th>组别</th><th>Champion</th><th>Challenger</th><th>Edge</th><th>Dry</th><th>当前</th><th>MFE</th><th>MAE</th></tr>{rows}</table></div></div>
-<div class='c'><b>纪律：</b>V6.13期间不再根据历史结果修改参数。只有前瞻Challenger-only达到最低样本量后才做一次升级/淘汰决定。</div>
-</div></body></html>"""
-
-# ================= V6.12.17 ERA x MARKET-REGIME STABILITY =================
-@APP.get("/v61217/era-regime")
-def v61217_era_regime_page():
-    import html
-    esc=lambda x:html.escape(str(x))
-    p=V63_DIR/"full"/"jlaw_v6_trades.csv"
-    if not p.exists():return "<h2>缺少历史 V6 trades 缓存</h2>",409
-    try:D=pd.read_csv(p)
-    except Exception as ex:return f"<h2>缓存读取失败</h2><pre>{esc(ex)}</pre>",500
-    if D.empty:return "<h2>历史交易缓存为空</h2>",409
-    D["date"]=pd.to_datetime(D.get("date"),errors="coerce")
-    D["return_pct"]=pd.to_numeric(D.get("return_pct"),errors="coerce")
-    for c in ["supply_score","dry","volratio"]:
-        if c in D.columns:D[c]=pd.to_numeric(D[c],errors="coerce")
-
-    def met(g):
-        z=pd.to_numeric(g.get("return_pct"),errors="coerce").dropna()
-        if z.empty:return {"n":0,"win":0.0,"avg":0.0,"pf":0.0,"streak":0}
-        w=z[z>0].sum();loss=-z[z<0].sum();run=mx=0
-        for v in z.tolist():
-            if v<0:run+=1;mx=max(mx,run)
-            else:run=0
-        return {"n":int(len(z)),"win":float((z>0).mean()),"avg":float(z.mean()),"pf":float(w/loss) if loss>0 else 0.0,"streak":int(mx)}
-
-    rules=[("BASELINE",lambda g:pd.Series(True,index=g.index)),
-           ("Supply ≥50",lambda g:g["supply_score"]>=50),
-           ("Dry <0.95",lambda g:g["dry"]<.95),("Dry <1.05",lambda g:g["dry"]<1.05),
-           ("Vol ≥1.35",lambda g:g["volratio"]>=1.35),("Vol ≥1.50",lambda g:g["volratio"]>=1.50),
-           ("Supply≥50 + Dry<0.95",lambda g:(g["supply_score"]>=50)&(g["dry"]<.95)),
-           ("Supply≥50 + Vol≥1.35",lambda g:(g["supply_score"]>=50)&(g["volratio"]>=1.35)),
-           ("Dry<0.95 + Vol≥1.35",lambda g:(g["dry"]<.95)&(g["volratio"]>=1.35))]
-    eras=[("2007–2011",pd.Timestamp("2007-01-01"),pd.Timestamp("2012-01-01")),
-          ("2012–2016",pd.Timestamp("2012-01-01"),pd.Timestamp("2017-01-01")),
-          ("2017–2021",pd.Timestamp("2017-01-01"),pd.Timestamp("2022-01-01")),
-          ("2022–2026",pd.Timestamp("2022-01-01"),pd.Timestamp("2027-01-01"))]
-    scopes=[]
-    for name,a,b in eras:scopes.append((name,D[(D["date"]>=a)&(D["date"]<b)]))
-    if "v6_market_character" in D.columns:
-        scopes.extend([("POWER_TREND",D[D["v6_market_character"].astype(str)=="POWER_TREND"]),
-                       ("BULL_TREND",D[D["v6_market_character"].astype(str)=="BULL_TREND"])])
-    rows=[]
-    for scope,G in scopes:
-        base=met(G)
-        for label,fn in rules:
-            try:mask=fn(G).fillna(False)
-            except Exception:continue
-            m=met(G[mask]);rows.append({"scope":scope,"rule":label,"coverage":float(mask.mean()) if len(mask) else 0.0,
-                "delta_avg":m["avg"]-base["avg"],"delta_pf":m["pf"]-base["pf"],**m})
-
-    # Stability score only counts eras with >=20 selected trades.
-    score=[]
-    for label,_ in rules[1:]:
-        rr=[x for x in rows if x["rule"]==label]
-        era_rr=[x for x in rr if x["scope"] in {e[0] for e in eras} and x["n"]>=20]
-        positive=[x for x in era_rr if x["delta_avg"]>0 and x["delta_pf"]>0]
-        recent=next((x for x in rr if x["scope"]=="2022–2026"),None)
-        power=next((x for x in rr if x["scope"]=="POWER_TREND"),None)
-        robust=len(era_rr)>=3 and len(positive)>=3 and recent and power and recent["delta_avg"]>0 and recent["delta_pf"]>0 and power["delta_avg"]>0 and power["delta_pf"]>0
-        score.append({"rule":label,"eligible_eras":len(era_rr),"positive_eras":len(positive),
-                      "recent_ok":bool(recent and recent["delta_avg"]>0 and recent["delta_pf"]>0),
-                      "power_ok":bool(power and power["delta_avg"]>0 and power["delta_pf"]>0),"robust":bool(robust)})
-    robust=[x["rule"] for x in score if x["robust"]]
-    verdict="ROBUST_CANDIDATES: "+", ".join(robust) if robust else "NO_RULE_PASSES_CROSS-ERA ROBUSTNESS GATE"
-
-    sr="" 
-    for x in score:sr+=f"<tr><td><b>{esc(x['rule'])}</b></td><td>{x['eligible_eras']}</td><td>{x['positive_eras']}</td><td>{'✓' if x['recent_ok'] else '✕'}</td><td>{'✓' if x['power_ok'] else '✕'}</td><td class='{'good' if x['robust'] else 'bad'}'><b>{'通过' if x['robust'] else '不通过'}</b></td></tr>"
-    trs=""
-    for scope,_ in scopes:
-        for x in rows:
-            if x["scope"]!=scope:continue
-            cls="good" if x["rule"]!="BASELINE" and x["delta_avg"]>0 and x["delta_pf"]>0 else ""
-            trs+=f"<tr><td>{scope}</td><td><b>{esc(x['rule'])}</b></td><td>{x['n']}</td><td>{x['coverage']:.1%}</td><td>{x['win']:.1%}</td><td>{x['avg']:.2%}</td><td>{x['pf']:.2f}</td><td>{x['streak']}</td><td class='{cls}'>{x['delta_avg']:+.2%}</td><td class='{cls}'>{x['delta_pf']:+.2f}</td></tr>"
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1220px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:14px;line-height:1.6}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:900px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.good{{color:#047857;font-weight:800}}.bad{{color:#b91c1c}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>🧬 V6.12.17 Era × Market-Regime Stability Audit</h1><div class='note'>使用现有 {len(D)} 笔历史交易，拆四个年代与 POWER/BULL。只验证12.16候选，不下载、不重跑、不修改正式策略。</div></div>
-<div class='truth'><b>{esc(verdict)}</b><br>严格通过条件：至少3个年代各有≥20笔且同时改善平均收益和PF；2022–2026与POWER也必须同时改善。</div>
-<div class='c'><h2>跨年代稳定性总判定</h2><div class='scroll'><table><tr><th>规则</th><th>有效年代</th><th>正向年代</th><th>近期</th><th>POWER</th><th>最终</th></tr>{sr}</table></div></div>
-<div class='c'><h2>年代 × 市场环境明细</h2><div class='scroll'><table><tr><th>范围</th><th>规则</th><th>N</th><th>覆盖</th><th>胜率</th><th>平均收益</th><th>PF</th><th>最大连亏</th><th>平均差</th><th>PF差</th></tr>{trs}</table></div></div>
-<div class='c'><b>纪律：</b>不通过跨年代门槛的规则不能因为某一个时期漂亮就进入正式策略；组合规则若样本不足也自动不通过。</div>
-</div></body></html>"""
-
-# ================= V6.12.16 HISTORICAL ANALOG EXPANSION =================
-@APP.get("/v61216/historical-analogs")
-def v61216_historical_analogs_page():
-    import html
-    esc=lambda x:html.escape(str(x))
-    p=V63_DIR/"full"/"jlaw_v6_trades.csv"
-    if not p.exists():return "<h2>缺少 V6.3 历史交易缓存</h2><p>本页不会触发下载或重跑。</p>",409
-    try:D=pd.read_csv(p)
-    except Exception as ex:return f"<h2>读取历史缓存失败</h2><pre>{esc(ex)}</pre>",500
-    if D.empty:return "<h2>历史交易缓存为空</h2>",409
-    D["date"]=pd.to_datetime(D.get("date"),errors="coerce")
-    D["return_pct"]=pd.to_numeric(D.get("return_pct"),errors="coerce")
-    numeric=["supply_score","pivot_tight","volratio","extension","dry","c1","c2","c3"]
-    for c in numeric:
-        if c in D.columns:D[c]=pd.to_numeric(D[c],errors="coerce")
-
-    def metrics(g):
-        z=pd.to_numeric(g.get("return_pct"),errors="coerce").dropna()
-        if z.empty:return {"n":0,"win":0.0,"avg":0.0,"pf":0.0}
-        w=z[z>0].sum();loss=-z[z<0].sum()
-        return {"n":int(len(z)),"win":float((z>0).mean()),"avg":float(z.mean()),"pf":float(w/loss) if loss>0 else 0.0}
-
-    tests=[
-      ("Supply ≥40","supply_score",lambda s:s>=40),("Supply ≥50","supply_score",lambda s:s>=50),("Supply ≥60（正式）","supply_score",lambda s:s>=60),
-      ("Pivot ≤10%（正式）","pivot_tight",lambda s:s<=.10),("Pivot ≤12%","pivot_tight",lambda s:s<=.12),("Pivot ≤14%","pivot_tight",lambda s:s<=.14),
-      ("Vol ≥1.20","volratio",lambda s:s>=1.20),("Vol ≥1.35","volratio",lambda s:s>=1.35),("Vol ≥1.50（正式）","volratio",lambda s:s>=1.50),
-      ("Dry <0.85（正式）","dry",lambda s:s<.85),("Dry <0.95","dry",lambda s:s<.95),("Dry <1.05","dry",lambda s:s<1.05),
-    ]
-    scopes=[("ALL",D),("2022–2026",D[D["date"]>=pd.Timestamp("2022-01-01")])]
-    if "v6_market_character" in D.columns:scopes.append(("POWER_TREND",D[D["v6_market_character"].astype(str)=="POWER_TREND"]))
-    rows=[]
-    for scope,G in scopes:
-        base=metrics(G);rows.append({"scope":scope,"rule":"BASELINE · 全部历史V6交易","coverage":1.0,**base})
-        for label,field,fn in tests:
-            if field not in G.columns:continue
-            s=pd.to_numeric(G[field],errors="coerce");mask=fn(s)&s.notna();m=metrics(G[mask])
-            rows.append({"scope":scope,"rule":label,"coverage":float(mask.mean()) if len(mask) else 0.0,**m})
-        if all(c in G.columns for c in ["c1","c2","c3"]):
-            mask=G[["c1","c2","c3"]].notna().all(axis=1)&(G["c2"]<G["c1"])&(G["c3"]<G["c2"])
-            rows.append({"scope":scope,"rule":"Contraction c1>c2>c3（正式）","coverage":float(mask.mean()),**metrics(G[mask])})
-
-    # Exact PASS vs FAIL outcome difference for each official Edge.
-    edge_masks=[]
-    if "supply_score" in D:edge_masks.append(("supply_dryup",D["supply_score"]>=60))
-    if "pivot_tight" in D:edge_masks.append(("tight_pivot",D["pivot_tight"]<=.10))
-    if "volratio" in D:edge_masks.append(("demand_confirmation",D["volratio"]>=1.50))
-    if "extension" in D:edge_masks.append(("entry_location",D["extension"]<=.02))
-    if "dry" in D:edge_masks.append(("volume_dry_before_breakout",D["dry"]<.85))
-    if all(c in D for c in ["c1","c2","c3"]):edge_masks.append(("contraction_sequence",D[["c1","c2","c3"]].notna().all(axis=1)&(D["c2"]<D["c1"])&(D["c3"]<D["c2"])))
-    compare=[]
-    for name,mask in edge_masks:
-        a=metrics(D[mask.fillna(False)]);b=metrics(D[~mask.fillna(False)])
-        compare.append({"edge":name,"pass":a,"fail":b,"delta_avg":a["avg"]-b["avg"],"delta_pf":a["pf"]-b["pf"]})
-
-    # Verdict: protect only thresholds with enough observations and positive outcome separation.
-    useful=[x for x in compare if x["pass"]["n"]>=30 and x["fail"]["n"]>=30 and x["delta_avg"]>0 and x["delta_pf"]>0]
-    verdict=("HISTORICAL_SUPPORT: "+", ".join(x["edge"] for x in useful)) if useful else "NO_EDGE_HAS_STABLE_HISTORICAL_SEPARATION"
-    trs=""
-    for scope in [x[0] for x in scopes]:
-        for x in rows:
-            if x["scope"]!=scope:continue
-            trs+=f"<tr><td>{scope}</td><td><b>{esc(x['rule'])}</b></td><td>{x['n']}</td><td>{x['coverage']:.1%}</td><td>{x['win']:.1%}</td><td>{x['avg']:.2%}</td><td>{x['pf']:.2f}</td></tr>"
-    cr=""
-    for x in compare:
-        cr+=f"<tr><td><b>{x['edge']}</b></td><td>{x['pass']['n']}</td><td>{x['pass']['avg']:.2%}</td><td>{x['pass']['pf']:.2f}</td><td>{x['fail']['n']}</td><td>{x['fail']['avg']:.2%}</td><td>{x['fail']['pf']:.2f}</td><td>{x['delta_avg']:+.2%}</td><td>{x['delta_pf']:+.2f}</td></tr>"
-    missing=[c for c in numeric if c not in D.columns]
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:14px;line-height:1.6}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:820px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>🧭 V6.12.16 Historical Analog Expansion</h1><div class='note'>直接读取现有历史 V6 trades 缓存，共 {len(D)} 笔；不下载、不重跑109只、不修改正式门槛。比较正式门槛及邻近值与真实后续收益。</div></div>
-<div class='truth'><b>{esc(verdict)}</b><br>只有 PASS/FAIL 两边各≥30笔，并且平均收益及PF同时改善，才视为有历史支持。缺少字段：{esc(', '.join(missing) if missing else '无')}。</div>
-<div class='c'><h2>正式Edge：通过 vs 不通过的历史收益</h2><div class='scroll'><table><tr><th>Edge</th><th>通过N</th><th>通过平均</th><th>通过PF</th><th>失败N</th><th>失败平均</th><th>失败PF</th><th>平均差</th><th>PF差</th></tr>{cr}</table></div></div>
-<div class='c'><h2>门槛邻近值敏感度</h2><div class='scroll'><table><tr><th>范围</th><th>规则</th><th>N</th><th>覆盖</th><th>胜率</th><th>平均收益</th><th>PF</th></tr>{trs}</table></div></div>
-<div class='c'><b>纪律：</b>本页是历史交易内的Outcome Expansion，不直接改正式策略。若某Edge只有很少通过样本，或放宽后PF下降，则保持原门槛。</div>
-</div></body></html>"""
-
-# ================= V6.12.15 EDGE LOGIC LAYER AUDIT =================
-@APP.get("/v61215/edge-logic")
-def v61215_edge_logic_page():
-    import html
-    esc=lambda x:html.escape(str(x))
-    r=None
-    if V61214_RESULT.exists():
-        try:r=json.loads(V61214_RESULT.read_text(encoding="utf-8"))
-        except Exception:r=None
-    if not r:
-        return "<h2>请先完成 V6.12.14 Edge-Gate Cliff Audit</h2><a href='/v61214/edge-cliff'>打开 V6.12.14</a>",409
-
-    rules=[
-      ("supply_dryup","supply_score",">=",60.0,"供应质量分至少60"),
-      ("tight_pivot","pivot_tight","<=",0.10,"Pivot宽度不超过10%"),
-      ("demand_confirmation","volratio",">=",1.50,"突破量至少1.50倍"),
-      ("entry_location","extension","<=",0.02,"突破延伸不超过2%"),
-      ("volume_dry_before_breakout","dry","<",0.85,"突破前量能收干低于0.85"),
-    ]
-    comps={x.get("component"):x for x in r.get("components",[])}
-    rule_rows=""
-    for edge,field,op,th,meaning in rules:
-        c=comps.get(field,{})
-        pre=c.get("pre_median");post=c.get("post_median")
-        def ok(v):
-            if v is None:return False
-            return (v>=th) if op==">=" else ((v<=th) if op=="<=" else v<th)
-        verdict=("前后均达标" if ok(pre) and ok(post) else "5/20后跌破门槛" if ok(pre) and not ok(post) else "前后均未达标" if not ok(pre) and not ok(post) else "5/20后改善达标")
-        cls="bad" if "未达标" in verdict or "跌破" in verdict else "good"
-        rule_rows+=f"<tr><td><b>{edge}</b></td><td>{field}</td><td>{op} {th:g}</td><td>{esc(pre)}</td><td>{esc(post)}</td><td class='{cls}'><b>{verdict}</b></td><td>{meaning}</td></tr>"
-
-    examples=r.get("examples",[])
-    detail="";fail_counts={k:0 for k,_,_,_,_ in rules};contract_fail=0
-    for x in examples:
-        fails=[]
-        for edge,field,op,th,_ in rules:
-            v=x.get(field);q=pd.to_numeric(pd.Series([v]),errors="coerce").iloc[0]
-            passed=pd.notna(q) and ((q>=th) if op==">=" else ((q<=th) if op=="<=" else q<th))
-            if not passed:fails.append(f"{edge}: {field}={v} 未达到 {op}{th:g}");fail_counts[edge]+=1
-        vals=[x.get("c1"),x.get("c2"),x.get("c3")]
-        vv=[pd.to_numeric(pd.Series([v]),errors="coerce").iloc[0] for v in vals]
-        contraction=all(pd.notna(v) for v in vv) and vv[1]<vv[0] and vv[2]<vv[1]
-        if not contraction:fails.append(f"contraction_sequence: 需要 c1>c2>c3；实际 {vals}");contract_fail+=1
-        detail+=f"<tr><td><b>{esc(x.get('ticker'))}</b></td><td>{esc(x.get('date'))}</td><td>{esc(x.get('edge_count'))}</td><td>{esc(x.get('supply_score'))}</td><td>{esc(x.get('pivot_tight'))}</td><td>{esc(x.get('volratio'))}</td><td>{esc(x.get('extension'))}</td><td>{esc(x.get('c1'))} / {esc(x.get('c2'))} / {esc(x.get('c3'))}</td><td>{'<br>'.join(esc(z) for z in fails)}</td></tr>"
-
-    n=max(1,len(examples));counts="" 
-    for edge,_,_,_,_ in rules:
-        counts+=f"<tr><td><b>{edge}</b></td><td>{fail_counts[edge]}/{len(examples)}</td><td>{fail_counts[edge]/n:.1%}</td></tr>"
-    counts+=f"<tr><td><b>contraction_sequence</b></td><td>{contract_fail}/{len(examples)}</td><td>{contract_fail/n:.1%}</td></tr>"
-
-    supply_pre=comps.get("supply_score",{}).get("pre_median");supply_post=comps.get("supply_score",{}).get("post_median")
-    vol_pre=comps.get("volratio",{}).get("pre_median");vol_post=comps.get("volratio",{}).get("post_median")
-    verdict=("<b>LOGIC_OK · THRESHOLD/REGIME MISMATCH</b><br>没有发现输入缺失或单位跳变。"
-             f"Supply Edge 要求≥60，但中位数由 {supply_pre} 降至 {supply_post}；Demand 要求量比≥1.50，但中位数只有 {vol_pre} / {vol_post}。"
-             "这两个Edge长期为0是门槛结果，不是程序没有计算。5/20后真正新增的断层主要是 Pivot Tightness 与 Contraction 顺序。暂时不能改参数，样本只有4笔对2笔。")
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:18px;margin:14px 0}}.note{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:14px;line-height:1.6}}.truth{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.65}}table{{width:100%;border-collapse:collapse;font-size:12px;min-width:860px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}.scroll{{overflow:auto}}.good{{color:#047857}}.bad{{color:#b91c1c}}details summary{{font-size:19px;cursor:pointer}}</style></head><body><div class='w'><a href='/'>← 返回主页</a>
-<div class='c'><h1>🧪 V6.12.15 Edge Logic Layer Audit</h1><div class='note'>直接读取已经完成的 V6.12.14 result.json；不下载、不重跑109只、不修改门槛。</div></div>
-<div class='truth'>{verdict}</div>
-<div class='c'><h2>真实公式与门槛</h2><div class='scroll'><table><tr><th>Edge</th><th>输入</th><th>真实门槛</th><th>5/20前中位数</th><th>5/20后中位数</th><th>判定</th><th>含义</th></tr>{rule_rows}
-<tr><td><b>contraction_sequence</b></td><td>c1,c2,c3</td><td>c1 &gt; c2 &gt; c3</td><td>{esc(comps.get('c1',{}).get('pre_median'))} / {esc(comps.get('c2',{}).get('pre_median'))} / {esc(comps.get('c3',{}).get('pre_median'))}</td><td>{esc(comps.get('c1',{}).get('post_median'))} / {esc(comps.get('c2',{}).get('post_median'))} / {esc(comps.get('c3',{}).get('post_median'))}</td><td class='bad'><b>后期中位顺序不收缩</b></td><td>每次收缩必须严格小于上一次</td></tr></table></div></div>
-<div class='c'><h2>5/20后失败集中度</h2><div class='scroll'><table><tr><th>Edge</th><th>失败数</th><th>失败率</th></tr>{counts}</table></div></div>
-<details class='c'><summary><b>逐笔原始值、门槛与失败原因</b></summary><div class='scroll'><table><tr><th>股票</th><th>日期</th><th>Edge数</th><th>Supply</th><th>Pivot Tight</th><th>Vol Ratio</th><th>Extension</th><th>c1/c2/c3</th><th>失败原因</th></tr>{detail}</table></div></details>
-<div class='c'><b>下一步纪律：</b>这页只定位逻辑层，不改参数。需要扩大5/20后样本或等待更多正式Base Setup，再决定是否做V6.12.16门槛敏感度测试。</div>
-</div></body></html>"""
 
 @APP.get("/v61213/write-truth")
 def v61213_page():
