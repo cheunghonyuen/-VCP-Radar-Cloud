@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v6134-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.4 Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：Development 定Cut，未来年份只验证</div></div><a href="/v6134/entry-extension-holdout"><button type="button">打开 V6.13.4</button></a></div></div>
 <div class="card" id="v6133-shortcut" style="border:3px solid #7c3aed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.13.3 META Failure Autopsy</h2><div class="muted">Fast Replay：冻结META，找 Loser vs Big Winner 的进场前差异；不调参数</div></div><a href="/v6133/failure-autopsy"><button type="button">打开 V6.13.3</button></a></div></div>
 <div class="card" id="v6132-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.13.2 Fast Replay + Winner Management</h2><div class="muted">不重跑选股：冻结 V6.13.1 META，直接测试 10MA/20MA Winner Exit</div></div><a href="/v6132/winner-replay"><button type="button">打开 V6.13.2</button></a></div></div>
 
@@ -9941,6 +9942,208 @@ def v6132_page():
     run='' if st.get('status')=='running' else '<form method="post" action="/v6132/run"><button>⚡ 跑 Fast Winner Replay</button></form>'
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
 
+
+
+
+# ================= V6.13.4 ENTRY EXTENSION · STRICT HOLDOUT =================
+# Strict validation only. No parameter sweep.
+V6134_DIR = DATA_DIR / "jlaw_v6134_entry_extension_holdout"
+V6134_STATUS = V6134_DIR / "status.json"
+V6134_RESULT = V6134_DIR / "result.json"
+v6134_thread = None
+
+def _v6134_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None,"elapsed_sec":0}
+    if V6134_STATUS.exists():
+        try:s.update(json.loads(V6134_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v6134_write_status(**kw):
+    V6134_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v6134_status();s.update(kw)
+    V6134_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v6134_pf(x):
+    r=pd.to_numeric(pd.Series(x),errors="coerce").dropna()
+    w=r[r>0]; l=r[r<0]
+    if len(l) and -l.sum()>0:return float(w.sum()/(-l.sum()))
+    return 99.0 if len(w) else 0.0
+
+def _v6134_metrics(z):
+    if z is None or len(z)==0:return {"trades":0,"pf":0.0,"avg_return":0.0,"win_rate":0.0,"avg_win":0.0,"avg_loss":0.0,"bigwinners":0}
+    r=pd.to_numeric(z["return_pct"],errors="coerce")
+    mfe=pd.to_numeric(z["mfe"],errors="coerce")
+    return dict(
+        trades=int(len(z)),
+        pf=_v6134_pf(r),
+        avg_return=float(r.mean()),
+        win_rate=float((r>0).mean()),
+        avg_win=float(r[r>0].mean()) if (r>0).any() else 0.0,
+        avg_loss=float(r[r<0].mean()) if (r<0).any() else 0.0,
+        bigwinners=int((mfe>=.20).sum()),
+    )
+
+def _v6134_apply_cut(z, cut):
+    x=pd.to_numeric(z["entry_extension"],errors="coerce")
+    return z[x < float(cut)].copy()
+
+def _v6134_compare(base, filt):
+    b=_v6134_metrics(base); f=_v6134_metrics(filt)
+    big_total=max(1,b.get("bigwinners",0))
+    loser_total=max(1,int((pd.to_numeric(base["return_pct"],errors="coerce")<=0).sum()))
+    big_keep=int((pd.to_numeric(filt["mfe"],errors="coerce")>=.20).sum())/big_total if len(filt) else 0.0
+    loser_rej=1-int((pd.to_numeric(filt["return_pct"],errors="coerce")<=0).sum())/loser_total if len(filt) else 1.0
+    return dict(base=b,filtered=f,bigwinner_retention=float(big_keep),loser_rejection=float(loser_rej),
+                pf_delta=float(f.get("pf",0)-b.get("pf",0)),
+                avg_return_delta=float(f.get("avg_return",0)-b.get("avg_return",0)))
+
+def _v6134_compute():
+    global v6134_thread
+    t0=time.time()
+    try:
+        if not V6133_DETAIL.exists():
+            raise RuntimeError("缺少 V6.13.3 features.csv；请先跑 V6.13.3")
+        F=pd.read_csv(V6133_DETAIL)
+        F["entry_date"]=pd.to_datetime(F["entry_date"],errors="coerce")
+        F["entry_extension"]=pd.to_numeric(F["entry_extension"],errors="coerce")
+        F["return_pct"]=pd.to_numeric(F["return_pct"],errors="coerce")
+        F["mfe"]=pd.to_numeric(F["mfe"],errors="coerce")
+        F=F.dropna(subset=["entry_date","entry_extension","return_pct","mfe"]).copy()
+        if len(F)<60:raise RuntimeError("样本不足，无法做严格 Holdout")
+        _v6134_write_status(status="running",message="Strict Holdout：Development 定阈值，Holdout 只验证",processed=0,total=3,elapsed_sec=0,error=None)
+
+        dev=F[F["entry_date"] < pd.Timestamp("2022-01-01")].copy()
+        hold=F[F["entry_date"] >= pd.Timestamp("2022-01-01")].copy()
+        split_date=pd.Timestamp("2022-01-01")
+        if len(dev)<30 or len(hold)<20:
+            F2=F.sort_values("entry_date").reset_index(drop=True)
+            k=max(30,min(len(F2)-20,int(len(F2)*0.70)))
+            split_date=F2.iloc[k]["entry_date"]
+            dev=F[F["entry_date"] < split_date].copy()
+            hold=F[F["entry_date"] >= split_date].copy()
+
+        dev_cut=float(dev["entry_extension"].median())
+        strict=dict(
+            split_date=str(pd.Timestamp(split_date).date()),
+            development_cut=dev_cut,
+            development=_v6134_compare(dev,_v6134_apply_cut(dev,dev_cut)),
+            holdout=_v6134_compare(hold,_v6134_apply_cut(hold,dev_cut)),
+        )
+        _v6134_write_status(status="running",message="Strict Holdout 完成；开始 Walk-Forward",processed=1,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        years=sorted(int(y) for y in F["entry_date"].dt.year.dropna().unique())
+        wf=[]
+        for y in years:
+            train=F[F["entry_date"].dt.year < y].copy()
+            test=F[F["entry_date"].dt.year == y].copy()
+            if len(train)<30 or len(test)<3:continue
+            cut=float(train["entry_extension"].median())
+            cmp=_v6134_compare(test,_v6134_apply_cut(test,cut))
+            wf.append(dict(
+                year=int(y),train_n=int(len(train)),test_n=int(len(test)),cut=cut,
+                base_pf=cmp["base"]["pf"],filtered_pf=cmp["filtered"]["pf"],
+                base_avg_return=cmp["base"]["avg_return"],filtered_avg_return=cmp["filtered"]["avg_return"],
+                bigwinner_retention=cmp["bigwinner_retention"],loser_rejection=cmp["loser_rejection"],
+                pf_delta=cmp["pf_delta"]
+            ))
+
+        oos_parts=[]; base_parts=[]
+        for row in wf:
+            y=row["year"]; cut=row["cut"]
+            test=F[F["entry_date"].dt.year==y].copy()
+            base_parts.append(test)
+            kept=_v6134_apply_cut(test,cut)
+            if len(kept):oos_parts.append(kept)
+        wf_base=pd.concat(base_parts,ignore_index=True) if base_parts else F.iloc[0:0].copy()
+        wf_oos=pd.concat(oos_parts,ignore_index=True) if oos_parts else F.iloc[0:0].copy()
+        wf_summary=_v6134_compare(wf_base,wf_oos) if len(wf_base) else {}
+
+        _v6134_write_status(status="running",message="Walk-Forward 完成；检查预先通过标准",processed=2,total=3,elapsed_sec=round(time.time()-t0,2))
+
+        ho=strict["holdout"]
+        pass_pf = ho["filtered"]["pf"] >= max(1.20, ho["base"]["pf"] + 0.10)
+        pass_ret = ho["filtered"]["avg_return"] > ho["base"]["avg_return"]
+        pass_big = ho["bigwinner_retention"] >= 0.80
+        pass_loser = ho["loser_rejection"] >= 0.20
+        verdict="PASS" if (pass_pf and pass_ret and pass_big and pass_loser) else ("MIXED" if (pass_ret and pass_big and (pass_pf or pass_loser)) else "FAIL")
+
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            full_scan=False,
+            source="V6.13.3 fixed META features.csv",
+            total_trades=int(len(F)),
+            strict_holdout=strict,
+            walk_forward=wf,
+            walk_forward_oos=wf_summary,
+            verdict=verdict,
+            pass_checks=dict(pf=bool(pass_pf),avg_return=bool(pass_ret),bigwinner_retention=bool(pass_big),loser_rejection=bool(pass_loser)),
+            note="Strict: cut comes only from Development. Walk-forward: each test year uses only prior years to set the median cut. No threshold sweep."
+        )
+        V6134_DIR.mkdir(parents=True,exist_ok=True)
+        V6134_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v6134_write_status(status="done",message="V6.13.4 Strict Holdout + Walk-Forward 完成",processed=3,total=3,elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v6134_write_status(status="error",message="V6.13.4 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v6134_thread=None
+
+def _v6134_start():
+    global v6134_thread
+    if v6134_thread is not None and v6134_thread.is_alive():return False
+    v6134_thread=threading.Thread(target=_v6134_compute,daemon=True)
+    v6134_thread.start();return True
+
+@APP.post("/v6134/run")
+def v6134_run():
+    _v6134_start();return redirect("/v6134/entry-extension-holdout")
+
+@APP.get("/api/v6134/status")
+def v6134_status_api():
+    return jsonify(_v6134_status())
+
+@APP.get("/v6134/entry-extension-holdout")
+def v6134_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v6134_status();r=None
+    if V6134_RESULT.exists():
+        try:r=json.loads(V6134_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    strict_html="";wf_html="";verdict_html=""
+    if r:
+        sh=r.get("strict_holdout",{});cut=sh.get("development_cut",0)
+        for label,cmp in [("DEVELOPMENT",sh.get("development",{})),("HOLDOUT",sh.get("holdout",{}))]:
+            if not cmp:continue
+            b=cmp.get("base",{});f=cmp.get("filtered",{})
+            strict_html += (
+                f"<tr><td><b>{label}</b></td><td>{cut:.2%}</td><td>{b.get('trades',0)}</td><td>{b.get('pf',0):.2f}</td>"
+                f"<td>{f.get('trades',0)}</td><td><b>{f.get('pf',0):.2f}</b></td><td>{b.get('avg_return',0):.2%}</td>"
+                f"<td>{f.get('avg_return',0):.2%}</td><td>{cmp.get('bigwinner_retention',0):.1%}</td><td>{cmp.get('loser_rejection',0):.1%}</td></tr>"
+            )
+        for x in r.get("walk_forward",[]):
+            wf_html += (
+                f"<tr><td><b>{x['year']}</b></td><td>{x['train_n']}</td><td>{x['test_n']}</td><td>{x['cut']:.2%}</td>"
+                f"<td>{x['base_pf']:.2f}</td><td><b>{x['filtered_pf']:.2f}</b></td><td>{x['base_avg_return']:.2%}</td>"
+                f"<td>{x['filtered_avg_return']:.2%}</td><td>{x['bigwinner_retention']:.1%}</td><td>{x['loser_rejection']:.1%}</td><td>{x['pf_delta']:+.2f}</td></tr>"
+            )
+        vd=r.get("verdict","")
+        cls="ok" if vd=="PASS" else ("warn" if vd=="MIXED" else "bad")
+        verdict_html=f"<div class='{cls}'><h2 style='margin:0'>Verdict：{esc(vd)}</h2></div>"
+    run="" if st.get("status")=="running" else '<form method="post" action="/v6134/run"><button>⚡ 跑 Strict Holdout + Walk-Forward</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.ok,.warn,.bad{{border-radius:14px;padding:14px;margin:12px 0}}.ok{{background:#ecfdf5;border:1px solid #86efac}}.warn{{background:#fff7df;border:1px solid #f1c75b}}.bad{{background:#fef2f2;border:1px solid #fca5a5}}table{{width:100%;border-collapse:collapse;min-width:900px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧪 V6.13.4 · Entry Extension · Strict Holdout</h1><div class="info"><b>真正独立验证。</b> Development 只负责产生 Entry Extension 切点；Holdout 不参与定阈值。Walk-Forward 每一年只允许使用过去年份确定切点。没有参数扫描。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div>
+{verdict_html}
+<div class="c"><h2>Strict Holdout</h2><div class="scroll"><table><tr><th>样本</th><th>Dev定出的Cut</th><th>Base N</th><th>Base PF</th><th>Filtered N</th><th>Filtered PF</th><th>Base Avg Ret</th><th>Filtered Avg Ret</th><th>Big Winner保留</th><th>Loser排除</th></tr>{strict_html}</table></div></div>
+<div class="c"><h2>Walk-Forward · 每年只用过去数据</h2><div class="scroll"><table><tr><th>测试年</th><th>训练N</th><th>测试N</th><th>Cut</th><th>Base PF</th><th>Filtered PF</th><th>Base Avg Ret</th><th>Filtered Avg Ret</th><th>Big Winner保留</th><th>Loser排除</th><th>PF变化</th></tr>{wf_html}</table></div></div>
+<div class="c"><div class="info"><b>预先通过标准：</b>Holdout PF 至少 1.20 且较 Base 提升 ≥0.10；Avg Return 提升；Big Winner 保留 ≥80%；Loser 排除 ≥20%。四项全部满足才 PASS。</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6134/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>'''
 
 
 # ================= V6.13.3 META FAILURE AUTOPSY · FAST REPLAY =================
