@@ -6160,7 +6160,7 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
-<div class="top"><div><h1>VCP Radar Cloud · V6.13.1</h1><div class="muted">当前研究版：JLaw META / First Pullback Shadow · V6.12.14 Baseline 冻结</div></div>
+<div class="top"><div><h1>VCP Radar Cloud · V6.17</h1><div class="muted">Production Candidate · 主系统已冻结当前最佳规则；研究分支继续独立测试，不阻塞生产版</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
 <div class="grid">
@@ -6961,6 +6961,19 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h322/daily-mtm"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
+
+<div class="card" id="v617-production-shortcut" style="border:4px solid #10b981;background:#f0fdf4">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0;font-size:30px">🚀 V6.17 Production Candidate</h2>
+      <div class="muted" style="margin-top:8px">
+        当前主系统：冻结 DNA + CONTROL 买点 + -7% 止损 + HOLD1260 + 10仓 + FIRST_COME。
+        未通过测试的 Add-on / Gate / Replacement 不进入生产规则。
+      </div>
+    </div>
+    <a href="/v617/production"><button type="button" style="font-size:18px;padding:14px 18px">打开 V6.17 主系统</button></a>
+  </div>
+</div>
 <div class="card" id="v616i4-shortcut" style="border:3px solid #10b981"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16I.6 满仓强换弱 / Replacement Test</h2><div class="muted">Low-memory · 10-slot · test whether a candidate deserves a scarce long-hold slot</div></div><a href="/v616i6/replacement"><button type="button">打开 V6.16I.6</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
@@ -17511,8 +17524,8 @@ def v617_production_page():
     status=e(s.get('status','idle')); msg=e(s.get('message',''))
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
-    <div class="c"><h1>🚀 V6.17 · Production Candidate</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
-    <div class="c"><h2>生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
+    <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
+    <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
     <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
-    <div class="c"><div class="ok"><b>Production baseline:</b> Daily-MTM BASE_ONLY / FIRST_COME account benchmark from the validated branch: End Equity 31.45x, CAGR 23.12%, MaxDD -38.30%, Calmar 0.60. These are research/backtest figures, not a guarantee of future performance.</div></div>
+    <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
