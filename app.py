@@ -6959,7 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616c2-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C.6 Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C.6</button></a></div></div>
+<div class="card" id="v616c2-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C.7 Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C.7</button></a></div></div>
 <div class="card" id="v616b-shortcut" style="border:3px solid #ef4444"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.16B Failure / Stop Research</h2><div class="muted">冻结 Big Winner DNA · -4/-5/-6/-7% + Structural Stop · 检查误杀大赢家</div></div><a href="/v616b/stop-research"><button type="button">打开 V6.16B</button></a></div></div>
 <div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
 <div class="card" id="v615f-shortcut" style="border:3px solid #16a34a"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.15F Strict Big Winner OOS</h2><div class="muted">冻结 A/B · 过去定阈值 · 未来年验证 · 不调 Entry/Stop/Exit</div></div><a href="/v615f/strict-oos"><button type="button">打开 V6.15F</button></a></div></div>
@@ -9987,7 +9987,7 @@ def v6132_page():
 
 
 # ================= V6.16C EARLY FAILURE SIGNATURE RESEARCH =================
-V616C_DIR=DATA_DIR/'jlaw_v616c_early_failure'
+V616C_DIR=DATA_DIR/'jlaw_v616c7_streaming_clean'
 V616C_STATUS=V616C_DIR/'status.json'; V616C_RESULT=V616C_DIR/'result.json'
 V616C_REPORT=V616C_DIR/'signature_report.csv'; V616C_DETAIL=V616C_DIR/'signature_detail.csv'
 v616c_thread=None
@@ -10004,7 +10004,7 @@ def _v616c_write(**kw):
     V616C_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
 
 def _v616c_recover_stale_status():
-    # V6.16C.6 CLEAN: passive shared status read for Railway multi-worker.
+    # V6.16C.7 CLEAN: passive shared status read for Railway multi-worker.
     return _v616c_status()
 
 def _v616c_features(d,ei,px,day):
@@ -10169,14 +10169,14 @@ def _v616c_run():
             'elapsed_sec':round(time.time()-t0,2),
             'rows':int(total_events),
             'methods':R.to_dict('records'),
-            'rule_note':'V6.16C.6 STREAMING. Frozen V6.15F DNA + V6.16A entries + terminal -7% stop. D1/D2/D3/D5 signals use only information known by that close; exits execute next open. No BE/Add/Winner Exit/sizing.',
+            'rule_note':'V6.16C.7 STREAMING. Frozen V6.15F DNA + V6.16A entries + terminal -7% stop. D1/D2/D3/D5 signals use only information known by that close; exits execute next open. No BE/Add/Winner Exit/sizing.',
             'acceptance':'Must improve BOTH PF and Avg Return versus fixed -7%, with useful failure precision/recall and low BW20/30/50 kill rates. Otherwise keep simple -7%.',
             'warning':'Discovery on existing 455-file cache; survivorship-bias limits remain. Later strict time/ticker OOS required.'
         }
         V616C_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
         _v616c_write(
             status='done',
-            message='V6.16C.6 Streaming Early Failure Research 完成',
+            message='V6.16C.7 Streaming Early Failure Research 完成',
             processed=len(ticks),total=len(ticks),current='',
             elapsed_sec=res['elapsed_sec'],error=None
         )
@@ -10185,7 +10185,7 @@ def _v616c_run():
         traceback.print_exc()
         _v616c_write(
             status='error',
-            message='V6.16C.6 失败',
+            message='V6.16C.7 失败',
             error=f'{type(ex).__name__}: {ex}',
             elapsed_sec=round(time.time()-t0,1)
         )
@@ -10219,10 +10219,10 @@ def v616c_page():
     trs=''
     for x in r.get('methods',[])[:80]:
         trs+=f"<tr><td>{e(x.get('group'))}</td><td>{e(x.get('entry'))}</td><td>D{int(x.get('day',0))}</td><td><b>{e(x.get('signal'))}</b></td><td>{int(x.get('hit_n',0)):,}</td><td>{x.get('hit_rate',0):.1%}</td><td>{x.get('failure_precision',0) if x.get('failure_precision') is not None else 0:.1%}</td><td>{x.get('failure_recall',0) if x.get('failure_recall') is not None else 0:.1%}</td><td>{x.get('base_pf',0) if x.get('base_pf') is not None else 0:.2f}</td><td><b>{x.get('strategy_pf',0) if x.get('strategy_pf') is not None else 0:.2f}</b></td><td>{x.get('pf_delta',0) if x.get('pf_delta') is not None else 0:+.2f}</td><td>{x.get('base_avg',0):.2%}</td><td><b>{x.get('strategy_avg',0):.2%}</b></td><td>{x.get('avg_delta',0):+.2%}</td><td>{x.get('strategy_avgloss',0):.1%}</td><td>{x.get('kill_bw20',0) if x.get('kill_bw20') is not None else 0:.1%}</td><td>{x.get('kill_bw30',0) if x.get('kill_bw30') is not None else 0:.1%}</td><td>{x.get('kill_bw50',0) if x.get('kill_bw50') is not None else 0:.1%}</td></tr>"
-    btn='' if s.get('status') in ('running','aggregating') else '<div style="display:flex;gap:10px;flex-wrap:wrap"><form method="post" action="/v616c/run"><button>▶ 跑 V6.16C.6 Early Failure Research</button></form><form method="post" action="/v616c/reset-status"><button type="submit" style="background:#64748b">↻ 清理旧状态</button></form></div>'
+    btn='' if s.get('status') in ('running','aggregating') else '<div style="display:flex;gap:10px;flex-wrap:wrap"><form method="post" action="/v616c/run"><button>▶ 跑 V6.16C.7 Early Failure Research</button></form><form method="post" action="/v616c/reset-status"><button type="submit" style="background:#64748b">↻ 清理旧状态</button></form></div>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:10.5px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
-<a href="/">← 返回主页</a><div class="c"><h1>🧬 V6.16C.6 · Early Failure Signature Research</h1><div class="info"><b>V6.16C.6 STREAMING BUILD。</b> 扫描时直接流式累计统计，不再把几十万条明细塞进 DataFrame/groupby。<br><b>-7% 是最后保险。</b>冻结选股 DNA、Entry 与 terminal -7% Stop；只研究 D1/D2/D3/D5 当时已经出现的失败证据。信号触发后下一交易日开盘退出，避免 look-ahead。</div></div>
+<a href="/">← 返回主页</a><div class="c"><h1>🧬 V6.16C.7 · Early Failure Signature Research</h1><div class="info"><b>V6.16C.7 STREAMING BUILD。</b> 独立状态目录 + Streaming 汇总；不会再读取 C2/C5/C6 遗留的 running/aggregating 状态。<br><b>-7% 是最后保险。</b>冻结选股 DNA、Entry 与 terminal -7% Stop；只研究 D1/D2/D3/D5 当时已经出现的失败证据。信号触发后下一交易日开盘退出，避免 look-ahead。</div></div>
 <div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{btn}</div>
 <div class="c"><h2>Failure Signature Ranking</h2><div class="warn">必须同时提高 <b>PF + Avg Return</b>，并检查 Failure Precision / Recall 与 BW20/30/50 Kill Rate。只是让 Avg Loss 好看、却误杀大赢家的规则直接淘汰。</div><div style="overflow:auto"><table><tr><th>Group</th><th>Entry</th><th>Day</th><th>Signal</th><th>Hit N</th><th>Hit%</th><th>Failure Precision</th><th>Failure Recall</th><th>Base PF</th><th>New PF</th><th>ΔPF</th><th>Base Avg</th><th>New Avg</th><th>ΔAvg</th><th>AvgLoss</th><th>Kill BW20</th><th>Kill BW30</th><th>Kill BW50</th></tr>{trs}</table></div></div>
 <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div>
