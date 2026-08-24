@@ -14476,8 +14476,21 @@ def publisher_publish():
 
 @APP.get("/health")
 def health():
-    info=storage_info()
-    return jsonify({"ok":True,"version":"v5.1-free-tier-auto-resume","data_dir":info["data_dir"],"writable":info["writable"]})
+    # Railway healthcheck must be instant and side-effect free.
+    # Do NOT touch Volume/storage, pandas, Tiingo, cache files, or background state here.
+    return "OK", 200, {"Content-Type":"text/plain; charset=utf-8"}
 
-recover_stale_v3_status()
-threading.Thread(target=scheduler_loop, daemon=True).start()
+def _deferred_app_startup():
+    """Start non-essential recovery/scheduler only after the web app can answer /health."""
+    try:
+        time.sleep(3.0)
+        recover_stale_v3_status()
+    except Exception:
+        traceback.print_exc()
+    try:
+        threading.Thread(target=scheduler_loop, daemon=True).start()
+    except Exception:
+        traceback.print_exc()
+
+# Never block Gunicorn/Railway startup on recovery, Volume I/O, scheduler, or cache work.
+threading.Thread(target=_deferred_app_startup, daemon=True).start()
