@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615a-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧱 V6.15A Big Winner Data Integrity</h2><div class="muted">先验历史Universe/退市股/价格覆盖；Blocking FAIL 就不进入权重与DNA</div></div><a href="/v615a/data-integrity"><button type="button">打开 V6.15A</button></a></div></div>
 <div class="card" id="v614-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌍 V6.14 True OOS Expansion</h2><div class="muted">冻结现有规则，优先用 V6.13 从未出现过的新股票做独立扩样验证</div></div><a href="/v614/oos-expansion"><button type="button">打开 V6.14</button></a></div></div>
 <div class="card" id="v6137-shortcut" style="border:3px solid #2563eb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛟 V6.13.7 False-Reject Big Winner Escape</h2><div class="muted">冻结 V6.13.6 Gate，专门研究被误杀的大赢家为什么还能跑出来</div></div><a href="/v6137/false-reject-escape"><button type="button">打开 V6.13.7</button></a></div></div>
 <div class="card" id="v6136-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.6 RS + Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：只验证 RS≥90 + Low Extension</div></div><a href="/v6136/rs-extension-holdout"><button type="button">打开 V6.13.6</button></a></div></div>
@@ -9951,6 +9952,277 @@ def v6132_page():
 
 
 
+
+
+# ================= V6.15A BIG WINNER DATA INTEGRITY BENCHMARK =================
+# PURPOSE:
+#   Validate the historical research dataset BEFORE learning any factor weights.
+#   No Entry / Stop / Exit / PF optimization. No ranking model.
+#   Reconstruct approximate point-in-time US stock universes from Tiingo's
+#   supported_tickers.csv startDate/endDate, including covered delisted names.
+# IMPORTANT:
+#   This is a DATA PRE-FLIGHT. It refuses to approve DNA/weight research when
+#   historical cache coverage is inadequate.
+V615A_DIR = DATA_DIR / "jlaw_v615a_data_integrity"
+V615A_STATUS = V615A_DIR / "status.json"
+V615A_RESULT = V615A_DIR / "result.json"
+V615A_MASTER = V615A_DIR / "supported_tickers.csv"
+V615A_SNAPSHOTS = V615A_DIR / "snapshot_coverage.csv"
+V615A_MASTER_URL = "https://apimedia.tiingo.com/docs/tiingo/daily/supported_tickers.zip"
+v615a_thread = None
+
+# Major US venues for the first benchmark. OTC/PINK are deliberately excluded
+# from the primary universe but are reported separately rather than silently lost.
+V615A_US_EXCHANGES = {
+    "NASDAQ", "NYSE", "NYSE MKT", "AMEX", "NYSE ARCA", "NYSEAMERICAN",
+    "BATS", "IEX"
+}
+V615A_COVERAGE_GO = 0.80       # minimum historical ticker coverage to start research benchmark
+V615A_COVERAGE_LOCKBOX = 0.95  # target before final lockbox claims
+
+
+def _v615a_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None,"elapsed_sec":0}
+    if V615A_STATUS.exists():
+        try:s.update(json.loads(V615A_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+
+def _v615a_write_status(**kw):
+    V615A_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v615a_status();s.update(kw)
+    V615A_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+
+def _v615a_download_master(force=False):
+    # Download Tiingo full supported ticker master once; includes start/end dates.
+    if V615A_MASTER.exists() and not force:
+        try:
+            d=pd.read_csv(V615A_MASTER)
+            if len(d)>1000:return d
+        except Exception:pass
+    import io, zipfile
+    req=Request(V615A_MASTER_URL,headers={"User-Agent":"VCP-Radar-Cloud/1.2"})
+    with urlopen(req,timeout=60) as r:
+        raw=r.read()
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names=z.namelist()
+        target="supported_tickers.csv" if "supported_tickers.csv" in names else names[0]
+        csvraw=z.read(target)
+    V615A_DIR.mkdir(parents=True,exist_ok=True)
+    V615A_MASTER.write_bytes(csvraw)
+    return pd.read_csv(io.BytesIO(csvraw))
+
+
+def _v615a_normalize_master(d):
+    d=d.copy()
+    d.columns=[str(c).strip() for c in d.columns]
+    col={c.lower():c for c in d.columns}
+    def get(name):return col.get(name.lower())
+    need=[get("ticker"),get("exchange"),get("assetType"),get("priceCurrency"),get("startDate"),get("endDate")]
+    if any(x is None for x in need):
+        raise RuntimeError(f"Tiingo supported_tickers.csv 栏位变化：{list(d.columns)}")
+    d=d.rename(columns={
+        get("ticker"):"ticker",get("exchange"):"exchange",get("assetType"):"assetType",
+        get("priceCurrency"):"priceCurrency",get("startDate"):"startDate",get("endDate"):"endDate"
+    })
+    d["ticker"]=d["ticker"].astype(str).str.upper().str.strip()
+    d["exchange"]=d["exchange"].astype(str).str.upper().str.strip()
+    d["assetType"]=d["assetType"].astype(str).str.strip()
+    d["priceCurrency"]=d["priceCurrency"].astype(str).str.upper().str.strip()
+    d["startDate"]=pd.to_datetime(d["startDate"],errors="coerce")
+    d["endDate"]=pd.to_datetime(d["endDate"],errors="coerce")
+    return d
+
+
+def _v615a_cache_ranges():
+    # Read only first/last dates from local market cache; no full historical re-scan.
+    out=[]
+    for p in MARKET_DIR.glob("*.csv"):
+        t=p.stem.upper()
+        try:
+            # Files are small enough, but use only Date column to keep audit quick.
+            x=pd.read_csv(p,usecols=["Date"])
+            ds=pd.to_datetime(x["Date"],errors="coerce").dropna()
+            if len(ds):out.append((t,ds.min(),ds.max(),len(ds)))
+        except Exception:
+            try:
+                x=pd.read_csv(p)
+                dc="date" if "date" in x.columns else ("Date" if "Date" in x.columns else None)
+                if dc:
+                    ds=pd.to_datetime(x[dc],errors="coerce").dropna()
+                    if len(ds):out.append((t,ds.min(),ds.max(),len(ds)))
+            except Exception:pass
+    return pd.DataFrame(out,columns=["ticker","cache_start","cache_end","bars"])
+
+
+def _v615a_snapshot_dates(start_year=2007):
+    # Annual anchors are enough for preflight coverage; later benchmark can use weekly snapshots.
+    now=pd.Timestamp.utcnow().tz_localize(None).normalize()
+    dates=[]
+    for y in range(start_year,now.year+1):
+        dates.append(pd.Timestamp(f"{y}-06-30"))
+    return [d for d in dates if d<=now]
+
+
+def _v615a_run(force_master=False):
+    global v615a_thread
+    t0=time.time()
+    try:
+        _v615a_write_status(status="running",message="阶段1/4：读取 Tiingo 全量历史 ticker 主表",processed=0,total=4,error=None,elapsed_sec=0)
+        raw=_v615a_download_master(force_master)
+        M=_v615a_normalize_master(raw)
+
+        # Primary US listed-stock research universe; no ETFs/mutual funds, USD only.
+        stocks=M[M["assetType"].astype(str).str.upper().eq("STOCK")].copy()
+        usd=stocks[stocks["priceCurrency"].eq("USD")].copy()
+        primary=usd[usd["exchange"].isin(V615A_US_EXCHANGES)].copy()
+        otc=usd[usd["exchange"].str.contains("OTC|PINK",regex=True,na=False)].copy()
+        primary=primary.dropna(subset=["startDate","endDate"]).copy()
+
+        # endDate earlier than recent date is a covered ended/delisted/recycled listing proxy.
+        today=pd.Timestamp.utcnow().tz_localize(None).normalize()
+        ended=primary[primary["endDate"] < today-pd.Timedelta(days=14)].copy()
+
+        _v615a_write_status(status="running",message="阶段2/4：审计本地历史价格缓存覆盖",processed=1,total=4,elapsed_sec=round(time.time()-t0,2))
+        C=_v615a_cache_ranges()
+        cache_map={r.ticker:r for r in C.itertuples(index=False)} if len(C) else {}
+        snaps=[]
+        for dt in _v615a_snapshot_dates(2007):
+            U=primary[(primary["startDate"]<=dt)&(primary["endDate"]>=dt)].copy()
+            # Unique ticker is not a perfect security identifier; explicitly report duplicates/recycled symbols.
+            expected=set(U["ticker"].astype(str))
+            covered=[]
+            for t in expected:
+                r=cache_map.get(t)
+                if r is not None and pd.Timestamp(r.cache_start)<=dt<=pd.Timestamp(r.cache_end):
+                    covered.append(t)
+            covered=set(covered)
+            ended_then=set(U[U["endDate"]<today-pd.Timedelta(days=14)]["ticker"].astype(str))
+            ended_cov=len(ended_then & covered)
+            snaps.append(dict(
+                snapshot=str(dt.date()),expected_tickers=len(expected),cached_tickers=len(covered),
+                coverage=(len(covered)/len(expected) if expected else 0.0),
+                ended_or_delisted_tickers=len(ended_then),ended_cached=ended_cov,
+                ended_coverage=(ended_cov/len(ended_then) if ended_then else None),
+                missing_tickers=max(0,len(expected)-len(covered))
+            ))
+        S=pd.DataFrame(snaps)
+        V615A_DIR.mkdir(parents=True,exist_ok=True);S.to_csv(V615A_SNAPSHOTS,index=False)
+
+        _v615a_write_status(status="running",message="阶段3/4：执行 NO-GO 数据完整性检查",processed=2,total=4,elapsed_sec=round(time.time()-t0,2))
+        med_cov=float(S["coverage"].median()) if len(S) else 0.0
+        recent_cov=float(S.iloc[-1]["coverage"]) if len(S) else 0.0
+        oldS=S[pd.to_datetime(S["snapshot"]).dt.year<=2020] if len(S) else S
+        hist_cov=float(oldS["coverage"].median()) if len(oldS) else med_cov
+        ended_cov_vals=pd.to_numeric(S["ended_coverage"],errors="coerce").dropna()
+        ended_med=float(ended_cov_vals.median()) if len(ended_cov_vals) else 0.0
+
+        checks=[]
+        def ck(key,label,status,detail,blocking=True):
+            checks.append(dict(key=key,label=label,status=status,detail=detail,blocking=bool(blocking)))
+        ck("master","Tiingo 全量 ticker 主表","PASS" if len(M)>1000 else "FAIL",f"master rows={len(M):,}")
+        ck("pit_proxy","历史 Point-in-Time Universe proxy","PASS" if len(primary)>1000 else "FAIL",
+           f"以 startDate/endDate 重建；US major-exchange Stock rows={len(primary):,}")
+        ck("delisted","退市/结束交易股票纳入","PASS" if len(ended)>100 else "FAIL",
+           f"主表中 covered ended/delisted proxy={len(ended):,}；不会只用今天仍存活股票")
+        ck("cache_coverage","本地历史价格 Universe 覆盖","PASS" if hist_cov>=V615A_COVERAGE_GO else "FAIL",
+           f"<=2020 年度Snapshot中位覆盖={hist_cov:.1%}；研究最低要求={V615A_COVERAGE_GO:.0%}")
+        ck("ended_cache","退市/结束交易价格缓存覆盖","PASS" if ended_med>=V615A_COVERAGE_GO else "FAIL",
+           f"年度Snapshot退市/结束交易 ticker 中位缓存覆盖={ended_med:.1%}")
+        ck("adjustment","复权口径","PASS",
+           "当前 Tiingo 下载器保存 adjOpen/adjHigh/adjLow/adjClose/adjVolume；Split/Dividend 调整口径一致")
+        # Known structural limits are warnings, not silently ignored.
+        ck("ticker_recycle","Ticker 重用 / 稳定 security ID","WARN",
+           "supported_tickers 以 ticker 为主；旧/重用 symbol 可能需 permaTicker/更强 security master 才能达到最终 Lockbox 级别",False)
+        ck("fundamentals_pit","Point-in-Time 基本面","WARN",
+           "V6.15A Benchmark 先不要求基本面；V6.15B 若加入 EPS/Sales，必须使用 filing-date/PIT 数据，不能回填最终修订值",False)
+        ck("otc","OTC/PINK","INFO",f"Primary benchmark 暂排除 OTC/PINK USD Stock={len(otc):,}；不是静默删除，已记录",False)
+
+        blockers=[x for x in checks if x["blocking"] and x["status"]!="PASS"]
+        verdict="GO_BENCHMARK" if not blockers else "NO_GO_FIX_DATA_FIRST"
+
+        _v615a_write_status(status="running",message="阶段4/4：冻结 V6.15A Preflight 报告",processed=3,total=4,elapsed_sec=round(time.time()-t0,2))
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),elapsed_sec=round(time.time()-t0,2),
+            verdict=verdict,
+            purpose="Data integrity preflight only; no factor weights, no PF optimization, no entry/stop/exit.",
+            master_rows=int(len(M)),stock_rows=int(len(stocks)),usd_stock_rows=int(len(usd)),
+            primary_us_stock_rows=int(len(primary)),covered_ended_or_delisted_rows=int(len(ended)),
+            otc_pink_usd_stock_rows=int(len(otc)),local_cache_files=int(len(C)),
+            historical_median_coverage=hist_cov,recent_snapshot_coverage=recent_cov,
+            ended_delisted_median_cache_coverage=ended_med,
+            coverage_go_threshold=V615A_COVERAGE_GO,lockbox_target_coverage=V615A_COVERAGE_LOCKBOX,
+            checks=checks,snapshots=snaps,
+            next_step=("建立 weekly Snapshot + 20/40/60d MFE/MAE + 15/20/30% labels" if verdict=="GO_BENCHMARK"
+                       else "先扩充历史价格缓存，尤其是退市/结束交易股票；禁止开始 Big Winner DNA/权重训练"),
+            caveat=("Tiingo supported_tickers startDate/endDate 能显著降低 survivorship bias，但不是 CRSP 级 security master。"
+                    "最终 Lockbox 前必须再次审计 ticker recycling / historical completeness。")
+        )
+        V615A_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v615a_write_status(status="done",message=f"V6.15A Data Integrity 完成：{verdict}",processed=4,total=4,
+                            current="",elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v615a_write_status(status="error",message="V6.15A Data Integrity 失败",error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v615a_thread=None
+
+
+def _v615a_start(force_master=False):
+    global v615a_thread
+    if v615a_thread is not None and v615a_thread.is_alive():return False
+    v615a_thread=threading.Thread(target=_v615a_run,args=(force_master,),daemon=True);v615a_thread.start();return True
+
+@APP.post("/v615a/run")
+def v615a_run():
+    _v615a_start(False);return redirect("/v615a/data-integrity")
+
+@APP.post("/v615a/refresh-master")
+def v615a_refresh_master():
+    _v615a_start(True);return redirect("/v615a/data-integrity")
+
+@APP.get("/api/v615a/status")
+def v615a_status_api():return jsonify(_v615a_status())
+
+@APP.get("/v615a/data-integrity")
+def v615a_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v615a_status();r=None
+    if V615A_RESULT.exists():
+        try:r=json.loads(V615A_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    verdict="";checks="";snaps="";summary=""
+    if r:
+        vd=r.get("verdict","");cls="ok" if vd=="GO_BENCHMARK" else "bad"
+        verdict=f"<div class='{cls}'><h2 style='margin:0'>Verdict：{esc(vd)}</h2><p>{esc(r.get('next_step',''))}</p></div>"
+        summary=(f"<div class='grid'><div class='m'><small>Tiingo Master</small><b>{r.get('master_rows',0):,}</b></div>"
+                 f"<div class='m'><small>Primary US Stocks</small><b>{r.get('primary_us_stock_rows',0):,}</b></div>"
+                 f"<div class='m'><small>Covered Delisted/Ended</small><b>{r.get('covered_ended_or_delisted_rows',0):,}</b></div>"
+                 f"<div class='m'><small>Local Price Cache</small><b>{r.get('local_cache_files',0):,}</b></div></div>")
+        for x in r.get("checks",[]):
+            c=x.get("status","");cl="p" if c=="PASS" else ("f" if c=="FAIL" else "w")
+            checks+=f"<tr><td><b>{esc(x.get('label'))}</b></td><td class='{cl}'>{esc(c)}</td><td>{esc(x.get('detail'))}</td><td>{'YES' if x.get('blocking') else 'NO'}</td></tr>"
+        for x in r.get("snapshots",[]):
+            ec=x.get("ended_coverage")
+            ect="—" if ec is None else f"{ec:.1%}"
+            snaps+=f"<tr><td><b>{x.get('snapshot')}</b></td><td>{x.get('expected_tickers',0):,}</td><td>{x.get('cached_tickers',0):,}</td><td>{x.get('coverage',0):.1%}</td><td>{x.get('ended_or_delisted_tickers',0):,}</td><td>{x.get('ended_cached',0):,}</td><td>{ect}</td></tr>"
+    running=st.get("status")=="running"
+    run="" if running else '<form method="post" action="/v615a/run"><button>🔎 跑 V6.15A Data Preflight</button></form>'
+    refresh="" if running else '<form method="post" action="/v615a/refresh-master"><button class="secondary">↻ 更新 Tiingo Master</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800;margin:4px}}.secondary{{background:#64748b}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.ok,.bad{{border-radius:14px;padding:14px;margin:12px 0}}.ok{{background:#ecfdf5;border:1px solid #86efac}}.bad{{background:#fef2f2;border:1px solid #fca5a5}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:21px}}table{{width:100%;border-collapse:collapse;min-width:900px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left}}.scroll{{overflow:auto}}.p{{color:#15803d;font-weight:900}}.f{{color:#b91c1c;font-weight:900}}.w{{color:#a16207;font-weight:900}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧱 V6.15A · Big Winner Data Integrity Benchmark</h1><div class="info"><b>这一版不学权重。</b>先证明历史研究地基可信：Point-in-Time Universe proxy、退市/结束交易股票、历史价格覆盖、复权口径。任何 Blocking FAIL 都直接 NO-GO，禁止进入 Big Winner DNA。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p><div style="display:flex;flex-wrap:wrap">{run}{refresh}</div></div>
+{verdict}{summary}
+<div class="c"><h2>NO-GO 检查表</h2><div class="scroll"><table><tr><th>项目</th><th>状态</th><th>说明</th><th>Blocking</th></tr>{checks}</table></div></div>
+<div class="c"><h2>历史 Universe / Cache Coverage</h2><div class="warn">这里用 Tiingo master 的 startDate/endDate 重建每年当时存在的股票，再检查我们本地价格缓存当时覆盖了多少。低覆盖率时不允许开始 DNA/权重测试。</div><div class="scroll"><table><tr><th>Snapshot</th><th>当时应有</th><th>本地有价格</th><th>Coverage</th><th>其中退市/结束</th><th>已缓存</th><th>退市Coverage</th></tr>{snaps}</table></div></div>
+<div class="c"><div class="info"><b>下一关（只有 GO 才做）：</b>固定 weekly Snapshot，保存未来20/40/60交易日 MFE/MAE 与 +15/+20/+30 标签；Primary Big Winner = 60D MFE≥20%。仍然不碰 Entry/Stop/Exit。</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615a/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},1500)</script>
+</div></body></html>'''
 
 
 # ================= V6.14.0 TRUE OOS EXPANSION · NEW TICKERS FIRST =================
