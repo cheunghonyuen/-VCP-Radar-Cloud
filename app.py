@@ -17609,6 +17609,17 @@ def _v617o_one_listing(M,idx,row):
         M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=f"{type(ex).__name__}: {ex}"
         return "FAILED"
 
+def _v617o_sort_work(P):
+    """Stable/defensive ordering: older manifests may lack one or more sort columns."""
+    cols=[c for c in ["ended","startDate","ticker"] if c in P.columns]
+    if not cols:
+        return P
+    asc=[False if c=="ended" else True for c in cols]
+    try:
+        return P.sort_values(cols,ascending=asc,na_position="last")
+    except Exception:
+        return P
+
 def _v617o_engine():
     global v617o_thread
     batch_no=0
@@ -17645,7 +17656,7 @@ def _v617o_engine():
             work=(~ver)&(~st.eq("FAILED"))
             P=M[work].copy()
             if not P.empty:
-                P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
+                P=_v617o_sort_work(P).head(V617O_BATCH_SIZE)
                 # Normalize the selected batch only; preserve completed cache and manifest rows.
                 M.loc[P.index,"status"]="PENDING"
                 _v615b_atomic_manifest(M)
@@ -17656,7 +17667,7 @@ def _v617o_engine():
                 if P.empty:
                     _v617o_write(status="needs_review",message="没有未验证项目，但覆盖仍未达门槛；检查 manifest 一致性",**met)
                     return
-                P=P.sort_values(["ended","startDate","ticker"],ascending=[False,True,True]).head(V617O_BATCH_SIZE)
+                P=_v617o_sort_work(P).head(V617O_BATCH_SIZE)
                 M.loc[P.index,"status"]="PENDING"
                 _v615b_atomic_manifest(M)
                 phase="retry_failed"
@@ -17706,7 +17717,17 @@ def _v617o_engine():
 def _v617o_start():
     global v617o_thread
     if _v617o_alive():return False
-    _v617o_write(status="starting",message="建立批次后台线程；从现有 manifest/cache 断点继续",error=None)
+    # Recompute counters from the existing manifest BEFORE launching the worker.
+    # This prevents stale error/pending=0 values from the previous run being shown.
+    met={}
+    try:
+        M0=_v615b_read_manifest()
+        if M0 is not None and not M0.empty:
+            met=_v617o_manifest_metrics(M0)
+    except Exception:
+        met={}
+    _v617o_write(status="starting",message="已重新计算真实待处理队列；从现有 manifest/cache 断点继续",
+                 phase="startup_recount",batch=0,current="",error=None,**met)
     v617o_thread=threading.Thread(target=_v617o_engine,daemon=True)
     v617o_thread.start()
     return True
@@ -17746,7 +17767,7 @@ def v617_overnight_page():
     <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
-    <div class="info"><b>批次引擎。</b> 每批只处理新的 PENDING，失败项先跳过；全部新项跑完后才回头补失败。只有429会暂停。</div></div>
+    <div class="info"><b>批次引擎（修正版）。</b> 不再只认 PENDING：所有「尚未验证且非 FAILED」的股票都会进入待处理队列；失败项先跳过，全部未验证新项跑完后再重试失败项。只有 Tiingo 429 才进入冷却。</div></div>
     <div class="c"><h2>状态：{e(s.get("status"))}</h2>
     <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
     <p>{e(s.get("message"))}</p>
