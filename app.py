@@ -12921,7 +12921,7 @@ V615B_WORKERS = max(1, int(os.environ.get("V615B_WORKERS", "2")))
 # Use the account-safe Tiingo throttle already configured in the app unless explicitly overridden.
 # V6.17 overnight full-history build uses its own conservative throttle.
 # Default 1.5 seconds/request (~2400/hour max before network latency); override only with V617_FULL_REQUEST_GAP_SECONDS.
-V615B_REQUEST_GAP = max(0.5, float(os.environ.get("V617_FULL_REQUEST_GAP_SECONDS", "1.5")))
+V615B_REQUEST_GAP = max(0.05, float(os.environ.get("V617_FULL_REQUEST_GAP_SECONDS", "0.40")))
 V615B_MAX_RETRIES = max(1, int(os.environ.get("V615B_MAX_RETRIES", "3")))
 V615B_MIN_BARS = max(5, int(os.environ.get("V615B_MIN_BARS", "20")))
 # V6.15B.3: validate the data pipeline on a deliberately small, balanced sample first.
@@ -17531,6 +17531,9 @@ V617O_BATCH_SIZE=max(20,int(os.environ.get("V617_OVERNIGHT_BATCH_SIZE","200")))
 # Low-disk V6.17: historical listing caches are stored as gzip CSV.
 # Existing .csv files remain readable and are migrated safely on resume.
 V617O_DISK_RESERVE_MB=max(256,int(os.environ.get("V617_OVERNIGHT_DISK_RESERVE_MB","768")))
+# Tiingo Power tuned downloader: concurrent network I/O while a global launch-gap keeps
+# requests below ~9,000/hour by default (0.40s between request starts).
+V617O_WORKERS=max(2,min(16,int(os.environ.get("V617_OVERNIGHT_WORKERS","8"))))
 
 def _v617o_price_paths(listing_id):
     lid=str(listing_id)
@@ -17669,27 +17672,34 @@ def _v617o_reconcile_files(M):
     if changed:_v615b_atomic_manifest(M)
     return M
 
-def _v617o_one_listing(M,idx,row):
-    t=str(row.ticker);lid=str(row.listing_id);path=V615B_PRICE_DIR/f"{lid}.csv"
+def _v617o_download_listing(idx,row):
+    """Worker-safe listing download. It never mutates the shared manifest DataFrame."""
+    t=str(row.ticker);lid=str(row.listing_id)
     try:
         x=_v615b_try_reuse_local(t,row.startDate,row.endDate)
         source="local_market_cache" if x is not None else ""
         if x is None:
             x=_v615b_tiingo_listing(t,row.startDate,row.endDate);source="tiingo"
-        # Low-disk mode: gzip each completed listing immediately.
         path=_v617o_write_price(x,lid)
         ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
         if not ok:raise RuntimeError(f"verify failed: {err}")
-        M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True;M.at[idx,"bars"]=int(b)
-        M.at[idx,"cache_start"]=str(pd.Timestamp(cs).date());M.at[idx,"cache_end"]=str(pd.Timestamp(ce).date())
-        M.at[idx,"source"]=source;M.at[idx,"error"]=""
-        return "DONE"
+        return idx,"DONE",dict(bars=int(b),cache_start=str(pd.Timestamp(cs).date()),
+            cache_end=str(pd.Timestamp(ce).date()),source=source,error="")
     except TiingoRateLimitPause as ex:
-        M.at[idx,"status"]="PENDING";M.at[idx,"error"]=str(ex)
-        return "RATE_LIMIT"
+        return idx,"RATE_LIMIT",dict(error=str(ex))
     except Exception as ex:
-        M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=f"{type(ex).__name__}: {ex}"
-        return "FAILED"
+        return idx,"FAILED",dict(error=f"{type(ex).__name__}: {ex}")
+
+def _v617o_apply_result(M,result):
+    idx,state,info=result
+    if state=="DONE":
+        M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True
+        for k,v in info.items(): M.at[idx,k]=v
+    elif state=="RATE_LIMIT":
+        M.at[idx,"status"]="PENDING";M.at[idx,"error"]=info.get("error","")
+    else:
+        M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=info.get("error","")
+    return state
 
 def _v617o_sort_work(P):
     """Stable/defensive ordering: older manifests may lack one or more sort columns."""
@@ -17785,38 +17795,55 @@ def _v617o_engine():
                          phase=phase,batch=batch_no,**_v617o_manifest_metrics(M))
 
             hit_rate_limit=False
-            for seq,(idx,row) in enumerate(P.iterrows(),1):
-                if V617O_STOP.exists():
-                    _v615b_atomic_manifest(M)
-                    _v617o_write(status="paused",message="已安全暂停；进度已保存",batch=batch_no)
-                    return
-
-                _v617o_write(status="running",message=f"第 {batch_no} 批 {seq}/{len(P)}",
-                             phase=phase,batch=batch_no,current=f"{row.ticker} · {row.listing_id}",
-                             **_v617o_manifest_metrics(M))
-
-                free_mb=_v617o_disk_free_mb()
-                if free_mb < V617O_DISK_RESERVE_MB:
-                    _v615b_atomic_manifest(M)
-                    _v617o_write(status="disk_low",message=f"低磁盘保护：剩 {free_mb:.0f} MB，已安全保存进度并暂停；不会写满 Volume。",phase="disk_guard",**_v617o_manifest_metrics(M))
-                    return
-                result=_v617o_one_listing(M,idx,row)
-                if seq%10==0 or seq==len(P):
-                    _v615b_atomic_manifest(M)
-
-                if result=="RATE_LIMIT":
-                    _v615b_atomic_manifest(M)
-                    met=_v617o_manifest_metrics(M)
-                    _v617o_write(status="cooldown",message="Tiingo 429：已保存进度；65分钟后自动继续",
-                                 phase=phase,batch=batch_no,**met)
-                    for _ in range(65):
-                        if V617O_STOP.exists():return
-                        time.sleep(60)
-                    hit_rate_limit=True
-                    break
+            # Power-mode concurrent downloader. Network work happens in workers; only this
+            # coordinator mutates/saves the shared manifest, avoiding CSV corruption.
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+            items=list(P.iterrows())
+            submitted=0;finished=0;active={}
+            with ThreadPoolExecutor(max_workers=V617O_WORKERS,thread_name_prefix="v617dl") as pool:
+                while finished < len(items):
+                    if V617O_STOP.exists():
+                        for f in active: f.cancel()
+                        _v615b_atomic_manifest(M)
+                        _v617o_write(status="paused",message="已安全暂停；并发下载进度已保存",batch=batch_no)
+                        return
+                    free_mb=_v617o_disk_free_mb()
+                    if free_mb < V617O_DISK_RESERVE_MB:
+                        for f in active: f.cancel()
+                        _v615b_atomic_manifest(M)
+                        _v617o_write(status="disk_low",message=f"低磁盘保护：剩 {free_mb:.0f} MB，已安全保存进度并暂停；不会写满 Volume。",phase="disk_guard",**_v617o_manifest_metrics(M))
+                        return
+                    while submitted < len(items) and len(active) < V617O_WORKERS and not hit_rate_limit:
+                        idx,row=items[submitted]
+                        fut=pool.submit(_v617o_download_listing,idx,row)
+                        active[fut]=(idx,row);submitted+=1
+                    if not active: break
+                    done,_=wait(list(active),return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        idx,row=active.pop(fut);finished+=1
+                        try: state=_v617o_apply_result(M,fut.result())
+                        except Exception as ex:
+                            M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=f"worker: {ex}";state="FAILED"
+                        if state=="RATE_LIMIT": hit_rate_limit=True
+                        if finished%10==0 or finished==len(items) or state=="RATE_LIMIT": _v615b_atomic_manifest(M)
+                        _v617o_write(status="running",message=f"第 {batch_no} 批 {finished}/{len(P)} · {V617O_WORKERS}并发",
+                            phase=phase,batch=batch_no,current=f"{row.ticker} · {row.listing_id}",workers=V617O_WORKERS,
+                            request_gap_sec=V615B_REQUEST_GAP,**_v617o_manifest_metrics(M))
+                    if hit_rate_limit:
+                        # Do not submit more work. Let already-running requests finish cleanly.
+                        for fut,(idx,row) in list(active.items()):
+                            try: _v617o_apply_result(M,fut.result())
+                            except Exception as ex:
+                                M.at[idx,"status"]="FAILED";M.at[idx,"verified"]=False;M.at[idx,"error"]=f"worker: {ex}"
+                        active.clear();_v615b_atomic_manifest(M);break
 
             _v615b_atomic_manifest(M)
             if hit_rate_limit:
+                met=_v617o_manifest_metrics(M)
+                _v617o_write(status="cooldown",message="Tiingo 429：并发已停止并保存；65分钟后自动继续",phase=phase,batch=batch_no,**met)
+                for _ in range(65):
+                    if V617O_STOP.exists():return
+                    time.sleep(60)
                 continue
             # Normal batch completion => immediately advance to next untouched batch.
             continue
