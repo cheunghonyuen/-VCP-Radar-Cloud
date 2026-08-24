@@ -17628,8 +17628,19 @@ def _v617o_engine():
             try:
                 if p.exists():p.unlink()
             except Exception:pass
+        # RUN-NOW FIX: do not perform a full 16,450-row filesystem reconciliation at startup.
+        # It is unnecessary for resuming the queue and was the startup failure point on Railway.
         M=_v617o_prepare_manifest()
-        M=_v617o_reconcile_files(M)
+        if M is None or M.empty:
+            raise RuntimeError("manifest 为空，无法继续")
+        # Normalize only the few columns the queue actually needs; preserve all existing cache rows.
+        if "verified" not in M.columns: M["verified"]=False
+        if "status" not in M.columns: M["status"]=""
+        if "error" not in M.columns: M["error"]=""
+        if "ended" not in M.columns: M["ended"]=False
+        # A verified row is authoritative even if an old status string is stale.
+        vv=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+        M.loc[vv,"status"]="DONE"
         _v615b_atomic_manifest(M)
 
         while True:
@@ -17710,7 +17721,8 @@ def _v617o_engine():
 
     except Exception as ex:
         traceback.print_exc()
-        _v617o_write(status="error",message="整晚批次引擎失败",error=f"{type(ex).__name__}: {ex}")
+        _v617o_write(status="error",message="整晚批次引擎失败",phase="engine_exception",
+                     error=f"{type(ex).__name__}: {ex}")
     finally:
         v617o_thread=None
 
