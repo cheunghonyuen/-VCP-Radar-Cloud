@@ -9955,6 +9955,198 @@ def v6132_page():
 
 
 
+
+# ================= V6.15C EXISTING LOCAL CACHE VALIDATION =================
+V615C_DIR = DATA_DIR / "jlaw_v615c_existing_cache"
+V615C_STATUS = V615C_DIR / "status.json"
+V615C_RESULT = V615C_DIR / "result.json"
+V615C_DETAIL = V615C_DIR / "existing_cache_audit.csv"
+v615c_thread = None
+
+def _v615c_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","elapsed_sec":0,"error":None}
+    if V615C_STATUS.exists():
+        try:s.update(json.loads(V615C_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v615c_write_status(**kw):
+    V615C_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v615c_status();s.update(kw)
+    V615C_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v615c_read_local_csv(path):
+    try:
+        d=pd.read_csv(path)
+        date_col=next((c for c in ["Date","date","DATE"] if c in d.columns),None)
+        if date_col is None:return None,"missing date column"
+        d["_date"]=pd.to_datetime(d[date_col],errors="coerce",utc=True).dt.tz_convert(None)
+        d=d.dropna(subset=["_date"]).sort_values("_date")
+        close_col=next((c for c in ["Close","close","adjClose","Adj Close","adj_close"] if c in d.columns),None)
+        high_col=next((c for c in ["High","high","adjHigh","adj_high"] if c in d.columns),None)
+        low_col=next((c for c in ["Low","low","adjLow","adj_low"] if c in d.columns),None)
+        vol_col=next((c for c in ["Volume","volume","adjVolume","adj_volume"] if c in d.columns),None)
+        if close_col is None:return None,"missing close"
+        out=pd.DataFrame({
+            "date":d["_date"],
+            "close":pd.to_numeric(d[close_col],errors="coerce"),
+            "high":pd.to_numeric(d[high_col],errors="coerce") if high_col else pd.to_numeric(d[close_col],errors="coerce"),
+            "low":pd.to_numeric(d[low_col],errors="coerce") if low_col else pd.to_numeric(d[close_col],errors="coerce"),
+            "volume":pd.to_numeric(d[vol_col],errors="coerce") if vol_col else np.nan,
+        }).dropna(subset=["date","close"]).sort_values("date").reset_index(drop=True)
+        return (out,None) if len(out) else (None,"no valid rows")
+    except Exception as ex:
+        return None,f"{type(ex).__name__}: {ex}"
+
+def _v615c_forward_metrics(d, idx, horizon=60):
+    end=min(len(d)-1,idx+horizon)
+    future=d.iloc[idx+1:end+1]
+    if future.empty:return None
+    entry=float(d.iloc[idx]["close"])
+    if not np.isfinite(entry) or entry<=0:return None
+    mfe=float(future["high"].max()/entry-1.0)
+    mae=float(future["low"].min()/entry-1.0)
+    return mfe,mae
+
+def _v615c_run():
+    global v615c_thread
+    t0=time.time()
+    try:
+        V615C_DIR.mkdir(parents=True,exist_ok=True)
+        files=sorted(MARKET_DIR.glob("*.csv"))
+        total=len(files)
+        _v615c_write_status(status="running",message="只读现有 Local Price Cache；不下载新数据",
+                            processed=0,total=total,current="",elapsed_sec=0,error=None)
+
+        ended_lookup={}
+        try:
+            raw=_v615a_download_master(False)
+            mm=_v615a_normalize_master(raw)
+            today=pd.Timestamp.utcnow().tz_localize(None).normalize()
+            mm["ticker"]=mm["ticker"].astype(str).str.upper().str.strip()
+            mm["endDate"]=pd.to_datetime(mm["endDate"],errors="coerce").dt.tz_localize(None)
+            for t,g in mm.groupby("ticker"):
+                ended_lookup[str(t).upper()]=bool((g["endDate"] < today-pd.Timedelta(days=14)).any())
+        except Exception:
+            ended_lookup={}
+
+        audits=[];snaps=[]
+        for n,p in enumerate(files,1):
+            ticker=p.stem.upper()
+            _v615c_write_status(status="running",message="审计现有缓存 + 建立 Big Winner 标签",
+                                processed=n-1,total=total,current=ticker,elapsed_sec=round(time.time()-t0,1))
+            d,err=_v615c_read_local_csv(p)
+            if d is None:
+                audits.append(dict(ticker=ticker,valid=False,error=err,bars=0,start="",end="",ended=ended_lookup.get(ticker,None)))
+                continue
+            bars=len(d)
+            audits.append(dict(ticker=ticker,valid=True,error="",bars=bars,start=str(d["date"].iloc[0].date()),
+                               end=str(d["date"].iloc[-1].date()),ended=ended_lookup.get(ticker,None)))
+            if bars<320:continue
+            roll50=d["close"].rolling(50).mean()
+            roll150=d["close"].rolling(150).mean()
+            roll200=d["close"].rolling(200).mean()
+            for idx in range(259,bars-60,20):
+                fm=_v615c_forward_metrics(d,idx,60)
+                if fm is None:continue
+                mfe,mae=fm
+                c=float(d.iloc[idx]["close"])
+                hi52=float(d["high"].iloc[max(0,idx-251):idx+1].max())
+                snaps.append(dict(
+                    ticker=ticker,obs_date=str(pd.Timestamp(d.iloc[idx]["date"]).date()),
+                    ended=ended_lookup.get(ticker,None),
+                    close=c,
+                    above_ma50=bool(c>roll50.iloc[idx]) if pd.notna(roll50.iloc[idx]) else False,
+                    above_ma150=bool(c>roll150.iloc[idx]) if pd.notna(roll150.iloc[idx]) else False,
+                    above_ma200=bool(c>roll200.iloc[idx]) if pd.notna(roll200.iloc[idx]) else False,
+                    near_52w_high=float(c/hi52) if np.isfinite(hi52) and hi52>0 else np.nan,
+                    mfe15=bool(mfe>=.15),mfe20=bool(mfe>=.20),mfe30=bool(mfe>=.30),
+                    mfe60=float(mfe),mae60=float(mae)
+                ))
+
+        A=pd.DataFrame(audits);S=pd.DataFrame(snaps)
+        A.to_csv(V615C_DETAIL,index=False)
+        if len(S):S.to_csv(V615C_DIR/"snapshots.csv",index=False)
+        valid=A[A["valid"].eq(True)] if len(A) else pd.DataFrame()
+        result={
+            "generated_at":datetime.now(timezone.utc).isoformat(),
+            "elapsed_sec":round(time.time()-t0,2),
+            "mode":"EXISTING_CACHE_ONLY",
+            "price_api_calls":0,
+            "local_csv_files":int(total),
+            "valid_price_files":int(len(valid)),
+            "ended_valid_files":int(len(valid[valid["ended"].eq(True)])) if len(valid) else 0,
+            "active_valid_files":int(len(valid[valid["ended"].eq(False)])) if len(valid) else 0,
+            "snapshot_rows":int(len(S)),
+            "base_rate_15":float(S["mfe15"].mean()) if len(S) else 0.0,
+            "base_rate_20":float(S["mfe20"].mean()) if len(S) else 0.0,
+            "base_rate_30":float(S["mfe30"].mean()) if len(S) else 0.0,
+            "avg_mfe60":float(S["mfe60"].mean()) if len(S) else 0.0,
+            "avg_mae60":float(S["mae60"].mean()) if len(S) else 0.0,
+            "warning":"Existing cache only: useful for pipeline/initial benchmark, not final survivorship-bias-free evidence."
+        }
+        if len(S):
+            base=result["base_rate_20"]
+            m=S["above_ma50"] & S["above_ma150"] & S["above_ma200"] & (S["near_52w_high"]>=0.85)
+            sel=S[m]
+            result["jlaw_base_screen_n"]=int(len(sel))
+            result["jlaw_base_screen_bw20"]=float(sel["mfe20"].mean()) if len(sel) else 0.0
+            result["jlaw_base_screen_lift20"]=float(sel["mfe20"].mean()/base) if len(sel) and base>0 else 0.0
+            yrs=[]
+            S["year"]=pd.to_datetime(S["obs_date"]).dt.year
+            for y,g in S.groupby("year"):
+                yrs.append(dict(year=int(y),n=int(len(g)),bw15=float(g["mfe15"].mean()),bw20=float(g["mfe20"].mean()),
+                                bw30=float(g["mfe30"].mean()),avg_mfe=float(g["mfe60"].mean()),avg_mae=float(g["mae60"].mean())))
+            result["by_year"]=yrs
+        V615C_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v615c_write_status(status="done",message="Existing Cache Validation 完成",processed=total,total=total,current="",
+                            elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v615c_write_status(status="error",message="V6.15C 失败",error=f"{type(ex).__name__}: {ex}",
+                            elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v615c_thread=None
+
+def _v615c_start():
+    global v615c_thread
+    if v615c_thread is not None and v615c_thread.is_alive():return False
+    v615c_thread=threading.Thread(target=_v615c_run,daemon=True);v615c_thread.start();return True
+
+@APP.post("/v615c/run")
+def v615c_run():
+    _v615c_start();return redirect("/v615c/existing-cache")
+
+@APP.get("/api/v615c/status")
+def v615c_status_api():
+    return jsonify(_v615c_status())
+
+@APP.get("/v615c/existing-cache")
+def v615c_page():
+    import html
+    esc=lambda x:html.escape(str(x));s=_v615c_status();r={}
+    if V615C_RESULT.exists():
+        try:r=json.loads(V615C_RESULT.read_text(encoding="utf-8"))
+        except Exception:r={}
+    yearly=""
+    for y in r.get("by_year",[]):
+        yearly+=f"<tr><td>{y.get('year')}</td><td>{y.get('n')}</td><td>{y.get('bw15',0):.1%}</td><td>{y.get('bw20',0):.1%}</td><td>{y.get('bw30',0):.1%}</td><td>{y.get('avg_mfe',0):.1%}</td><td>{y.get('avg_mae',0):.1%}</td></tr>"
+    runbtn="" if s.get("status")=="running" else '<form method="post" action="/v615c/run"><button>▶ 跑 Existing Cache Validation</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1050px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:22px}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧪 V6.15C · Existing Cache Validation</h1><div class="info"><b>完全不下载新数据。</b>只读取当前现有 Local Price Cache，先验证历史 Snapshot、未来60日 MFE/MAE 与 +15/+20/+30 Big Winner 标签。此版不训练权重，也不把结果当最终无幸存者偏差结论。</div></div>
+<div class="c"><h2>状态：{esc(s.get('status'))}</h2><p>{esc(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{esc(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{runbtn}</div>
+<div class="grid"><div class="m"><small>Local CSV</small><b>{r.get('local_csv_files',0)}</b></div><div class="m"><small>Valid Files</small><b>{r.get('valid_price_files',0)}</b></div><div class="m"><small>Snapshots</small><b>{r.get('snapshot_rows',0)}</b></div><div class="m"><small>Ended/Delisted</small><b>{r.get('ended_valid_files',0)}</b></div></div>
+<div class="c"><h2>Big Winner Base Rate</h2><div class="grid"><div class="m"><small>60D ≥15%</small><b>{r.get('base_rate_15',0):.1%}</b></div><div class="m"><small>60D ≥20%</small><b>{r.get('base_rate_20',0):.1%}</b></div><div class="m"><small>60D ≥30%</small><b>{r.get('base_rate_30',0):.1%}</b></div><div class="m"><small>Avg MAE60</small><b>{r.get('avg_mae60',0):.1%}</b></div></div></div>
+<div class="c"><h2>JLaw Base Screen · 暂不加权</h2><div class="warn">只测试：站上50/150/200MA + 距52周高点不超过15%。这不是最终JLaw Factor Library。</div><div class="grid"><div class="m"><small>Screen N</small><b>{r.get('jlaw_base_screen_n',0)}</b></div><div class="m"><small>Screen BW20</small><b>{r.get('jlaw_base_screen_bw20',0):.1%}</b></div><div class="m"><small>Market BW20</small><b>{r.get('base_rate_20',0):.1%}</b></div><div class="m"><small>BW20 Lift</small><b>{r.get('jlaw_base_screen_lift20',0):.2f}×</b></div></div></div>
+<div class="c"><h2>年度分布</h2><div style="overflow:auto"><table><tr><th>Year</th><th>N</th><th>≥15%</th><th>≥20%</th><th>≥30%</th><th>Avg MFE</th><th>Avg MAE</th></tr>{yearly}</table></div></div>
+<div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','现有缓存只用于流程认证。'))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615c/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+</div></body></html>"""
+
+
 # ================= V6.15B HISTORICAL PRICE CACHE BUILDER =================
 # DATA ENGINEERING ONLY. No factors, no entries, no stops, no PF optimization.
 # Goals:
