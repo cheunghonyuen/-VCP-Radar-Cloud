@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.1 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.1</button></a></div></div>
+<div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
 <div>
@@ -10179,8 +10179,8 @@ def _v616e_run():
         verdict='NO_GO'
         modes_present=set(O['mode'].astype(str))
         if {'HOLD_120','HOLD_90'}.issubset(modes_present):
-            h120=O[O.mode.eq('HOLD_120')].iloc[0]
-            h90=O[O.mode.eq('HOLD_90')].iloc[0]
+            h120=O[O['mode'].eq('HOLD_120')].iloc[0]
+            h90=O[O['mode'].eq('HOLD_90')].iloc[0]
 
             def ge(a,b):
                 if pd.isna(a) or pd.isna(b): return False
@@ -10213,11 +10213,11 @@ def _v616e_run():
             'warning':'Still uses existing 455-file cache, so survivorship-bias limits remain until historical/delisted coverage is complete.'
         }
         V616E_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616e_write(status='done',message='V6.16E.1 Winner Hold Strict OOS 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616e_write(status='done',message='V6.16E.2 Winner Hold Strict OOS 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
 
     except Exception as ex:
         traceback.print_exc()
-        _v616e_write(status='error',message='V6.16E.1 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+        _v616e_write(status='error',message='V6.16E.2 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
     finally:
         v616e_thread=None
 
@@ -10250,9 +10250,9 @@ def v616e_page():
     for x in r.get('yearly',[]):
         ytr+=f"<tr><td>{int(x.get('year',0))}</td><td>{e(x.get('mode'))}</td><td>{int(x.get('n',0))}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('win_rate',0):.1%}</td><td>{x.get('pf',0) if x.get('pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('capture_bw30',0) if x.get('capture_bw30') is not None else 0:.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td></tr>"
 
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616e/run"><button>▶ 跑 V6.16E.1 Strict OOS</button></form>'
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616e/run"><button>▶ 跑 V6.16E.2 Strict OOS</button></form>'
 
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.verdict{{font-size:24px;font-weight:900;background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:11px;min-width:1100px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.16E.1 · Winner Hold Strict OOS</h1><div class="info"><b>只验证，不优化。</b> 冻结 V6.15F DNA、Entry、-7% Stop；只比较 HOLD_120 vs HOLD_90。每个测试年份的选股阈值只能来自更早年份。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{('<div class="warn"><b>Error:</b> '+e(s.get('error'))+'</div>') if s.get('error') else ''}{btn}</div><div class="c"><div class="verdict">Verdict：{e(r.get('verdict','—'))}</div></div><div class="c"><h2>Overall OOS</h2><div style="overflow:auto"><table><tr><th>Mode</th><th>N</th><th>Weighted AvgRet</th><th>Median Year Ret</th><th>Median Year PF</th><th>PF&gt;1 Years</th><th>Positive Years</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{otr}</table></div></div><div class="c"><h2>Year-by-Year Walk-Forward</h2><div style="overflow:auto"><table><tr><th>Year</th><th>Mode</th><th>N</th><th>AvgRet</th><th>Win%</th><th>PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{ytr}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.verdict{{font-size:24px;font-weight:900;background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;font-size:11px;min-width:1100px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧪 V6.16E.2 · Winner Hold Strict OOS</h1><div class="info"><b>只验证，不优化。</b> 冻结 V6.15F DNA、Entry、-7% Stop；只比较 HOLD_120 vs HOLD_90。每个测试年份的选股阈值只能来自更早年份。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{('<div class="warn"><b>Error:</b> '+e(s.get('error'))+'</div>') if s.get('error') else ''}{btn}</div><div class="c"><div class="verdict">Verdict：{e(r.get('verdict','—'))}</div></div><div class="c"><h2>Overall OOS</h2><div style="overflow:auto"><table><tr><th>Mode</th><th>N</th><th>Weighted AvgRet</th><th>Median Year Ret</th><th>Median Year PF</th><th>PF&gt;1 Years</th><th>Positive Years</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{otr}</table></div></div><div class="c"><h2>Year-by-Year Walk-Forward</h2><div style="overflow:auto"><table><tr><th>Year</th><th>Mode</th><th>N</th><th>AvgRet</th><th>Win%</th><th>PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>BW30 Capture</th><th>BW50 Capture</th></tr>{ytr}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16D WINNER MANAGEMENT / HOLD RESEARCH =================
