@@ -17608,7 +17608,9 @@ def _v617o_one_listing(M,idx,row):
         source="local_market_cache" if x is not None else ""
         if x is None:
             x=_v615b_tiingo_listing(t,row.startDate,row.endDate);source="tiingo"
-        tmp=path.with_suffix(".tmp");x.to_csv(tmp,index=False);tmp.replace(path)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        # Low-disk mode: write final cache directly, avoiding a second full-size temp copy.
+        x.to_csv(path,index=False)
         ok,b,cs,ce,err=_v615b_verify_file(path,row.startDate,row.endDate)
         if not ok:raise RuntimeError(f"verify failed: {err}")
         M.at[idx,"status"]="DONE";M.at[idx,"verified"]=True;M.at[idx,"bars"]=int(b)
@@ -17633,6 +17635,26 @@ def _v617o_sort_work(P):
     except Exception:
         return P
 
+def _v617o_disk_free_mb():
+    import shutil
+    target=DATA_DIR if DATA_DIR.exists() else Path(".")
+    return shutil.disk_usage(str(target)).free/(1024*1024)
+
+def _v617o_cleanup_disk():
+    # Safe cleanup only. Keep manifest and all completed price CSV caches.
+    removed=0; seen=set()
+    for root in [DATA_DIR,V615B_DIR,V617O_DIR]:
+        try:
+            if not root.exists(): continue
+            for pat in ("*.tmp","*.part","*.download"):
+                for fp in root.rglob(pat):
+                    if str(fp) in seen: continue
+                    seen.add(str(fp))
+                    try: fp.unlink(); removed+=1
+                    except Exception: pass
+        except Exception: pass
+    return removed
+
 def _v617o_engine():
     global v617o_thread
     batch_no=0
@@ -17641,6 +17663,11 @@ def _v617o_engine():
             try:
                 if p.exists():p.unlink()
             except Exception:pass
+        removed=_v617o_cleanup_disk()
+        free_mb=_v617o_disk_free_mb()
+        if free_mb < 8:
+            _v617o_write(status="disk_full",message=f"磁盘已满/空间不足：剩 {free_mb:.1f} MB；已清理 {removed} 个临时文件。请扩容 Railway Volume 后继续。",phase="disk_preflight",error="No space left on device")
+            return
         M=_v617o_prepare_manifest()
         M=_v617o_reconcile_files(M)
         _v615b_atomic_manifest(M)
@@ -17700,6 +17727,11 @@ def _v617o_engine():
                              phase=phase,batch=batch_no,current=f"{row.ticker} · {row.listing_id}",
                              **_v617o_manifest_metrics(M))
 
+                free_mb=_v617o_disk_free_mb()
+                if free_mb < 8:
+                    _v615b_atomic_manifest(M)
+                    _v617o_write(status="disk_full",message=f"磁盘空间低：剩 {free_mb:.1f} MB；已安全保存进度并停止。扩容后可断点继续。",phase="disk_guard",**_v617o_manifest_metrics(M))
+                    return
                 result=_v617o_one_listing(M,idx,row)
                 if seq%10==0 or seq==len(P):
                     _v615b_atomic_manifest(M)
