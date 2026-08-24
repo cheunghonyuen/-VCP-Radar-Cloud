@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616f3-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.3 Extended Exit Matrix</h2><div class="muted">HOLD504 Control · HOLD756/1008/1260 · 100/200MA · Long Trend · DD25/35</div></div><a href="/v616f3/exit-matrix"><button type="button">打开 V6.16F.3.1</button></a></div></div>
+<div class="card" id="v616f32-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.16F.3 Extended Exit Matrix</h2><div class="muted">同批样本公平比较 HOLD504/756/1008/1260 · 检查右尾是否被极少数超级赢家主导</div></div><a href="/v616f32/matched-cohort"><button type="button">打开 V6.16F.3.2</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616f3_extended_exit_matrix'
+V616F_DIR=DATA_DIR/'jlaw_v616f32_matched_cohort'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'extended_exit_matrix_report.csv'
+V616F_REPORT=V616F_DIR/'matched_cohort_pairwise_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10120,7 +10120,6 @@ def _v616f_run():
     global v616f_thread
     t0=time.time()
     try:
-        # Strict time-WF candidate stream, same frozen DNA concept as V6.16E.
         S=pd.read_csv(V615D_SNAP)
         S['obs_date']=pd.to_datetime(S['obs_date'],errors='coerce')
         for c in ['ret60','ret120','ret252','vol_vs20']:
@@ -10131,7 +10130,7 @@ def _v616f_run():
         picks=[]
         for y in sorted(S.year.unique()):
             tr=S[S.year<y]; te=S[S.year==y]
-            if len(tr)<1000 or len(te)<50:continue
+            if len(tr)<1000 or len(te)<50: continue
             q={c:float(tr[c].quantile(.75)) for c in ['ret60','ret120','ret252']}
             a=te[(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
             a['test_year']=y
@@ -10140,18 +10139,11 @@ def _v616f_run():
             picks.extend([a,b])
         D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
 
+        horizons=[504,756,1008,1260]
         ticks=sorted(D.ticker.unique())
-        modes=['HOLD_504_CONTROL','HOLD_756','HOLD_1008','HOLD_1260','POST504_100MA_3CLOSE','POST504_200MA_2CLOSE','POST504_LONG_TREND_BREAK','POST504_DD25','POST504_DD35']
-        A={}
+        trades=[]
 
-        def bucket(key):
-            if key not in A:
-                A[key]={'n':0,'sum':0.0,'win_n':0,'loss_n':0,'win_sum':0.0,'loss_sum':0.0,
-                        'hold_sum':0.0,'give_sum':0.0,'mae_sum':0.0,
-                        'bw50':0,'bw100':0,'bw200':0,'bw300':0,'cap50':0,'cap100':0,'cap200':0,'cap300':0}
-            return A[key]
-
-        _v616f_write(status='running',message='Strict OOS Dynamic Exit Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+        _v616f_write(status='running',message='Matched Cohort Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
 
         for k,t in enumerate(ticks,1):
             d=_v616a_price(t)
@@ -10159,119 +10151,163 @@ def _v616f_run():
                 im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
                 for _,r in D[D.ticker.eq(t)].iterrows():
                     dt=pd.Timestamp(r.obs_date).normalize()
-                    if dt not in im:continue
+                    if dt not in im: continue
                     oi=im[dt]
-                    if oi>=len(d)-505:continue
                     E=_v616a_entries(d,oi)
-                    if 'CONTROL' not in E:continue
-                    ei,px,delay=E['CONTROL']
+                    if 'CONTROL' not in E: continue
+                    ei,px,_=E['CONTROL']
 
-                    for mode in modes:
-                        # Pairwise fairness: each extended mode requires enough future data,
-                        # and its HOLD504 control is evaluated on that exact same eligible cohort.
-                        need={'HOLD_504_CONTROL':504,'HOLD_756':756,'HOLD_1008':1008,'HOLD_1260':1260,
-                              'POST504_100MA_3CLOSE':504,'POST504_200MA_2CLOSE':504,
-                              'POST504_LONG_TREND_BREAK':504,'POST504_DD25':504,'POST504_DD35':504}[mode]
-                        if ei+need-1>=len(d):continue
-                        z=_v616f_manage(d,ei,px,mode,need if mode.startswith('HOLD_') else 1260)
-                        if z is None:continue
-                        b=bucket((int(r['test_year']),mode))
-                        b['n']+=1;b['sum']+=z['return'];b['hold_sum']+=z['held'];b['give_sum']+=z['max_giveback'];b['mae_sum']+=z['mae']
-                        if z['return']>0:b['win_n']+=1;b['win_sum']+=z['return']
-                        else:b['loss_n']+=1;b['loss_sum']+=z['return']
-                        for q in [50,100,200,300]:
-                            if z['bw'+str(q)]:
-                                b['bw'+str(q)]+=1
-                                if z['cap'+str(q)]:b['cap'+str(q)]+=1
+                    rec={'ticker':t,'obs_date':str(dt.date()),'year':int(r['test_year'])}
+                    any_ok=False
+                    for h in horizons:
+                        if ei+h-1>=len(d): continue
+                        mode='HOLD_504_CONTROL' if h==504 else f'HOLD_{h}'
+                        z=_v616f_manage(d,ei,px,mode,h)
+                        if z is None: continue
+                        rec[f'ret_{h}']=float(z['return'])
+                        rec[f'mfe_{h}']=float(z['mfe'])
+                        any_ok=True
+                    if any_ok and 'ret_504' in rec:
+                        trades.append(rec)
 
-            _v616f_write(status='running',message='Dynamic Exit · Streaming stats',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+            _v616f_write(status='running',message='Matched Cohort Replay',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
 
-        rows=[]
-        for (year,mode),b in sorted(A.items()):
-            n=b['n']
-            if n<=0:continue
-            gp=b['win_sum'];gl=abs(b['loss_sum'])
-            avgwin=gp/b['win_n'] if b['win_n'] else 0.0
-            avgloss=b['loss_sum']/b['loss_n'] if b['loss_n'] else 0.0
-            rows.append({
-                'year':year,'mode':mode,'n':n,'avg_return':b['sum']/n,'win_rate':b['win_n']/n,
-                'pf':gp/gl if gl>0 else np.nan,'avg_win':avgwin,'avg_loss':avgloss,
-                'win_loss_ratio':avgwin/abs(avgloss) if avgloss<0 else np.nan,
-                'avg_hold':b['hold_sum']/n,'avg_giveback':b['give_sum']/n,'avg_mae':b['mae_sum']/n,
-                'capture_bw50':b['cap50']/b['bw50'] if b['bw50'] else np.nan,
-                'capture_bw100':b['cap100']/b['bw100'] if b['bw100'] else np.nan,
-                'capture_bw200':b['cap200']/b['bw200'] if b['bw200'] else np.nan,
-                'capture_bw300':b['cap300']/b['bw300'] if b['bw300'] else np.nan,
+        T=pd.DataFrame(trades)
+        if T.empty: raise RuntimeError('没有生成 matched trades')
+
+        pairwise=[]
+        yearly=[]
+        verdicts=[]
+
+        for cohort in horizons:
+            need=[f'ret_{h}' for h in horizons if h<=cohort]
+            C=T.dropna(subset=need).copy()
+            if C.empty: continue
+
+            for h in horizons:
+                if h>cohort: continue
+                c=f'ret_{h}'
+                vals=pd.to_numeric(C[c],errors='coerce').dropna()
+                if vals.empty: continue
+
+                # yearly metrics
+                yrows=[]
+                for y,g in C.groupby('year'):
+                    v=pd.to_numeric(g[c],errors='coerce').dropna()
+                    if v.empty: continue
+                    wins=v[v>0]; losses=v[v<=0]
+                    gp=float(wins.sum()); gl=abs(float(losses.sum()))
+                    pf=gp/gl if gl>0 else np.nan
+                    yrows.append((y,len(v),float(v.mean()),pf))
+                    yearly.append({'cohort':cohort,'hold':h,'year':int(y),'n':int(len(v)),'avg_return':float(v.mean()),'pf':pf})
+
+                med_pf=float(pd.Series([x[3] for x in yrows]).dropna().median()) if yrows else np.nan
+                avgwin=float(vals[vals>0].mean()) if (vals>0).any() else 0.0
+                avgloss=float(vals[vals<=0].mean()) if (vals<=0).any() else 0.0
+                wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
+
+                pairwise.append({
+                    'cohort':cohort,'hold':h,'mode':f'HOLD_{h}','n':int(len(vals)),
+                    'avg_return':float(vals.mean()),'median_year_pf':med_pf,
+                    'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,
+                    'positive_years':int(sum(1 for x in yrows if x[2]>0)),'years':int(len(yrows))
+                })
+
+            Ptmp=pd.DataFrame([x for x in pairwise if x['cohort']==cohort])
+            if not Ptmp.empty and (Ptmp['hold']==504).any():
+                base=Ptmp[Ptmp['hold'].eq(504)].iloc[0]
+                Ptmp['avgret_delta']=Ptmp.avg_return-base.avg_return
+                Ptmp['pf_delta']=Ptmp.median_year_pf-base.median_year_pf
+                best=Ptmp.sort_values(['avg_return','median_year_pf'],ascending=[False,False]).iloc[0]
+                verdicts.append({
+                    'cohort':cohort,'n':int(best.n),'best_hold':int(best['hold']),
+                    'best_avg_return':float(best.avg_return),'best_median_pf':float(best.median_year_pf)
+                })
+                for idx,row in Ptmp.iterrows():
+                    for rec in pairwise:
+                        if rec['cohort']==cohort and rec['hold']==row['hold']:
+                            rec['avgret_delta']=float(row['avgret_delta'])
+                            rec['pf_delta']=float(row['pf_delta'])
+
+        tail=[]
+        for h in horizons:
+            c=f'ret_{h}'
+            if c not in T.columns: continue
+            v=pd.to_numeric(T[c],errors='coerce').dropna()
+            if len(v)<20: continue
+            pos=v[v>0].sort_values(ascending=False)
+            total=float(pos.sum()) if len(pos) else 0.0
+            k1=max(1,int(np.ceil(len(pos)*.01)))
+            k5=max(1,int(np.ceil(len(pos)*.05)))
+            tail.append({
+                'hold':h,'n':int(len(v)),'median_return':float(v.median()),
+                'p90_return':float(v.quantile(.90)),'p95_return':float(v.quantile(.95)),
+                'p99_return':float(v.quantile(.99)),
+                'top1_profit_share':float(pos.iloc[:k1].sum()/total) if total>0 else np.nan,
+                'top5_profit_share':float(pos.iloc[:k5].sum()/total) if total>0 else np.nan
             })
-        R=pd.DataFrame(rows).replace([np.inf,-np.inf],np.nan)
-        if R.empty:raise RuntimeError('没有生成 V6.16F 结果')
-        R.to_csv(V616F_REPORT,index=False)
 
-        overall=[]
-        for mode,g in R.groupby('mode'):
-            w=g['n'].astype(float)
-            def wa(c):
-                v=pd.to_numeric(g[c],errors='coerce');m=v.notna()&(w>0)
-                return float(np.average(v[m],weights=w[m])) if m.any() else np.nan
-            overall.append({
-                'mode':mode,'n':int(g.n.sum()),'avg_return':wa('avg_return'),
-                'median_year_pf':float(g.pf.dropna().median()) if g.pf.notna().any() else np.nan,
-                'avg_win':wa('avg_win'),'avg_loss':wa('avg_loss'),'win_loss_ratio':wa('win_loss_ratio'),
-                'avg_hold':wa('avg_hold'),'avg_giveback':wa('avg_giveback'),'avg_mae':wa('avg_mae'),
-                'capture_bw50':wa('capture_bw50'),'capture_bw100':wa('capture_bw100'),'capture_bw200':wa('capture_bw200'),'capture_bw300':wa('capture_bw300'),
-                'positive_years':int((g.avg_return>0).sum()),'years':int(g.year.nunique())
-            })
-        O=pd.DataFrame(overall)
-        control=O[O['mode'].eq('HOLD_504_CONTROL')].iloc[0]
-        O['avgret_delta']=O.avg_return-control.avg_return
-        O['pf_delta']=O.median_year_pf-control.median_year_pf
-        O['bw100_delta']=O.capture_bw100-control.capture_bw100
-        O['bw200_delta']=O.capture_bw200-control.capture_bw200
-        O['bw300_delta']=O.capture_bw300-control.capture_bw300
+        P=pd.DataFrame(pairwise)
+        P.to_csv(V616F_REPORT,index=False)
 
-        # Promotion requires better expectancy/PF without materially killing the right tail.
-        O['pass_vs_control']=(O.avg_return>control.avg_return)&(O.median_year_pf>=control.median_year_pf)&(O.capture_bw200>=control.capture_bw200-.08)&(O.capture_bw300>=control.capture_bw300-.10)
-        O=O.sort_values(['pass_vs_control','avg_return','median_year_pf'],ascending=[False,False,False])
-
-        res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),
-             'overall':O.to_dict('records'),'yearly':R.to_dict('records'),
-             'rule_note':'V6.16F.3.1 Strict OOS. Frozen DNA + CONTROL entry + -7% initial stop. HOLD504 is control. No winner-management exit before day 504. Only +2R winners may extend beyond 504; post-504 exits use close-known data and execute next open.',
-             'acceptance':'Extended exit must beat HOLD504 on Avg Return and median yearly PF while preserving BW200 within 8pp and BW300 within 10pp. Long-horizon modes are interpreted with their own eligible-sample N.',
-             'warning':'Existing cache still has survivorship-bias limits until delisted/historical universe coverage is complete.'}
+        res={
+            'generated_at':datetime.now(timezone.utc).isoformat(),
+            'elapsed_sec':round(time.time()-t0,2),
+            'pairwise':pairwise,'verdicts':verdicts,'tail':tail,'yearly':yearly,
+            'rule_note':'V6.16F.3.2 Matched Cohort. Same frozen DNA + CONTROL entry + -7% stop. Longer holds are compared only on the exact same trades with enough future history.',
+            'acceptance':'A longer hold is credible only if it beats HOLD504 on the same cohort on Avg Return and median yearly PF. Tail concentration is reported to detect dependence on a tiny number of monster winners.',
+            'warning':'Existing cache still has survivorship-bias limits until historical/delisted coverage is complete.'
+        }
         V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616f_write(status='done',message='V6.16F.3.1 Extended Exit Matrix 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+        _v616f_write(status='done',message='V6.16F.3.2 Matched-Cohort Pairwise 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
     except Exception as ex:
         traceback.print_exc()
-        _v616f_write(status='error',message='V6.16F.3.1 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
-    finally:v616f_thread=None
+        _v616f_write(status='error',message='V6.16F.3.2 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v616f_thread=None
 
 def _v616f_start():
     global v616f_thread
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616f3/run')
+@APP.post('/v616f32/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616f3/exit-matrix')
+    _v616f_start();return redirect('/v616f32/matched-cohort')
 
-@APP.get('/api/v616f3/status')
+@APP.get('/api/v616f32/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616f3/exit-matrix')
+@APP.get('/v616f32/matched-cohort')
 def v616f_page():
     import html
-    e=lambda x:html.escape(str(x));s=_v616f_status();r={}
+    e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
     if V616F_RESULT.exists():
         try:r=json.loads(V616F_RESULT.read_text(encoding='utf-8'))
         except Exception:pass
-    trs=''
-    for x in r.get('overall',[]):
-        trs+=f"<tr><td><b>{e(x.get('mode'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avg_hold',0):.1f}</td><td>{x.get('avg_giveback',0):.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td><td>{x.get('capture_bw100',0) if x.get('capture_bw100') is not None else 0:.1%}</td><td>{x.get('capture_bw200',0) if x.get('capture_bw200') is not None else 0:.1%}</td><td>{x.get('capture_bw300',0) if x.get('capture_bw300') is not None else 0:.1%}</td><td>{'PASS' if x.get('pass_vs_control') else '—'}</td></tr>"
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f3/run"><button>▶ 跑 V6.16F.3.1 Exit Matrix</button></form>'
-    err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1250px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🧭 V6.16F.3.1 · Extended Exit Matrix</h1><div class="info"><b>HOLD504 = Control。</b> 一次测试 504→756→1008→1260 个交易日，以及 504 日后的 100MA / 200MA / Long Trend Break / 高点回撤25% / 35%。长周期方案只使用拥有足够未来历史的样本。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div><div class="c"><h2>Strict OOS Overall</h2><div style="overflow:auto"><table><tr><th>Exit</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>HoldD</th><th>Giveback</th><th>BW50</th><th>BW100</th><th>BW200</th><th>BW300</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f3/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
+    rows=''
+    for x in r.get('pairwise',[]):
+        rows += f"<tr><td>{int(x.get('cohort',0))}</td><td>HOLD_{int(x.get('hold',0))}</td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('median_year_pf',0) if x.get('median_year_pf') is not None else 0:.2f}</td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avgret_delta',0) if x.get('avgret_delta') is not None else 0:+.2%}</td></tr>"
+
+    tails=''
+    for x in r.get('tail',[]):
+        tails += f"<tr><td>HOLD_{int(x.get('hold',0))}</td><td>{int(x.get('n',0)):,}</td><td>{x.get('median_return',0):.2%}</td><td>{x.get('p90_return',0):.1%}</td><td>{x.get('p95_return',0):.1%}</td><td>{x.get('p99_return',0):.1%}</td><td>{x.get('top1_profit_share',0):.1%}</td><td>{x.get('top5_profit_share',0):.1%}</td></tr>"
+
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616f32/run"><button>▶ 跑 V6.16F.3.2 Matched Cohort</button></form>'
+    err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
+
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1000px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>⚖️ V6.16F.3.2 · Matched-Cohort Pairwise</h1><div class="info"><b>只修公平性，不加新规则。</b> HOLD504 / 756 / 1008 / 1260 在完全相同、拥有足够未来历史的交易上比较。</div></div>
+<div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　耗时 {s.get('elapsed_sec',0)} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Matched Pairwise</h2><div style="overflow:auto"><table><tr><th>Cohort</th><th>Hold</th><th>N</th><th>AvgRet</th><th>Median PF</th><th>AvgWin</th><th>W/L</th><th>ΔAvgRet vs504</th></tr>{rows}</table></div></div>
+<div class="c"><h2>Right-Tail Concentration</h2><div style="overflow:auto"><table><tr><th>Hold</th><th>N</th><th>Median</th><th>P90</th><th>P95</th><th>P99</th><th>Top1% Profit Share</th><th>Top5% Profit Share</th></tr>{tails}</table></div></div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616f32/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script>
+</div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
