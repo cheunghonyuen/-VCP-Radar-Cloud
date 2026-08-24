@@ -6959,6 +6959,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v615e-shortcut" style="border:3px solid #f97316"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.15E Big Winner DNA Multi-Factor</h2><div class="muted">Fast Replay · 看 +20/+30/+40/+50% 右尾 · 不训练权重</div></div><a href="/v615e/multifactor"><button type="button">打开 V6.15E</button></a></div></div>
+
 <div class="card" id="v615d-shortcut" style="border:3px solid #ec4899">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
     <div><h2 style="margin:0">🧬 V6.15D Big Winner Factor Discovery</h2>
@@ -9973,6 +9975,222 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.15E BIG WINNER DNA MULTI-FACTOR VALIDATION =================
+V615E_DIR = DATA_DIR / "jlaw_v615e_multifactor"
+V615E_STATUS = V615E_DIR / "status.json"
+V615E_RESULT = V615E_DIR / "result.json"
+V615E_REPORT = V615E_DIR / "multifactor_report.csv"
+v615e_thread = None
+
+def _v615e_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","elapsed_sec":0,"error":None}
+    if V615E_STATUS.exists():
+        try:s.update(json.loads(V615E_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v615e_write_status(**kw):
+    V615E_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v615e_status();s.update(kw)
+    V615E_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v615e_eval(S,mask,name,components,proxy):
+    mask=pd.Series(mask,index=S.index).fillna(False)
+    g=S[mask]
+    if len(g)<100:return None
+
+    base15=float((S["mfe60"]>=.15).mean())
+    base20=float((S["mfe60"]>=.20).mean())
+    base30=float((S["mfe60"]>=.30).mean())
+    base40=float((S["mfe60"]>=.40).mean())
+    base50=float((S["mfe60"]>=.50).mean())
+
+    out=dict(
+        name=name,components=components,proxy=proxy,n=int(len(g)),share=float(len(g)/len(S)),
+        bw15=float((g["mfe60"]>=.15).mean()),
+        bw20=float((g["mfe60"]>=.20).mean()),
+        bw30=float((g["mfe60"]>=.30).mean()),
+        bw40=float((g["mfe60"]>=.40).mean()),
+        bw50=float((g["mfe60"]>=.50).mean()),
+        lift15=float((g["mfe60"]>=.15).mean()/base15) if base15>0 else 0,
+        lift20=float((g["mfe60"]>=.20).mean()/base20) if base20>0 else 0,
+        lift30=float((g["mfe60"]>=.30).mean()/base30) if base30>0 else 0,
+        lift40=float((g["mfe60"]>=.40).mean()/base40) if base40>0 else 0,
+        lift50=float((g["mfe60"]>=.50).mean()/base50) if base50>0 else 0,
+        avg_mfe=float(g["mfe60"].mean()),
+        avg_mae=float(g["mae60"].mean()),
+    )
+
+    # Right-tail emphasis: stronger weight on 30/40/50% winners, but still penalize tiny samples.
+    tail_score=(out["lift20"]*1.0 + out["lift30"]*1.3 + out["lift40"]*1.6 + out["lift50"]*2.0)/5.9
+    sample_penalty=min(1.0, math.sqrt(len(g)/1000.0))
+    out["tail_score"]=float(tail_score*sample_penalty)
+
+    # Year stability: compare each selected subset to that year's own base rate.
+    yr_lifts20=[];yr_lifts30=[];good_years20=0;good_years30=0;tested=0
+    for y,yy in S.groupby("year"):
+        gm=mask.loc[yy.index]
+        gg=yy[gm]
+        if len(gg)<20:continue
+        b20=float((yy["mfe60"]>=.20).mean());b30=float((yy["mfe60"]>=.30).mean())
+        l20=float((gg["mfe60"]>=.20).mean()/b20) if b20>0 else np.nan
+        l30=float((gg["mfe60"]>=.30).mean()/b30) if b30>0 else np.nan
+        if np.isfinite(l20):yr_lifts20.append(l20);good_years20+=int(l20>=1.0)
+        if np.isfinite(l30):yr_lifts30.append(l30);good_years30+=int(l30>=1.0)
+        tested+=1
+    out["year_med_lift20"]=float(np.median(yr_lifts20)) if yr_lifts20 else np.nan
+    out["year_med_lift30"]=float(np.median(yr_lifts30)) if yr_lifts30 else np.nan
+    out["years_ge1_20"]=int(good_years20);out["years_ge1_30"]=int(good_years30);out["years_tested"]=int(tested)
+    return out
+
+def _v615e_run():
+    global v615e_thread
+    t0=time.time()
+    try:
+        if not V615D_SNAP.exists():
+            raise RuntimeError("缺少 V6.15D factor_snapshots.csv；请先跑一次 V6.15D")
+        S=pd.read_csv(V615D_SNAP)
+        if S.empty:raise RuntimeError("V6.15D snapshot cache 为空")
+        S["obs_date"]=pd.to_datetime(S["obs_date"],errors="coerce")
+        S=S.dropna(subset=["obs_date","mfe60","mae60"]).copy()
+        S["year"]=S["obs_date"].dt.year
+
+        numcols=["ret60","ret120","ret252","atr20","range20","range50","vol_vs20","vol20_vs50",
+                 "near_52w_high","ma10_dist","ma20_dist","ma200_slope20"]
+        for c in numcols:
+            if c in S.columns:S[c]=pd.to_numeric(S[c],errors="coerce")
+
+        q=lambda c,p:float(S[c].quantile(p))
+        q60=q("ret60",.75);q120=q("ret120",.75);q252=q("ret252",.75)
+        qatr=q("atr20",.25);qr20=q("range20",.25);qr50=q("range50",.25)
+
+        # Explicit JLaw-aligned proxies. These are not claimed as exact JLaw mechanical rules.
+        F={}
+        F["MOM60"]=S["ret60"]>=q60
+        F["MOM120"]=S["ret120"]>=q120
+        F["MOM252"]=S["ret252"]>=q252
+        F["VOL_DRY"]=S["vol_vs20"]<=.80
+        F["VOL_CONTRACT"]=S["vol20_vs50"]<1.0
+        F["ATR_TIGHT"]=S["atr20"]<=qatr
+        F["RANGE20_TIGHT"]=S["range20"]<=qr20
+        F["RANGE50_TIGHT"]=S["range50"]<=qr50
+        F["NEAR_HIGH90"]=S["near_52w_high"]>=.90
+        F["MA10_NEAR"]=S["ma10_dist"].abs()<=.03
+        F["MA20_NEAR"]=S["ma20_dist"].abs()<=.04
+        F["TREND_TEMPLATE"]=S["trend_template"].astype(str).str.lower().isin(["true","1","yes"])
+
+        # Composite proxies for ideas we cannot exactly reconstruct from daily bars alone.
+        F["BASE_QUALITY_PROXY"]=(
+            (F["RANGE20_TIGHT"].astype(int)+F["RANGE50_TIGHT"].astype(int)+
+             F["ATR_TIGHT"].astype(int)+F["VOL_CONTRACT"].astype(int))>=3
+        )
+        F["PIVOT_READY_PROXY"]=(
+            F["NEAR_HIGH90"] &
+            (F["RANGE20_TIGHT"] | F["ATR_TIGHT"]) &
+            (F["VOL_DRY"] | F["VOL_CONTRACT"])
+        )
+        F["LEADER_MOMENTUM"]=((F["MOM60"].astype(int)+F["MOM120"].astype(int)+F["MOM252"].astype(int))>=2)
+
+        combos=[
+            ("Leader Momentum","LEADER_MOMENTUM","60/120/252D strength: at least 2 of 3"),
+            ("Leader + Volume Dry-up","LEADER_MOMENTUM&VOL_DRY","Leader momentum + current volume dry-up"),
+            ("Leader + Volume Contraction","LEADER_MOMENTUM&VOL_CONTRACT","Leader momentum + 20D avg volume < 50D"),
+            ("Leader + Base Quality","LEADER_MOMENTUM&BASE_QUALITY_PROXY","Leader momentum + tight base proxy"),
+            ("Leader + Pivot Ready","LEADER_MOMENTUM&PIVOT_READY_PROXY","Leader momentum + pivot-readiness proxy"),
+            ("MOM60 + MOM120 + VOL_DRY","MOM60&MOM120&VOL_DRY","Short/intermediate momentum + dry-up"),
+            ("MOM60 + MOM120 + BASE","MOM60&MOM120&BASE_QUALITY_PROXY","Momentum + multi-contraction base proxy"),
+            ("MOM60 + MOM120 + PIVOT","MOM60&MOM120&PIVOT_READY_PROXY","Momentum + near-high/tight/dry pivot proxy"),
+            ("MOM60 + VOL_DRY + RANGE20","MOM60&VOL_DRY&RANGE20_TIGHT","Momentum + dry-up + 20D tightness"),
+            ("MOM120 + VOL_DRY + RANGE20","MOM120&VOL_DRY&RANGE20_TIGHT","Intermediate momentum + dry-up + tightness"),
+            ("MOM252 + MOM120 + VOL_DRY","MOM252&MOM120&VOL_DRY","Long/intermediate momentum + dry-up"),
+            ("Trend + Leader","TREND_TEMPLATE&LEADER_MOMENTUM","Trend Template + leader momentum"),
+            ("Trend + Leader + Dry-up","TREND_TEMPLATE&LEADER_MOMENTUM&VOL_DRY","Trend + leader momentum + supply dry-up"),
+            ("Near High + Leader + Tight","NEAR_HIGH90&LEADER_MOMENTUM&RANGE20_TIGHT","Near highs + leader momentum + tightness"),
+            ("Near High + Leader + Dry-up","NEAR_HIGH90&LEADER_MOMENTUM&VOL_DRY","Near highs + leader momentum + dry-up"),
+        ]
+
+        _v615e_write_status(status="running",message="Fast Replay：验证 Big Winner Multi-Factor DNA",
+                            processed=0,total=len(combos),elapsed_sec=0,error=None)
+        rows=[]
+        for i,(name,expr,proxy) in enumerate(combos,1):
+            parts=expr.split("&")
+            mask=pd.Series(True,index=S.index)
+            for p in parts:mask &= F[p].fillna(False)
+            r=_v615e_eval(S,mask,name,expr,proxy)
+            if r:rows.append(r)
+            _v615e_write_status(status="running",message="Fast Replay：验证右尾 + 年度稳定性",
+                                processed=i,total=len(combos),current=name,elapsed_sec=round(time.time()-t0,2))
+        R=pd.DataFrame(rows)
+        if R.empty:raise RuntimeError("没有组合达到最小样本要求")
+        R=R.sort_values(["tail_score","year_med_lift30","lift30","n"],ascending=[False,False,False,False])
+        R.to_csv(V615E_REPORT,index=False)
+
+        base={
+            "bw15":float((S["mfe60"]>=.15).mean()),
+            "bw20":float((S["mfe60"]>=.20).mean()),
+            "bw30":float((S["mfe60"]>=.30).mean()),
+            "bw40":float((S["mfe60"]>=.40).mean()),
+            "bw50":float((S["mfe60"]>=.50).mean()),
+        }
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            snapshots=int(len(S)),
+            primary_label="60D MFE >=20%; right-tail validation through 30/40/50%",
+            base=base,
+            combinations=int(len(R)),
+            top=R.head(15).to_dict("records"),
+            rule_note="All VCP/Base/Pivot fields here are explicit daily-bar proxies, not exact JLaw discretionary setup labels.",
+            warning="Discovery/validation on existing-cache universe only. No Entry/Stop/Exit optimization. Final proof still requires independent time/ticker OOS and lockbox."
+        )
+        V615E_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v615e_write_status(status="done",message="V6.15E Multi-Factor Validation 完成",
+                            processed=len(combos),total=len(combos),current="",elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v615e_write_status(status="error",message="V6.15E 失败",error=f"{type(ex).__name__}: {ex}",
+                            elapsed_sec=round(time.time()-t0,1))
+    finally:v615e_thread=None
+
+def _v615e_start():
+    global v615e_thread
+    if v615e_thread is not None and v615e_thread.is_alive():return False
+    v615e_thread=threading.Thread(target=_v615e_run,daemon=True);v615e_thread.start();return True
+
+@APP.post("/v615e/run")
+def v615e_run():
+    _v615e_start();return redirect("/v615e/multifactor")
+
+@APP.get("/api/v615e/status")
+def v615e_status_api():return jsonify(_v615e_status())
+
+@APP.get("/v615e/multifactor")
+def v615e_page():
+    import html
+    esc=lambda x:html.escape(str(x));s=_v615e_status();r={}
+    if V615E_RESULT.exists():
+        try:r=json.loads(V615E_RESULT.read_text(encoding="utf-8"))
+        except Exception:r={}
+    T=pd.DataFrame(r.get("top",[]))
+    rows=""
+    for _,x in T.iterrows():
+        rows+=f"<tr><td>{esc(x.get('name'))}</td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('bw20',0)):.1%}</td><td>{float(x.get('bw30',0)):.1%}</td><td>{float(x.get('bw40',0)):.1%}</td><td>{float(x.get('bw50',0)):.1%}</td><td><b>{float(x.get('lift20',0)):.2f}×</b></td><td><b>{float(x.get('lift30',0)):.2f}×</b></td><td>{float(x.get('lift50',0)):.2f}×</td><td>{float(x.get('year_med_lift30',0) or 0):.2f}×</td><td>{int(x.get('years_ge1_30',0))}/{int(x.get('years_tested',0))}</td><td>{float(x.get('avg_mae',0)):.1%}</td></tr>"
+    b=r.get("base",{})
+    runbtn="" if s.get("status")=="running" else '<form method="post" action="/v615e/run"><button>▶ 跑 V6.15E Multi-Factor Validation</button></form>'
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1180px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:21px}}table{{width:100%;border-collapse:collapse;font-size:11px;min-width:1100px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🧬 V6.15E · Big Winner DNA Multi-Factor</h1><div class="info"><b>继续只解决选股。</b>直接 Replay V6.15D 的 snapshot cache，不重新扫描455只股票。除了主标签 +20%，同时观察 +30/+40/+50% 右尾，优先找真正能产生大赢家的 DNA，而不是为了减少止损牺牲右尾。</div></div>
+<div class="c"><h2>状态：{esc(s.get('status'))}</h2><p>{esc(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{esc(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{runbtn}</div>
+<div class="grid"><div class="m"><small>Base ≥15%</small><b>{b.get('bw15',0):.1%}</b></div><div class="m"><small>Base ≥20%</small><b>{b.get('bw20',0):.1%}</b></div><div class="m"><small>Base ≥30%</small><b>{b.get('bw30',0):.1%}</b></div><div class="m"><small>Base ≥40%</small><b>{b.get('bw40',0):.1%}</b></div><div class="m"><small>Base ≥50%</small><b>{b.get('bw50',0):.1%}</b></div></div>
+<div class="c"><h2>Multi-Factor DNA Ranking</h2><div class="warn">排序偏重 +30/+40/+50% 右尾和年度稳定性。Base Quality / Pivot Ready 是明确标注的 daily-bar Proxy，不冒充 JLaw 原版机械规则。</div><div style="overflow:auto"><table><tr><th>DNA组合</th><th>N</th><th>BW20</th><th>BW30</th><th>BW40</th><th>BW50</th><th>Lift20</th><th>Lift30</th><th>Lift50</th><th>Year Med L30</th><th>Years≥1</th><th>Avg MAE</th></tr>{rows}</table></div></div>
+<div class="c"><div class="warn"><b>限制：</b>{esc(r.get('warning','Existing-cache validation only; independent OOS remains required.'))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v615e/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>"""
 
 
 # ================= V6.15D BIG WINNER FACTOR DISCOVERY =================
