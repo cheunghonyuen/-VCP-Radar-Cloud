@@ -6959,6 +6959,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v614-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌍 V6.14 True OOS Expansion</h2><div class="muted">冻结现有规则，优先用 V6.13 从未出现过的新股票做独立扩样验证</div></div><a href="/v614/oos-expansion"><button type="button">打开 V6.14</button></a></div></div>
 <div class="card" id="v6137-shortcut" style="border:3px solid #2563eb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛟 V6.13.7 False-Reject Big Winner Escape</h2><div class="muted">冻结 V6.13.6 Gate，专门研究被误杀的大赢家为什么还能跑出来</div></div><a href="/v6137/false-reject-escape"><button type="button">打开 V6.13.7</button></a></div></div>
 <div class="card" id="v6136-shortcut" style="border:3px solid #0f766e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.13.6 RS + Entry Extension Holdout</h2><div class="muted">Strict Holdout + Walk-Forward：只验证 RS≥90 + Low Extension</div></div><a href="/v6136/rs-extension-holdout"><button type="button">打开 V6.13.6</button></a></div></div>
 <div class="card" id="v6135-shortcut" style="border:3px solid #9333ea"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.13.5 Immediate Failure Autopsy</h2><div class="muted">Fast Replay：优先保住 Big Winner，再找能排除 Immediate Failure 的进场前特征</div></div><a href="/v6135/immediate-failure-autopsy"><button type="button">打开 V6.13.5</button></a></div></div>
@@ -9949,6 +9950,254 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.14.0 TRUE OOS EXPANSION · NEW TICKERS FIRST =================
+V614_DIR = DATA_DIR / "jlaw_v614_oos_expansion"
+V614_STATUS = V614_DIR / "status.json"
+V614_RESULT = V614_DIR / "result.json"
+V614_TRADES = V614_DIR / "trades.csv"
+v614_thread = None
+
+def _v614_status():
+    s={"status":"idle","message":"尚未运行","processed":0,"total":0,"current":"","error":None,"elapsed_sec":0}
+    if V614_STATUS.exists():
+        try:s.update(json.loads(V614_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return s
+
+def _v614_write_status(**kw):
+    V614_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v614_status();s.update(kw)
+    V614_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return s
+
+def _v614_metrics(z):
+    if z is None or len(z)==0:
+        return dict(trades=0,pf=0.0,win_rate=0.0,avg_return=0.0,avg_win=0.0,avg_loss=0.0,
+                    avg_initial_risk=0.0,stop_rate=0.0,bigwinner20=0.0,bigwinner30=0.0,avg_mfe=0.0,avg_mae=0.0)
+    r=pd.to_numeric(z["return_pct"],errors="coerce").dropna()
+    wins=r[r>0];losses=r[r<0]
+    pf=float(wins.sum()/(-losses.sum())) if len(losses) and -losses.sum()>0 else (99.0 if len(wins) else 0.0)
+    mfe=pd.to_numeric(z["mfe60"],errors="coerce")
+    mae=pd.to_numeric(z["mae60"],errors="coerce")
+    return dict(
+        trades=int(len(r)),pf=pf,win_rate=float((r>0).mean()),avg_return=float(r.mean()),
+        avg_win=float(wins.mean()) if len(wins) else 0.0,
+        avg_loss=float(losses.mean()) if len(losses) else 0.0,
+        avg_initial_risk=float(pd.to_numeric(z["initial_risk"],errors="coerce").mean()),
+        stop_rate=float(pd.to_numeric(z["stopped"],errors="coerce").fillna(0).mean()),
+        bigwinner20=float((mfe>=.20).mean()),bigwinner30=float((mfe>=.30).mean()),
+        avg_mfe=float(mfe.mean()),avg_mae=float(mae.mean())
+    )
+
+def _v614_run_build(force=False):
+    global v614_thread
+    t0=time.time()
+    try:
+        if V614_RESULT.exists() and V614_TRADES.exists() and not force:
+            _v614_write_status(status="done",message="已有 V6.14 OOS Expansion 缓存；未重复 Full Build",
+                               elapsed_sec=0,error=None)
+            return
+
+        import importlib.util
+        ep=Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+        if not ep.exists():raise RuntimeError("缺少 jlaw_v6_1_DECISION_FAST.py")
+        spec=importlib.util.spec_from_file_location("v614_engine",str(ep))
+        eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+
+        files={p.stem.upper():p for p in MARKET_DIR.glob("*.csv")}
+        all_data={}
+        for t,p in files.items():
+            try:all_data[t]=eng.load(p)
+            except Exception:pass
+        spy=all_data.get("SPY")
+        if spy is None:raise RuntimeError("缺少 SPY market cache")
+
+        mapped=sorted(t for t in files if t in getattr(eng,"T2S",{}) and eng.T2S.get(t) in all_data)
+        old_meta_tickers=set()
+        if V613_DETAIL.exists():
+            try:
+                old=pd.read_csv(V613_DETAIL)
+                old_meta_tickers=set(old[old["mode"].astype(str).eq("META")]["ticker"].astype(str).str.upper())
+            except Exception:pass
+
+        new_tickers=[t for t in mapped if t not in old_meta_tickers]
+        overlap_tickers=[t for t in mapped if t in old_meta_tickers]
+        targets=new_tickers
+        if not targets:
+            raise RuntimeError("当前 market cache / T2S 没有任何 V6.13 未使用的新股票；需要先扩充数据股票池")
+
+        _v614_write_status(status="running",
+            message=f"Full Build 一次：冻结规则扫描新股票 OOS（{len(targets)}只）",
+            processed=0,total=len(targets),current="",elapsed_sec=0,error=None)
+
+        rows=[];errors=[];base_signal_count=0
+        for n,t in enumerate(targets,1):
+            _v614_write_status(status="running",message="冻结 V6.13.1 META+Re-strength 规则扫描新股票",
+                               processed=n-1,total=len(targets),current=t,elapsed_sec=round(time.time()-t0,1))
+            try:
+                sec=eng.T2S.get(t)
+                if not sec or t not in all_data or sec not in all_data:continue
+                d,s,_,_=eng.historical_signals(t,all_data[t],spy,all_data[sec],all_data)
+                if s is None or s.empty:continue
+                d=d.copy()
+                d["ma10"]=d["close"].rolling(10).mean()
+                d["v20"]=d["volume"].rolling(20).mean()
+                base_signal_count+=len(s)
+                for _,sg in s.iterrows():
+                    i=int(sg["idx"]);pivot=float(sg["pivot"])
+                    mt=_v613_pullback_candidate(d,i,pivot,"META")
+                    if not mt:continue
+                    sres=_v613_trade_path(d,mt["entry_i"],mt["entry"],mt["stop"],60)
+                    rows.append(dict(
+                        ticker=t,
+                        breakout_date=pd.Timestamp(sg["date"]).strftime("%Y-%m-%d"),
+                        entry_date=mt["entry_date"],
+                        entry=float(mt["entry"]),stop=float(mt["stop"]),
+                        initial_risk=float(mt["initial_risk"]),
+                        pivot=pivot,
+                        entry_extension=float(mt["entry"]/pivot-1.0) if pivot>0 else np.nan,
+                        rs=float(sg.get("rs",np.nan)),
+                        breakout_volratio=float(sg.get("volratio",np.nan)),
+                        pullback_depth=float(mt.get("pullback_depth",np.nan)),
+                        support_count=int(mt.get("support_count",0)),
+                        support_cluster=float(mt.get("support_cluster",np.nan)),
+                        supports=str(mt.get("supports","")),
+                        vol_vs_v20=mt.get("vol_vs_v20"),
+                        vol_vs_breakout=mt.get("vol_vs_breakout"),
+                        v6_market_character=str(sg.get("v6_market_character","")),
+                        **sres
+                    ))
+            except Exception as ex:
+                errors.append({"ticker":t,"error":f"{type(ex).__name__}: {ex}"})
+
+        D=pd.DataFrame(rows)
+        if D.empty:
+            raise RuntimeError("新股票 OOS 没有产生 META trades；请扩大 market cache / universe")
+
+        D=D.sort_values(["ticker","entry_date","support_count","initial_risk"],
+                        ascending=[True,True,False,True]).drop_duplicates(["ticker","entry_date"],keep="first")
+        V614_DIR.mkdir(parents=True,exist_ok=True)
+        D.to_csv(V614_TRADES,index=False)
+
+        core=_v614_metrics(D)
+
+        ext_cut=0.0157
+        rs90=pd.to_numeric(D["rs"],errors="coerce")>=90
+        lowext=pd.to_numeric(D["entry_extension"],errors="coerce")<ext_cut
+        D["quality_tier"]=np.where(rs90 & lowext,"A",np.where(rs90 | lowext,"B","C"))
+        tiers={q:_v614_metrics(D[D["quality_tier"]==q]) for q in ["A","B","C"]}
+
+        annual=[]
+        D["entry_year"]=pd.to_datetime(D["entry_date"],errors="coerce").dt.year
+        for y,z in D.groupby("entry_year"):
+            if pd.isna(y):continue
+            m=_v614_metrics(z);m["year"]=int(y);annual.append(m)
+
+        regimes=[]
+        for rg,z in D.groupby(D["v6_market_character"].fillna("UNKNOWN").astype(str)):
+            m=_v614_metrics(z);m["regime"]=rg;regimes.append(m)
+
+        result=dict(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            elapsed_sec=round(time.time()-t0,2),
+            rule_freeze="V6.13.1 META + Re-strength + structural stop + BASE 60-session exit",
+            full_build=True,
+            cache_policy="Full build once; later analysis reads V614_TRADES",
+            mapped_cache_tickers=int(len(mapped)),
+            original_v613_meta_tickers=int(len(old_meta_tickers)),
+            true_oos_new_tickers_available=int(len(new_tickers)),
+            overlap_tickers_available=int(len(overlap_tickers)),
+            scanned_new_tickers=int(len(targets)),
+            base_breakout_signals=int(base_signal_count),
+            oos_meta_trades=int(len(D)),
+            oos_meta_unique_tickers=int(D["ticker"].nunique()),
+            core_metrics=core,
+            quality_tiers=tiers,
+            annual=annual,
+            regimes=regimes,
+            errors=errors[:100],
+            warning=("Ticker-level OOS relative to V6.13 META sample. "
+                     "Quality tiers are descriptive only; failed hard gates are NOT reintroduced.")
+        )
+        V614_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v614_write_status(status="done",message="V6.14 True OOS Expansion 完成",
+                           processed=len(targets),total=len(targets),current="",
+                           elapsed_sec=result["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v614_write_status(status="error",message="V6.14 OOS Expansion 失败",
+                           error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,2))
+    finally:
+        v614_thread=None
+
+def _v614_start(force=False):
+    global v614_thread
+    if v614_thread is not None and v614_thread.is_alive():return False
+    v614_thread=threading.Thread(target=_v614_run_build,args=(force,),daemon=True)
+    v614_thread.start();return True
+
+@APP.post("/v614/run")
+def v614_run():
+    _v614_start(False);return redirect("/v614/oos-expansion")
+
+@APP.post("/v614/rebuild")
+def v614_rebuild():
+    _v614_start(True);return redirect("/v614/oos-expansion")
+
+@APP.get("/api/v614/status")
+def v614_status_api():
+    return jsonify(_v614_status())
+
+@APP.get("/v614/oos-expansion")
+def v614_page():
+    import html
+    esc=lambda x:html.escape(str(x));st=_v614_status();r=None
+    if V614_RESULT.exists():
+        try:r=json.loads(V614_RESULT.read_text(encoding="utf-8"))
+        except Exception:pass
+    core_html="";tier_html="";annual_html="";regime_html="";summary=""
+    if r:
+        c=r.get("core_metrics",{})
+        summary=(f"<div class='grid'>"
+                 f"<div class='m'><small>Mapped Cache</small><b>{r.get('mapped_cache_tickers',0)}</b></div>"
+                 f"<div class='m'><small>旧V6.13 META股票</small><b>{r.get('original_v613_meta_tickers',0)}</b></div>"
+                 f"<div class='m'><small>真正新股票</small><b>{r.get('true_oos_new_tickers_available',0)}</b></div>"
+                 f"<div class='m'><small>OOS META Trades</small><b>{r.get('oos_meta_trades',0)}</b></div></div>")
+        core_html=(f"<tr><td><b>FROZEN CORE</b></td><td>{c.get('trades',0)}</td><td>{c.get('win_rate',0):.1%}</td>"
+                   f"<td>{c.get('avg_return',0):.2%}</td><td><b>{c.get('pf',0):.2f}</b></td>"
+                   f"<td>{c.get('avg_win',0):.2%}</td><td>{c.get('avg_loss',0):.2%}</td>"
+                   f"<td>{c.get('avg_initial_risk',0):.2%}</td><td>{c.get('stop_rate',0):.1%}</td>"
+                   f"<td>{c.get('bigwinner20',0):.1%}</td><td>{c.get('bigwinner30',0):.1%}</td></tr>")
+        for q,m in r.get("quality_tiers",{}).items():
+            tier_html+=(f"<tr><td><b>{q}</b></td><td>{m.get('trades',0)}</td><td>{m.get('win_rate',0):.1%}</td>"
+                        f"<td>{m.get('avg_return',0):.2%}</td><td>{m.get('pf',0):.2f}</td>"
+                        f"<td>{m.get('bigwinner20',0):.1%}</td><td>{m.get('stop_rate',0):.1%}</td></tr>")
+        for m in r.get("annual",[]):
+            annual_html+=(f"<tr><td><b>{m.get('year')}</b></td><td>{m.get('trades',0)}</td><td>{m.get('win_rate',0):.1%}</td>"
+                          f"<td>{m.get('avg_return',0):.2%}</td><td>{m.get('pf',0):.2f}</td>"
+                          f"<td>{m.get('bigwinner20',0):.1%}</td><td>{m.get('stop_rate',0):.1%}</td></tr>")
+        for m in r.get("regimes",[]):
+            regime_html+=(f"<tr><td><b>{esc(m.get('regime'))}</b></td><td>{m.get('trades',0)}</td><td>{m.get('win_rate',0):.1%}</td>"
+                          f"<td>{m.get('avg_return',0):.2%}</td><td>{m.get('pf',0):.2f}</td>"
+                          f"<td>{m.get('bigwinner20',0):.1%}</td></tr>")
+    running=st.get("status")=="running"
+    run="" if running else '<form method="post" action="/v614/run"><button>▶ 建立/读取 V6.14 OOS Expansion</button></form>'
+    rebuild="" if running else '<form method="post" action="/v614/rebuild" onsubmit="return confirm(\'确定重新 Full Build？平时不用。\')"><button class="secondary">♻️ Force Full Rebuild</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1150px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800;margin:4px}}.secondary{{background:#64748b}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}}.m{{background:#f8fafc;border-radius:12px;padding:12px}}.m small{{display:block;color:#64748b}}.m b{{font-size:21px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}}}</style></head><body><div class="w">
+<a href="/">← 返回主页</a>
+<div class="c"><h1>🌍 V6.14 · True Out-of-Sample Expansion</h1><div class="info"><b>停止在157笔里继续挖规则。</b>冻结 V6.13.1 的 META + Re-strength + Structural Stop + BASE Exit。优先扫描从未进入 V6.13 META 的新股票。第一次 Full Build 后持久缓存，之后继续 Fast Replay。</div></div>
+<div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　{esc(st.get('current',''))}　耗时 {st.get('elapsed_sec',0)} 秒</p><div style="display:flex;flex-wrap:wrap">{run}{rebuild}</div></div>
+{summary}
+<div class="c"><h2>Frozen Core · 真正新股票 OOS</h2><div class="scroll"><table><tr><th>系统</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Risk</th><th>Stop率</th><th>≥20%</th><th>≥30%</th></tr>{core_html}</table></div></div>
+<div class="c"><h2>Soft Quality Tier · 只观察，不当 Gate</h2><div class="warn">A/B/C 只用于判断 RS + Entry Location 是否有稳定排序价值。V6.13.4/6 已证明硬 Gate 会误杀 Big Winner，所以这里不重新把它变成禁止交易规则。</div><div class="scroll"><table><tr><th>Tier</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>≥20%</th><th>Stop率</th></tr>{tier_html}</table></div></div>
+<div class="c"><h2>年度稳定性</h2><div class="scroll"><table><tr><th>年份</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>≥20%</th><th>Stop率</th></tr>{annual_html}</table></div></div>
+<details class="c"><summary><b>市场 Character 分组</b></summary><div class="scroll"><table><tr><th>Market Character</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>≥20%</th></tr>{regime_html}</table></div></details>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v614/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+</div></body></html>'''
 
 
 # ================= V6.13.7 FALSE-REJECT BIG WINNER ESCAPE · FAST AUTOPSY =================
