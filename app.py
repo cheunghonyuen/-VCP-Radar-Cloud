@@ -6961,7 +6961,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 
 <div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h322/daily-mtm"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
-<div class="card" id="v616i4-shortcut" style="border:3px solid #10b981"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16I.4 Capital Admission Ranking</h2><div class="muted">Low-memory · 10-slot · FIRST_COME vs DNA / Momentum / Liquidity / Base Quality / Composite</div></div><a href="/v616i4/capital-ranking"><button type="button">打开 V6.16I.4</button></a></div></div>
+<div class="card" id="v616i4-shortcut" style="border:3px solid #10b981"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16I.5 Opportunity-Cost Admission Gate</h2><div class="muted">Low-memory · 10-slot · test whether a candidate deserves a scarce long-hold slot</div></div><a href="/v616i5/opportunity-gate"><button type="button">打开 V6.16I.5</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10687,27 +10687,27 @@ def v616f_page():
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.3.2.2 Daily MTM Low-Disk</h1><div class="info"><b>Low-Disk Daily MTM. Reuses the existing Local Cache; does not duplicate the full historical price map to Railway disk.</b> Every open position is marked to each trading day's close. Compare only BASE_ONLY, QUALITY_2OF4 +100%, and MFE252_Q75 +100% under a 10-slot no-margin account.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2>{click_note}<p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Daily MTM Portfolio Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Add</th><th>End Equity</th><th>CAGR</th><th>Delta CAGR</th><th>MaxDD</th><th>Delta DD</th><th>Calmar</th><th>Delta Calmar</th><th>Avg Exposure</th><th>Avg Cash</th><th>Add Fill%</th><th>Skip Base</th><th>Worst Year</th><th>Positive Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>MTM:</b> {e(r.get('mtm_note',''))}<br><b>Capacity:</b> {e(r.get('capacity_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h322/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running'||x.status==='aggregating'||(x.status==='idle'&&location.search.includes('started=')))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
-# ================= V6.16I.4 CAPITAL ADMISSION / SIGNAL RANKING =================
-V616I4_DIR=DATA_DIR/'jlaw_v616i4_capital_admission'
-V616I4_STATUS=V616I4_DIR/'status.json'
-V616I4_RESULT=V616I4_DIR/'result.json'
-V616I4_REPORT=V616I4_DIR/'capital_admission_report.csv'
-v616i4_thread=None
+# ================= V6.16I.5 CAPITAL ADMISSION / SIGNAL RANKING =================
+V616I5_DIR=DATA_DIR/'jlaw_v616i5_opportunity_gate'
+V616I5_STATUS=V616I5_DIR/'status.json'
+V616I5_RESULT=V616I5_DIR/'result.json'
+V616I5_REPORT=V616I5_DIR/'capital_admission_report.csv'
+v616i5_thread=None
 
-def _v616i4_status():
-    s={'version':'V6.16I.4','status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
-    if V616I4_STATUS.exists():
-        try:s.update(json.loads(V616I4_STATUS.read_text(encoding='utf-8')))
+def _v616i5_status():
+    s={'version':'V6.16I.5','status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616I5_STATUS.exists():
+        try:s.update(json.loads(V616I5_STATUS.read_text(encoding='utf-8')))
         except Exception:pass
     return s
 
-def _v616i4_write(**kw):
-    V616I4_DIR.mkdir(parents=True,exist_ok=True)
-    s=_v616i4_status();s.update(kw)
-    V616I4_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+def _v616i5_write(**kw):
+    V616I5_DIR.mkdir(parents=True,exist_ok=True)
+    s=_v616i5_status();s.update(kw)
+    V616I5_STATUS.write_text(json.dumps(s,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     return s
 
-def _v616i4_pct_vec(sorted_arr,values,higher=True):
+def _v616i5_pct_vec(sorted_arr,values,higher=True):
     vals=pd.to_numeric(pd.Series(values),errors='coerce').to_numpy(dtype=float)
     out=np.full(len(vals),np.nan,dtype=float)
     if sorted_arr is None or len(sorted_arr)<20:return out
@@ -10717,7 +10717,7 @@ def _v616i4_pct_vec(sorted_arr,values,higher=True):
         out[good]=p if higher else 1.0-p
     return out
 
-def _v616i4_nanmean_cols(*cols):
+def _v616i5_nanmean_cols(*cols):
     A=np.column_stack(cols).astype(float)
     cnt=np.sum(np.isfinite(A),axis=1)
     sm=np.nansum(A,axis=1)
@@ -10726,7 +10726,7 @@ def _v616i4_nanmean_cols(*cols):
     out[good]=sm[good]/cnt[good]
     return out
 
-def _v616i4_close_on(compact_prices,ticker,dt_ns,last_value):
+def _v616i5_close_on(compact_prices,ticker,dt_ns,last_value):
     pair=compact_prices.get(str(ticker))
     if pair is None:return last_value
     dns,cls=pair
@@ -10734,12 +10734,12 @@ def _v616i4_close_on(compact_prices,ticker,dt_ns,last_value):
     if j<len(dns) and dns[j]==np.int64(dt_ns):return float(cls[j])
     return last_value
 
-def _v616i4_run():
-    global v616i4_thread
+def _v616i5_run():
+    global v616i5_thread
     t0=time.time()
     try:
-        V616I4_DIR.mkdir(parents=True,exist_ok=True)
-        _v616i4_write(status='running',message='Phase 1/4 · Reuse H.3.2.2 Trade Metadata',processed=0,total=4,current='',elapsed_sec=0,error=None)
+        V616I5_DIR.mkdir(parents=True,exist_ok=True)
+        _v616i5_write(status='running',message='Phase 1/4 · Reuse H.3.2.2 Trade Metadata',processed=0,total=4,current='',elapsed_sec=0,error=None)
         if not V616H32_META_CACHE.exists():raise RuntimeError('缺少 H.3.2.2 trade_meta.pkl')
         T=pd.read_pickle(V616H32_META_CACHE).copy()
         if T.empty:raise RuntimeError('H.3.2.2 Trade Metadata 为空')
@@ -10759,7 +10759,7 @@ def _v616i4_run():
         needed=sorted(T.ticker.astype(str).unique())
         compact_prices={}
         ticker_str=T.ticker.astype(str)
-        _v616i4_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=0,total=len(needed),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+        _v616i5_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=0,total=len(needed),current='',elapsed_sec=round(time.time()-t0,1),error=None)
         for k,tic in enumerate(needed,1):
             d=_v616a_price(tic)
             if d is not None and len(d):
@@ -10778,7 +10778,7 @@ def _v616i4_run():
                     compact_prices[str(tic)]=(dates_ns,closes)
                 del d,close,volume,dv
             if k%10==0 or k==len(needed):
-                _v616i4_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=k,total=len(needed),current=tic,elapsed_sec=round(time.time()-t0,1),error=None)
+                _v616i5_write(status='running',message='Phase 2/4 · Low-Memory Local Cache',processed=k,total=len(needed),current=tic,elapsed_sec=round(time.time()-t0,1),error=None)
         if not compact_prices:raise RuntimeError('Local Cache 无可用价格')
 
         score_cols=['DNA_SCORE','MOMENTUM_STRENGTH','LIQUIDITY','BASE_QUALITY','COMPOSITE']
@@ -10788,7 +10788,7 @@ def _v616i4_run():
         for y in sorted(int(x) for x in year_series.dropna().unique()):
             if int((year_series<y).sum())>=300 and int((year_series==y).sum())>=30:eligible_years.append(y)
         if not eligible_years:raise RuntimeError('没有可用于 strict OOS 的年份')
-        _v616i4_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · 0/{len(eligible_years)} years',processed=0,total=len(eligible_years),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+        _v616i5_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · 0/{len(eligible_years)} years',processed=0,total=len(eligible_years),current='',elapsed_sec=round(time.time()-t0,1),error=None)
 
         feature_specs=[('ret60',True),('ret120',True),('ret252',True),('near_52w_high',True),('liq20',True),('atr20',False),('range20',False),('range50',False),('vol_vs20',False),('vol20_vs50',False)]
         valid_years=[]
@@ -10801,24 +10801,24 @@ def _v616i4_run():
                     arr=pd.to_numeric(tr[col],errors='coerce').dropna().to_numpy(dtype=float)
                     cache[col]=np.sort(arr) if len(arr) else None
                 else:cache[col]=None
-            p60=_v616i4_pct_vec(cache.get('ret60'),te.get('ret60'),True)
-            p120=_v616i4_pct_vec(cache.get('ret120'),te.get('ret120'),True)
-            p252=_v616i4_pct_vec(cache.get('ret252'),te.get('ret252'),True)
-            phigh=_v616i4_pct_vec(cache.get('near_52w_high'),te.get('near_52w_high'),True)
-            pliq=_v616i4_pct_vec(cache.get('liq20'),te.get('liq20'),True)
-            patr=_v616i4_pct_vec(cache.get('atr20'),te.get('atr20'),False)
-            pr20=_v616i4_pct_vec(cache.get('range20'),te.get('range20'),False)
-            pr50=_v616i4_pct_vec(cache.get('range50'),te.get('range50'),False)
-            pvd=_v616i4_pct_vec(cache.get('vol_vs20'),te.get('vol_vs20'),False)
-            pvc=_v616i4_pct_vec(cache.get('vol20_vs50'),te.get('vol20_vs50'),False)
+            p60=_v616i5_pct_vec(cache.get('ret60'),te.get('ret60'),True)
+            p120=_v616i5_pct_vec(cache.get('ret120'),te.get('ret120'),True)
+            p252=_v616i5_pct_vec(cache.get('ret252'),te.get('ret252'),True)
+            phigh=_v616i5_pct_vec(cache.get('near_52w_high'),te.get('near_52w_high'),True)
+            pliq=_v616i5_pct_vec(cache.get('liq20'),te.get('liq20'),True)
+            patr=_v616i5_pct_vec(cache.get('atr20'),te.get('atr20'),False)
+            pr20=_v616i5_pct_vec(cache.get('range20'),te.get('range20'),False)
+            pr50=_v616i5_pct_vec(cache.get('range50'),te.get('range50'),False)
+            pvd=_v616i5_pct_vec(cache.get('vol_vs20'),te.get('vol_vs20'),False)
+            pvc=_v616i5_pct_vec(cache.get('vol20_vs50'),te.get('vol20_vs50'),False)
             trend=te['trend_template'].fillna(False).astype(bool).to_numpy(dtype=float) if 'trend_template' in te.columns else np.zeros(len(te))
-            mom=_v616i4_nanmean_cols(p60,p120,p252)
-            bq=_v616i4_nanmean_cols(phigh,patr,pr20,pr50,pvd,pvc)
-            dna=_v616i4_nanmean_cols(p60,p120,p252,phigh,pvd,trend)
-            comp=_v616i4_nanmean_cols(dna,mom,pliq,bq)
+            mom=_v616i5_nanmean_cols(p60,p120,p252)
+            bq=_v616i5_nanmean_cols(phigh,patr,pr20,pr50,pvd,pvc)
+            dna=_v616i5_nanmean_cols(p60,p120,p252,phigh,pvd,trend)
+            comp=_v616i5_nanmean_cols(dna,mom,pliq,bq)
             T.loc[te_idx,'MOMENTUM_STRENGTH']=mom;T.loc[te_idx,'LIQUIDITY']=pliq;T.loc[te_idx,'BASE_QUALITY']=bq;T.loc[te_idx,'DNA_SCORE']=dna;T.loc[te_idx,'COMPOSITE']=comp
             valid_years.append(y)
-            _v616i4_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · year {y} · {yi}/{len(eligible_years)}',processed=yi,total=len(eligible_years),current=str(y),elapsed_sec=round(time.time()-t0,1),error=None)
+            _v616i5_write(status='running',message=f'Phase 3/4 · Vectorized Calibration · year {y} · {yi}/{len(eligible_years)}',processed=yi,total=len(eligible_years),current=str(y),elapsed_sec=round(time.time()-t0,1),error=None)
 
         V=T[year_series.isin(valid_years)].copy()
         if V.empty:raise RuntimeError('没有 strict OOS cohort')
@@ -10834,79 +10834,210 @@ def _v616i4_run():
         for idx,r in recs.items():
             entries.setdefault(np.int64(pd.Timestamp(r['entry_date']).value),[]).append(idx)
             exits.setdefault(np.int64(pd.Timestamp(r['base_exit_date']).value),[]).append(idx)
-        strategies=['FIRST_COME','DNA_SCORE','MOMENTUM_STRENGTH','LIQUIDITY','BASE_QUALITY','COMPOSITE'];slots=10
+        # Opportunity-cost gates: candidate can be rejected even when a slot is free.
+        # Scores are already strict point-in-time / earlier-year calibrated in Phase 3.
+        gates=[
+            ('FIRST_COME',None),
+            ('COMPOSITE_50',('COMPOSITE',0.50)),
+            ('COMPOSITE_65',('COMPOSITE',0.65)),
+            ('COMPOSITE_75',('COMPOSITE',0.75)),
+            ('COMPOSITE_85',('COMPOSITE',0.85)),
+            ('DNA_75',('DNA_SCORE',0.75)),
+            ('DYNAMIC_COMPOSITE','DYNAMIC'),
+            ('QUALITY_CONFLUENCE','CONFLUENCE'),
+        ]
+        slots=10
 
-        def simulate(strategy,si):
-            _v616i4_write(status='running',message=f'Phase 4/4 · {strategy} · 0%',processed=0,total=len(calendar_ns),current=strategy,elapsed_sec=round(time.time()-t0,1),error=None)
-            cash=1.0;pos={};lastpx={};skipped=admitted=contested_days=contested_candidates=0;eq_dates=[];eq_vals=[];expo_vals=[];step=max(1,len(calendar_ns)//20)
+        entries={};exits={}
+        for idx,r in recs.items():
+            entries.setdefault(np.int64(pd.Timestamp(r['entry_date']).value),[]).append(idx)
+            exits.setdefault(np.int64(pd.Timestamp(r['base_exit_date']).value),[]).append(idx)
+
+        # Research-only labels for capture diagnostics; NEVER used by gate decisions.
+        future_ret={}
+        for idx,r in recs.items():
+            ep=float(r['entry_px']); xp=float(r['base_exit_px'])
+            future_ret[idx]=(xp/ep-1.0) if ep>0 else np.nan
+        all_bw100=sum(1 for v in future_ret.values() if np.isfinite(v) and v>=1.0)
+        all_bw200=sum(1 for v in future_ret.values() if np.isfinite(v) and v>=2.0)
+
+        def gate_pass(gate_name,gate_def,idx,free_slots):
+            if gate_name=='FIRST_COME':
+                return True
+            r=recs[idx]
+            if isinstance(gate_def,tuple):
+                col,thr=gate_def
+                v=r.get(col,np.nan)
+                return bool(pd.notna(v) and float(v)>=float(thr))
+            if gate_def=='DYNAMIC':
+                # Scarcer remaining capacity => demand higher COMPOSITE.
+                # Pre-declared, no optimization inside test years.
+                if free_slots>=5:thr=0.50
+                elif free_slots>=3:thr=0.65
+                elif free_slots==2:thr=0.75
+                else:thr=0.85
+                v=r.get('COMPOSITE',np.nan)
+                return bool(pd.notna(v) and float(v)>=thr)
+            if gate_def=='CONFLUENCE':
+                vals=[r.get('DNA_SCORE',np.nan),r.get('MOMENTUM_STRENGTH',np.nan),
+                      r.get('LIQUIDITY',np.nan),r.get('BASE_QUALITY',np.nan)]
+                good=sum(pd.notna(v) and float(v)>=0.65 for v in vals)
+                comp=r.get('COMPOSITE',np.nan)
+                return bool(pd.notna(comp) and float(comp)>=0.60 and good>=2)
+            return False
+
+        def simulate(gate_name,gate_def,si):
+            _v616i5_write(status='running',message=f'Phase 4/4 · {gate_name} · 0%',
+                          processed=0,total=len(calendar_ns),current=gate_name,
+                          elapsed_sec=round(time.time()-t0,1),error=None)
+
+            cash=1.0;pos={};lastpx={}
+            skipped_capacity=0;rejected_gate=0;admitted=0
+            eligible_signals=0;cash_wait_days=0
+            eq_dates=[];eq_vals=[];expo_vals=[];open_vals=[]
+            admitted_ids=set()
+            step=max(1,len(calendar_ns)//20)
+
             for di,dt_ns in enumerate(calendar_ns,1):
                 for idx in exits.get(np.int64(dt_ns),[]):
                     p=pos.pop(idx,None)
-                    if p is not None:cash+=p['shares']*float(recs[idx]['base_exit_px'])
+                    if p is not None:
+                        cash+=p['shares']*float(recs[idx]['base_exit_px'])
+
                 hv=0.0
                 for idx,p in pos.items():
-                    cp=_v616i4_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']));lastpx[idx]=cp;hv+=p['shares']*cp
-                equity_now=cash+hv;target=equity_now/slots if equity_now>0 else 0.0
-                cand=list(entries.get(np.int64(dt_ns),[]));cash_capacity=int(np.floor((cash+1e-12)/target)) if target>0 else 0;capacity=max(0,min(slots-len(pos),cash_capacity))
-                if cand and len(cand)>capacity:contested_days+=1;contested_candidates+=len(cand)
-                if strategy!='FIRST_COME':cand.sort(key=lambda i:(-(float(recs[i].get(strategy)) if pd.notna(recs[i].get(strategy)) else -1e9),str(recs[i].get('ticker','')),str(recs[i].get('obs_date',''))))
-                for rank,idx in enumerate(cand):
-                    if rank>=capacity or cash+1e-12<target:skipped+=1;continue
+                    cp=_v616i5_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
+                    lastpx[idx]=cp;hv+=p['shares']*cp
+                equity_now=cash+hv
+                target=equity_now/slots if equity_now>0 else 0.0
+                cash_capacity=int(np.floor((cash+1e-12)/target)) if target>0 else 0
+                free_slots=max(0,min(slots-len(pos),cash_capacity))
+
+                cand=list(entries.get(np.int64(dt_ns),[]))
+                if cand:
+                    eligible_signals+=len(cand)
+
+                # Preserve deterministic FIRST_COME ordering within a gate.
+                # Gate decides "take or wait"; it does not rank candidates.
+                accepted=[]
+                for idx in cand:
+                    if gate_pass(gate_name,gate_def,idx,free_slots):
+                        accepted.append(idx)
+                    else:
+                        rejected_gate+=1
+
+                if free_slots>0 and cand and not accepted:
+                    cash_wait_days+=1
+
+                for idx in accepted:
+                    if len(pos)>=slots or cash+1e-12<target:
+                        skipped_capacity+=1
+                        continue
                     px=float(recs[idx]['entry_px'])
-                    if not np.isfinite(px) or px<=0:skipped+=1;continue
-                    cash-=target;pos[idx]={'ticker':str(recs[idx]['ticker']),'shares':target/px,'entry_px':px};lastpx[idx]=px;admitted+=1
+                    if not np.isfinite(px) or px<=0:
+                        skipped_capacity+=1;continue
+                    cash-=target
+                    pos[idx]={'ticker':str(recs[idx]['ticker']),
+                              'shares':target/px,'entry_px':px}
+                    lastpx[idx]=px
+                    admitted+=1;admitted_ids.add(idx)
+
                 hv=0.0
                 for idx,p in pos.items():
-                    cp=_v616i4_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']));lastpx[idx]=cp;hv+=p['shares']*cp
-                eq=cash+hv;eq_dates.append(np.int64(dt_ns));eq_vals.append(float(eq));expo_vals.append(float(hv/eq) if eq>0 else np.nan)
-                if di%step==0 or di==len(calendar_ns):_v616i4_write(status='running',message=f'Phase 4/4 · {strategy} · {int(round(di/len(calendar_ns)*100))}%',processed=di,total=len(calendar_ns),current=strategy,elapsed_sec=round(time.time()-t0,1),error=None)
-            eq=np.asarray(eq_vals,dtype=float);dates=pd.to_datetime(np.asarray(eq_dates,dtype=np.int64));years=max((dates[-1]-dates[0]).days/365.25,1/365.25);end_eq=float(eq[-1]);cagr=end_eq**(1/years)-1 if end_eq>0 else -1.0;dd=eq/np.maximum.accumulate(eq)-1;maxdd=float(dd.min());calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
-            dy=pd.Series(dates).dt.year.to_numpy();annual={}
+                    cp=_v616i5_close_on(compact_prices,p['ticker'],dt_ns,lastpx.get(idx,p['entry_px']))
+                    lastpx[idx]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                eq_dates.append(np.int64(dt_ns));eq_vals.append(float(eq))
+                expo_vals.append(float(hv/eq) if eq>0 else np.nan)
+                open_vals.append(len(pos))
+
+                if di%step==0 or di==len(calendar_ns):
+                    _v616i5_write(status='running',
+                                  message=f'Phase 4/4 · {gate_name} · {int(round(di/len(calendar_ns)*100))}%',
+                                  processed=di,total=len(calendar_ns),current=gate_name,
+                                  elapsed_sec=round(time.time()-t0,1),error=None)
+
+            eq=np.asarray(eq_vals,dtype=float)
+            dates=pd.to_datetime(np.asarray(eq_dates,dtype=np.int64))
+            years=max((dates[-1]-dates[0]).days/365.25,1/365.25)
+            end_eq=float(eq[-1]);cagr=end_eq**(1/years)-1 if end_eq>0 else -1.0
+            roll=np.maximum.accumulate(eq);dd=eq/roll-1.0
+            maxdd=float(np.min(dd));calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
+
+            dy=pd.Series(dates).dt.year.to_numpy()
+            annual={}
             for yy in np.unique(dy):
                 vals=eq[dy==yy]
                 if len(vals)>=2:annual[int(yy)]=float(vals[-1]/vals[0]-1)
-            return {'strategy':strategy,'end_equity':end_eq,'cagr':float(cagr),'maxdd_mtm':maxdd,'calmar':calmar,'avg_exposure':float(np.nanmean(np.asarray(expo_vals,dtype=float))),'admitted':int(admitted),'skipped_base':int(skipped),'contested_days':int(contested_days),'contested_candidates':int(contested_candidates),'worst_year':float(min(annual.values())) if annual else np.nan,'annual':annual}
 
-        results=[simulate(s,i) for i,s in enumerate(strategies,1)]
+            bw100_adm=sum(1 for i in admitted_ids if np.isfinite(future_ret.get(i,np.nan)) and future_ret[i]>=1.0)
+            bw200_adm=sum(1 for i in admitted_ids if np.isfinite(future_ret.get(i,np.nan)) and future_ret[i]>=2.0)
+
+            return {
+                'strategy':gate_name,'end_equity':end_eq,'cagr':float(cagr),
+                'maxdd_mtm':maxdd,'calmar':calmar,
+                'avg_exposure':float(np.nanmean(np.asarray(expo_vals,dtype=float))),
+                'avg_open_slots':float(np.mean(np.asarray(open_vals,dtype=float))),
+                'admitted':int(admitted),
+                'rejected_gate':int(rejected_gate),
+                'skipped_capacity':int(skipped_capacity),
+                'signals':int(eligible_signals),
+                'cash_wait_days':int(cash_wait_days),
+                'bw100_capture':float(bw100_adm/all_bw100) if all_bw100 else np.nan,
+                'bw200_capture':float(bw200_adm/all_bw200) if all_bw200 else np.nan,
+                'worst_year':float(min(annual.values())) if annual else np.nan,
+                'annual':annual
+            }
+
+        results=[simulate(name,gdef,i) for i,(name,gdef) in enumerate(gates,1)]
         control=next(x for x in results if x['strategy']=='FIRST_COME');ctrlann=control['annual'];rows=[]
         for x in results:
-            ann=x.pop('annual');common=sorted(set(ctrlann)&set(ann));wins=sum(ann[y]>ctrlann[y] for y in common) if x['strategy']!='FIRST_COME' else 0;x['delta_cagr_vs_first']=x['cagr']-control['cagr'];x['delta_maxdd_vs_first']=x['maxdd_mtm']-control['maxdd_mtm'];x['delta_calmar_vs_first']=x['calmar']-control['calmar'];x['win_years_vs_first']=int(wins);x['compare_years']=int(len(common));x['screen_pass']=bool(x['strategy']!='FIRST_COME' and x['delta_cagr_vs_first']>0 and x['delta_maxdd_vs_first']>=-0.03 and len(common)>0 and wins>=math.ceil(.60*len(common)));rows.append(x)
+            ann=x.pop('annual');common=sorted(set(ctrlann)&set(ann));wins=sum(ann[y]>ctrlann[y] for y in common) if x['strategy']!='FIRST_COME' else 0;x['delta_cagr_vs_first']=x['cagr']-control['cagr'];x['delta_maxdd_vs_first']=x['maxdd_mtm']-control['maxdd_mtm'];x['delta_calmar_vs_first']=x['calmar']-control['calmar'];x['win_years_vs_first']=int(wins);x['compare_years']=int(len(common));x['screen_pass']=bool(
+                x['strategy']!='FIRST_COME' and
+                x['delta_cagr_vs_first']>0 and
+                x['delta_maxdd_vs_first']>=-0.03 and
+                len(common)>0 and
+                wins>=math.ceil(.60*len(common)) and
+                x.get('bw100_capture',0)>=0.70
+            );rows.append(x)
         O=pd.DataFrame(rows).sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False])
-        try:O.to_csv(V616I4_REPORT,index=False)
+        try:O.to_csv(V616I5_REPORT,index=False)
         except OSError:pass
-        res={'version':'V6.16I.4','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'overall':O.replace({np.nan:None}).to_dict('records'),'acceptance':'Ranking must beat FIRST_COME on Daily-MTM CAGR, not worsen MaxDD by more than 3pp, and beat FIRST_COME in at least 60% of comparable OOS years.','rule_note':'Frozen DNA + CONTROL entry + -7% stop + HOLD1260. 10-slot, no margin. No add-on, no exit retuning. Ranking changes only same-day admission priority when capital is insufficient.','score_note':'Strict point-in-time scores; test-year percentile calibration uses earlier years only.','memory_note':'Low-memory engine retains only compact int64 dates + float32 closes per ticker. Full OHLCV is released after liquidity extraction; no second close_lookup is built.','cache_note':'Reuses H.3.2.2 trade metadata + existing Local Cache.','warning':'Existing universe still has survivorship-bias limits until historical/delisted coverage is complete.'}
-        V616I4_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v616i4_write(status='done',message='V6.16I.4 Capital Admission Ranking 完成',processed=6,total=6,current='',elapsed_sec=round(time.time()-t0,2),error=None)
+        res={'version':'V6.16I.5','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'overall':O.replace({np.nan:None}).to_dict('records'),'acceptance':'Opportunity-cost gate must beat FIRST_COME on Daily-MTM CAGR, not worsen MaxDD by more than 3pp, beat FIRST_COME in at least 60% of comparable OOS years, and preserve at least 70% of +100% winners.','rule_note':'Frozen DNA + CONTROL entry + -7% stop + HOLD1260. 10-slot, no margin. Gate may deliberately leave cash idle even when a slot is free. No add-on, no exit retuning, no forced replacement. Gate uses only admission-time scores.','score_note':'Pre-declared gates: COMPOSITE >= 0.50/0.65/0.75/0.85, DNA >= 0.75, dynamic COMPOSITE threshold based on free slots, and a fixed quality-confluence gate. Score calibration remains strict earlier-year only.','memory_note':'Low-memory engine retains only compact int64 dates + float32 closes per ticker. Full OHLCV is released after liquidity extraction; no second close_lookup is built.','cache_note':'Reuses H.3.2.2 trade metadata + existing Local Cache.','warning':'Existing universe still has survivorship-bias limits until historical/delisted coverage is complete.'}
+        V616I5_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v616i5_write(status='done',message='V6.16I.5 Opportunity-Cost Admission Gate 完成',processed=6,total=6,current='',elapsed_sec=round(time.time()-t0,2),error=None)
     except Exception as ex:
-        traceback.print_exc();_v616i4_write(status='error',message='V6.16I.4 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
-    finally:v616i4_thread=None
+        traceback.print_exc();_v616i5_write(status='error',message='V6.16I.5 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v616i5_thread=None
 
-def _v616i4_start():
-    global v616i4_thread
-    if v616i4_thread is not None and v616i4_thread.is_alive():return False
-    try:_v616i4_write(status='starting',message='Starting V6.16I.4 low-memory worker',processed=0,total=4,error=None)
+def _v616i5_start():
+    global v616i5_thread
+    if v616i5_thread is not None and v616i5_thread.is_alive():return False
+    try:_v616i5_write(status='starting',message='Starting V6.16I.5 low-memory worker',processed=0,total=4,error=None)
     except OSError:return False
-    v616i4_thread=threading.Thread(target=_v616i4_run,daemon=True);v616i4_thread.start();return True
+    v616i5_thread=threading.Thread(target=_v616i5_run,daemon=True);v616i5_thread.start();return True
 
-@APP.route('/v616i4/run',methods=['GET','POST'])
-def v616i4_run_route():
-    alive=v616i4_thread is not None and v616i4_thread.is_alive();started=_v616i4_start();code='1' if started else ('2' if alive else '0');return redirect('/v616i4/capital-ranking?started='+str(int(time.time()))+'&ok='+code)
+@APP.route('/v616i5/run',methods=['GET','POST'])
+def v616i5_run_route():
+    alive=v616i5_thread is not None and v616i5_thread.is_alive();started=_v616i5_start();code='1' if started else ('2' if alive else '0');return redirect('/v616i5/opportunity-gate?started='+str(int(time.time()))+'&ok='+code)
 
-@APP.get('/api/v616i4/status')
-def v616i4_status_api():return jsonify(_v616i4_status())
+@APP.get('/api/v616i5/status')
+def v616i5_status_api():return jsonify(_v616i5_status())
 
-@APP.get('/v616i4/capital-ranking')
-def v616i4_page():
+@APP.get('/v616i5/opportunity-gate')
+def v616i5_page():
     import html
-    e=lambda x:html.escape(str(x));s=_v616i4_status();r={}
-    if V616I4_RESULT.exists():
+    e=lambda x:html.escape(str(x));s=_v616i5_status();r={}
+    if V616I5_RESULT.exists():
         try:
-            z=json.loads(V616I4_RESULT.read_text(encoding='utf-8'))
-            if z.get('version')=='V6.16I.4':r=z
+            z=json.loads(V616I5_RESULT.read_text(encoding='utf-8'))
+            if z.get('version')=='V6.16I.5':r=z
         except Exception:pass
     rows=''
-    for x in r.get('overall',[]):rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_first',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('delta_maxdd_vs_first',0):+.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{int(x.get('admitted',0))}</td><td>{int(x.get('skipped_base',0))}</td><td>{int(x.get('contested_days',0))}</td><td>{int(x.get('win_years_vs_first',0))}/{int(x.get('compare_years',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>"
-    btn='' if s.get('status') in ('starting','running') else '<a href="/v616i4/run"><button type="button">Run V6.16I.4 Capital Ranking</button></a>';err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;min-width:1350px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>🎯 V6.16I.4 · Capital Admission Ranking</h1><div class="info"><b>Low-Memory Engine。</b> 冻结 DNA / CONTROL Entry / -7% Stop / HOLD1260。比较 FIRST_COME、DNA_SCORE、MOMENTUM_STRENGTH、LIQUIDITY、BASE_QUALITY、COMPOSITE。Phase 2 只保留紧凑 Date+Close。</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Daily-MTM Admission Results</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>End Equity</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>Calmar</th><th>Exposure</th><th>Admitted</th><th>Skipped</th><th>Contested Days</th><th>Win Years</th><th>Worst Year</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Memory:</b> {e(r.get('memory_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616i4/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    for x in r.get('overall',[]):
+        rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{x.get('end_equity',0):.2f}x</td><td>{x.get('cagr',0):.2%}</td><td>{x.get('delta_cagr_vs_first',0):+.2%}</td><td>{x.get('maxdd_mtm',0):.2%}</td><td>{x.get('calmar',0) or 0:.2f}</td><td>{x.get('avg_exposure',0):.1%}</td><td>{x.get('avg_open_slots',0):.1f}</td><td>{int(x.get('admitted',0))}</td><td>{int(x.get('rejected_gate',0))}</td><td>{int(x.get('skipped_capacity',0))}</td><td>{x.get('bw100_capture',0):.1%}</td><td>{x.get('bw200_capture',0):.1%}</td><td>{int(x.get('win_years_vs_first',0))}/{int(x.get('compare_years',0))}</td><td>{x.get('worst_year',0):.1%}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>"
+
+    btn='' if s.get('status') in ('starting','running') else '<a href="/v616i5/run"><button type="button">Run V6.16I.5 Opportunity Gate</button></a>';err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px}}table{{width:100%;border-collapse:collapse;min-width:1350px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>🎯 V6.16I.5 · Opportunity-Cost Admission Gate</h1><div class="info"><b>Opportunity-Cost Gate。</b> 不再研究同日排序；研究一个候选是否值得占用长期仓位。Gate 不通过时即使有空位也保留现金。底层继续使用 I.4 Low-Memory Engine。</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Daily-MTM Opportunity-Cost Results</h2><div style="overflow:auto"><table><tr><th>Gate</th><th>End Equity</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>Calmar</th><th>Exposure</th><th>Avg Slots</th><th>Admitted</th><th>Gate Reject</th><th>Capacity Skip</th><th>BW100 Capture</th><th>BW200 Capture</th><th>Win Years</th><th>Worst Year</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Memory:</b> {e(r.get('memory_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616i5/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
