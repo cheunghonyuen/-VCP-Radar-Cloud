@@ -5995,6 +5995,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 
 </style></head><body><div class="wrap">
 <div><a href="/" class="btn">← VCP Radar</a></div>
+<div class="card" id="v616d-shortcut" style="border:3px solid #22c55e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🏆 V6.16D Winner Management</h2><div class="muted">冻结 DNA / Entry / -7% Stop · +2R后才启动赢家保护 · 比较10MA/20MA/Hybrid/Giveback</div></div><a href="/v616d/winner-management"><button type="button">打开 V6.16D</button></a></div></div>
 <div class="card">
 <h2 style="margin-top:0">YouTube Ingest</h2>
 <div class="muted">粘贴 YouTube 链接 → 自动抓完整字幕 → 保存到云端。以后你只要把 YouTube 链接发给 ChatGPT，我就可以通过这个云端入口读取字幕并分析。</div>
@@ -9984,6 +9985,197 @@ def v6132_page():
 
 
 
+
+
+
+# ================= V6.16D WINNER MANAGEMENT / HOLD RESEARCH =================
+V616D_DIR=DATA_DIR/'jlaw_v616d_winner_management'
+V616D_STATUS=V616D_DIR/'status.json'
+V616D_RESULT=V616D_DIR/'result.json'
+V616D_REPORT=V616D_DIR/'winner_management_report.csv'
+v616d_thread=None
+
+def _v616d_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V616D_STATUS.exists():
+        try:x.update(json.loads(V616D_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v616d_write(**kw):
+    V616D_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v616d_status();x.update(kw)
+    V616D_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v616d_manage(d,ei,px,mode,horizon=120):
+    end=min(len(d)-1,ei+horizon-1)
+    if end<=ei:return None
+    ma10=d.close.rolling(10).mean()
+    ma20=d.close.rolling(20).mean()
+    initial_stop=px*.93
+    peak=px;armed=False;exit_idx=end;exit_px=float(d.close.iloc[end]);reason='TIME'
+
+    for i in range(ei,end+1):
+        op=float(d.open.iloc[i]);hi=float(d.high.iloc[i]);lo=float(d.low.iloc[i]);cl=float(d.close.iloc[i])
+        peak=max(peak,hi)
+
+        if lo<=initial_stop:
+            exit_idx=i;exit_px=min(op,initial_stop) if op<initial_stop else initial_stop;reason='STOP7';break
+
+        if not armed and peak/px-1>=.14:
+            armed=True
+
+        if mode=='HOLD_60' and i>=min(end,ei+59):
+            exit_idx=i;exit_px=cl;reason='HOLD60';break
+        if mode=='HOLD_90' and i>=min(end,ei+89):
+            exit_idx=i;exit_px=cl;reason='HOLD90';break
+        if mode=='HOLD_120':
+            continue
+        if not armed:
+            continue
+
+        if mode=='BE_AFTER_2R':
+            if lo<=px:
+                exit_idx=i;exit_px=min(op,px) if op<px else px;reason='BE_AFTER_2R';break
+
+        elif mode=='TRAIL_10MA_AFTER_2R':
+            if pd.notna(ma10.iloc[i]) and cl<ma10.iloc[i]:
+                if i+1<=end:exit_idx=i+1;exit_px=float(d.open.iloc[i+1]);reason='10MA_NEXT_OPEN'
+                else:exit_idx=i;exit_px=cl;reason='10MA_CLOSE'
+                break
+
+        elif mode in ('TRAIL_20MA_AFTER_2R','HYBRID_10_20_AFTER_2R'):
+            if pd.notna(ma20.iloc[i]) and cl<ma20.iloc[i]:
+                if i+1<=end:exit_idx=i+1;exit_px=float(d.open.iloc[i+1]);reason='20MA_NEXT_OPEN'
+                else:exit_idx=i;exit_px=cl;reason='20MA_CLOSE'
+                break
+
+        elif mode=='GIVEBACK_50_AFTER_2R':
+            peak_gain=peak/px-1;floor_px=px*(1+max(0.0,peak_gain*.50))
+            if lo<=floor_px:
+                exit_idx=i;exit_px=min(op,floor_px) if op<floor_px else floor_px;reason='GIVEBACK50';break
+
+        elif mode=='GIVEBACK_35_AFTER_2R':
+            peak_gain=peak/px-1;floor_px=px*(1+max(0.0,peak_gain*.65))
+            if lo<=floor_px:
+                exit_idx=i;exit_px=min(op,floor_px) if op<floor_px else floor_px;reason='GIVEBACK35';break
+
+    realized=float(exit_px/px-1)
+    path=d.iloc[ei:end+1]
+    mfe=float(path.high.max()/px-1)
+    mae=float(path.low.min()/px-1)
+    return {
+        'return':realized,'mfe':mfe,'mae':mae,'held':int(exit_idx-ei+1),
+        'reason':reason,'armed':armed,'max_giveback':max(0.0,mfe-realized),
+        'bw20_path':mfe>=.20,'bw30_path':mfe>=.30,'bw50_path':mfe>=.50,
+        'finish10':realized>=.10,'finish20':realized>=.20,'finish30':realized>=.30,'finish50':realized>=.50
+    }
+
+def _v616d_run():
+    global v616d_thread
+    t0=time.time()
+    try:
+        D=_v616b_build_entries()
+        ticks=sorted(D.ticker.unique())
+        modes=['HOLD_60','HOLD_90','HOLD_120','BE_AFTER_2R','TRAIL_10MA_AFTER_2R','TRAIL_20MA_AFTER_2R','HYBRID_10_20_AFTER_2R','GIVEBACK_50_AFTER_2R','GIVEBACK_35_AFTER_2R']
+        A={}
+
+        def bucket(key):
+            if key not in A:
+                A[key]={'n':0,'sum_ret':0.0,'win_n':0,'loss_n':0,'win_sum':0.0,'loss_sum':0.0,'held_sum':0.0,'giveback_sum':0.0,'armed_n':0,'path20_n':0,'path30_n':0,'path50_n':0,'finish20_n':0,'finish30_n':0,'finish50_n':0,'capture20_n':0,'capture30_n':0,'capture50_n':0}
+            return A[key]
+
+        _v616d_write(status='running',message='Frozen DNA + Entry + Stop7 → Winner Management Replay',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+
+        for k,t in enumerate(ticks,1):
+            d=_v616a_price(t)
+            if d is not None:
+                im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+                for _,r in D[D.ticker.eq(t)].iterrows():
+                    dt=pd.Timestamp(r.obs_date).normalize()
+                    if dt not in im:continue
+                    oi=im[dt]
+                    if oi>=len(d)-121:continue
+                    E=_v616a_entries(d,oi)
+                    methods=['CONTROL','RE_STRENGTH'] if r['group']=='CORE_AB' else ['POWER_PLAY_PB']
+                    for em in methods:
+                        if em not in E:continue
+                        ei,px,delay=E[em]
+                        for mode in modes:
+                            z=_v616d_manage(d,ei,px,mode,120)
+                            if z is None:continue
+                            b=bucket((str(r['group']),em,mode))
+                            b['n']+=1;b['sum_ret']+=z['return'];b['held_sum']+=z['held'];b['giveback_sum']+=z['max_giveback'];b['armed_n']+=int(z['armed'])
+                            if z['return']>0:b['win_n']+=1;b['win_sum']+=z['return']
+                            else:b['loss_n']+=1;b['loss_sum']+=z['return']
+                            b['path20_n']+=int(z['bw20_path']);b['path30_n']+=int(z['bw30_path']);b['path50_n']+=int(z['bw50_path'])
+                            b['finish20_n']+=int(z['finish20']);b['finish30_n']+=int(z['finish30']);b['finish50_n']+=int(z['finish50'])
+                            if z['bw20_path'] and z['return']>=.10:b['capture20_n']+=1
+                            if z['bw30_path'] and z['return']>=.20:b['capture30_n']+=1
+                            if z['bw50_path'] and z['return']>=.30:b['capture50_n']+=1
+
+            _v616d_write(status='running',message='Winner Management Replay · Streaming stats',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+
+        _v616d_write(status='aggregating',message='Replay完成 · 生成 Winner Management 排名',processed=len(ticks),total=len(ticks),current='FINALIZE',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        reps=[]
+        for (grp,en,mode),b in A.items():
+            n=max(b['n'],1);gp=b['win_sum'];gl=abs(b['loss_sum'])
+            pf=gp/gl if gl>0 else np.nan
+            avgwin=gp/b['win_n'] if b['win_n'] else 0.0
+            avgloss=b['loss_sum']/b['loss_n'] if b['loss_n'] else 0.0
+            wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
+            reps.append({
+                'group':grp,'entry':en,'mode':mode,'n':b['n'],'avg_return':b['sum_ret']/n,'win_rate':b['win_n']/n,'pf':pf,
+                'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,'avg_hold_days':b['held_sum']/n,'avg_giveback':b['giveback_sum']/n,
+                'armed_2R_rate':b['armed_n']/n,'finish20':b['finish20_n']/n,'finish30':b['finish30_n']/n,'finish50':b['finish50_n']/n,
+                'capture_bw20':b['capture20_n']/b['path20_n'] if b['path20_n'] else np.nan,
+                'capture_bw30':b['capture30_n']/b['path30_n'] if b['path30_n'] else np.nan,
+                'capture_bw50':b['capture50_n']/b['path50_n'] if b['path50_n'] else np.nan
+            })
+
+        R=pd.DataFrame(reps)
+        if R.empty:raise RuntimeError('没有生成 Winner Management 结果')
+        R['score']=R['avg_return'].fillna(-9)*100+R['pf'].fillna(0)+R['capture_bw30'].fillna(0)+R['capture_bw50'].fillna(0)
+        R=R.sort_values(['group','entry','score'],ascending=[True,True,False])
+        R.to_csv(V616D_REPORT,index=False)
+
+        res={'generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'methods':R.to_dict('records'),
+             'rule_note':'V6.16D freezes V6.15F DNA, V6.16A entry logic and -7% initial stop. Winner protection activates only after +2R (+14%). No Early Failure, add-on or sizing optimization.',
+             'acceptance':'Prefer higher PF + Avg Return + Avg Win/Loss while preserving BW20/BW30/BW50 capture. A prettier drawdown alone is not enough.',
+             'warning':'Discovery on existing cache; survivorship-bias limits remain. Strict OOS/lockbox is still required before promotion.'}
+        V616D_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v616d_write(status='done',message='V6.16D Winner Management Research 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+    except Exception as ex:
+        traceback.print_exc();_v616d_write(status='error',message='V6.16D 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v616d_thread=None
+
+def _v616d_start():
+    global v616d_thread
+    if v616d_thread is not None and v616d_thread.is_alive():return False
+    v616d_thread=threading.Thread(target=_v616d_run,daemon=True);v616d_thread.start();return True
+
+@APP.post('/v616d/run')
+def v616d_run():
+    _v616d_start();return redirect('/v616d/winner-management')
+
+@APP.get('/api/v616d/status')
+def v616d_status_api():
+    return jsonify(_v616d_status())
+
+@APP.get('/v616d/winner-management')
+def v616d_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v616d_status();r={}
+    if V616D_RESULT.exists():
+        try:r=json.loads(V616D_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    trs=''
+    for x in r.get('methods',[])[:90]:
+        trs+=f"<tr><td>{e(x.get('group'))}</td><td>{e(x.get('entry'))}</td><td><b>{e(x.get('mode'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{x.get('avg_return',0):.2%}</td><td>{x.get('win_rate',0):.1%}</td><td><b>{x.get('pf',0) if x.get('pf') is not None else 0:.2f}</b></td><td>{x.get('avg_win',0):.1%}</td><td>{x.get('avg_loss',0):.1%}</td><td>{x.get('win_loss_ratio',0) if x.get('win_loss_ratio') is not None else 0:.2f}×</td><td>{x.get('avg_hold_days',0):.1f}</td><td>{x.get('avg_giveback',0):.1%}</td><td>{x.get('finish20',0):.1%}</td><td>{x.get('finish30',0):.1%}</td><td>{x.get('finish50',0):.1%}</td><td>{x.get('capture_bw20',0) if x.get('capture_bw20') is not None else 0:.1%}</td><td>{x.get('capture_bw30',0) if x.get('capture_bw30') is not None else 0:.1%}</td><td>{x.get('capture_bw50',0) if x.get('capture_bw50') is not None else 0:.1%}</td></tr>"
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616d/run"><button>▶ 跑 V6.16D Winner Management</button></form>'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1600px;font-size:10.5px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>🏆 V6.16D · Winner Management / Hold Research</h1><div class="info"><b>亏损规则冻结，开始研究怎么拿住赢家。</b> V6.15F DNA、V6.16A Entry、初始 -7% Stop 全部固定。只有交易先达到 +2R（约 +14%）后，才启动 Break-even / 10MA / 20MA / Hybrid / Profit Giveback 管理。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}　{s.get('processed',0)}/{s.get('total',0)}　{e(s.get('current',''))}　耗时 {s.get('elapsed_sec',0)} 秒</p>{btn}</div><div class="c"><h2>Winner Management Ranking</h2><div class="warn">重点看 <b>PF、Avg Return、Avg Win/Loss、BW20/30/50 Capture</b>。不能为了少回吐而砍掉 +30/+50 右尾。</div><div style="overflow:auto"><table><tr><th>Group</th><th>Entry</th><th>Mode</th><th>N</th><th>AvgRet</th><th>Win%</th><th>PF</th><th>AvgWin</th><th>AvgLoss</th><th>W/L</th><th>HoldD</th><th>Giveback</th><th>Finish20</th><th>Finish30</th><th>Finish50</th><th>CaptureBW20</th><th>CaptureBW30</th><th>CaptureBW50</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>限制：</b>{e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616d/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 
 # ================= V6.16C EARLY FAILURE SIGNATURE RESEARCH =================
