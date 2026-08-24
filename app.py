@@ -5995,7 +5995,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px so
 
 </style></head><body><div class="wrap">
 <div><a href="/" class="btn">← VCP Radar</a></div>
-<div class="card" id="v616d-shortcut" style="border:3px solid #22c55e"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🏆 V6.16D Winner Management</h2><div class="muted">冻结 DNA / Entry / -7% Stop · +2R后才启动赢家保护 · 比较10MA/20MA/Hybrid/Giveback</div></div><a href="/v616d/winner-management"><button type="button">打开 V6.16D</button></a></div></div>
+<a href="/v616d/winner-management"><button type="button">打开 V6.16D</button></a></div></div>
 <div class="card">
 <h2 style="margin-top:0">YouTube Ingest</h2>
 <div class="muted">粘贴 YouTube 链接 → 自动抓完整字幕 → 保存到云端。以后你只要把 YouTube 链接发给 ChatGPT，我就可以通过这个云端入口读取字幕并分析。</div>
@@ -6960,6 +6960,15 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
+<div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
+<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+<div>
+<h2 style="margin:0">🏆 V6.16D Winner Management</h2>
+<div class="muted">冻结 DNA / Entry / -7% Stop · +2R后才启动赢家保护 · 比较 10MA / 20MA / Hybrid / Giveback</div>
+</div>
+<a href="/v616d/winner-management"><button type="button">打开 V6.16D</button></a>
+</div>
+</div>
 <div class="card" id="v616c2-shortcut" style="border:3px solid #f59e0b"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.16C.7 Early Failure Signature</h2><div class="muted">冻结 -7% terminal stop · D1/D2/D3/D5 提前失败识别 · 防误杀 Big Winner</div></div><a href="/v616c/early-failure"><button type="button">打开 V6.16C.7</button></a></div></div>
 <div class="card" id="v616b-shortcut" style="border:3px solid #ef4444"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.16B Failure / Stop Research</h2><div class="muted">冻结 Big Winner DNA · -4/-5/-6/-7% + Structural Stop · 检查误杀大赢家</div></div><a href="/v616b/stop-research"><button type="button">打开 V6.16B</button></a></div></div>
 <div class="card" id="v616a-shortcut" style="border:3px solid #0ea5e9"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.16A Entry Location Research</h2><div class="muted">冻结 Big Winner DNA · 比较 Pivot / Pullback / Re-strength / Power Play 入场</div></div><a href="/v616a/entry-location"><button type="button">打开 V6.16A</button></a></div></div>
