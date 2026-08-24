@@ -6960,7 +6960,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
     </div>
 
 
-<div class="card" id="v616h-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H Big Winner Add-on / Position Sizing</h2><div class="muted">HOLD1260 frozen · Day252 Winner Signature · +25% / +50% / +100% conditional add-on</div></div><a href="/v616h/addon-sizing"><button type="button">打开 V6.16H</button></a></div></div>
+<div class="card" id="v616h1-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.1 Exact Add-on Execution Validation</h2><div class="muted">Day252 close signal -> Day253 open exact add-on · Top3 signatures · +25/+50/+100</div></div><a href="/v616h1/exact-addon"><button type="button">打开 V6.16H.1</button></a></div></div>
 <div class="card" id="v616e-shortcut" style="border:3px solid #06b6d4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.16E.2 Winner Hold Strict OOS</h2><div class="muted">冻结 DNA / Entry / -7% Stop · 只验证 HOLD120 vs HOLD90 · Walk-Forward</div></div><a href="/v616e/winner-hold-oos"><button type="button">打开 V6.16E.2</button></a></div></div>
 <div class="card" id="v616d-shortcut" style="border:3px solid #22c55e">
 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -10002,10 +10002,10 @@ def v6132_page():
 
 
 # ================= V6.16F DYNAMIC EXIT RESEARCH =================
-V616F_DIR=DATA_DIR/'jlaw_v616h_big_winner_addon'
+V616F_DIR=DATA_DIR/'jlaw_v616h1_exact_addon'
 V616F_STATUS=V616F_DIR/'status.json'
 V616F_RESULT=V616F_DIR/'result.json'
-V616F_REPORT=V616F_DIR/'addon_sizing_report.csv'
+V616F_REPORT=V616F_DIR/'exact_addon_validation_report.csv'
 v616f_thread=None
 
 def _v616f_status():
@@ -10138,47 +10138,91 @@ def _v616f_run():
             b=te[(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.8)][['ticker','obs_date']].copy()
             b['test_year']=y
             picks.extend([a,b])
+
         D=pd.concat(picks,ignore_index=True).drop_duplicates(['ticker','obs_date'])
         ticks=sorted(D.ticker.unique())
         trades=[]
 
-        def hold_ret(d,ei,px,h):
-            end=ei+h-1
+        def base_leg(d,ei,px):
+            end=ei+1259
             if end>=len(d):
                 return None
+            exit_idx=end
+            exit_px=float(d.iloc[end]['close'])
+            reason='HOLD1260'
             for j in range(ei,end+1):
-                if float(d.iloc[j]['low'])<=px*.93:
-                    return -.07
-            return float(d.iloc[end]['close'])/px-1
+                op=float(d.iloc[j]['open'])
+                lo=float(d.iloc[j]['low'])
+                if lo<=px*.93:
+                    exit_idx=j
+                    exit_px=min(op,px*.93) if op<px*.93 else px*.93
+                    reason='BASE_STOP7'
+                    break
+            return {
+                'ret':float(exit_px/px-1),
+                'held':int(exit_idx-ei+1),
+                'reason':reason
+            }
 
-        def checkpoint_features(d,ei,px,cp=252):
-            end=ei+cp-1
+        def day252_features(d,ei,px):
+            end=ei+251
             if end>=len(d):
                 return None
             x=d.iloc[ei:end+1].copy()
             c=x['close'].astype(float)
             h=x['high'].astype(float)
-            peak=h.cummax()
-            running_dd=c/peak-1
-            ma50=c.rolling(50).mean()
             ma100=c.rolling(100).mean()
-            tail=h.iloc[-60:] if len(h)>=60 else h
-            hi_idx=int(tail.values.argmax())
             n=min(63,len(c))
             yy=np.log(c.iloc[-n:].values)
             xx=np.arange(n,dtype=float)
+            peak=h.cummax()
             return {
                 'cp_ret':float(c.iloc[-1]/px-1),
                 'cp_mfe':float(h.max()/px-1),
-                'cp_maxdd':float(running_dd.min()),
                 'cp_close_to_peak':float(c.iloc[-1]/h.max()-1),
-                'cp_above50':float((c.iloc[49:]>=ma50.iloc[49:]).mean()) if len(c)>=50 else np.nan,
-                'cp_above100':float((c.iloc[99:]>=ma100.iloc[99:]).mean()) if len(c)>=100 else np.nan,
-                'cp_days_since_high':int(len(tail)-1-hi_idx),
-                'cp_slope63':float(np.polyfit(xx,yy,1)[0]) if n>=20 else np.nan
+                'cp_above100':float((c.iloc[99:]>=ma100.iloc[99:]).mean()),
+                'cp_slope63':float(np.polyfit(xx,yy,1)[0]),
+                'cp_maxdd':float((c/peak-1).min())
             }
 
-        _v616f_write(status='running',message='Build day-252 hold-eligibility features',processed=0,total=len(ticks),elapsed_sec=0,error=None)
+        def addon_leg(d,ei):
+            ai=ei+252
+            end=ei+1259
+            if ai>=len(d) or end>=len(d):
+                return None
+            apx=float(d.iloc[ai]['open'])
+            if not np.isfinite(apx) or apx<=0:
+                return None
+
+            exit_idx=end
+            exit_px=float(d.iloc[end]['close'])
+            reason='ADD_HOLD_TO1260'
+            peak=apx
+            mae=0.0
+
+            for j in range(ai,end+1):
+                op=float(d.iloc[j]['open'])
+                hi=float(d.iloc[j]['high'])
+                lo=float(d.iloc[j]['low'])
+                peak=max(peak,hi)
+                mae=min(mae,lo/apx-1)
+                if lo<=apx*.93:
+                    exit_idx=j
+                    exit_px=min(op,apx*.93) if op<apx*.93 else apx*.93
+                    reason='ADD_STOP7'
+                    break
+
+            return {
+                'ret':float(exit_px/apx-1),
+                'held':int(exit_idx-ai+1),
+                'reason':reason,
+                'mae':float(mae),
+                'mfe':float(peak/apx-1),
+                'entry_px':float(apx)
+            }
+
+        _v616f_write(status='running',message='Exact next-open add-on replay',
+                     processed=0,total=len(ticks),elapsed_sec=0,error=None)
 
         for k,t in enumerate(ticks,1):
             d=_v616a_price(t)
@@ -10194,167 +10238,212 @@ def _v616f_run():
                     ei,px,_=E['CONTROL']
                     if ei+1259>=len(d):
                         continue
-                    f=checkpoint_features(d,ei,px,252)
-                    if f is None:
+
+                    f=day252_features(d,ei,px)
+                    b=base_leg(d,ei,px)
+                    a=addon_leg(d,ei)
+
+                    if f is None or b is None or a is None:
                         continue
-                    r504=hold_ret(d,ei,px,504)
-                    r1260=hold_ret(d,ei,px,1260)
-                    if r504 is None or r1260 is None:
-                        continue
+
                     trades.append({
-                        'ticker':t,'obs_date':str(dt.date()),'year':int(r['test_year']),
-                        'ret504':float(r504),'ret1260':float(r1260),**f
+                        'ticker':t,
+                        'obs_date':str(dt.date()),
+                        'year':int(r['test_year']),
+                        'base_ret':float(b['ret']),
+                        'base_held':int(b['held']),
+                        'base_reason':b['reason'],
+                        'addon_ret':float(a['ret']),
+                        'addon_held':int(a['held']),
+                        'addon_reason':a['reason'],
+                        'addon_mae':float(a['mae']),
+                        'addon_mfe':float(a['mfe']),
+                        'addon_entry_px':float(a['entry_px']),
+                        **f
                     })
-            _v616f_write(status='running',message='Build day-252 features',processed=k,total=len(ticks),current=t,elapsed_sec=round(time.time()-t0,1))
+
+            _v616f_write(status='running',message='Exact next-open add-on replay',
+                         processed=k,total=len(ticks),current=t,
+                         elapsed_sec=round(time.time()-t0,1))
 
         T=pd.DataFrame(trades).replace([np.inf,-np.inf],np.nan).dropna()
         if T.empty:
-            raise RuntimeError('没有生成 hold eligibility matched cohort')
+            raise RuntimeError('没有生成 H.1 exact matched cohort')
 
-        feature_defs={
-            'RET252_Q75':('cp_ret','high'),
-            'MFE252_Q75':('cp_mfe','high'),
-            'CLOSE_TO_PEAK_Q75':('cp_close_to_peak','high'),
-            'ABOVE50_Q75':('cp_above50','high'),
-            'ABOVE100_Q75':('cp_above100','high'),
-            'SLOPE63_Q75':('cp_slope63','high'),
-            'MAXDD_Q75':('cp_maxdd','high'),
-            'HIGH_RECENCY_Q25':('cp_days_since_high','low'),
-        }
+        yearly=[]
+        sizes=[0.25,0.50,1.00]
 
-        rows=[]
-        policy_rows=[]
         for y in sorted(T.year.unique()):
             tr=T[T.year<y].copy()
             te=T[T.year==y].copy()
             if len(tr)<300 or len(te)<30:
                 continue
 
-            signals={}
-            for name,(col,direction) in feature_defs.items():
-                q=float(tr[col].quantile(.75 if direction=='high' else .25))
-                signals[name]=(te[col]>=q) if direction=='high' else (te[col]<=q)
+            q_ret=float(tr.cp_ret.quantile(.75))
+            q_mfe=float(tr.cp_mfe.quantile(.75))
+            q_peak=float(tr.cp_close_to_peak.quantile(.75))
+            q_ab100=float(tr.cp_above100.quantile(.75))
+            q_slope=float(tr.cp_slope63.quantile(.75))
 
-            signals['QUALITY_2OF4']=(
-                signals['RET252_Q75'].astype(int)+
-                signals['CLOSE_TO_PEAK_Q75'].astype(int)+
-                signals['ABOVE100_Q75'].astype(int)+
-                signals['SLOPE63_Q75'].astype(int)
-            )>=2
+            s_ret=te.cp_ret>=q_ret
+            s_mfe=te.cp_mfe>=q_mfe
+            score=(
+                s_ret.astype(int)+
+                (te.cp_close_to_peak>=q_peak).astype(int)+
+                (te.cp_above100>=q_ab100).astype(int)+
+                (te.cp_slope63>=q_slope).astype(int)
+            )
 
-            signals['QUALITY_3OF4']=(
-                signals['RET252_Q75'].astype(int)+
-                signals['CLOSE_TO_PEAK_Q75'].astype(int)+
-                signals['ABOVE100_Q75'].astype(int)+
-                signals['SLOPE63_Q75'].astype(int)
-            )>=3
-
-            signals['MOMENTUM_STRUCTURE']=signals['RET252_Q75'] & signals['ABOVE100_Q75']
-            signals['TREND_NEAR_HIGH']=signals['ABOVE100_Q75'] & signals['CLOSE_TO_PEAK_Q75']
+            signals={
+                'RET252_Q75':s_ret,
+                'MFE252_Q75':s_mfe,
+                'QUALITY_2OF4':score>=2
+            }
 
             for name,sig in signals.items():
-                n=int(sig.sum())
-                if n<10:
+                if int(sig.sum())<10:
                     continue
-                sub=te[sig].copy()
-                rows.append({
-                    'year':int(y),
-                    'signal':name,
-                    'n':n,
-                    'coverage':n/len(te),
-                    'long_better_rate':float((sub.ret1260>sub.ret504).mean()),
-                    'mega100_rate':float((sub.ret1260>=1.0).mean()),
-                    'mega200_rate':float((sub.ret1260>=2.0).mean()),
-                    'avg_ret1260':float(sub.ret1260.mean()),
-                    'avg_incremental':float((sub.ret1260-sub.ret504).mean())
-                })
 
-                # H: base HOLD1260 is never replaced. Estimate conditional pyramiding at day252.
-                # Conservative research proxy: incremental leg earns the eligible cohort's
-                # observed 504->1260 incremental return. Exact next-open add-on execution
-                # is the promotion gate for the following implementation stage.
-                eligible_increment=(te.loc[sig,'ret1260']-te.loc[sig,'ret504']).values
-                for addon_size in (0.25,0.50,1.00):
-                    addon_pnl=float(np.sum(eligible_increment)*addon_size/len(te))
-                    strategy=float(te.ret1260.mean()+addon_pnl)
-                    avg_capital=float(1.0 + addon_size*n/len(te))
-                    policy_rows.append({
-                        'year':int(y),'signal':name,'addon_size':addon_size,
-                        'n':int(len(te)),'eligible_n':n,'eligible_rate':n/len(te),
-                        'policy_avg_return':strategy,
-                        'hold504_avg_return':float(te.ret504.mean()),
-                        'hold1260_avg_return':float(te.ret1260.mean()),
-                        'incremental_vs1260':addon_pnl,
-                        'avg_capital_multiple':avg_capital,
-                        'return_on_deployed':strategy/avg_capital
+                for sz in sizes:
+                    base=te.base_ret.values.astype(float)
+                    add=sig.astype(float).values*float(sz)*te.addon_ret.values.astype(float)
+                    total=base+add
+                    capital=1.0+sig.astype(float).values*float(sz)
+
+                    wins=total[total>0]
+                    losses=total[total<=0]
+                    gp=float(wins.sum()) if len(wins) else 0.0
+                    gl=abs(float(losses.sum())) if len(losses) else 0.0
+                    pf=gp/gl if gl>0 else np.nan
+                    avgwin=float(np.mean(wins)) if len(wins) else 0.0
+                    avgloss=float(np.mean(losses)) if len(losses) else 0.0
+                    wl=avgwin/abs(avgloss) if avgloss<0 else np.nan
+
+                    eligible_add=te.loc[sig,'addon_ret'].astype(float)
+                    eligible_mae=te.loc[sig,'addon_mae'].astype(float)
+
+                    yearly.append({
+                        'year':int(y),
+                        'signal':name,
+                        'addon_size':float(sz),
+                        'n':int(len(te)),
+                        'eligible_n':int(sig.sum()),
+                        'eligible_rate':float(sig.mean()),
+                        'strategy_avg_return':float(np.mean(total)),
+                        'base_avg_return':float(np.mean(base)),
+                        'incremental_return':float(np.mean(total)-np.mean(base)),
+                        'avg_capital_multiple':float(np.mean(capital)),
+                        'return_on_deployed':float(np.sum(total)/np.sum(capital)),
+                        'pf':pf,
+                        'avg_win':avgwin,
+                        'avg_loss':avgloss,
+                        'win_loss_ratio':wl,
+                        'addon_avg_return':float(eligible_add.mean()),
+                        'addon_median_return':float(eligible_add.median()),
+                        'addon_win_rate':float((eligible_add>0).mean()),
+                        'addon_stop_rate':float((te.loc[sig,'addon_reason']=='ADD_STOP7').mean()),
+                        'addon_avg_mae':float(eligible_mae.mean()),
+                        'addon_worst_mae':float(eligible_mae.min())
                     })
 
-        R=pd.DataFrame(rows)
-        P=pd.DataFrame(policy_rows)
-        if R.empty or P.empty:
-            raise RuntimeError('没有生成 walk-forward eligibility 结果')
+        Y=pd.DataFrame(yearly)
+        if Y.empty:
+            raise RuntimeError('没有生成 H.1 strict OOS exact add-on 结果')
 
         overall=[]
-        for (name,addon_size),g in P.groupby(['signal','addon_size']):
+        for (sig,sz),g in Y.groupby(['signal','addon_size']):
             w=g.n.astype(float)
+
             def wa(col):
                 v=pd.to_numeric(g[col],errors='coerce')
                 m=v.notna()&(w>0)
                 return float(np.average(v[m],weights=w[m])) if m.any() else np.nan
 
-            dg=R[R.signal.eq(name)]
-            wd=dg.n.astype(float)
-            def wad(col):
-                v=pd.to_numeric(dg[col],errors='coerce')
-                m=v.notna()&(wd>0)
-                return float(np.average(v[m],weights=wd[m])) if m.any() else np.nan
+            pfs=pd.to_numeric(g.pf,errors='coerce').dropna()
 
             overall.append({
-                'signal':name,
-                'addon_size':float(addon_size),
+                'signal':sig,
+                'addon_size':float(sz),
                 'n':int(g.n.sum()),
                 'eligible_rate':wa('eligible_rate'),
-                'policy_avg_return':wa('policy_avg_return'),
-                'hold504_avg_return':wa('hold504_avg_return'),
-                'hold1260_avg_return':wa('hold1260_avg_return'),
-                'delta_vs504':wa('policy_avg_return')-wa('hold504_avg_return'),
-                'delta_vs1260':wa('policy_avg_return')-wa('hold1260_avg_return'),
+                'strategy_avg_return':wa('strategy_avg_return'),
+                'base_avg_return':wa('base_avg_return'),
+                'incremental_return':wa('incremental_return'),
                 'avg_capital_multiple':wa('avg_capital_multiple'),
                 'return_on_deployed':wa('return_on_deployed'),
-                'long_better_rate':wad('long_better_rate'),
-                'mega100_rate':wad('mega100_rate'),
-                'mega200_rate':wad('mega200_rate'),
-                'avg_incremental_if_eligible':wad('avg_incremental'),
-                'positive_policy_years':int((g.policy_avg_return>g.hold504_avg_return).sum()),
+                'median_year_pf':float(pfs.median()) if len(pfs) else np.nan,
+                'avg_win':wa('avg_win'),
+                'avg_loss':wa('avg_loss'),
+                'win_loss_ratio':wa('win_loss_ratio'),
+                'addon_avg_return':wa('addon_avg_return'),
+                'addon_median_return':wa('addon_median_return'),
+                'addon_win_rate':wa('addon_win_rate'),
+                'addon_stop_rate':wa('addon_stop_rate'),
+                'addon_avg_mae':wa('addon_avg_mae'),
+                'addon_worst_mae':float(pd.to_numeric(g.addon_worst_mae,errors='coerce').min()),
+                'positive_years':int((g.incremental_return>0).sum()),
                 'years':int(g.year.nunique())
             })
 
         O=pd.DataFrame(overall)
+
         O['screen_pass']=(
-            (O.delta_vs504>0)&
-            (O.delta_vs1260>0)&
-            (O.positive_policy_years>=np.ceil(O.years*.6))
+            (O.incremental_return>0)&
+            (O.addon_avg_return>0)&
+            (O.return_on_deployed>0)&
+            (O.positive_years>=np.ceil(O.years*.75))
         )
-        O=O.sort_values(['screen_pass','delta_vs1260','return_on_deployed'],ascending=[False,False,False])
+
+        O['size_verdict']='KEEP'
+        for sig in O.signal.unique():
+            g=O[O.signal.eq(sig)].set_index('addon_size')
+            if 0.50 in g.index and 1.00 in g.index:
+                eff50=float(g.loc[0.50,'return_on_deployed'])
+                eff100=float(g.loc[1.00,'return_on_deployed'])
+                verdict='BEATS_50_CAPEFF' if eff100>eff50 else 'NO_EDGE_VS_50'
+                O.loc[(O.signal.eq(sig))&(O.addon_size.eq(1.00)),'size_verdict']=verdict
+
+        O=O.sort_values(
+            ['screen_pass','incremental_return','return_on_deployed'],
+            ascending=[False,False,False]
+        )
         O.to_csv(V616F_REPORT,index=False)
 
         res={
             'generated_at':datetime.now(timezone.utc).isoformat(),
             'elapsed_sec':round(time.time()-t0,2),
             'overall':O.replace({np.nan:None}).to_dict('records'),
-            'yearly_policy':P.replace({np.nan:None}).to_dict('records'),
-            'yearly_diagnostic':R.replace({np.nan:None}).to_dict('records'),
-            'acceptance':'HOLD1260 remains the frozen base. At day252 test +25%, +50%, +100% conditional add-on. Research screen requires positive incremental return versus HOLD1260 and consistency across OOS years. Capital efficiency is reported separately.',
-            'rule_note':'Strict walk-forward thresholds use earlier years only. Frozen V6.15F DNA + CONTROL Entry + -7% initial stop + HOLD1260 base. Day252 post-entry Winner Signatures control add-on sizing only; nobody is sold early.',
-            'dedupe_note':'No re-test of pre-entry DNA or prior exit rules. This is conditional pyramiding into existing winners, not a repeat of the earlier V6.6.x generic exposure/portfolio sizing lab.',
-            'warning':'Existing cache still has survivorship-bias limits until historical/delisted universe coverage is complete.'
+            'yearly':Y.replace({np.nan:None}).to_dict('records'),
+            'acceptance':'Exact promotion gate. Day252 signal is close-known; add-on executes day253 open; add-on leg has its own -7% stop; base HOLD1260 is untouched. Require positive incremental OOS return, positive add-on expectancy, and positive incremental return in at least 75% of test years.',
+            'rule_note':'Only RET252_Q75 / MFE252_Q75 / QUALITY_2OF4 are validated. No new factor search. Strict walk-forward thresholds use earlier years only. Compare +25%, +50%, +100%.',
+            'capital_note':'Strategy AvgRet is P&L per original starting unit. Avg Capital Multiple and Return-on-Deployed are reported separately. +100% is not preferred over +50% unless deployed-capital efficiency is also better.',
+            'risk_note':'Reports add-on stop rate, average MAE and worst MAE. Portfolio CAGR and portfolio max drawdown still require a portfolio-level capital timeline simulation.',
+            'warning':'Existing cache retains survivorship-bias limits until historical/delisted universe coverage is complete.'
         }
-        V616F_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v616f_write(status='done',message='V6.16H Big Winner Add-on / Position Sizing 完成',processed=len(ticks),total=len(ticks),current='',elapsed_sec=res['elapsed_sec'],error=None)
+
+        V616F_RESULT.write_text(
+            json.dumps(res,ensure_ascii=False,indent=2,default=str),
+            encoding='utf-8'
+        )
+
+        _v616f_write(
+            status='done',
+            message='V6.16H.1 Exact Add-on Validation 完成',
+            processed=len(ticks),
+            total=len(ticks),
+            current='',
+            elapsed_sec=res['elapsed_sec'],
+            error=None
+        )
 
     except Exception as ex:
         traceback.print_exc()
-        _v616f_write(status='error',message='V6.16G 失败',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+        _v616f_write(
+            status='error',
+            message='V6.16H.1 失败',
+            error=f'{type(ex).__name__}: {ex}',
+            elapsed_sec=round(time.time()-t0,1)
+        )
     finally:
         v616f_thread=None
 
@@ -10363,15 +10452,15 @@ def _v616f_start():
     if v616f_thread is not None and v616f_thread.is_alive():return False
     v616f_thread=threading.Thread(target=_v616f_run,daemon=True);v616f_thread.start();return True
 
-@APP.post('/v616h/run')
+@APP.post('/v616h1/run')
 def v616f_run():
-    _v616f_start();return redirect('/v616h/addon-sizing')
+    _v616f_start();return redirect('/v616h1/exact-addon')
 
-@APP.get('/api/v616h/status')
+@APP.get('/api/v616h1/status')
 def v616f_status_api():
     return jsonify(_v616f_status())
 
-@APP.get('/v616h/addon-sizing')
+@APP.get('/v616h1/exact-addon')
 def v616f_page():
     import html
     e=lambda x:html.escape(str(x)); s=_v616f_status(); r={}
@@ -10380,10 +10469,10 @@ def v616f_page():
         except Exception:pass
     rows=''
     for x in r.get('overall',[]):
-        rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>+{x.get('addon_size',0):.0%}</td><td>{x.get('eligible_rate',0):.1%}</td><td>{x.get('policy_avg_return',0):.2%}</td><td>{x.get('hold1260_avg_return',0):.2%}</td><td>{x.get('delta_vs1260',0):+.2%}</td><td>{x.get('avg_capital_multiple',1):.3f}x</td><td>{x.get('return_on_deployed',0):.2%}</td><td>{x.get('long_better_rate',0):.1%}</td><td>{x.get('mega100_rate',0):.1%}</td><td>{x.get('mega200_rate',0):.1%}</td><td>{int(x.get('positive_policy_years',0))}/{int(x.get('years',0))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
-    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h/run"><button>Run V6.16H Add-on Sizing</button></form>'
+        rows += f"<tr><td><b>{e(x.get('signal'))}</b></td><td>+{x.get('addon_size',0):.0%}</td><td>{x.get('eligible_rate',0):.1%}</td><td>{x.get('strategy_avg_return',0):.2%}</td><td>{x.get('base_avg_return',0):.2%}</td><td>{x.get('incremental_return',0):+.2%}</td><td>{x.get('median_year_pf',0) or 0:.2f}</td><td>{x.get('win_loss_ratio',0) or 0:.2f}x</td><td>{x.get('avg_capital_multiple',1):.3f}x</td><td>{x.get('return_on_deployed',0):.2%}</td><td>{x.get('addon_win_rate',0):.1%}</td><td>{x.get('addon_avg_return',0):.1%}</td><td>{x.get('addon_stop_rate',0):.1%}</td><td>{x.get('addon_avg_mae',0):.1%}</td><td>{int(x.get('positive_years',0))}/{int(x.get('years',0))}</td><td>{e(x.get('size_verdict',''))}</td><td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>" 
+    btn='' if s.get('status') in ('running','aggregating') else '<form method="post" action="/v616h1/run"><button>Run V6.16H.1 Exact Add-on</button></form>'
     err=f"<div class='warn'><b>Error:</b> {e(s.get('error'))}</div>" if s.get('error') else ''
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1500px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H Big Winner Add-on / Position Sizing</h1><p><b>Stage 1:</b> fast cached screening. Exact next-open add-on execution is required before promotion.</p><div class="info"><b>HOLD1260 stays frozen.</b> Nobody is sold early. At day252, strict walk-forward Winner Signatures test conditional +25% / +50% / +100% add-on sizing.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Conditional Add-on</h2><div style="overflow:auto"><table><tr><th>Eligibility</th><th>Add</th><th>Eligible%</th><th>Strategy AvgRet</th><th>Base HOLD1260</th><th>Increment</th><th>Avg Capital</th><th>Return/Deployed</th><th>Long Better</th><th>1260>=100%</th><th>1260>=200%</th><th>Win Years</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Dedup:</b> {e(r.get('dedupe_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1750px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:#fff;font-weight:800}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:14px;line-height:1.6}}table{{width:100%;border-collapse:collapse;min-width:1700px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/">Back</a><div class="c"><h1>V6.16H.1 Exact Add-on Execution Validation</h1><div class="info"><b>No proxy.</b> Day252 close confirms signal; Day253 next open executes add-on. Base HOLD1260 remains untouched. Only Stage-1 top 3 signatures are validated.</div></div><div class="c"><h2>Status: {e(s.get('status'))}</h2><p>{e(s.get('message',''))} {s.get('processed',0)}/{s.get('total',0)} elapsed {s.get('elapsed_sec',0)} sec</p>{err}{btn}</div><div class="c"><h2>Strict OOS Exact Add-on</h2><div style="overflow:auto"><table><tr><th>Signal</th><th>Add</th><th>Eligible%</th><th>Strategy AvgRet</th><th>Base1260</th><th>Increment</th><th>Median PF</th><th>W/L</th><th>Avg Capital</th><th>Return/Deployed</th><th>Add Win%</th><th>Add AvgRet</th><th>Add Stop%</th><th>Add Avg MAE</th><th>Positive Years</th><th>Size Verdict</th><th>Pass</th></tr>{rows}</table></div></div><div class="c"><div class="warn"><b>Acceptance:</b> {e(r.get('acceptance',''))}<br><b>Rule:</b> {e(r.get('rule_note',''))}<br><b>Capital:</b> {e(r.get('capital_note',''))}<br><b>Risk:</b> {e(r.get('risk_note',''))}<br><b>Limit:</b> {e(r.get('warning',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v616h1/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running'||x.status==='aggregating')location.reload()}}catch(e){{}}}},1500)</script></div></body></html>'''
 
 # ================= V6.16E WINNER HOLD STRICT OOS VALIDATION =================
 V616E_DIR=DATA_DIR/'jlaw_v616e_winner_hold_oos'
