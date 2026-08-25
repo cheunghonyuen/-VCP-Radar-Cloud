@@ -6974,6 +6974,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
   </div>
 </div>
 
+<div class="card" id="v619-shortcut" style="border:3px solid #ef4444;background:#fff1f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.19 MaxDD Autopsy</h2><div class="muted">只诊断 BASE_UNION 深回撤来源 · 保护超级赢家右尾 · 复用 Stage-2 Cache · 0 Tiingo</div></div><a href="/v619/maxdd-autopsy"><button type="button">打开 V6.19 回撤尸检</button></a></div></div>
 <div class="card" id="v617-production-shortcut" style="border:4px solid #10b981;background:#f0fdf4">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
     <div>
@@ -18753,6 +18754,165 @@ def v618_page():
     <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v618/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
     </div></body></html>"""
 
+# ==================== V6.19 BASE_UNION MAXDD AUTOPSY ====================
+# Diagnostic-only branch. No new entry/exit/filter hypothesis is introduced.
+# Purpose: explain why BASE_UNION can keep a strong right-tail/PF while suffering
+# a very deep portfolio drawdown. Reuses V6.17 Stage-2 trades + Historical Cache.
+V619_DIR=DATA_DIR/'v619_maxdd_autopsy'
+V619_STATUS=V619_DIR/'status.json'
+V619_RESULT=V619_DIR/'result.json'
+V619_EQUITY=V619_DIR/'base_equity.csv.gz'
+V619_LEDGER=V619_DIR/'base_ledger.csv.gz'
+V619_DD_TRADES=V619_DIR/'drawdown_trades.csv.gz'
+V619_STOP=V619_DIR/'STOP'
+v619_thread=None
+
+def _v619_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V619_STATUS.exists():
+        try:x.update(json.loads(V619_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v619_write(**kw):
+    V619_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v619_status();x.update(kw)
+    V619_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v619_alive():return v619_thread is not None and v619_thread.is_alive()
+
+def _v619_load_base(t0):
+    if not V617FV2_TRADES.exists():raise RuntimeError('缺少 V6.17 Stage 2 trades.csv.gz；先完成 Stage 2')
+    T=pd.read_csv(V617FV2_TRADES,compression='gzip')
+    if T.empty:raise RuntimeError('V6.17 Stage 2 trades cache 为空')
+    req=['listing_id','ticker','entry_date','exit_date','entry_px','exit_px']
+    miss=[c for c in req if c not in T.columns]
+    if miss:raise RuntimeError('Stage 2 trades 缺字段: '+','.join(miss))
+    T=T.copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
+    T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']).copy();T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
+    if T.empty:raise RuntimeError('Stage 2 trades 没有可用交易')
+    if 'dna' not in T.columns:T['dna']=''
+    if 'exit_reason' not in T.columns:T['exit_reason']=''
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in needed}
+    price={};date_set=set();total=len(mm)
+    for n,(lid,mr) in enumerate(mm.items(),1):
+        if V619_STOP.exists():raise RuntimeError('__STOPPED__')
+        d=_v617fv1_read_price(mr)
+        if d is not None and len(d):
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize();d['close']=pd.to_numeric(d.close,errors='coerce');d=d.dropna(subset=['date','close'])
+            z=dict(zip(d.date,d.close.astype(float)));price[lid]=z;date_set.update(z.keys())
+        if n==1 or n%50==0 or n==total:_v619_write(status='running',message='Phase 1/3 · 复用 Historical Cache 读取 MTM',phase='load_cache',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+    if not date_set:raise RuntimeError('Historical Cache 没有可用价格')
+    return T,price,sorted(date_set)
+
+def _v619_replay(T,price,cal,t0):
+    X=T.sort_values(['entry_date','listing_id']).reset_index(drop=True);rec=X.to_dict('index');entries={};exits={}
+    for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};eqrows=[];ledger=[];skipped=0;admitted=0;step=max(1,len(cal)//40)
+    for di,dt in enumerate(cal,1):
+        if V619_STOP.exists():raise RuntimeError('__STOPPED__')
+        for i in exits.get(dt,[]):
+            q=pos.pop(i,None)
+            if q is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=q['shares']*xp;cash+=proceeds
+            ledger.append({'trade_id':i,'listing_id':q['listing_id'],'ticker':rec[i].get('ticker',''),'dna':rec[i].get('dna',''),'entry_date':rec[i]['entry_date'],'exit_date':rec[i]['exit_date'],'entry_px':float(rec[i]['entry_px']),'exit_px':xp,'allocated':q['cost'],'return':xp/float(rec[i]['entry_px'])-1.0,'pnl_dollars':proceeds-q['cost'],'exit_reason':rec[i].get('exit_reason','')})
+            last.pop(i,None)
+        hv=0.0
+        for i,q in pos.items():
+            cp=price.get(q['listing_id'],{}).get(dt,last.get(i,q['entry_px']));cp=cp if np.isfinite(cp) else last.get(i,q['entry_px']);last[i]=cp;hv+=q['shares']*cp
+        equity_now=cash+hv
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];target=equity_now/10.0;ep=float(r['entry_px'])
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,'entry_px':ep,'cost':target};last[i]=ep;admitted+=1
+        hv=0.0
+        for i,q in pos.items():
+            cp=price.get(q['listing_id'],{}).get(dt,last.get(i,q['entry_px']));cp=cp if np.isfinite(cp) else last.get(i,q['entry_px']);last[i]=cp;hv+=q['shares']*cp
+        eq=cash+hv;eqrows.append({'date':dt,'equity':eq,'cash':cash,'holdings_value':hv,'exposure':hv/eq if eq>0 else np.nan,'cash_pct':cash/eq if eq>0 else np.nan,'open_slots':len(pos)})
+        if di%step==0 or di==len(cal):_v619_write(status='running',message=f'Phase 2/3 · BASE_UNION replay {int(round(di/len(cal)*100))}%',phase='base_replay',processed=di,total=len(cal),current='BASE_UNION',elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows);L=pd.DataFrame(ledger)
+    if C.empty:raise RuntimeError('BASE_UNION replay 没有 equity curve')
+    C['date']=pd.to_datetime(C.date);C['peak_equity']=C.equity.cummax();C['drawdown']=C.equity/C.peak_equity-1
+    return C,L,admitted,skipped
+
+def _v619_autopsy(C,L,admitted,skipped,t0):
+    _v619_write(status='running',message='Phase 3/3 · 拆解 MaxDD 与右尾赢家贡献',phase='autopsy',processed=1,total=1,current='MAXDD',elapsed_sec=round(time.time()-t0,1),error=None)
+    trough_i=int(C.drawdown.idxmin());trough=C.loc[trough_i];peak_equity=float(trough.peak_equity);pre=C.loc[:trough_i]
+    peak_candidates=pre.index[np.isclose(pre.equity.values,peak_equity,rtol=1e-10,atol=1e-12)];peak_i=int(peak_candidates[-1]) if len(peak_candidates) else int(pre.equity.idxmax());peak=C.loc[peak_i]
+    recov=C.loc[trough_i+1:];recov=recov[recov.equity>=peak_equity];recovery_date=(pd.Timestamp(recov.date.iloc[0]) if len(recov) else None)
+    dd_start=pd.Timestamp(peak.date);dd_trough=pd.Timestamp(trough.date);maxdd=float(trough.drawdown);peak_to_trough_days=int((dd_trough-dd_start).days);recovery_days=(int((recovery_date-dd_trough).days) if recovery_date is not None else None)
+    if L is None or L.empty:rr=pd.Series(dtype=float);pf=wr=avgwin=avgloss=np.nan;L=pd.DataFrame(columns=['entry_date','exit_date','return','pnl_dollars'])
+    else:
+        L=L.copy();L['entry_date']=pd.to_datetime(L.entry_date);L['exit_date']=pd.to_datetime(L.exit_date);rr=pd.to_numeric(L['return'],errors='coerce');gp=float(L.loc[L.pnl_dollars>0,'pnl_dollars'].sum());gl=float(-L.loc[L.pnl_dollars<0,'pnl_dollars'].sum());pf=float(gp/gl) if gl>0 else np.inf;wr=float((rr>0).mean()) if len(rr) else np.nan;avgwin=float(rr[rr>0].mean()) if (rr>0).any() else np.nan;avgloss=float(rr[rr<=0].mean()) if (rr<=0).any() else np.nan
+    D=L[(L.entry_date<=dd_trough)&(L.exit_date>=dd_start)].copy() if len(L) else pd.DataFrame();D=D.sort_values('pnl_dollars') if len(D) else D
+    tail=[]
+    if len(L):
+        W=L[L.pnl_dollars>0].sort_values('pnl_dollars',ascending=False).copy();total_gp=float(W.pnl_dollars.sum()) if len(W) else 0.0
+        for pct in [0.01,0.05,0.10,0.20]:
+            n=max(1,int(np.ceil(len(W)*pct))) if len(W) else 0;pnl=float(W.head(n).pnl_dollars.sum()) if n else 0.0
+            tail.append({'top_pct':pct,'winner_count':n,'gross_profit_share':(pnl/total_gp if total_gp>0 else np.nan),'avg_return':float(W.head(n)['return'].mean()) if n else np.nan,'min_return':float(W.head(n)['return'].min()) if n else np.nan})
+    realized_dd=L[(L.exit_date>=dd_start)&(L.exit_date<=dd_trough)].copy() if len(L) else pd.DataFrame();dd_loss=realized_dd[realized_dd.pnl_dollars<0].copy() if len(realized_dd) else pd.DataFrame();dd_win=realized_dd[realized_dd.pnl_dollars>0].copy() if len(realized_dd) else pd.DataFrame()
+    worst_trades=[]
+    if len(D):
+        for _,r in D.head(20).iterrows():worst_trades.append({'ticker':str(r.get('ticker','')),'dna':str(r.get('dna','')),'entry_date':str(pd.Timestamp(r.entry_date).date()),'exit_date':str(pd.Timestamp(r.exit_date).date()),'return':float(r['return']),'pnl_dollars':float(r['pnl_dollars']),'exit_reason':str(r.get('exit_reason',''))})
+    CY=C.copy();CY['year']=CY.date.dt.year;yearly=[]
+    for y,g in CY.groupby('year'):
+        if len(g)>=2:yearly.append({'year':int(y),'return':float(g.equity.iloc[-1]/g.equity.iloc[0]-1),'worst_drawdown':float(g.drawdown.min()),'avg_exposure':float(g.exposure.mean())})
+    flags=[];avg_dd_exp=float(C.loc[peak_i:trough_i,'exposure'].mean())
+    if avg_dd_exp>=0.85:flags.append('MAXDD 期间账户长期高仓位，组合层缺少风险缓冲。')
+    if len(dd_loss)>=5:flags.append('MaxDD 窗口存在成簇亏损/止损，单笔 -7% 并不能阻止组合连续受损。')
+    if len(tail)>1 and np.isfinite(tail[1]['gross_profit_share']) and tail[1]['gross_profit_share']>=0.50:flags.append('前 5% 赢家贡献至少一半 gross profit；右尾高度集中，不能用普通止盈/过早离场破坏。')
+    if not flags:flags.append('回撤来源不是单一明显因素；先查看 MaxDD 交易导出和年度分解，再决定下一轮最小化测试。')
+    return {'verdict':'DIAGNOSIS_COMPLETE','baseline':{'trades':int(len(L)),'admitted':int(admitted),'skipped_capacity':int(skipped),'win_rate':wr,'profit_factor':pf,'avg_win':avgwin,'avg_loss':avgloss,'end_equity':float(C.equity.iloc[-1]),'maxdd':maxdd},'maxdd_event':{'peak_date':str(dd_start.date()),'peak_equity':float(peak.equity),'trough_date':str(dd_trough.date()),'trough_equity':float(trough.equity),'maxdd':maxdd,'peak_to_trough_days':peak_to_trough_days,'recovery_date':str(recovery_date.date()) if recovery_date is not None else None,'recovery_days':recovery_days,'avg_exposure_peak_to_trough':avg_dd_exp,'avg_open_slots_peak_to_trough':float(C.loc[peak_i:trough_i,'open_slots'].mean()),'realized_trades':int(len(realized_dd)),'realized_losses':int(len(dd_loss)),'realized_winners':int(len(dd_win)),'realized_net_pnl':float(realized_dd.pnl_dollars.sum()) if len(realized_dd) else 0.0},'right_tail':tail,'worst_drawdown_trades':worst_trades,'yearly':yearly,'diagnostic_flags':flags,'rule_note':'Diagnostic only: no new filter, no Smart Exit retune, no Add-on/Gate/Replacement/MA/Giveback rerun.','cache_note':'Reuses V6.17 Stage-2 trades.csv.gz + Historical Cache; no universe rebuild; 0 Tiingo.'},D
+
+def _v619_run():
+    global v619_thread;t0=time.time()
+    try:
+        V619_DIR.mkdir(parents=True,exist_ok=True)
+        if V619_STOP.exists():V619_STOP.unlink()
+        _v619_write(status='running',message='V6.19 MaxDD Autopsy 启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T,price,cal=_v619_load_base(t0);C,L,admitted,skipped=_v619_replay(T,price,cal,t0);res,D=_v619_autopsy(C,L,admitted,skipped,t0)
+        try:C.to_csv(V619_EQUITY,index=False,compression='gzip')
+        except OSError:pass
+        try:L.to_csv(V619_LEDGER,index=False,compression='gzip')
+        except OSError:pass
+        try:D.to_csv(V619_DD_TRADES,index=False,compression='gzip')
+        except OSError:pass
+        res['version']='V6.19 BASE_UNION MaxDD Autopsy · Right-Tail Preservation';res['generated_at']=datetime.now(timezone.utc).isoformat();res['elapsed_sec']=round(time.time()-t0,2)
+        V619_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v619_write(status='done',message='V6.19 完成：DIAGNOSIS_COMPLETE',phase='done',processed=3,total=3,current='BASE_UNION',elapsed_sec=res['elapsed_sec'],error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v619_write(status='paused',message='V6.19 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v619_write(status='error',message='V6.19 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:traceback.print_exc();_v619_write(status='error',message='V6.19 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v619_thread=None
+
+def _v619_start():
+    global v619_thread
+    if _v619_alive():return False
+    _v619_write(status='starting',message='V6.19 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None);v619_thread=threading.Thread(target=_v619_run,daemon=True);v619_thread.start();return True
+
+@APP.route('/v619/run',methods=['GET','POST'])
+def v619_run():_v619_start();return redirect('/v619/maxdd-autopsy')
+@APP.get('/v619/stop')
+def v619_stop():V619_DIR.mkdir(parents=True,exist_ok=True);V619_STOP.write_text('stop',encoding='utf-8');return redirect('/v619/maxdd-autopsy')
+@APP.get('/api/v619/status')
+def v619_status_api():return jsonify(_v619_status())
+@APP.get('/v619/maxdd-autopsy')
+def v619_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v619_status();r={}
+    if V619_RESULT.exists():
+        try:r=json.loads(V619_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v619_alive() or s.get('status') in ('starting','running');btn='' if running else '<a href="/v619/run"><button>▶ 开始 V6.19 回撤尸检</button></a>';stop='<a href="/v619/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    b=r.get('baseline',{});m=r.get('maxdd_event',{});tail=''.join(f"<tr><td>Top {float(x.get('top_pct',0)):.0%}</td><td>{int(x.get('winner_count',0))}</td><td>{float(x.get('gross_profit_share') or 0):.1%}</td><td>{float(x.get('avg_return') or 0):.1%}</td><td>{float(x.get('min_return') or 0):.1%}</td></tr>" for x in r.get('right_tail',[]));worst=''.join(f"<tr><td><b>{e(x.get('ticker',''))}</b></td><td>{e(x.get('dna',''))}</td><td>{e(x.get('entry_date',''))}</td><td>{e(x.get('exit_date',''))}</td><td>{float(x.get('return') or 0):.1%}</td><td>{float(x.get('pnl_dollars') or 0):+.4f}</td><td>{e(x.get('exit_reason',''))}</td></tr>" for x in r.get('worst_drawdown_trades',[]));years=''.join(f"<tr><td>{int(x.get('year',0))}</td><td>{float(x.get('return') or 0):.1%}</td><td>{float(x.get('worst_drawdown') or 0):.1%}</td><td>{float(x.get('avg_exposure') or 0):.1%}</td></tr>" for x in r.get('yearly',[]));flags=''.join('<li>'+e(x)+'</li>' for x in r.get('diagnostic_flags',[]))
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:15px;line-height:1.6}}.danger{{background:#fff1f2;border:1px solid #fda4af;border-radius:14px;padding:15px}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/v618/optimization-lab">← V6.18 Optimization Lab</a><div class="c"><h1>🧬 V6.19 BASE_UNION MaxDD Autopsy</h1><div class="info"><b>这轮不优化、不调参，只查清回撤来源。</b><br>保留 JLaw 型右尾：小亏损 + 少数超级大赢家。只复用 V6.17 Stage-2 trades + Historical Cache，0 Tiingo，不重建股票池。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}{('<div class="danger">'+e(s.get('error'))+'</div>') if s.get('error') else ''}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><table><tr><th>BASE Trades</th><td>{int(b.get('trades',0) or 0):,}</td><th>Win Rate</th><td>{float(b.get('win_rate') or 0):.2%}</td><th>PF</th><td>{float(b.get('profit_factor') or 0):.2f}</td></tr><tr><th>Avg Win</th><td>{float(b.get('avg_win') or 0):.1%}</td><th>Avg Loss</th><td>{float(b.get('avg_loss') or 0):.1%}</td><th>MaxDD</th><td><b>{float(b.get('maxdd') or 0):.2%}</b></td></tr></table></div><div class="c"><h2>1. MaxDD 事件</h2><table><tr><th>Peak</th><th>Trough</th><th>MaxDD</th><th>跌到谷底</th><th>Recovery</th><th>恢复天数</th><th>平均仓位</th><th>平均持仓数</th><th>窗口亏/赢</th></tr><tr><td>{e(m.get('peak_date','—'))}</td><td>{e(m.get('trough_date','—'))}</td><td><b>{float(m.get('maxdd') or 0):.2%}</b></td><td>{m.get('peak_to_trough_days','—')} 天</td><td>{e(m.get('recovery_date') or '未恢复')}</td><td>{m.get('recovery_days') if m.get('recovery_days') is not None else '—'}</td><td>{float(m.get('avg_exposure_peak_to_trough') or 0):.1%}</td><td>{float(m.get('avg_open_slots_peak_to_trough') or 0):.1f}</td><td>{int(m.get('realized_losses',0) or 0)} / {int(m.get('realized_winners',0) or 0)}</td></tr></table></div><div class="c"><h2>2. 右尾赢家贡献</h2><div class="warn"><b>这是保护对象。</b> 如果少数大赢家贡献大部分 gross profit，下一版绝不能用过早止盈换胜率。</div><table><tr><th>赢家层</th><th>数量</th><th>Gross Profit 占比</th><th>平均收益</th><th>该层最低收益</th></tr>{tail}</table></div><div class="c"><h2>3. MaxDD 窗口最差交易</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>DNA</th><th>Entry</th><th>Exit</th><th>Return</th><th>账户 P&L</th><th>Exit Reason</th></tr>{worst}</table></div></div><div class="c"><h2>4. 年度风险分解</h2><table><tr><th>Year</th><th>Return</th><th>Worst DD</th><th>Avg Exposure</th></tr>{years}</table></div><div class="c"><div class="warn"><b>诊断结论：</b><ul>{flags}</ul><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v619/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
@@ -18782,7 +18942,7 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v618/optimization-lab">🚀 V6.18 三目标优化</a> &nbsp; <a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v619/maxdd-autopsy">🧬 V6.19 回撤尸检</a> &nbsp; <a class="btn" href="/v618/optimization-lab">🚀 V6.18 三目标优化</a> &nbsp; <a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
 
