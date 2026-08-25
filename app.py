@@ -18304,6 +18304,444 @@ def v617_final_validation_page():
     </div></body></html>"""
 
 
+
+# ==================== V6.18 OPTIMIZATION LAB ====================
+# Goal: improve Win Rate + CAGR and reduce MaxDD WITHOUT re-downloading,
+# re-building the historical universe, or re-testing discarded Gate/Replacement experiments.
+#
+# Reuses V6.17 Stage-2 trades + Historical Cache.
+# Predeclared variants only:
+#   1) BASE_UNION       = current A/B union + -7% + HOLD1260
+#   2) A_FOCUS_BASE     = A or AB only, same exits
+#   3) UNION_SMART      = A/B union + stale-loser recycle + progressive profit floor
+#   4) A_FOCUS_SMART    = A or AB + smart exit
+#   5) AB_SMART         = A∩B only + smart exit
+#
+# SMART EXIT is point-in-time:
+#   - initial -7% stop remains active
+#   - stale recycle: at trading day 60, if prior max close never reached +14%
+#     and day-60 close <= +3%, exit next open
+#   - progressive profit floor is armed only from PRIOR closes:
+#       prior peak >= +20% -> floor +5%
+#       prior peak >= +50% -> floor +20%
+#       prior peak >= +100% -> floor +50%
+#       prior peak >= +200% -> floor +100%
+#     next day gap-through uses the worse open; otherwise stop price.
+# This is different from the previously tested MA/Giveback/Replacement branches.
+
+V618_DIR=DATA_DIR/'v618_optimization_lab'
+V618_STATUS=V618_DIR/'status.json'
+V618_RESULT=V618_DIR/'result.json'
+V618_REPORT=V618_DIR/'results.csv'
+V618_STOP=V618_DIR/'STOP'
+v618_thread=None
+
+def _v618_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'current':'','elapsed_sec':0,'error':None}
+    if V618_STATUS.exists():
+        try:x.update(json.loads(V618_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v618_write(**kw):
+    V618_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v618_status();x.update(kw)
+    V618_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v618_alive():
+    return v618_thread is not None and v618_thread.is_alive()
+
+def _v618_smart_exit(d,ei,entry_px):
+    # Close-entry model. No same-day stop after entry close.
+    n=len(d)
+    if ei+1>=n:return None
+    max_end=min(n-1,ei+1259)
+    init_stop=float(entry_px)*.93
+    peak_close=float(entry_px)
+
+    for j in range(ei+1,max_end+1):
+        op=float(d.open.iloc[j]); lo=float(d.low.iloc[j]); cl=float(d.close.iloc[j])
+
+        # Profit floor uses information available BEFORE today's session.
+        floor=init_stop
+        peak_ret=peak_close/entry_px-1.0
+        if peak_ret>=2.00: floor=max(floor,entry_px*2.00)   # lock +100%
+        elif peak_ret>=1.00: floor=max(floor,entry_px*1.50) # lock +50%
+        elif peak_ret>=.50: floor=max(floor,entry_px*1.20)  # lock +20%
+        elif peak_ret>=.20: floor=max(floor,entry_px*1.05)  # lock +5%
+
+        if np.isfinite(lo) and lo<=floor:
+            opx=op if np.isfinite(op) and op>0 else cl
+            xp=opx if opx<floor else floor
+            reason='PROFIT_FLOOR' if floor>init_stop+1e-12 else 'STOP7'
+            return j,float(xp),reason
+
+        # Stale-loser recycle: evaluate at close of day 60, execute NEXT open.
+        age=j-ei
+        peak_close=max(peak_close,cl) if np.isfinite(cl) else peak_close
+        if age==60:
+            if (peak_close/entry_px-1.0)<.14 and np.isfinite(cl) and cl<=entry_px*1.03:
+                nx=j+1
+                if nx<=max_end:
+                    nop=float(d.open.iloc[nx]); ncl=float(d.close.iloc[nx])
+                    xp=nop if np.isfinite(nop) and nop>0 else ncl
+                    return nx,float(xp),'STALE60_NEXT_OPEN'
+
+    return max_end,float(d.close.iloc[max_end]),'HOLD1260'
+
+def _v618_enrich_trades(t0):
+    if not V617FV2_TRADES.exists():
+        raise RuntimeError('缺少 V6.17 Stage 2 trades cache；先完成 Stage 2')
+    T=pd.read_csv(V617FV2_TRADES,compression='gzip')
+    if T.empty:raise RuntimeError('Stage 2 trades cache 为空')
+    T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+    T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
+
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到历史 manifest')
+    mm={str(r.listing_id):r for _,r in M.iterrows()
+        if str(r.listing_id) in set(T.listing_id.astype(str))}
+    groups={k:g.index.tolist() for k,g in T.groupby(T.listing_id.astype(str),sort=False)}
+
+    T['smart_exit_date']=pd.NaT
+    T['smart_exit_px']=np.nan
+    T['smart_reason']=''
+    total=len(groups)
+
+    for n,(lid,idxs) in enumerate(groups.items(),1):
+        if V618_STOP.exists():raise RuntimeError('__STOPPED__')
+        mr=mm.get(str(lid))
+        if mr is None:continue
+        d=_v617fv1_read_price(mr)
+        if d is None or d.empty:continue
+        d=d.copy()
+        d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        if 'open' not in d.columns:d['open']=d['close']
+        if 'high' not in d.columns:d['high']=d['close']
+        if 'low' not in d.columns:d['low']=d['close']
+        for c in ['open','high','low','close']:
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+        for idx in idxs:
+            dt=pd.Timestamp(T.at[idx,'entry_date']).normalize()
+            ei=im.get(dt)
+            ep=float(T.at[idx,'entry_px'])
+            if ei is None or not np.isfinite(ep) or ep<=0:continue
+            z=_v618_smart_exit(d,ei,ep)
+            if z is None:continue
+            xi,xp,reason=z
+            T.at[idx,'smart_exit_date']=pd.Timestamp(d.date.iloc[xi]).normalize()
+            T.at[idx,'smart_exit_px']=float(xp)
+            T.at[idx,'smart_reason']=reason
+
+        if n==1 or n%25==0 or n==total:
+            _v618_write(status='running',
+                message='Phase 1/3 · 复用 Stage 2 Cache，建立 Smart Exit 元数据',
+                phase='smart_exit',processed=n,total=total,
+                current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),
+                error=None)
+
+    T=T.dropna(subset=['entry_date','entry_px','smart_exit_date','smart_exit_px']).copy()
+    if T.empty:raise RuntimeError('没有生成 V6.18 smart-exit trades')
+    return T,M
+
+def _v618_load_prices(T,M,t0):
+    needed=set(T.listing_id.astype(str))
+    mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in needed}
+    price={};date_set=set();total=len(mm)
+    for n,(lid,mr) in enumerate(mm.items(),1):
+        if V618_STOP.exists():raise RuntimeError('__STOPPED__')
+        d=_v617fv1_read_price(mr)
+        if d is not None and len(d):
+            d=d.copy();d['date']=pd.to_datetime(d.date).dt.normalize()
+            d['close']=pd.to_numeric(d.close,errors='coerce')
+            z=dict(zip(d.date,d.close.astype(float)))
+            price[lid]=z;date_set.update(z.keys())
+        if n%50==0 or n==total:
+            _v618_write(status='running',message='Phase 2/3 · Loading compact MTM prices',
+                phase='mtm_load',processed=n,total=total,current=str(mr.get('ticker','')),
+                elapsed_sec=round(time.time()-t0,1),error=None)
+    return price,sorted(date_set)
+
+def _v618_simulate(T,price,cal,label,use_smart=False,dna_mode='UNION',variant_no=1,total_variants=5,t0=None):
+    X=T.copy()
+    if dna_mode=='A_FOCUS':
+        X=X[X.dna.astype(str).isin(['A','AB'])].copy()
+    elif dna_mode=='AB':
+        X=X[X.dna.astype(str).eq('AB')].copy()
+    if X.empty:return None
+
+    exit_date_col='smart_exit_date' if use_smart else 'exit_date'
+    exit_px_col='smart_exit_px' if use_smart else 'exit_px'
+    reason_col='smart_reason' if use_smart else 'exit_reason'
+
+    X=X.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=X.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r[exit_date_col]).normalize(),[]).append(i)
+
+    cash=1.0;pos={};last={};eqrows=[];ledger=[]
+    skipped=0;admitted=0;step=max(1,len(cal)//30)
+
+    for di,dt in enumerate(cal,1):
+        if V618_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        # Exit first; same-day cash can be reused.
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i][exit_px_col])
+            proceeds=p['shares']*xp
+            cash+=proceeds
+            ledger.append({
+                'ticker':rec[i]['ticker'],'dna':rec[i]['dna'],
+                'entry_date':rec[i]['entry_date'],'exit_date':rec[i][exit_date_col],
+                'entry_px':float(rec[i]['entry_px']),'exit_px':xp,
+                'reason':rec[i][reason_col],'allocated':p['cost'],
+                'return':xp/float(rec[i]['entry_px'])-1.0,
+                'pnl_dollars':proceeds-p['cost']
+            })
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            if not np.isfinite(cp):cp=last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        equity_now=cash+hv
+
+        # FIRST_COME. Deterministic listing_id tie-break already preserved.
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];target=equity_now/10.0;ep=float(r['entry_px'])
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target
+            pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,
+                    'entry_px':ep,'cost':target}
+            last[i]=ep;admitted+=1
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            if not np.isfinite(cp):cp=last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv
+        eqrows.append({'date':dt,'equity':eq,'exposure':hv/eq if eq>0 else np.nan,
+                       'cash_pct':cash/eq if eq>0 else np.nan,'open_slots':len(pos)})
+
+        if t0 is not None and (di%step==0 or di==len(cal)):
+            _v618_write(status='running',
+                message=f'Phase 3/3 · {label} Daily-MTM {int(round(di/len(cal)*100))}%',
+                phase='simulate',processed=di,total=len(cal),current=label,
+                elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows)
+    L=pd.DataFrame(ledger)
+    if C.empty:return None
+    C['date']=pd.to_datetime(C.date)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((C.date.iloc[-1]-C.date.iloc[0]).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if end>0 and start>0 else -1.0
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
+
+    C['year']=C.date.dt.year
+    annual={}
+    for y,g in C.groupby('year'):
+        if len(g)>=2:annual[int(y)]=float(g.equity.iloc[-1]/g.equity.iloc[0]-1)
+
+    if L.empty:
+        wr=pf=avgwin=avgloss=wl=np.nan;trades=0
+    else:
+        rr=pd.to_numeric(L['return'],errors='coerce')
+        wins=rr[rr>0];loss=rr[rr<=0]
+        wr=float((rr>0).mean());avgwin=float(wins.mean()) if len(wins) else np.nan
+        avgloss=float(loss.mean()) if len(loss) else np.nan
+        gp=float(L.loc[L.pnl_dollars>0,'pnl_dollars'].sum())
+        gl=float(-L.loc[L.pnl_dollars<0,'pnl_dollars'].sum())
+        pf=float(gp/gl) if gl>0 else np.inf
+        wl=float(avgwin/abs(avgloss)) if np.isfinite(avgwin) and np.isfinite(avgloss) and avgloss<0 else np.nan
+        trades=int(len(L))
+
+    return {
+        'strategy':label,'dna_mode':dna_mode,'smart_exit':bool(use_smart),
+        'end_equity':end,'cagr':float(cagr),'maxdd_mtm':maxdd,'calmar':calmar,
+        'trades':trades,'win_rate':wr,'profit_factor':pf,
+        'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,
+        'admitted':int(admitted),'skipped_capacity':int(skipped),
+        'avg_exposure':float(C.exposure.mean()),'avg_cash_pct':float(C.cash_pct.mean()),
+        'worst_year':float(min(annual.values())) if annual else np.nan,
+        'positive_years':int(sum(v>0 for v in annual.values())),
+        'total_years':int(len(annual)),
+        'exit_stop7':int((L.reason=='STOP7').sum()) if len(L) else 0,
+        'exit_stale60':int((L.reason=='STALE60_NEXT_OPEN').sum()) if len(L) else 0,
+        'exit_profit_floor':int((L.reason=='PROFIT_FLOOR').sum()) if len(L) else 0,
+        'exit_hold1260':int((L.reason=='HOLD1260').sum()) if len(L) else 0,
+    }
+
+def _v618_run():
+    global v618_thread
+    t0=time.time()
+    try:
+        V618_DIR.mkdir(parents=True,exist_ok=True)
+        if V618_STOP.exists():V618_STOP.unlink()
+        _v618_write(status='running',message='V6.18 Optimization Lab 启动',
+                    phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T,M=_v618_enrich_trades(t0)
+        price,cal=_v618_load_prices(T,M,t0)
+        if not cal:raise RuntimeError('没有 MTM price calendar')
+
+        variants=[
+            ('BASE_UNION',False,'UNION'),
+            ('A_FOCUS_BASE',False,'A_FOCUS'),
+            ('UNION_SMART',True,'UNION'),
+            ('A_FOCUS_SMART',True,'A_FOCUS'),
+            ('AB_SMART',True,'AB'),
+        ]
+        rows=[]
+        for vi,(label,smart,dna_mode) in enumerate(variants,1):
+            z=_v618_simulate(T,price,cal,label,smart,dna_mode,vi,len(variants),t0)
+            if z is not None:rows.append(z)
+
+        O=pd.DataFrame(rows)
+        if O.empty:raise RuntimeError('V6.18 没有生成模拟结果')
+        base=O[O.strategy.eq('BASE_UNION')].iloc[0]
+        O['delta_winrate']=O.win_rate-float(base.win_rate)
+        O['delta_cagr']=O.cagr-float(base.cagr)
+        O['delta_maxdd']=O.maxdd_mtm-float(base.maxdd_mtm)
+        O['delta_skipped']=O.skipped_capacity-int(base.skipped_capacity)
+
+        # User's three priorities all must improve. PF protects the right-tail engine.
+        O['triple_improve']=(
+            (O.win_rate>float(base.win_rate)) &
+            (O.cagr>float(base.cagr)) &
+            (O.maxdd_mtm>float(base.maxdd_mtm))
+        )
+        O['screen_pass']=(
+            O['triple_improve'] &
+            (O.delta_maxdd>=.10) &
+            (O.profit_factor>=2.0)
+        )
+        O.loc[O.strategy.eq('BASE_UNION'),'screen_pass']=False
+
+        # Rank by pass first, then Calmar, CAGR, win rate.
+        O=O.sort_values(['screen_pass','calmar','cagr','win_rate'],
+                        ascending=[False,False,False,False]).reset_index(drop=True)
+        try:O.to_csv(V618_REPORT,index=False)
+        except OSError:pass
+
+        winners=O[O.screen_pass]
+        verdict='PROMISING_CANDIDATE' if len(winners) else 'NO_TRIPLE_PASS'
+        best=O.iloc[0].to_dict()
+
+        res={
+            'version':'V6.18 Optimization Lab · Precision + Capital Recycling',
+            'generated_at':datetime.now(timezone.utc).isoformat(),
+            'elapsed_sec':round(time.time()-t0,2),
+            'verdict':verdict,
+            'best':{k:(None if pd.isna(v) else v) for k,v in best.items()},
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'acceptance':'候选必须同时提高 Win Rate、CAGR、MaxDD；MaxDD 至少改善10个百分点；Profit Factor 保持 >=2.0。',
+            'baseline_note':'BASE_UNION is exactly the V6.17 Stage-2 structure: frozen A/B union, CONTROL observation-close entry, -7% stop, HOLD1260, 10 slots, FIRST_COME.',
+            'new_tests':'Only two new hypotheses are introduced: A/AB precision filtering and point-in-time Smart Exit (stale60 recycle + progressive profit floor).',
+            'not_retested':'No Tiingo. No new factor search. No Add-on. No Opportunity Gate. No Replacement. No 10MA/20MA/Hybrid/Giveback rerun.',
+            'cache_note':'Reuses V6.17 Stage-2 trades.csv.gz + Historical Cache; no universe rebuild.'
+        }
+        V618_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v618_write(status='done',message=f'V6.18 完成：{verdict}',phase='done',
+                    processed=3,total=3,current=str(best.get('strategy','')),
+                    elapsed_sec=res['elapsed_sec'],error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v618_write(status='paused',message='V6.18 已安全暂停',phase='paused',
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc()
+            _v618_write(status='error',message='V6.18 失败',phase='error',
+                        error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc()
+        _v618_write(status='error',message='V6.18 失败',phase='error',
+                    error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v618_thread=None
+
+def _v618_start():
+    global v618_thread
+    if _v618_alive():return False
+    _v618_write(status='starting',message='V6.18 正在启动',phase='startup',
+                processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v618_thread=threading.Thread(target=_v618_run,daemon=True)
+    v618_thread.start();return True
+
+@APP.route('/v618/run',methods=['GET','POST'])
+def v618_run():
+    _v618_start()
+    return redirect('/v618/optimization-lab')
+
+@APP.get('/v618/stop')
+def v618_stop():
+    V618_DIR.mkdir(parents=True,exist_ok=True)
+    V618_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v618/optimization-lab')
+
+@APP.get('/api/v618/status')
+def v618_status_api():
+    return jsonify(_v618_status())
+
+@APP.get('/v618/optimization-lab')
+def v618_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    s=_v618_status();r={}
+    if V618_RESULT.exists():
+        try:r=json.loads(V618_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v618_alive() or s.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v618/run"><button>▶ 开始 V6.18 三目标优化</button></a>'
+    stop='<a href="/v618/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('overall',[]):
+        pf=x.get('profit_factor');pf_txt='—' if pf is None else f"{float(pf):.2f}"
+        trs+=f"""<tr>
+        <td><b>{e(x.get('strategy',''))}</b></td>
+        <td>{float(x.get('win_rate') or 0):.2%}</td>
+        <td>{float(x.get('delta_winrate') or 0):+.2%}</td>
+        <td><b>{float(x.get('cagr') or 0):.2%}</b></td>
+        <td>{float(x.get('delta_cagr') or 0):+.2%}</td>
+        <td><b>{float(x.get('maxdd_mtm') or 0):.2%}</b></td>
+        <td>{float(x.get('delta_maxdd') or 0):+.2%}</td>
+        <td>{float(x.get('calmar') or 0):.2f}</td>
+        <td>{pf_txt}</td>
+        <td>{float(x.get('avg_win') or 0):.1%}</td>
+        <td>{float(x.get('avg_loss') or 0):.1%}</td>
+        <td>{int(x.get('trades') or 0):,}</td>
+        <td>{int(x.get('skipped_capacity') or 0):,}</td>
+        <td>{float(x.get('worst_year') or 0):.1%}</td>
+        <td>{'PASS' if x.get('screen_pass') else '-'}</td></tr>"""
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:15px;line-height:1.6}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:800}}table{{width:100%;border-collapse:collapse;min-width:1350px;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head>
+    <body><div class="w"><a href="/v617/production">← V6.17 主系统</a>
+    <div class="c"><h1>🚀 V6.18 Optimization Lab</h1>
+    <div class="info"><b>目标只看三个：Win Rate ↑、CAGR ↑、MaxDD ↓。</b><br>
+    不重新下载；不重新做股票池；不重复已经失败的 Add-on / Opportunity Gate / Replacement / 10MA / 20MA / Giveback。
+    这轮只比较 A/AB 精度过滤，以及 Smart Exit：60日死仓释放 + 大赢家逐级利润底线。</div></div>
+    <div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p>
+    <p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>
+    {btn}{stop}
+    {('<div class="warn"><b>Error:</b> '+e(s.get('error'))+'</div>') if s.get('error') else ''}</div>
+    <div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2>
+    <div style="overflow:auto"><table><tr><th>方案</th><th>Win Rate</th><th>ΔWR</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>Calmar</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>Trades</th><th>Capacity Skip</th><th>Worst Year</th><th>Pass</th></tr>{trs}</table></div></div>
+    <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br>
+    <b>新测试：</b>{e(r.get('new_tests',''))}<br><b>不重复：</b>{e(r.get('not_retested',''))}<br>
+    <b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+    <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v618/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
+    </div></body></html>"""
+
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
@@ -18333,7 +18771,7 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v618/optimization-lab">🚀 V6.18 三目标优化</a> &nbsp; <a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
 
