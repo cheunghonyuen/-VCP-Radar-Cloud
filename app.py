@@ -23319,3 +23319,199 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>Source Spec：</b>{e(r.get('source_spec',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>解释：</b>{e(r.get('interpretation',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v636/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ============================================================
+# V6.37 Trigger Latency Autopsy
+# Diagnostic only; exact V6.36 SOURCE trigger logic is frozen.
+# ============================================================
+V637_DIR = Path("/data/vcp_v637")
+V637_DIR.mkdir(parents=True, exist_ok=True)
+V637_STATUS = V637_DIR / "status.json"
+V637_RESULT = V637_DIR / "result.json"
+V637_DETAIL = V637_DIR / "trigger_latency_detail.csv.gz"
+V637_STOP = V637_DIR / "STOP"
+v637_thread = None
+
+def _v637_write(**kw):
+    x={}
+    try:
+        if V637_STATUS.exists(): x=json.loads(V637_STATUS.read_text(encoding="utf-8"))
+    except Exception: x={}
+    x.update(kw); x["updated_at"]=pd.Timestamp.utcnow().isoformat()
+    V637_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return x
+
+def _v637_status():
+    try: return json.loads(V637_STATUS.read_text(encoding="utf-8")) if V637_STATUS.exists() else {}
+    except Exception: return {}
+
+def _v637_alive(): return v637_thread is not None and v637_thread.is_alive()
+
+def _v637_one(r,d):
+    ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+    x=d[(d.date>=ed)&(d.date<=xd)].copy().reset_index(drop=True)
+    out={"listing_id":str(r.listing_id),"ticker":str(r.ticker),"base_entry_date":ed,"base_exit_date":xd,
+         "base_entry_px":float(r.entry_px),"touch_i":np.nan,"arm_i":np.nan,"confirm_i":np.nan,"execute_i":np.nan,
+         "touch_supports":"","arm_supports":"","triggered":False,"failure_stage":"","failure_detail":""}
+    if len(x)<3:
+        out["failure_stage"]="INSUFFICIENT_PATH"; return out
+    x["ma10"]=pd.to_numeric(x.close,errors="coerce").rolling(10,min_periods=1).mean()
+    x["ma20"]=pd.to_numeric(x.close,errors="coerce").rolling(20,min_periods=1).mean()
+    x["vmed20"]=pd.to_numeric(x.volume,errors="coerce").rolling(20,min_periods=1).median()
+    pivot=float(r.entry_px); breakout_vol=float(x.iloc[0].volume) if pd.notna(x.iloc[0].volume) else np.nan
+    armed=None; saw_touch=False; saw_qb=False; saw_qc=False; saw_cons=False
+    for j in range(1,len(x)-1):
+        rr=x.iloc[j]; o,h,l,c,v=map(float,[rr.open,rr.high,rr.low,rr.close,rr.volume])
+        ma10=float(rr.ma10) if pd.notna(rr.ma10) else np.nan
+        ma20=float(rr.ma20) if pd.notna(rr.ma20) else np.nan
+        vm=float(rr.vmed20) if pd.notna(rr.vmed20) else np.nan
+        anchors=[]
+        for name,val in [("PIVOT",pivot),("10MA",ma10),("20MA",ma20)]:
+            if np.isfinite(val) and val>0 and l<=val<=h: anchors.append((name,float(val)))
+        if armed is None:
+            if not anchors: continue
+            saw_touch=True
+            if pd.isna(out["touch_i"]):
+                out["touch_i"]=int(j); out["touch_supports"]=" + ".join(a[0] for a in anchors)
+            qb=(not np.isfinite(breakout_vol)) or (np.isfinite(v) and v<breakout_vol)
+            qc=(not np.isfinite(vm)) or (np.isfinite(v) and v<vm)
+            cons=any(c>=a[1] for a in anchors)
+            saw_qb|=bool(qb); saw_qc|=bool(qc); saw_cons|=bool(cons)
+            if qb and qc and cons:
+                vals=[a[1] for a in anchors]
+                armed={"i":j,"low":min(vals),"high":max(vals),"supports":" + ".join(a[0] for a in anchors)}
+                out["arm_i"]=int(j); out["arm_supports"]=armed["supports"]
+            continue
+        prev=x.iloc[j-1]
+        if c<float(armed["low"]):
+            out["failure_stage"]="ARMED_THEN_SUPPORT_FAILED"; out["failure_detail"]="close_below_armed_support"; break
+        if c>float(prev.high) and c>o and c>float(armed["high"]):
+            out["confirm_i"]=int(j); out["execute_i"]=int(j+1); out["triggered"]=True
+            out["failure_stage"]="TRIGGERED"; break
+    if not out["triggered"] and not out["failure_stage"]:
+        if not saw_touch: out["failure_stage"]="NO_SUPPORT_TOUCH"
+        elif armed is None:
+            if not saw_qb and not saw_qc: out["failure_stage"]="TOUCH_BUT_VOLUME_NOT_QUIET"
+            elif not saw_qb: out["failure_stage"]="TOUCH_BUT_NOT_BELOW_BREAKOUT_VOLUME"
+            elif not saw_qc: out["failure_stage"]="TOUCH_BUT_NOT_BELOW_20D_MEDIAN_VOLUME"
+            elif not saw_cons: out["failure_stage"]="TOUCH_BUT_NOT_CONSTRUCTIVE"
+            else: out["failure_stage"]="TOUCH_BUT_NEVER_ARMED_COMBINATION"
+        else: out["failure_stage"]="ARMED_BUT_NO_CONFIRMATION"
+    out["to_touch"]=float(out["touch_i"]) if pd.notna(out["touch_i"]) else np.nan
+    out["touch_to_arm"]=float(out["arm_i"]-out["touch_i"]) if pd.notna(out["arm_i"]) and pd.notna(out["touch_i"]) else np.nan
+    out["arm_to_confirm"]=float(out["confirm_i"]-out["arm_i"]) if pd.notna(out["confirm_i"]) and pd.notna(out["arm_i"]) else np.nan
+    out["confirm_to_execute"]=float(out["execute_i"]-out["confirm_i"]) if pd.notna(out["execute_i"]) and pd.notna(out["confirm_i"]) else np.nan
+    out["total_to_execute"]=float(out["execute_i"]) if pd.notna(out["execute_i"]) else np.nan
+    return out
+
+def _v637_stats(s):
+    s=pd.to_numeric(s,errors="coerce").dropna()
+    if s.empty:return {"n":0,"mean":None,"median":None,"p90":None,"p95":None}
+    return {"n":int(len(s)),"mean":float(s.mean()),"median":float(s.median()),
+            "p90":float(s.quantile(.90)),"p95":float(s.quantile(.95))}
+
+def _v637_run():
+    global v637_thread
+    t0=time.time()
+    try:
+        if V637_STOP.exists():
+            try:V637_STOP.unlink()
+            except OSError:pass
+        _v637_write(status="running",message="V6.37 Trigger Latency Autopsy",phase="load",processed=0,total=2,current="Historical Cache",elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError("1996–2026 没有 Stage-2 trades")
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError("找不到 Historical Cache manifest")
+        needed=set(T.listing_id.astype(str)); M=M[M.listing_id.astype(str).isin(needed)].copy()
+        groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+        rows=[]; total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            if V637_STOP.exists():raise RuntimeError("__STOPPED__")
+            lid=str(mr.listing_id); g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy(); d["date"]=pd.to_datetime(d.date,errors="coerce").dt.normalize()
+            for c in ["open","high","low","close","volume"]:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors="coerce")
+            d=d.dropna(subset=["date","open","high","low","close"]).sort_values("date").drop_duplicates("date",keep="last")
+            for _,r in g.iterrows(): rows.append(_v637_one(r,d))
+            if n==1 or n%50==0 or n==total:
+                _v637_write(status="running",message="Phase 1/2 · 拆解 Trigger latency",phase="latency_autopsy",
+                            processed=n,total=total,current=str(mr.get("ticker","")),elapsed_sec=round(time.time()-t0,1),error=None)
+        D=pd.DataFrame(rows)
+        if D.empty:raise RuntimeError("V6.37 没有诊断记录")
+        try:D.to_csv(V637_DETAIL,index=False,compression="gzip")
+        except OSError:pass
+        G=D[D.triggered.eq(True)].copy()
+        fc=D.loc[~D.triggered.eq(True),"failure_stage"].value_counts(dropna=False)
+        failures=[{"stage":str(k),"n":int(v),"pct_all":float(v/len(D)),"pct_fail":float(v/max(1,(~D.triggered.eq(True)).sum()))} for k,v in fc.items()]
+        latency={"to_first_support_touch":_v637_stats(G["to_touch"]),
+                 "touch_to_arm":_v637_stats(G["touch_to_arm"]),
+                 "arm_to_confirmation":_v637_stats(G["arm_to_confirm"]),
+                 "confirmation_to_next_open":_v637_stats(G["confirm_to_execute"]),
+                 "total_to_execution":_v637_stats(G["total_to_execute"])}
+        keys=["to_first_support_touch","touch_to_arm","arm_to_confirmation"]
+        med={k:(latency[k]["median"] if latency[k]["median"] is not None else -1) for k in keys}
+        dominant=max(med,key=med.get)
+        res={"version":"V6.37 Trigger Latency Autopsy","verdict":"TRIGGER_LATENCY_AUTOPSY_COMPLETE",
+             "base_candidates":int(len(D)),"triggered":int(D.triggered.sum()),"coverage":float(D.triggered.mean()),
+             "latency_sessions":latency,"dominant_latency_stage":dominant,"failure_breakdown":failures,
+             "rules_frozen":"Exact V6.36 SOURCE_FAITHFUL_TRIGGER logic; diagnostic only.",
+             "cache_note":"Reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild; saves V6.37 detail cache.",
+             "next_step":"Use dominant latency/failure stage to reconstruct the corresponding exact JLaw source definition; do not tune exits."}
+        V637_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v637_write(status="done",message="V6.37 完成：TRIGGER_LATENCY_AUTOPSY_COMPLETE",phase="done",
+                    processed=2,total=2,current=dominant,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        if str(ex)=="__STOPPED__":
+            _v637_write(status="paused",message="V6.37 已安全暂停",phase="paused",elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc(); _v637_write(status="error",message="V6.37 失败",phase="error",
+                error=f"{type(ex).__name__}: {ex}",elapsed_sec=round(time.time()-t0,1))
+    finally:v637_thread=None
+
+def _v637_start():
+    global v637_thread
+    if _v637_alive():return False
+    _v637_write(status="starting",message="V6.37 正在启动",phase="startup",processed=0,total=2,current="",elapsed_sec=0,error=None)
+    v637_thread=threading.Thread(target=_v637_run,daemon=True);v637_thread.start();return True
+
+@APP.route("/v637/run",methods=["GET","POST"])
+def v637_run():_v637_start();return redirect("/v637/trigger-latency")
+@APP.get("/v637")
+def v637_alias():return redirect("/v637/trigger-latency")
+@APP.get("/v637/stop")
+def v637_stop():
+    V637_STOP.write_text("stop",encoding="utf-8");return redirect("/v637/trigger-latency")
+@APP.get("/api/v637/status")
+def v637_status_api():return jsonify(_v637_status())
+
+@APP.get("/v637/trigger-latency")
+def v637_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v637_status(); r={}
+    try:
+        if V637_RESULT.exists():r=json.loads(V637_RESULT.read_text(encoding="utf-8"))
+    except Exception:r={}
+    running=_v637_alive() or st.get("status") in ("starting","running")
+    btn="" if running else '<a href="/v637/run"><button>▶ 开始 V6.37 Trigger Latency Autopsy</button></a>'
+    stop='<a href="/v637/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
+    lat=r.get("latency_sessions",{}); failures=r.get("failure_breakdown",[])
+    def fs(k):
+        q=lat.get(k,{})
+        return f'<tr><td>{e(k)}</td><td>{e(q.get("n","—"))}</td><td>{e(q.get("mean","—"))}</td><td>{e(q.get("median","—"))}</td><td>{e(q.get("p90","—"))}</td><td>{e(q.get("p95","—"))}</td></tr>'
+    fr="".join(f'<tr><td>{e(x.get("stage"))}</td><td>{int(x.get("n",0)):,}</td><td>{float(x.get("pct_all",0)):.1%}</td><td>{float(x.get("pct_fail",0)):.1%}</td></tr>' for x in failures)
+    return f"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fb;color:#0f172a;margin:0;padding:18px}}.c{{background:white;border-radius:24px;padding:28px;margin:0 auto 22px;max-width:1200px;overflow:auto}}h1{{font-size:34px}}h2{{font-size:26px}}button{{background:#0f172a;color:white;border:0;border-radius:14px;padding:14px 20px;font-weight:700}}table{{border-collapse:collapse;width:100%;min-width:760px}}th,td{{padding:11px;border-bottom:1px solid #dbe3ef;text-align:left;white-space:nowrap}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px;line-height:1.55}}.warn{{background:#fff8e7;border:1px solid #f5b942;border-radius:14px;padding:16px;line-height:1.55}}</style>
+<a href="/v636/source-trigger-ab">← V6.36 Source Trigger A/B</a>
+<div class="c"><h1>🔬 V6.37 Trigger Latency Autopsy</h1><div class="info"><b>这轮不改策略。</b><br>冻结 V6.36 Source Trigger / Selection / -7% Stop / HOLD1260。只拆解平均等待耗在 Support Touch、Quiet/Constructive Arm，还是 Re-strength Confirmation；同时分类未触发候选。</div></div>
+<div class="c"><h2>状态：{e(st.get("status","idle"))}</h2><p>{e(st.get("message",""))} · {e(st.get("elapsed_sec",0))} 秒</p>{btn} {stop}{('<p style="color:#b91c1c"><b>Error:</b> '+e(st.get("error"))+'</p>') if st.get("error") else ''}</div>
+<div class="c"><h2>Verdict: {e(r.get("verdict","—"))}</h2><p>BASE候选：{int(r.get("base_candidates",0)):,} · Triggered：{int(r.get("triggered",0)):,} · Coverage：{float(r.get("coverage",0) or 0):.1%}</p><p><b>Dominant latency stage:</b> {e(r.get("dominant_latency_stage","—"))}</p></div>
+<div class="c"><h2>触发成功者：等待时间拆解（交易日）</h2><table><tr><th>阶段</th><th>N</th><th>Mean</th><th>Median</th><th>P90</th><th>P95</th></tr>{fs("to_first_support_touch")}{fs("touch_to_arm")}{fs("arm_to_confirmation")}{fs("confirmation_to_next_open")}{fs("total_to_execution")}</table></div>
+<div class="c"><h2>未触发候选：卡在哪里</h2><table><tr><th>Failure Stage</th><th>N</th><th>% All</th><th>% Failures</th></tr>{fr}</table></div>
+<div class="c"><div class="warn"><b>下一步：</b>{e(r.get("next_step","跑完后只重建最大延迟/失败阶段对应的 JLaw 原始定义；不碰 Exit。"))}<br><b>Cache：</b>{e(r.get("cache_note","Reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild."))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch("/api/v637/status",{{cache:"no-store"}}),x=await q.json();if(x.status==="starting"||x.status==="running")location.reload()}}catch(e){{}}}},2500)</script>"""
