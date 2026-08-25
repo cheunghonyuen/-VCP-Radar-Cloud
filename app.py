@@ -20706,7 +20706,7 @@ def _v6281_run():
     try:
         V6281_DIR.mkdir(parents=True,exist_ok=True)
         if V6281_STOP.exists():V6281_STOP.unlink()
-        _v6281_write(status='running',message='V6.28.1 数据完整性审计启动',phase='load',processed=0,total=1,current='',elapsed_sec=0,error=None)
+        _v6281_write(status='running',message='V6.28.1 Hotfix 数据完整性审计启动',phase='load',processed=0,total=1,current='',elapsed_sec=0,error=None)
         T=_v622_load_trades().copy()
         T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
         if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
@@ -20742,7 +20742,10 @@ def _v6281_run():
                     rat=(c/c.shift(1)).replace([np.inf,-np.inf],np.nan).dropna()
                     jumps=int(((rat>=4.0)|(rat<=0.25)).sum())
                     if len(rat):
-                        max_jump=float(max(rat.max(),1.0/max(rat.min() if rat.min()>0 else 1e-9)))
+                        rmax=float(rat.max())
+                        rmin=float(rat.min())
+                        inv_min=(1.0/rmin) if rmin>0 else 1e9
+                        max_jump=float(max(rmax,inv_min))
                 entry_ratio=ep/ec
                 exit_ratio=xp/xc
                 stage_ret=xp/ep-1.0
@@ -20840,7 +20843,7 @@ def v6281_page():
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:22px;padding:26px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.danger{{background:#fff1f2;border:1px solid #fda4af;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 17px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
 <a href="/v628/shape-giveback-autopsy">← V6.28 Shape/Giveback</a>
-<div class="c"><h1>🧹 V6.28.1 Data Integrity Fix</h1><div class="info"><b>这次是真的跑数据审计，不是说明页。</b><br>检查 Stage-2 Entry/Exit 与 Historical Cache OHLC 是否同一调整口径，并识别 split / reverse-split / corporate-action 异常。交易规则完全不改。</div></div>
+<div class="c"><h1>🧹 V6.28.1 Data Integrity Fix · Hotfix</h1><div class="info"><b>这次是真的跑数据审计，不是说明页。</b><br>检查 Stage-2 Entry/Exit 与 Historical Cache OHLC 是否同一调整口径，并识别 split / reverse-split / corporate-action 异常。交易规则完全不改。</div></div>
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}{err}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="warn">{e(r.get('diagnosis','等待运行'))}</div></div>
 <div class="c"><h2>摘要</h2><table><tr><th>检查交易</th><th>异常交易</th><th>异常率</th><th>Entry口径异常</th><th>Entry→Exit缩放异常</th><th>路径Split-like跳变</th><th>Clean</th></tr><tr><td>{int(sm.get('trades_checked',0)):,}</td><td>{int(sm.get('flagged_trades',0)):,}</td><td>{float(sm.get('flagged_rate',0) or 0):.2%}</td><td>{int(sm.get('entry_basis_bad',0)):,}</td><td>{int(sm.get('scale_change_bad',0)):,}</td><td>{int(sm.get('split_like_path_bad',0)):,}</td><td>{int(sm.get('clean_trades',0)):,}</td></tr></table></div>
