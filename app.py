@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v6282-shortcut" style="border:3px solid #0ea5e9;background:#f0f9ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧼 V6.28.2 Price-Normalized Rebaseline</h2><div class="muted">清理 split-like 跳变后重算 MFE / Giveback / Shape · 1996–2026 · 0 Tiingo</div></div><a href="/v6282/normalized-rebaseline"><button type="button">打开 V6.28.2</button></a></div></div>
+
 <div class="card" id="v6281-shortcut" style="border:3px solid #2563eb;background:#eff6ff"><div><h2>🧹 V6.28.1 Data Integrity Fix</h2><div class="muted">先查 split / reverse split / OHLC adjustment basis；不改交易规则</div><a href="/v6281/data-integrity"><button type="button">打开 V6.28.1</button></a></div></div>
 
 <div class="card" id="v628-shortcut" style="border:3px solid #059669;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.28 Shape Deterioration & Winner Giveback Autopsy</h2><div class="muted">直接查股票自身形态为什么走差 · MFE/利润回吐/10MA/20MA/峰值回撤 · 1996–2026 · 0 Tiingo</div></div><a href="/v628/shape-giveback-autopsy"><button type="button">打开 V6.28</button></a></div></div>
@@ -20850,4 +20852,262 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>最严重异常</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>Entry</th><th>Entry ratio</th><th>Scale change</th><th>Jump days</th><th>Max jump</th><th>Stage Return</th><th>Cache Close Return</th></tr>{trs}</table></div></div>
 <div class="c"><div class="warn"><b>方法：</b>{e(r.get('method',''))}<br><b>修复方案：</b>{e(r.get('fix_plan',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6281/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.28.2 Price-Normalized Shape/Giveback Rebaseline =========================
+V6282_DIR=DATA_DIR/'v6282_price_normalized_rebaseline'
+V6282_STATUS=V6282_DIR/'status.json'; V6282_RESULT=V6282_DIR/'result.json'; V6282_STOP=V6282_DIR/'STOP'
+v6282_thread=None
+
+def _v6282_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V6282_STATUS.exists():
+        try:x.update(json.loads(V6282_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6282_write(**kw):
+    V6282_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6282_status(); x.update(kw)
+    V6282_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6282_alive(): return v6282_thread is not None and v6282_thread.is_alive()
+
+def _v6282_normalize_path(z, entry_px):
+    """
+    Build a continuous price path from cached OHLC.
+    Split-like jumps are detected only at >=4x or <=0.25x day/day close ratios.
+    From the jump day onward, apply a multiplicative bridge so the normalized
+    close is continuous across the jump. Finally anchor entry-day normalized
+    close to Stage-2 entry_px.
+    Returns (normalized_df, meta).
+    """
+    d=z.copy().sort_values('date').drop_duplicates('date',keep='last')
+    for c in ['open','high','low','close']:
+        if c not in d.columns:d[c]=np.nan
+        d[c]=pd.to_numeric(d[c],errors='coerce')
+    d=d.dropna(subset=['date','close']).copy()
+    if len(d)<2:return None,{'resolved':False,'reason':'too_short','jump_count':0}
+    raw=d['close'].to_numpy(float)
+    if not np.all(np.isfinite(raw)) or np.any(raw<=0):
+        return None,{'resolved':False,'reason':'bad_close','jump_count':0}
+    ratios=raw[1:]/raw[:-1]
+    jump_idx=np.where((ratios>=4.0)|(ratios<=0.25))[0]+1
+    # Too many scale breaks inside one holding path is unreliable.
+    if len(jump_idx)>8:
+        return None,{'resolved':False,'reason':'too_many_scale_breaks','jump_count':int(len(jump_idx))}
+    factor=np.ones(len(d),dtype=float)
+    cur=1.0
+    jump_rows=[]
+    for j in range(len(d)):
+        if j in set(jump_idx.tolist()):
+            prev_raw=float(raw[j-1]); cur_raw=float(raw[j])
+            bridge=prev_raw/cur_raw
+            cur*=bridge
+            jump_rows.append({'date':str(pd.Timestamp(d.iloc[j].date).date()),
+                              'raw_ratio':float(cur_raw/prev_raw),'bridge':float(bridge)})
+        factor[j]=cur
+    for c in ['open','high','low','close']:
+        vals=pd.to_numeric(d[c],errors='coerce').to_numpy(float)
+        d[c]=vals*factor
+    norm_entry=float(d.iloc[0].close)
+    if not np.isfinite(norm_entry) or norm_entry<=0:
+        return None,{'resolved':False,'reason':'bad_norm_entry','jump_count':int(len(jump_idx))}
+    anchor=float(entry_px)/norm_entry
+    for c in ['open','high','low','close']:
+        d[c]=pd.to_numeric(d[c],errors='coerce')*anchor
+    # sanity after normalization
+    c=d.close.to_numpy(float)
+    rr=c[1:]/c[:-1]
+    unresolved_jump=bool(np.any((rr>=4.0)|(rr<=0.25)))
+    resolved=not unresolved_jump
+    return d,{'resolved':resolved,'reason':'ok' if resolved else 'residual_jump',
+              'jump_count':int(len(jump_idx)),'jump_rows':jump_rows,'anchor':float(anchor)}
+
+def _v6282_analyze_trade(r,d):
+    ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+    z=d[(d.date>=ed)&(d.date<=xd)].copy()
+    if z.empty:return None,[],{'resolved':False,'reason':'no_path','jump_count':0}
+    nd,meta=_v6282_normalize_path(z,float(r.entry_px))
+    if nd is None or not meta.get('resolved',False):
+        return None,[],meta
+    # Reuse V6.28 path logic, but with normalized OHLC anchored to Stage-2 entry.
+    sm,ev=_v628_analyze_trade(r,nd)
+    if sm is not None:
+        sm['normalized']=True
+        sm['jump_count']=int(meta.get('jump_count',0))
+    for q in ev:
+        q['normalized']=True
+        q['jump_count']=int(meta.get('jump_count',0))
+    return sm,ev,meta
+
+def _v6282_run():
+    global v6282_thread
+    t0=time.time()
+    try:
+        V6282_DIR.mkdir(parents=True,exist_ok=True)
+        if V6282_STOP.exists():V6282_STOP.unlink()
+        _v6282_write(status='running',message='V6.28.2 价格标准化重算启动',phase='load',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T=_v622_load_trades().copy()
+        T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+        needed=set(T.listing_id.astype(str))
+        mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in needed}
+        groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+
+        summaries=[];events=[];bad=[];normalized_jump_trades=0;total=len(mm)
+        for n,(lid,mr) in enumerate(mm.items(),1):
+            if V6282_STOP.exists():raise RuntimeError('__STOPPED__')
+            g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','close']).sort_values('date')
+
+            for _,r in g.iterrows():
+                sm,ev,meta=_v6282_analyze_trade(r,d)
+                if meta.get('jump_count',0)>0:normalized_jump_trades+=1
+                if sm is None:
+                    bad.append({'ticker':str(r.ticker),'listing_id':lid,'entry_date':str(pd.Timestamp(r.entry_date).date()),
+                                'exit_date':str(pd.Timestamp(r.exit_date).date()),'reason':str(meta.get('reason','unknown')),
+                                'jump_count':int(meta.get('jump_count',0))})
+                    continue
+                summaries.append(sm);events.extend(ev)
+
+            if n==1 or n%100==0 or n==total:
+                _v6282_write(status='running',message='Phase 1/3 · 标准化 split-like 路径并重算 MFE/Giveback',
+                             phase='normalize_paths',processed=n,total=total,current=str(mr.get('ticker','')),
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+
+        if not summaries:raise RuntimeError('没有生成标准化交易路径')
+        S=pd.DataFrame(summaries);E=pd.DataFrame(events)
+        _v6282_write(status='running',message='Phase 2/3 · 重算 Shape/Giveback 统计',phase='rebaseline',
+                     processed=2,total=3,current=f'{len(S):,} clean/normalized trades',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        B=_v628_group_summary(S)
+        ES=_v628_event_summary(E) if len(E) else pd.DataFrame()
+        reached=S[S.reached20].copy()
+        stop_after_profit=reached[reached.exit_reason.astype(str).eq('STOP7')].copy()
+
+        key={
+            'input_trades':int(len(T)),
+            'resolved_trades':int(len(S)),
+            'unresolved_trades':int(len(bad)),
+            'normalized_split_like_trades':int(normalized_jump_trades),
+            'reached20':int(len(reached)),
+            'reached20_rate':float(len(reached)/len(S)) if len(S) else np.nan,
+            'reached20_then_stop7':int(len(stop_after_profit)),
+            'reached20_then_stop7_rate':float(len(stop_after_profit)/len(reached)) if len(reached) else np.nan,
+            'median_giveback_after_reach20':float(reached.giveback.median()) if len(reached) else np.nan,
+            'mfe50_then_final_below20_rate':float(((S.mfe>=.50)&(S.final_return<.20)).sum()/max(1,(S.mfe>=.50).sum())),
+            'mfe100_then_final_below50_rate':float(((S.mfe>=1.0)&(S.final_return<.50)).sum()/max(1,(S.mfe>=1.0).sum())),
+            'max_mfe_after_normalization':float(S.mfe.max()) if len(S) else np.nan,
+            'p999_mfe_after_normalization':float(S.mfe.quantile(.999)) if len(S) else np.nan,
+        }
+
+        # Compare to old V6.28 if available, but don't require it.
+        old={}
+        try:
+            if V628_RESULT.exists():
+                old=json.loads(V628_RESULT.read_text(encoding='utf-8')).get('key',{})
+        except Exception:
+            old={}
+        compare={
+            'old_reached20_then_stop7_rate':old.get('reached20_then_stop7_rate'),
+            'new_reached20_then_stop7_rate':key['reached20_then_stop7_rate'],
+            'old_median_giveback_after_reach20':old.get('median_giveback_after_reach20'),
+            'new_median_giveback_after_reach20':key['median_giveback_after_reach20'],
+        }
+
+        useful=ES[(ES.events>=100)&(ES.event_to_final_median<0)] if len(ES) else pd.DataFrame()
+        if key['unresolved_trades']/max(1,key['input_trades'])<=0.01 and len(stop_after_profit)>=100:
+            verdict='NORMALIZED_REBASELINE_READY'
+            diagnosis='价格路径已按 split-like 跳变标准化，无法可靠修复的交易比例低；现在可以用这套干净 MFE/Giveback 结果决定是否进入 Take-Profit / Capital-Recycling Replay。'
+        else:
+            verdict='NORMALIZATION_NEEDS_REVIEW'
+            diagnosis='仍有较多无法可靠标准化的交易，暂不应进入 Take-Profit Replay。'
+
+        examples=stop_after_profit.sort_values('giveback',ascending=False).head(20)
+        excols=['ticker','entry_date','exit_date','mfe','final_return','giveback','peak_to_exit_days','exit_reason','jump_count']
+
+        res={'version':'V6.28.2 Price-Normalized Shape/Giveback Rebaseline',
+             'generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data',
+             'verdict':verdict,'diagnosis':diagnosis,'key':key,'compare_to_v628':compare,
+             'mfe_buckets':B.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'event_summary':ES.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records') if len(ES) else [],
+             'worst_giveback_examples':examples[excols].replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records') if len(examples) else [],
+             'unresolved_examples':bad[:50],
+             'method':'Detect only extreme >=4x or <=0.25x close-to-close scale jumps. Bridge the post-jump segment multiplicatively to remove split/reverse-split scale discontinuity, then anchor the normalized entry close to Stage-2 entry_px. Stage-2 final exit return remains the strategy outcome.',
+             'rule_note':'Diagnostic rebaseline only. No Entry/Stop/Exit/portfolio rule changes.',
+             'cache_note':'1996–2026; reuses Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'If NORMALIZED_REBASELINE_READY, run V6.29 predeclared Take-Profit + R-multiple + partial-harvest + capital-recycling account replay.'}
+
+        V6282_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:
+            S.to_csv(V6282_DIR/'normalized_trade_paths_summary.csv.gz',index=False,compression='gzip')
+            if len(E):E.to_csv(V6282_DIR/'normalized_shape_events.csv.gz',index=False,compression='gzip')
+        except OSError:pass
+        _v6282_write(status='done',message=f'V6.28.2 完成：{verdict}',phase='done',processed=3,total=3,current='Normalized rebaseline',elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v6282_write(status='paused',message='V6.28.2 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v6282_write(status='error',message='V6.28.2 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v6282_write(status='error',message='V6.28.2 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v6282_thread=None
+
+def _v6282_start():
+    global v6282_thread
+    if _v6282_alive():return False
+    _v6282_write(status='starting',message='V6.28.2 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v6282_thread=threading.Thread(target=_v6282_run,daemon=True);v6282_thread.start();return True
+
+@APP.route('/v6282/run',methods=['GET','POST'])
+def v6282_run():_v6282_start();return redirect('/v6282/normalized-rebaseline')
+@APP.get('/v6282/stop')
+def v6282_stop():V6282_DIR.mkdir(parents=True,exist_ok=True);V6282_STOP.write_text('stop',encoding='utf-8');return redirect('/v6282/normalized-rebaseline')
+@APP.get('/api/v6282/status')
+def v6282_status_api():return jsonify(_v6282_status())
+
+@APP.get('/v6282/normalized-rebaseline')
+def v6282_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6282_status();r={};k={}
+    if V6282_RESULT.exists():
+        try:r=json.loads(V6282_RESULT.read_text(encoding='utf-8'));k=r.get('key',{})
+        except Exception:r={};k={}
+    running=_v6282_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v6282/run"><button>▶ 开始 V6.28.2 标准化重算</button></a>'
+    stop='<a href="/v6282/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    bs=''
+    for x in r.get('mfe_buckets',[]):
+        bs+=f"<tr><td><b>{e(x.get('bucket',''))}</b></td><td>{int(x.get('trades',0)):,}</td><td>{float(x.get('median_mfe',0) or 0):.1%}</td><td>{float(x.get('median_final_return',0) or 0):+.1%}</td><td>{float(x.get('median_giveback',0) or 0):.1%}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('gave_back_half_rate',0) or 0):.1%}</td></tr>"
+    es=''
+    for x in r.get('event_summary',[]):
+        es+=f"<tr><td><b>{e(x.get('event',''))}</b></td><td>{int(x.get('events',0)):,}</td><td>{float(x.get('median_event_profit',0) or 0):.1%}</td><td>{float(x.get('median_fwd20',0) or 0):+.1%}</td><td>{float(x.get('median_fwd40',0) or 0):+.1%}</td><td>{float(x.get('median_fwd60',0) or 0):+.1%}</td><td>{float(x.get('future_plus100_rate',0) or 0):.1%}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v6281/data-integrity">← V6.28.1 Data Integrity</a>
+<div class="c"><h1>🧼 V6.28.2 Price-Normalized Shape/Giveback Rebaseline</h1><div class="info"><b>把那 0.30% 的 split-like 异常先处理掉，再重新算赢家路径。</b><br>只修价格尺度，不改交易规则。每笔路径先消除 >=4x / <=0.25x 的极端缩放跳变，再锚定到 Stage-2 Entry price，重新计算真实 MFE / Giveback / Shape Events。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="warn">{e(r.get('diagnosis','等待运行'))}</div></div>
+<div class="c"><h2>标准化摘要</h2><table><tr><th>输入交易</th><th>成功重算</th><th>Unresolved</th><th>有Split-like跳变并已处理</th><th>曾到+20%</th><th>+20%后最终STOP7</th><th>比例</th><th>+20%组中位回吐</th><th>标准化后最大MFE</th><th>P99.9 MFE</th></tr><tr><td>{int(k.get('input_trades',0)):,}</td><td>{int(k.get('resolved_trades',0)):,}</td><td>{int(k.get('unresolved_trades',0)):,}</td><td>{int(k.get('normalized_split_like_trades',0)):,}</td><td>{int(k.get('reached20',0)):,}</td><td>{int(k.get('reached20_then_stop7',0)):,}</td><td>{float(k.get('reached20_then_stop7_rate',0) or 0):.1%}</td><td>{float(k.get('median_giveback_after_reach20',0) or 0):.1%}</td><td>{float(k.get('max_mfe_after_normalization',0) or 0):.1%}</td><td>{float(k.get('p999_mfe_after_normalization',0) or 0):.1%}</td></tr></table></div>
+<div class="c"><h2>1. 干净后的 MFE / Giveback</h2><div style="overflow:auto"><table><tr><th>最高盈利层</th><th>交易数</th><th>中位最高盈利</th><th>中位最终收益</th><th>中位回吐</th><th>STOP7</th><th>吐掉一半以上</th></tr>{bs}</table></div></div>
+<div class="c"><h2>2. 干净后的 Shape Events</h2><div style="overflow:auto"><table><tr><th>事件</th><th>N</th><th>事件时盈利</th><th>后20D</th><th>后40D</th><th>后60D</th><th>之后仍能到+100%</th></tr>{es}</table></div></div>
+<div class="c"><div class="warn"><b>方法：</b>{e(r.get('method',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6282/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
