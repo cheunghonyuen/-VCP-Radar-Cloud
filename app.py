@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v639-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧠 V6.39 Stateful Pullback-Area Arm A/B</h2><div class="muted">只换 Arm · Same-Day conjunction vs Stateful pullback area · Re-strength/Stop/HOLD1260 全冻结</div></div><a href="/v639/stateful-arm-ab"><button type="button">打开 V6.39</button></a></div></div>
+
 <div class="card" id="v638-shortcut" style="border:4px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧩 V6.38 Pullback / Arm Source Reconstruction</h2><div class="muted">只查 touch→arm 主延迟 · 对照 JLaw 字幕原文 · 不回测 · 不碰 Exit</div></div><a href="/v638/pullback-arm-source"><button type="button">打开 V6.38</button></a></div></div>
 
 <div class="card" id="v637-shortcut" style="border:4px solid #8b5cf6;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.37 Trigger Latency Autopsy</h2><div class="muted">拆解 Source Trigger 29.4-session 等待 · Support Touch / Quiet Arm / Re-strength Confirmation · 不改策略</div></div><a href="/v637/trigger-latency"><button type="button">打开 V6.37</button></a></div></div>
@@ -23751,4 +23753,368 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;margin:0;paddin
 <div class="c"><h2>Source-Faithful Arm Reconstruction</h2><table><tr><th>项目</th><th>当前问题</th><th>重建原则</th><th>下一版A/B</th></tr>{prs}</table></div>
 <div class="c"><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v638/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+
+# ========================= V6.39 Stateful Pullback-Area Arm A/B =========================
+V639_DIR=DATA_DIR/'v639_stateful_pullback_arm_ab'
+V639_STATUS=V639_DIR/'status.json'; V639_RESULT=V639_DIR/'result.json'; V639_STOP=V639_DIR/'STOP'
+V639_TRADE_CACHE=V639_DIR/'v639_trade_cache.csv.gz'
+v639_thread=None
+
+def _v639_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V639_STATUS.exists():
+        try:x.update(json.loads(V639_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v639_write(**kw):
+    V639_DIR.mkdir(parents=True,exist_ok=True);x=_v639_status();x.update(kw)
+    V639_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v639_alive(): return v639_thread is not None and v639_thread.is_alive()
+
+V639_VARIANTS=['CURRENT_SAME_DAY_ARM','STATEFUL_PULLBACK_AREA']
+
+def _v639_entry_same_day(r,d):
+    # Exact V6.36 SOURCE_FAITHFUL_TRIGGER logic, preserved as control.
+    return _v636_source_entry(r,d)
+
+def _v639_entry_stateful(r,d):
+    """
+    V6.39: replace ONLY the V6.36 same-day Arm conjunction with a stateful pullback area.
+    Frozen concepts from V6.38:
+      - Pivot / 10MA / 20MA are support context, not exact same-day overlap requirements.
+      - Quieter volume is evaluated over the pullback segment, not as two same-day inequalities.
+      - Constructive behavior is multi-bar holding/tightening, not a same-day close gate.
+      - Re-strength remains the execution trigger; next-session open remains the backtest execution model.
+
+    No numeric grid search. No new exit. No new factor.
+    """
+    ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize()
+    # Need pre-entry history so 10MA/20MA/volume context are not reset at entry.
+    pre=d[d.date<ed].tail(30).copy()
+    post=d[(d.date>=ed)&(d.date<=xd)].copy()
+    x=pd.concat([pre,post],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    if len(post)<3 or x.empty:return None
+
+    x['ma10']=pd.to_numeric(x.close,errors='coerce').rolling(10,min_periods=10).mean()
+    x['ma20']=pd.to_numeric(x.close,errors='coerce').rolling(20,min_periods=20).mean()
+    x['vmed20']=pd.to_numeric(x.volume,errors='coerce').rolling(20,min_periods=10).median()
+
+    # Locate frozen breakout opportunity inside the full context frame.
+    idxs=x.index[x.date.eq(ed)].tolist()
+    if not idxs:return None
+    start_i=int(idxs[0])
+    if start_i>=len(x)-2:return None
+
+    pivot=float(r.entry_px)
+    breakout_vol=float(x.loc[start_i,'volume']) if pd.notna(x.loc[start_i,'volume']) else np.nan
+
+    # Stateful pullback object.
+    state=None
+    quiet_obs=[]
+    support_obs=[]
+    close_obs=[]
+
+    for j in range(start_i+1,len(x)-1):
+        rr=x.iloc[j]
+        o,h,l,c,v=map(float,[rr.open,rr.high,rr.low,rr.close,rr.volume])
+        ma10=float(rr.ma10) if pd.notna(rr.ma10) else np.nan
+        ma20=float(rr.ma20) if pd.notna(rr.ma20) else np.nan
+        vm=float(rr.vmed20) if pd.notna(rr.vmed20) else np.nan
+
+        anchors=[('PIVOT',pivot)]
+        if np.isfinite(ma10) and ma10>0:anchors.append(('10MA',ma10))
+        if np.isfinite(ma20) and ma20>0:anchors.append(('20MA',ma20))
+
+        # Support CONTEXT, not exact line overlap:
+        # The pullback bar is considered in the area if its range/close is interacting with
+        # the envelope formed by available anchors, or if it is between the anchors.
+        vals=[a[1] for a in anchors if np.isfinite(a[1]) and a[1]>0]
+        if not vals:continue
+        area_low=min(vals);area_high=max(vals)
+
+        # Start/maintain pullback state when price is interacting with the anchor area.
+        interacts = (l<=area_high and h>=area_low) or (area_low<=c<=area_high)
+
+        if state is None:
+            if not interacts:
+                continue
+            state={'start_i':j,'area_low':area_low,'area_high':area_high,'supports':' + '.join(a[0] for a in anchors)}
+            quiet_obs=[];support_obs=[];close_obs=[]
+
+        # Expand the contextual support area as moving averages evolve.
+        state['area_low']=min(state['area_low'],area_low)
+        state['area_high']=max(state['area_high'],area_high)
+
+        # Segment-level quieter volume observations. No 0.85 / 0.80 fixed thresholds.
+        q_break=(not np.isfinite(breakout_vol)) or (np.isfinite(v) and v<breakout_vol)
+        q_ctx=(not np.isfinite(vm)) or (np.isfinite(v) and v<vm)
+        quiet_obs.append(bool(q_break or q_ctx))
+
+        # Multi-bar constructive/holding observations.
+        holds = c>=state['area_low']
+        support_obs.append(bool(holds))
+        close_obs.append(float(c))
+
+        # Hard invalidation only if the pullback clearly closes beneath the whole support context.
+        if c<state['area_low']:
+            state=None;quiet_obs=[];support_obs=[];close_obs=[]
+            continue
+
+        # Arm as a STATE, not a same-day conjunction:
+        # need evidence somewhere in the segment of quieter volume and continued holding.
+        # No arbitrary percentage threshold: any segment with at least one quiet observation
+        # and no support breakdown is eligible to await re-strength.
+        armed = any(quiet_obs) and all(support_obs)
+
+        if armed and j>state['start_i']:
+            prev=x.iloc[j-1]
+            # Unified re-strength trigger preserved from V6.36 concept:
+            # bullish close above prior high and above the support context.
+            if c>float(prev.high) and c>o and c>state['area_high']:
+                nxt=x.iloc[j+1]
+                entry=float(nxt.open)
+                if not np.isfinite(entry) or entry<=0:return None
+                return {
+                    'entry_date':pd.Timestamp(nxt.date).normalize(),
+                    'entry_px':entry,
+                    'signal_date':pd.Timestamp(rr.date).normalize(),
+                    'delay_sessions':int(j+1-start_i),
+                    'supports':state['supports'],
+                    'pullback_date':pd.Timestamp(x.iloc[int(state['start_i'])].date).normalize(),
+                    'arm_mode':'STATEFUL_PULLBACK_AREA'
+                }
+
+    return None
+
+def _v639_build(t0):
+    T=_v622_load_trades().copy()
+    T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+    if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    rows=[];price={};date_set=set();total=len(M)
+
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V639_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close','volume']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            for variant,fn in [('CURRENT_SAME_DAY_ARM',_v639_entry_same_day),('STATEFUL_PULLBACK_AREA',_v639_entry_stateful)]:
+                se=fn(r,d)
+                if se is None:continue
+                ex=_v636_exit_from_entry(d,se['entry_date'],se['entry_px'],1260)
+                if ex is None:continue
+                xd,xp,reason,hold=ex
+                rows.append({'variant':variant,'listing_id':lid,'ticker':str(r.ticker),
+                             'entry_date':se['entry_date'],'entry_px':float(se['entry_px']),
+                             'exit_date':xd,'exit_px':float(xp),'exit_reason':reason,
+                             'delay_sessions':int(se.get('delay_sessions',0)),
+                             'supports':str(se.get('supports',''))})
+
+        if n==1 or n%50==0 or n==total:
+            _v639_write(status='running',message='Phase 1/3 · 重建 Same-Day Arm vs Stateful Arm',
+                        phase='trigger_build',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('V6.39 没有生成 trigger trades')
+    try:X.to_csv(V639_TRADE_CACHE,index=False,compression='gzip')
+    except OSError:pass
+    return T,X,price,sorted(date_set)
+
+def _v639_replay(X,price,cal,label,t0,vi,vn):
+    Z=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        if V639_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],'reason':str(rec[i]['exit_reason']),
+                           'entry_date':p['entry_date'],'exit_date':dt,'delay':float(rec[i].get('delay_sessions',0))})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep;admitted+=1
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v639_write(status='running',message=f'Phase 2/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=label,elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.;dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean());avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stoprate=float(L.reason.astype(str).str.startswith('STOP7').mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+        avgdelay=float(L.delay.mean());meddelay=float(L.delay.median())
+        avghold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+    else:
+        pf=wr=avgw=avgl=stoprate=avgdelay=meddelay=avghold=np.nan;w100=w200=w500=0
+
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,'stop_rate':stoprate,
+            'winner100':w100,'winner200':w200,'winner500':w500,
+            'avg_delay_sessions':avgdelay,'median_delay_sessions':meddelay,'avg_hold_days':avghold,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),
+            'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v639_run():
+    global v639_thread
+    t0=time.time()
+    try:
+        V639_DIR.mkdir(parents=True,exist_ok=True)
+        if V639_STOP.exists():V639_STOP.unlink()
+
+        _v639_write(status='running',message='V6.39 Stateful Pullback-Area Arm A/B 启动',
+                    phase='build',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T,X,price,cal=_v639_build(t0)
+        rows=[_v639_replay(X,price,cal,v,t0,i,len(V639_VARIANTS)) for i,v in enumerate(V639_VARIANTS,1)]
+        O=pd.DataFrame(rows)
+        B=O[O.strategy.eq('CURRENT_SAME_DAY_ARM')].iloc[0]
+        for c in ['cagr','maxdd','profit_factor','win_rate','stop_rate','winner100','winner200','winner500','avg_delay_sessions','median_delay_sessions']:
+            O['delta_'+c]=O[c]-float(B[c])
+
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['candidate_pass']=(
+            O.strategy.eq('STATEFUL_PULLBACK_AREA') &
+            (O.win_rate>float(B.win_rate)) &
+            (O.avg_delay_sessions<float(B.avg_delay_sessions)) &
+            (O.cagr>=float(B.cagr)) &
+            (O.maxdd>=float(B.maxdd)) &
+            (O.profit_factor>=2.0) &
+            (O.winner100_retention>=.80)
+        )
+
+        same=int((X.variant=='CURRENT_SAME_DAY_ARM').sum())
+        state=int((X.variant=='STATEFUL_PULLBACK_AREA').sum())
+        verdict='STATEFUL_ARM_CANDIDATE' if bool(O.candidate_pass.any()) else 'STATEFUL_ARM_NOT_YET_PASS'
+
+        res={
+            'version':'V6.39 Stateful Pullback-Area Arm A/B',
+            'verdict':verdict,
+            'opportunity_summary':{
+                'same_day_arm_trades':same,
+                'stateful_arm_trades':state,
+                'stateful_vs_same_day_coverage':float(state/max(1,same))
+            },
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'changed_only':'Only Arm logic changes. CURRENT control keeps V6.36 exact same-day conjunction. STATEFUL treats support/quiet/constructive as a multi-bar pullback state, then uses the same re-strength trigger and next-session-open execution model.',
+            'frozen':'Universe/candidate stream, -7% terminal stop, HOLD1260, 10-slot portfolio, 1996–2026 benchmark, no new exit, no factor search.',
+            'source_basis':'V6.38 concluded that exact same-day overlap + double-volume gate + same-day constructive close is an implementation proxy; support/quiet pullback should be modeled as context/state before re-strength.',
+            'acceptance':'Candidate only if Win Rate improves, average delay decreases, CAGR >= control, MaxDD >= control, PF >=2.0, and +100% winner retention >=80%. No grid search.',
+            'next_step':'If STATEFUL_ARM_CANDIDATE, validate yearly/stress stability. If not, do not tune thresholds; inspect example-level JLaw source charts for the exact re-strength trigger.',
+            'cache_note':'Reuses V6.17 Stage-2 + Historical Cache; saves V6.39 trigger cache; 0 Tiingo; no universe rebuild.'
+        }
+        V639_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V639_DIR/'v639_results.csv',index=False)
+        except OSError:pass
+
+        _v639_write(status='done',message=f'V6.39 完成：{verdict}',phase='done',processed=3,total=3,
+                    current='A/B complete',elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v639_write(status='paused',message='V6.39 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v639_write(status='error',message='V6.39 失败',phase='error',
+                error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v639_write(status='error',message='V6.39 失败',phase='error',
+            error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v639_thread=None
+
+def _v639_start():
+    global v639_thread
+    if _v639_alive():return False
+    _v639_write(status='starting',message='V6.39 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v639_thread=threading.Thread(target=_v639_run,daemon=True);v639_thread.start();return True
+
+@APP.route('/v639/run',methods=['GET','POST'])
+def v639_run():_v639_start();return redirect('/v639/stateful-arm-ab')
+@APP.get('/v639')
+def v639_alias():return redirect('/v639/stateful-arm-ab')
+@APP.get('/v639/stop')
+def v639_stop():
+    V639_DIR.mkdir(parents=True,exist_ok=True);V639_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v639/stateful-arm-ab')
+@APP.get('/api/v639/status')
+def v639_status_api():return jsonify(_v639_status())
+
+@APP.get('/v639/stateful-arm-ab')
+def v639_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v639_status();r={};op={}
+    if V639_RESULT.exists():
+        try:r=json.loads(V639_RESULT.read_text(encoding='utf-8'));op=r.get('opportunity_summary',{})
+        except Exception:pass
+
+    running=_v639_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v639/run"><button>▶ 开始 V6.39 Stateful Arm A/B</button></a>'
+    stop='<a href="/v639/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ CANDIDATE' if x.get('candidate_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('delta_win_rate',0) or 0):+.1%}</td><td>{float(x.get('stop_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('avg_delay_sessions',0) or 0):.1f}</td><td>{float(x.get('median_delay_sessions',0) or 0):.1f}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1800px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #86efac;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v638/pullback-arm-source">← V6.38 Pullback / Arm Source</a>
+<div class="c"><h1>🧠 V6.39 Stateful Pullback-Area Arm A/B</h1><div class="info"><b>这轮只换 Arm。</b><br>Control 保留 V6.36 的“同一天 exact support overlap + volume gates + constructive close”；Stateful 把 support / quiet / constructive 看成多日 pullback 状态，再用同一个 re-strength trigger。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Same-day Arm：{int(op.get('same_day_arm_trades',0)):,} · Stateful Arm：{int(op.get('stateful_arm_trades',0)):,} · 相对覆盖：{float(op.get('stateful_vs_same_day_coverage',0) or 0):.1%}</p></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><div class="warn"><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>来源依据：</b>{e(r.get('source_basis',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v639/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
