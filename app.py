@@ -22462,7 +22462,7 @@ def _v633_replay(X,price,cal,label,t0,vi,vn):
         gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=gp/gl if gl>0 else np.inf
         wr=float((L.ret>0).mean());avg_win=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
         avg_loss=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
-        early=float(~L.reason.astype(str).isin(['STOP7','HOLD1260'])).mean()
+        early=float((~L.reason.astype(str).isin(['STOP7','HOLD1260'])).mean())
         avg_hold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
         w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
     else:
@@ -22536,7 +22536,7 @@ def v633_page():
 body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1700px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
 <a href="/v632/true-failure-entry-autopsy">← V6.32</a>
 <div class="c"><h1>🚨 V6.33 Failure Confirmation Replay</h1><p><b>只测试“突破后很快证明失败，就早点认错”。</b> 不改 Selection，不设 Take Profit，不碰超级 Winner。</p></div>
-<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{('<div style="margin:14px 0;padding:14px;border:2px solid #ef4444;border-radius:12px;background:#fef2f2"><b>Error:</b> '+e(st.get('error'))+'</div>') if st.get('error') else ''}{btn}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot Replay</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Early Exit</th><th>Avg Hold</th><th>+100%</th><th>+100%保留</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><p><b>本轮：</b>{e(r.get('tests',''))}</p><p><b>时序：</b>{e(r.get('timing_note',''))}</p><p><b>验收：</b>{e(r.get('acceptance',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p></div>
