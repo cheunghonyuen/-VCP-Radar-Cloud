@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v629-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">💰 V6.29 Take-Profit / R-Multiple / Capital Recycling</h2><div class="muted">+12% / +20% / +30% · +20%卖半+30%清仓 · 3R · 2R/3R分批 · 卖出后快速换新 VCP</div></div><a href="/v629/take-profit-recycling"><button type="button">打开 V6.29</button></a></div></div>
+
 <div class="card" id="v6284-shortcut" style="border:3px solid #ef4444;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.28.4 Root-Cause Price Repair</h2><div class="muted">查清极端 MFE 到底是真牛股还是 split / reverse-split / 复权断层，并修正明确的数据异常</div></div><a href="/v6284/root-cause"><button type="button">打开 V6.28.4</button></a></div></div>
 
 <div class="card" id="v6283-shortcut" style="border:3px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">✂️ V6.28.3 Extreme Tail Audit</h2><div class="muted">数清楚 &gt;+3000% 到底涉及几只股票 · 生成可逆坏数据名单</div></div><a href="/v6283/tail-audit"><button type="button">打开 V6.28.3</button></a></div></div>
@@ -21351,3 +21353,346 @@ def v6284_page():
 <div class="c"><h2>最极端交易：修正前 → 修正后</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>Entry</th><th>原MFE</th><th>Close支持MFE</th><th>修正MFE</th><th>High/Body</th><th>根因</th><th>动作</th></tr>{ex}</table></div></div>
 <div class="c"><div class="warn"><b>原则：</b>{e(r.get('rule',''))}<br><b>修复：</b>{e(r.get('repair_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6284/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
+
+
+# ========================= V6.29 Take-Profit / R-Multiple / Capital Recycling =========================
+V629_DIR=DATA_DIR/'v629_take_profit_recycling'
+V629_STATUS=V629_DIR/'status.json'; V629_RESULT=V629_DIR/'result.json'; V629_STOP=V629_DIR/'STOP'
+v629_thread=None
+
+def _v629_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V629_STATUS.exists():
+        try:x.update(json.loads(V629_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v629_write(**kw):
+    V629_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v629_status(); x.update(kw)
+    V629_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v629_alive(): return v629_thread is not None and v629_thread.is_alive()
+
+def _v629_clean_path(d, r):
+    """Normalize split-like scale changes and repair isolated bad highs, without deleting real winners."""
+    ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+    # include pre-entry window for structure-risk proxy
+    pre=d[d.date<ed].tail(15)
+    hold=d[(d.date>=ed)&(d.date<=xd)]
+    z=pd.concat([pre,hold],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last')
+    if z.empty:return None,None
+    # normalize the holding path separately so entry is exactly anchored
+    h=z[z.date>=ed].copy()
+    nh,meta=_v6282_normalize_path(h,float(r.entry_px))
+    if nh is None or not meta.get('resolved',False):return None,None
+
+    # Repair only clear isolated high spikes using same evidence logic as V6.28.4.
+    op=pd.to_numeric(nh.open,errors='coerce').to_numpy(float)
+    hi=pd.to_numeric(nh.high,errors='coerce').to_numpy(float)
+    cl=pd.to_numeric(nh.close,errors='coerce').to_numpy(float)
+    for i in range(len(nh)):
+        if not np.isfinite(hi[i]): continue
+        body=max(op[i] if np.isfinite(op[i]) else cl[i],cl[i] if np.isfinite(cl[i]) else 0,1e-12)
+        if hi[i]/body>=4.0:
+            # only repair if close path does not support the same scale
+            nearby=[]
+            for j in range(max(0,i-2),min(len(cl),i+3)):
+                if np.isfinite(cl[j]) and cl[j]>0:nearby.append(cl[j])
+            ref=max(nearby) if nearby else body
+            if hi[i]/max(ref,1e-12)>=2.0:
+                hi[i]=body
+    nh['high']=hi
+
+    # point-in-time structure-risk proxy from the 10 sessions BEFORE entry.
+    # Stage-2 cache does not store the exact historical contraction-low stop,
+    # so this is explicitly a proxy, never presented as the original JLaw stop.
+    pre10=pre.tail(10).copy()
+    struct_risk=np.nan
+    if len(pre10):
+        lows=pd.to_numeric(pre10.low if 'low' in pre10.columns else pre10.close,errors='coerce')
+        raw_close=float(pd.to_numeric(h.iloc[0].close,errors='coerce'))
+        low=float(lows.min()) if lows.notna().any() else np.nan
+        if np.isfinite(low) and np.isfinite(raw_close) and raw_close>0 and low>0:
+            rr=1.0-low/raw_close
+            # Keep realistic VCP-style risk band; cap rather than discard trades.
+            struct_risk=float(np.clip(rr,0.02,0.07))
+    if not np.isfinite(struct_risk):struct_risk=0.07
+    return nh,struct_risk
+
+def _v629_fill_stop(op, stop_px):
+    return float(op) if np.isfinite(op) and op>0 and op<stop_px else float(stop_px)
+
+def _v629_fill_target(op, target_px):
+    return float(op) if np.isfinite(op) and op>target_px else float(target_px)
+
+def _v629_lifecycle(r, nh, struct_risk, variant):
+    """Return list of exits: date, fraction of original shares sold, price, reason."""
+    ep=float(r.entry_px)
+    dates=pd.to_datetime(nh.date,errors='coerce').dt.normalize().tolist()
+    op=pd.to_numeric(nh.open,errors='coerce').to_numpy(float)
+    hi=pd.to_numeric(nh.high,errors='coerce').to_numpy(float)
+    lo=pd.to_numeric(nh.low,errors='coerce').to_numpy(float)
+    close=pd.to_numeric(nh.close,errors='coerce').to_numpy(float)
+    if not len(dates): return []
+
+    if variant=='BASE_30Y':
+        return [{'date':pd.Timestamp(r.exit_date).normalize(),'frac':1.0,'px':float(r.exit_px),'reason':str(r.exit_reason or 'BASE_EXIT')}]
+
+    # frozen -7% stop for fixed/harvest variants
+    if variant in ('TP12_ALL','TP20_ALL','TP30_ALL','HARVEST20_50_TP30'):
+        stop_r=.07
+    else:
+        stop_r=float(struct_risk)
+    stop_px=ep*(1-stop_r)
+
+    if variant=='TP12_ALL': targets=[(.12,1.0)]
+    elif variant=='TP20_ALL': targets=[(.20,1.0)]
+    elif variant=='TP30_ALL': targets=[(.30,1.0)]
+    elif variant=='HARVEST20_50_TP30': targets=[(.20,.50),(.30,.50)]
+    elif variant=='STRUCT3R_PROXY': targets=[(3*stop_r,1.0)]
+    elif variant=='STRUCT2R_HALF_3R_PROXY': targets=[(2*stop_r,.50),(3*stop_r,.50)]
+    else: targets=[]
+
+    exits=[]; remaining=1.0; hit=[False]*len(targets)
+    for i,dt in enumerate(dates):
+        if remaining<=1e-12:break
+        oo=op[i] if i<len(op) else np.nan
+        hh=hi[i] if i<len(hi) else np.nan
+        ll=lo[i] if i<len(lo) else np.nan
+
+        # Conservative same-day assumption: if stop and target both touched, stop is counted first.
+        if np.isfinite(ll) and ll<=stop_px:
+            exits.append({'date':pd.Timestamp(dt),'frac':remaining,'px':_v629_fill_stop(oo,stop_px),'reason':f'STOP_{stop_r:.3f}'})
+            remaining=0.0;break
+
+        for k,(tr,frac) in enumerate(targets):
+            if hit[k]:continue
+            tp=ep*(1+tr)
+            if np.isfinite(hh) and hh>=tp:
+                sell=min(float(frac),remaining)
+                exits.append({'date':pd.Timestamp(dt),'frac':sell,'px':_v629_fill_target(oo,tp),'reason':f'TP_{tr:.3f}'})
+                remaining-=sell;hit[k]=True
+                if remaining<=1e-12:break
+
+    if remaining>1e-12:
+        exits.append({'date':pd.Timestamp(r.exit_date).normalize(),'frac':remaining,'px':float(r.exit_px),'reason':str(r.exit_reason or 'BASE_EXIT')})
+    return exits
+
+def _v629_build_metadata(T,t0):
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    variants=['BASE_30Y','TP12_ALL','TP20_ALL','TP30_ALL','HARVEST20_50_TP30','STRUCT3R_PROXY','STRUCT2R_HALF_3R_PROXY']
+    rows=[]; price={};date_set=set();total=len(M)
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V629_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+        # raw close lookup preserved to keep BASE comparable to V6.24 account replay
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,pd.to_numeric(dz.close,errors='coerce').astype(float)))
+            date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            nh,srisk=_v629_clean_path(d,r)
+            if nh is None:continue
+            trade_id=f"{lid}|{pd.Timestamp(r.entry_date).date()}"
+            for v in variants:
+                ev=_v629_lifecycle(r,nh,srisk,v)
+                rows.append({'trade_id':trade_id,'variant':v,'listing_id':lid,'ticker':str(r.ticker),
+                             'entry_date':pd.Timestamp(r.entry_date).normalize(),'entry_px':float(r.entry_px),
+                             'struct_risk':float(srisk),'events':ev})
+        if n==1 or n%50==0 or n==total:
+            _v629_write(status='running',message='Phase 1/3 · 构建清洗后的 TP / R / Harvest 交易路径',
+                        phase='trade_metadata',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+    if not rows:raise RuntimeError('没有生成 V6.29 trade metadata')
+    return pd.DataFrame(rows),price,sorted(date_set)
+
+def _v629_replay(META,price,cal,variant,t0,vi,vn):
+    X=META[META.variant.eq(variant)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    if X.empty:return {'strategy':variant,'trades':0}
+    rec=X.to_dict('index'); entries={}; exit_events={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        for ev in r['events']:
+            exit_events.setdefault(pd.Timestamp(ev['date']).normalize(),[]).append((i,ev))
+
+    cash=1.0;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;partial_sales=0
+    step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        if V629_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        # exits first
+        for i,ev in exit_events.get(dt,[]):
+            p=pos.get(i)
+            if p is None:continue
+            frac=float(ev['frac'])
+            sell_original=min(frac,p['remaining_original_frac'])
+            if sell_original<=1e-12:continue
+            shares_to_sell=p['orig_shares']*sell_original
+            shares_to_sell=min(shares_to_sell,p['shares'])
+            proceeds=shares_to_sell*float(ev['px'])
+            cash+=proceeds;p['shares']-=shares_to_sell;p['remaining_original_frac']-=sell_original
+            pnl=proceeds-shares_to_sell*p['entry_px']
+            ledger.append({'pnl':pnl,'ret':float(ev['px'])/p['entry_px']-1.0,'reason':str(ev['reason']),
+                           'fraction':sell_original,'entry_date':p['entry_date'],'exit_date':dt})
+            if sell_original<.999:partial_sales+=1
+            if p['shares']<=1e-12 or p['remaining_original_frac']<=1e-12:
+                pos.pop(i,None);last.pop(i,None)
+
+        # MTM before entries
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+        slot_units=sum(p['remaining_original_frac'] for p in pos.values())
+
+        # new entries: one full slot; partial harvest can create fractional slot room,
+        # and two half-freed slots can admit one new full position.
+        for i in entries.get(dt,[]):
+            if slot_units+1.0>10.000001:
+                skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.0
+            if ep<=0 or cash+1e-12<target:
+                skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'orig_shares':shares,
+                    'remaining_original_frac':1.0,'entry_px':ep,'entry_date':dt,'cost':target}
+            last[i]=ep;slot_units+=1.0;admitted+=1
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv
+        eqrows.append((dt,eq,hv/eq if eq>0 else np.nan,slot_units))
+        if di%step==0 or di==len(cal):
+            _v629_write(status='running',message=f'Phase 2/3 · 30Y Account Replay {variant} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=variant,elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure','slot_units']);L=pd.DataFrame(ledger)
+    if C.empty:return {'strategy':variant,'trades':0}
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        # Trade-level win rate uses completed sell events; for partial harvest we also report positive-sale-event rate.
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=float(gp/gl) if gl>0 else np.inf;wr=float((L.pnl>0).mean())
+        avg_win=float(L.loc[L.pnl>0,'ret'].mean()) if (L.pnl>0).any() else np.nan
+        avg_loss=float(L.loc[L.pnl<=0,'ret'].mean()) if (L.pnl<=0).any() else np.nan
+        stop_rate=float(L.reason.astype(str).str.startswith('STOP').mean())
+    else:pf=wr=avg_win=avg_loss=stop_rate=np.nan
+    avg_hold=np.nan
+    if len(L):
+        avg_hold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+    return {'strategy':variant,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':pf,'win_rate':wr,'avg_win':avg_win,'avg_loss':avg_loss,'stop_event_rate':stop_rate,
+            'admitted_positions':int(admitted),'realized_sell_events':int(len(L)),'partial_sales':int(partial_sales),
+            'skipped_capacity':int(skipped),'avg_exposure':float(C.exposure.mean()),'avg_slot_units':float(C.slot_units.mean()),
+            'avg_hold_days':avg_hold,'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v629_run():
+    global v629_thread
+    t0=time.time()
+    try:
+        V629_DIR.mkdir(parents=True,exist_ok=True)
+        if V629_STOP.exists():V629_STOP.unlink()
+        _v629_write(status='running',message='V6.29 Take-Profit / Capital Recycling 启动',phase='load',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy();T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+        META,price,cal=_v629_build_metadata(T,t0)
+        variants=['BASE_30Y','TP12_ALL','TP20_ALL','TP30_ALL','HARVEST20_50_TP30','STRUCT3R_PROXY','STRUCT2R_HALF_3R_PROXY']
+        rows=[]
+        for i,v in enumerate(variants,1):
+            rows.append(_v629_replay(META,price,cal,v,t0,i,len(variants)))
+        O=pd.DataFrame(rows)
+        B=O[O.strategy.eq('BASE_30Y')].iloc[0]
+        O['delta_cagr']=O.cagr-float(B.cagr);O['delta_maxdd']=O.maxdd-float(B.maxdd);O['delta_pf']=O.profit_factor-float(B.profit_factor)
+        O['cagr_vs_base']=O.cagr/float(B.cagr) if float(B.cagr)!=0 else np.nan
+        O['screen_pass']=(O.strategy.ne('BASE_30Y')&(O.cagr>float(B.cagr))&(O.maxdd>=float(B.maxdd)-.03)&(O.profit_factor>=2.0))
+        O=O.sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False]).reset_index(drop=True)
+        verdict='TP_RECYCLING_CANDIDATE' if O.screen_pass.any() else 'NO_TP_RECYCLING_PASS'
+        # Baseline consistency check against V6.24 known 30Y replay; informational only.
+        base_check={'expected_cagr':0.1614,'expected_maxdd':-0.6407,'actual_cagr':float(B.cagr),'actual_maxdd':float(B.maxdd),
+                    'cagr_gap':float(B.cagr)-0.1614,'maxdd_gap':float(B.maxdd)+0.6407}
+        res={'version':'V6.29 Take-Profit / R-Multiple / Capital Recycling','generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data','verdict':verdict,
+             'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'base_check':base_check,
+             'tests':'Predeclared only: BASE; +12% all-out; +20% all-out; +30% all-out; +20% sell 50% then +30% rest; structure-risk-proxy 3R all-out; structure-risk-proxy 2R half + 3R rest. No grid search.',
+             'structure_note':'Stage-2 does not store the exact last-contraction stop. STRUCT variants therefore use a point-in-time proxy: distance from entry to the lowest low of the prior 10 sessions, clipped to 2%–7%. This is a new test hypothesis, not claimed to be JLaw exact.',
+             'recycling_note':'10 equivalent slot-units. A 50% partial harvest frees 0.5 slot-unit; two half-freed positions can admit one new full-size VCP candidate. Full exits immediately free one slot.',
+             'data_note':'Uses V6.28.2 split-normalized paths and V6.28.4-style isolated bad-high repair for TP trigger detection; real path-supported super-winners are never blacklisted.',
+             'acceptance':'Candidate must beat BASE CAGR, keep MaxDD no worse than BASE by more than 3 percentage points, and PF >=2.0. Win Rate / holding time / stop-event rate are diagnostic, not standalone pass criteria.',
+             'cache_note':'1996–2026; reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'If a harvest/TP variant wins, validate yearly and stress-window stability before production. If none wins, keep long-tail HOLD1260 and stop fixed-TP tuning.'}
+        V629_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V629_DIR/'v629_results.csv',index=False)
+        except OSError:pass
+        _v629_write(status='done',message=f'V6.29 完成：{verdict}',phase='done',processed=3,total=3,current=str(O.iloc[0].strategy),elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v629_write(status='paused',message='V6.29 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v629_write(status='error',message='V6.29 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v629_write(status='error',message='V6.29 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v629_thread=None
+
+def _v629_start():
+    global v629_thread
+    if _v629_alive():return False
+    _v629_write(status='starting',message='V6.29 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v629_thread=threading.Thread(target=_v629_run,daemon=True);v629_thread.start();return True
+
+@APP.route('/v629/run',methods=['GET','POST'])
+def v629_run():_v629_start();return redirect('/v629/take-profit-recycling')
+@APP.get('/v629')
+def v629_alias():return redirect('/v629/take-profit-recycling')
+@APP.get('/v629/stop')
+def v629_stop():V629_DIR.mkdir(parents=True,exist_ok=True);V629_STOP.write_text('stop',encoding='utf-8');return redirect('/v629/take-profit-recycling')
+@APP.get('/api/v629/status')
+def v629_status_api():return jsonify(_v629_status())
+
+@APP.get('/v629/take-profit-recycling')
+def v629_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v629_status();r={}
+    if V629_RESULT.exists():
+        try:r=json.loads(V629_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v629_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v629/run"><button>▶ 开始 V6.29 TP / Recycling Replay</button></a>'
+    stop='<a href="/v629/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ PASS' if x.get('screen_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('stop_event_rate',0) or 0):.1%}</td><td>{float(x.get('avg_hold_days',0) or 0):.0f}</td><td>{int(x.get('admitted_positions',0) or 0):,}</td><td>{int(x.get('partial_sales',0) or 0):,}</td><td>{float(x.get('avg_exposure',0) or 0):.1%}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+    bc=r.get('base_check',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1750px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v6284/root-cause">← V6.28.4 Root-Cause Audit</a>
+<div class="c"><h1>💰 V6.29 Take-Profit / R-Multiple / Capital Recycling</h1><div class="info"><b>这轮正式测试“赚到就收、马上换下一只”。</b><br>固定 +12% / +20% / +30%；+20%卖一半、+30%清仓；另外测试基于买入前10日低点的结构风险代理 3R，以及2R卖一半+3R清仓。所有卖出释放的 slot-capacity 会让后续 VCP 候选更早进入。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>1996–2026 · 10-slot-equivalent Replay</h2><div style="overflow:auto"><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate*</th><th>Avg Win</th><th>Avg Loss</th><th>STOP Event</th><th>Avg Hold Days</th><th>Admitted</th><th>Partial Sales</th><th>Exposure</th><th>Final</th><th>Pass</th></tr>{trs}</table></div><p style="font-size:12px">* Partial-harvest 方案的 Win Rate 是 realized sell-event 胜率，因此同时看 CAGR / PF / MaxDD，不单独拿它决策。</p></div>
+<div class="c"><div class="warn"><b>BASE一致性检查：</b> expected CAGR 16.14% / MaxDD -64.07%；本轮 BASE = {float(bc.get('actual_cagr',0) or 0):.2%} / {float(bc.get('actual_maxdd',0) or 0):.2%}。<br><b>测试：</b>{e(r.get('tests',''))}<br><b>结构R说明：</b>{e(r.get('structure_note',''))}<br><b>轮换：</b>{e(r.get('recycling_note',''))}<br><b>数据：</b>{e(r.get('data_note',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v629/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
