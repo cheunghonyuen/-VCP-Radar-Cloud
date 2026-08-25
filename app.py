@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v633-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div><h2>🚨 V6.33 Failure Confirmation Replay</h2><div class="muted">D+1/D+3/D+5 失败确认 · 次日退出 · 保留超级 Winner · 30Y 10-slot Replay</div><a href="/v633/failure-confirmation"><button type="button">打开 V6.33</button></a></div></div>
+
 <div class="card" id="v632-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div><h2>🔎 V6.32 True-Failure Entry / Trigger Autopsy</h2><div class="muted">只查未到+1R就STOP7 · Entry日 + D+1/3/5/10 follow-through · 不重复旧factor search</div><a href="/v632/true-failure-entry-autopsy"><button type="button">打开 V6.32</button></a></div></div>
 
 <div class="card" id="v631-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.31 Winner Profit Protection</h2><div class="muted">不固定止盈 · +1R/+2R/+3R/+5R 后逐级抬 Stop · 保留超级 Winner · 30Y 10-slot Replay</div></div><a href="/v631/winner-protection"><button type="button">打开 V6.31</button></a></div></div>
@@ -22316,3 +22318,227 @@ def v632_page():
     top=''.join([f"<tr><td><b>{e(x.get('label',''))}</b></td><td>{float(x.get('true_failure_median',0) or 0):+.3f}</td><td>{float(x.get('reached_1r_median',0) or 0):+.3f}</td><td>{float(x.get('delta_good_minus_fail',0) or 0):+.3f}</td><td>{float(x.get('robust_effect_iqr',0) or 0):+.2f}</td></tr>" for x in r.get('top_differentiators',[])])
     bs=''.join([f"<tr><td><b>{e(x.get('signal',''))}</b></td><td>{float(x.get('true_failure_rate',0) or 0):.1%}</td><td>{float(x.get('reached_1r_rate',0) or 0):.1%}</td><td>{float(x.get('delta_fail_minus_good',0) or 0):+.1%}</td></tr>" for x in r.get('boolean_signatures',[])])
     return f"""<!doctype html><html><body style="font-family:-apple-system;background:#f3f6fa;padding:16px"><div style="max-width:1500px;margin:auto"><a href="/v631/winner-protection">← V6.31</a><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h1>🔎 V6.32 True-Failure Entry / Trigger Autopsy</h1><p><b>只查连 +1R 都没到就 STOP7 的真失败。</b> 不重复旧 factor search。</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('diagnosis','等待运行'))}</p><p>TRUE_FAILURE {int(cnt.get('true_failure',0))} · REACHED_1R {int(cnt.get('reached_1r',0))} · Entry strength {float(r.get('entry_strength',0) or 0):.2f} · Post-entry strength {float(r.get('post_entry_strength',0) or 0):.2f}</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0;overflow:auto"><h2>最能区分的变量</h2><table style="width:100%"><tr><th>变量</th><th>Fail中位</th><th>Reached1R中位</th><th>Good-Fail</th><th>Effect/IQR</th></tr>{top}</table><h2>早期失败信号</h2><table style="width:100%"><tr><th>信号</th><th>TRUE_FAILURE</th><th>REACHED_1R</th><th>差值</th></tr>{bs}</table></div><div style="background:#fffbeb;padding:20px;border-radius:16px"><b>下一步：</b>{e(r.get('next_step',''))}</div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v632/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>"""
+
+
+# ========================= V6.33 Failure Confirmation Replay =========================
+V633_DIR=DATA_DIR/'v633_failure_confirmation_replay'
+V633_STATUS=V633_DIR/'status.json'; V633_RESULT=V633_DIR/'result.json'; V633_STOP=V633_DIR/'STOP'
+v633_thread=None
+
+def _v633_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V633_STATUS.exists():
+        try:x.update(json.loads(V633_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v633_write(**kw):
+    V633_DIR.mkdir(parents=True,exist_ok=True);x=_v633_status();x.update(kw)
+    V633_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v633_alive(): return v633_thread is not None and v633_thread.is_alive()
+
+V633_VARIANTS=[
+    'BASE_30Y',
+    'D1_BELOW_ENTRY_EXIT_NEXT',
+    'D3_BELOW_ENTRY_EXIT_NEXT',
+    'D5_BELOW_ENTRY_EXIT_NEXT',
+    'D3_TWO_CLOSES_BELOW_ENTRY',
+    'D5_WEAK_FOLLOWTHROUGH'
+]
+
+def _v633_exit_event(r,d,variant):
+    if variant=='BASE_30Y':
+        return pd.Timestamp(r.exit_date).normalize(),float(r.exit_px),str(r.exit_reason or 'BASE_EXIT')
+
+    ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize();ep=float(r.entry_px)
+    z=d[(d.date>=ed)&(d.date<=xd)].copy().sort_values('date').drop_duplicates('date',keep='last')
+    if z.empty:return xd,float(r.exit_px),str(r.exit_reason or 'BASE_EXIT')
+
+    cl=pd.to_numeric(z.close,errors='coerce').to_numpy(float)
+    op=pd.to_numeric(z.open,errors='coerce').to_numpy(float)
+    hi=pd.to_numeric(z.high,errors='coerce').to_numpy(float)
+    dates=pd.to_datetime(z.date,errors='coerce').dt.normalize().tolist()
+
+    trigger_idx=None;reason=None
+    if variant=='D1_BELOW_ENTRY_EXIT_NEXT' and len(cl)>1 and np.isfinite(cl[1]) and cl[1]<ep:
+        trigger_idx=1;reason='D1_BELOW_ENTRY'
+    elif variant=='D3_BELOW_ENTRY_EXIT_NEXT' and len(cl)>3 and np.isfinite(cl[3]) and cl[3]<ep:
+        trigger_idx=3;reason='D3_BELOW_ENTRY'
+    elif variant=='D5_BELOW_ENTRY_EXIT_NEXT' and len(cl)>5 and np.isfinite(cl[5]) and cl[5]<ep:
+        trigger_idx=5;reason='D5_BELOW_ENTRY'
+    elif variant=='D3_TWO_CLOSES_BELOW_ENTRY' and len(cl)>3:
+        q=[np.isfinite(cl[i]) and cl[i]<ep for i in range(1,4)]
+        if sum(q)>=2:
+            trigger_idx=3;reason='D3_2OF3_BELOW_ENTRY'
+    elif variant=='D5_WEAK_FOLLOWTHROUGH' and len(cl)>5:
+        max5=np.nanmax(hi[:6])/ep-1.0 if np.isfinite(hi[:6]).any() else np.nan
+        belowshare=float(np.mean([np.isfinite(x) and x<ep for x in cl[:6]]))
+        if np.isfinite(max5) and max5<.05 and belowshare>=.50:
+            trigger_idx=5;reason='D5_WEAK_FOLLOWTHROUGH'
+
+    if trigger_idx is None:
+        return xd,float(r.exit_px),str(r.exit_reason or 'BASE_EXIT')
+
+    exit_idx=trigger_idx+1
+    if exit_idx>=len(dates):
+        exit_idx=trigger_idx
+    px=float(op[exit_idx]) if exit_idx<len(op) and np.isfinite(op[exit_idx]) and op[exit_idx]>0 else float(cl[exit_idx])
+    return pd.Timestamp(dates[exit_idx]),px,reason+'_NEXT'
+
+def _v633_build_trades(T,t0):
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    rows=[];price={};date_set=set();total=len(M)
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V633_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+        for _,r in g.iterrows():
+            for v in V633_VARIANTS:
+                exd,exp,reason=_v633_exit_event(r,d,v)
+                rows.append({'variant':v,'listing_id':lid,'ticker':str(r.ticker),
+                             'entry_date':pd.Timestamp(r.entry_date).normalize(),'entry_px':float(r.entry_px),
+                             'exit_date':exd,'exit_px':exp,'exit_reason':reason})
+        if n==1 or n%50==0 or n==total:
+            _v633_write(status='running',message='Phase 1/3 · 构建 Failure-Confirmation exits',
+                        phase='trade_paths',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+    return pd.DataFrame(rows),price,sorted(date_set)
+
+def _v633_replay(X,price,cal,label,t0,vi,vn):
+    X=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=X.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        if V633_STOP.exists():raise RuntimeError('__STOPPED__')
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],'reason':str(rec[i]['exit_reason']),
+                           'entry_date':p['entry_date'],'exit_date':dt});last.pop(i,None)
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep;admitted+=1
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+        if di%step==0 or di==len(cal):
+            _v633_write(status='running',message=f'Phase 2/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=label,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.;dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean());avg_win=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avg_loss=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        early=float(~L.reason.astype(str).isin(['STOP7','HOLD1260'])).mean()
+        avg_hold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+    else:
+        pf=wr=avg_win=avg_loss=early=avg_hold=np.nan;w100=w200=w500=0
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avg_win,'avg_loss':avg_loss,'early_exit_share':early,
+            'avg_hold_days':avg_hold,'winner100':w100,'winner200':w200,'winner500':w500,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),'avg_exposure':float(C.exposure.mean()),
+            'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v633_run():
+    global v633_thread
+    t0=time.time()
+    try:
+        V633_DIR.mkdir(parents=True,exist_ok=True)
+        if V633_STOP.exists():V633_STOP.unlink()
+        T=_v622_load_trades().copy();T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        META,price,cal=_v633_build_trades(T,t0)
+        rows=[_v633_replay(META,price,cal,v,t0,i,len(V633_VARIANTS)) for i,v in enumerate(V633_VARIANTS,1)]
+        O=pd.DataFrame(rows);B=O[O.strategy.eq('BASE_30Y')].iloc[0]
+        O['delta_cagr']=O.cagr-float(B.cagr);O['delta_maxdd']=O.maxdd-float(B.maxdd)
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['screen_pass']=(O.strategy.ne('BASE_30Y')&(O.cagr>float(B.cagr))&(O.maxdd>=float(B.maxdd)-.03)&(O.profit_factor>=2.)&(O.winner100_retention>=.80))
+        O=O.sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False]).reset_index(drop=True)
+        verdict='FAILURE_CONFIRMATION_CANDIDATE' if O.screen_pass.any() else 'NO_FAILURE_CONFIRMATION_PASS'
+        res={'version':'V6.33 Failure Confirmation Replay','verdict':verdict,
+             'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'tests':'BASE; D+1 below entry -> next-session exit; D+3 below entry -> next-session exit; D+5 below entry -> next-session exit; 2 of first 3 closes below entry -> next-session exit; D+5 weak follow-through = max gain <5% and >=50% of first 6 closes below entry -> next-session exit. No grid search.',
+             'timing_note':'Every failure signal exits at the NEXT session open where available, avoiding same-day look-ahead.',
+             'purpose':'Test whether the V6.32 post-entry separation can reduce true failures without materially damaging the right-tail winners.',
+             'acceptance':'PASS if CAGR beats BASE, MaxDD no worse than BASE by >3 points, PF >=2.0, and +100% winner retention >=80%.',
+             'cache_note':'1996–2026; reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'If one rule passes, validate yearly/stress windows. If none passes, stop generic post-entry confirmation tuning and revisit exact JLaw trigger/exit definitions.'}
+        V633_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V633_DIR/'v633_results.csv',index=False)
+        except OSError:pass
+        _v633_write(status='done',message=f'V6.33 完成：{verdict}',phase='done',processed=3,total=3,current=str(O.iloc[0].strategy),elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v633_write(status='paused',message='V6.33 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v633_write(status='error',message='V6.33 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v633_write(status='error',message='V6.33 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v633_thread=None
+
+def _v633_start():
+    global v633_thread
+    if _v633_alive():return False
+    _v633_write(status='starting',message='V6.33 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v633_thread=threading.Thread(target=_v633_run,daemon=True);v633_thread.start();return True
+
+@APP.route('/v633/run',methods=['GET','POST'])
+def v633_run():_v633_start();return redirect('/v633/failure-confirmation')
+@APP.get('/v633')
+def v633_alias():return redirect('/v633/failure-confirmation')
+@APP.get('/api/v633/status')
+def v633_status_api():return jsonify(_v633_status())
+
+@APP.get('/v633/failure-confirmation')
+def v633_page():
+    import html;e=lambda x:html.escape(str(x));st=_v633_status();r={}
+    if V633_RESULT.exists():
+        try:r=json.loads(V633_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v633_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v633/run"><button>▶ 开始 V6.33 Failure Confirmation Replay</button></a>'
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ PASS' if x.get('screen_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('early_exit_share',0) or 0):.1%}</td><td>{float(x.get('avg_hold_days',0) or 0):.0f}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1700px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v632/true-failure-entry-autopsy">← V6.32</a>
+<div class="c"><h1>🚨 V6.33 Failure Confirmation Replay</h1><p><b>只测试“突破后很快证明失败，就早点认错”。</b> 不改 Selection，不设 Take Profit，不碰超级 Winner。</p></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot Replay</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Early Exit</th><th>Avg Hold</th><th>+100%</th><th>+100%保留</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><p><b>本轮：</b>{e(r.get('tests',''))}</p><p><b>时序：</b>{e(r.get('timing_note',''))}</p><p><b>验收：</b>{e(r.get('acceptance',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v633/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
