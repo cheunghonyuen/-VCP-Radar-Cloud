@@ -18328,3 +18328,201 @@ def v617_production_page():
     <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/final-validation">🧪 大股票池 Final Validation</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 整晚全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
+
+# ==================== V6.17 FINAL VALIDATION · STAGE 2 ====================
+# Final account-level replay on the expanded historical cache.
+# Frozen rules only: A/B DNA union + CONTROL entry + -7% stop + HOLD1260,
+# 10 equal slots, no margin, FIRST_COME, Daily MTM. No Tiingo. No retuning.
+V617FV2_DIR=DATA_DIR/'v617_final_validation_stage2'
+V617FV2_STATUS=V617FV2_DIR/'status.json'
+V617FV2_RESULT=V617FV2_DIR/'result.json'
+V617FV2_TRADES=V617FV2_DIR/'trades.csv.gz'
+V617FV2_YEARLY=V617FV2_DIR/'yearly.csv'
+V617FV2_REPORT=V617FV2_DIR/'report.txt'
+V617FV2_STOP=V617FV2_DIR/'STOP'
+v617fv2_thread=None
+
+def _v617fv2_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V617FV2_STATUS.exists():
+        try:x.update(json.loads(V617FV2_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v617fv2_write(**kw):
+    V617FV2_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v617fv2_status();x.update(kw)
+    V617FV2_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v617fv2_alive():return v617fv2_thread is not None and v617fv2_thread.is_alive()
+
+def _v617fv2_selected():
+    years=sorted(int(p.stem.split('.')[0]) for p in V617FV1_YEAR_DIR.glob('*.csv.gz'))
+    out=[]
+    for y in years:
+        pri=[yy for yy in years if yy<y]
+        if len(pri)<3:continue
+        te=_v617fv1_load_year(y)
+        if len(te)<50:continue
+        parts=[]
+        for yy in pri:
+            z=_v617fv1_load_year(yy)
+            if z.empty:continue
+            parts.append(z[['ret60','ret120','ret252']])
+        if not parts:continue
+        tr=pd.concat(parts,ignore_index=True)
+        if len(tr)<1000:continue
+        q={c:float(pd.to_numeric(tr[c],errors='coerce').quantile(.75)) for c in ['ret60','ret120','ret252']}
+        del tr,parts
+        for c in ['ret60','ret120','ret252','vol_vs20']:te[c]=pd.to_numeric(te[c],errors='coerce')
+        a=(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.80)
+        b=(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.80)
+        g=te[a|b][['listing_id','ticker','obs_date']].copy()
+        g['dna']=np.where(a[a|b]&b[a|b],'AB',np.where(a[a|b],'A','B'))
+        out.append(g)
+    if not out:return pd.DataFrame()
+    return pd.concat(out,ignore_index=True).drop_duplicates(['listing_id','obs_date']).sort_values(['obs_date','listing_id']).reset_index(drop=True)
+
+def _v617fv2_build_trades(t0):
+    D=_v617fv2_selected()
+    if D.empty:raise RuntimeError('Stage 1 Feature Store 没有可用 frozen DNA signals')
+    groups={k:g for k,g in D.groupby('listing_id',sort=False)}
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到历史 manifest')
+    M=M[M.listing_id.astype(str).isin(set(groups))].copy()
+    rows=[];total=len(M)
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V617FV2_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.get('listing_id',''));g=groups.get(lid)
+        if g is None:continue
+        if n==1 or n%10==0:_v617fv2_write(status='running',message='Phase 1/2 · 重建冻结交易元数据（0 API）',phase='trade_replay',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or len(d)<1260:continue
+        d=d.copy();d['date']=pd.to_datetime(d['date']).dt.normalize()
+        for c in ['open','high','low','close']:d[c]=pd.to_numeric(d[c],errors='coerce')
+        im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
+        lows=d.low.to_numpy(float);opens=d.open.to_numpy(float);closes=d.close.to_numpy(float);dates=d.date.to_numpy()
+        for _,r in g.iterrows():
+            dt=pd.Timestamp(r.obs_date).normalize();ei=im.get(dt)
+            if ei is None or ei+1259>=len(d):continue
+            px=float(closes[ei])
+            if not np.isfinite(px) or px<=0:continue
+            stop=px*.93;window=lows[ei:ei+1260]
+            hit=np.flatnonzero(np.isfinite(window)&(window<=stop))
+            if len(hit):
+                xi=ei+int(hit[0]);xp=float(opens[xi]) if opens[xi]<stop else stop;reason='STOP7'
+            else:
+                xi=ei+1259;xp=float(closes[xi]);reason='HOLD1260'
+            rows.append({'listing_id':lid,'ticker':str(r.ticker),'dna':str(r.dna),'signal_date':dt,'entry_date':dt,'entry_px':px,'exit_date':pd.Timestamp(dates[xi]),'exit_px':xp,'exit_reason':reason,'return':xp/px-1.0})
+    T=pd.DataFrame(rows)
+    if T.empty:raise RuntimeError('没有形成可交易的 Stage 2 trades（需要完整 HOLD1260 路径）')
+    T=T.sort_values(['entry_date','listing_id']).drop_duplicates(['listing_id','entry_date']).reset_index(drop=True)
+    try:T.to_csv(V617FV2_TRADES,index=False,compression='gzip')
+    except OSError:pass
+    return T,M
+
+def _v617fv2_simulate(T,t0):
+    # Load only listings that can actually participate; one price frame per listing.
+    M=_v615b_read_manifest(); mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in set(T.listing_id.astype(str))}
+    price={};date_set=set();total=len(mm)
+    for n,(lid,mr) in enumerate(mm.items(),1):
+        if V617FV2_STOP.exists():raise RuntimeError('__STOPPED__')
+        d=_v617fv1_read_price(mr)
+        if d is not None and len(d):
+            d=d.copy();d['date']=pd.to_datetime(d.date).dt.normalize();d['close']=pd.to_numeric(d.close,errors='coerce')
+            z=dict(zip(d.date,d.close.astype(float)));price[lid]=z;date_set.update(z.keys())
+        if n%25==0 or n==total:_v617fv2_write(status='running',message='Phase 2/2 · Loading MTM prices',phase='mtm_load',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1))
+    cal=sorted(date_set)
+    if not cal:raise RuntimeError('没有 MTM 价格日历')
+    rec=T.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};eqrows=[];ledger=[];skipped=0;admitted=0
+    step=max(1,len(cal)//40)
+    for di,dt in enumerate(cal,1):
+        # exits before new admissions; same-day released cash is reusable
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is not None:
+                proceeds=p['shares']*float(rec[i]['exit_px']);cash+=proceeds
+                ledger.append({**rec[i],'allocated':p['cost'],'pnl_dollars':proceeds-p['cost']})
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        equity_now=cash+hv
+        # FIRST_COME deterministic order already listing_id sorted for ties
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];target=equity_now/10.0;px=float(r['entry_px'])
+            if px<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;pos[i]={'listing_id':str(r['listing_id']),'shares':target/px,'entry_px':px,'cost':target};last[i]=px;admitted+=1
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append({'date':dt,'equity':eq,'exposure':hv/eq if eq>0 else np.nan,'cash_pct':cash/eq if eq>0 else np.nan,'open_slots':len(pos)})
+        if di%step==0 or di==len(cal):_v617fv2_write(status='running',message=f'Phase 2/2 · 10-slot Daily MTM {int(round(di/len(cal)*100))}%',phase='daily_mtm',processed=di,total=len(cal),current=str(dt.date()),elapsed_sec=round(time.time()-t0,1))
+    C=pd.DataFrame(eqrows).sort_values('date');L=pd.DataFrame(ledger)
+    if C.empty:raise RuntimeError('Daily MTM curve 为空')
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((C.date.iloc[-1]-C.date.iloc[0]).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0;dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min());calmar=float(cagr/abs(maxdd)) if maxdd<0 else np.nan
+    C['year']=pd.to_datetime(C.date).dt.year;yr=[]
+    for y,g in C.groupby('year'):
+        if len(g)>=2:yr.append({'year':int(y),'return':float(g.equity.iloc[-1]/g.equity.iloc[0]-1),'end_equity':float(g.equity.iloc[-1])})
+    Y=pd.DataFrame(yr)
+    try:Y.to_csv(V617FV2_YEARLY,index=False)
+    except OSError:pass
+    wins=L[L.pnl_dollars>0] if not L.empty else L;loss=L[L.pnl_dollars<=0] if not L.empty else L
+    gp=float(wins.pnl_dollars.sum()) if len(wins) else 0.0;gl=float(-loss.pnl_dollars.sum()) if len(loss) else 0.0
+    pf=float(gp/gl) if gl>0 else None;wr=float((L.pnl_dollars>0).mean()) if len(L) else None
+    avgwin=float(wins['return'].mean()) if len(wins) else None;avgloss=float(loss['return'].mean()) if len(loss) else None
+    wl=float(avgwin/abs(avgloss)) if avgwin is not None and avgloss is not None and avgloss<0 else None
+    monthly=C.copy();monthly['m']=monthly.date.dt.to_period('M');monthly=monthly.groupby('m',as_index=False).tail(1)
+    audit=[{'date':str(x.date.date()),'equity':round(float(x.equity),6),'exposure':round(float(x.exposure),6)} for _,x in monthly.iterrows()]
+    return {'start_date':str(C.date.iloc[0].date()),'end_date':str(C.date.iloc[-1].date()),'start_equity':start,'end_equity':end,'cagr':float(cagr),'maxdd_mtm':maxdd,'calmar':calmar,'trades':int(len(L)),'admitted':int(admitted),'skipped_capacity':int(skipped),'win_rate':wr,'profit_factor':pf,'avg_win':avgwin,'avg_loss':avgloss,'win_loss_ratio':wl,'avg_exposure':float(C.exposure.mean()),'avg_cash_pct':float(C.cash_pct.mean()),'max_open_slots':int(C.open_slots.max()),'best_year':float(Y['return'].max()) if len(Y) else None,'worst_year':float(Y['return'].min()) if len(Y) else None,'positive_years':int((Y['return']>0).sum()) if len(Y) else 0,'total_years':int(len(Y)),'monthly_equity_audit':audit}
+
+def _v617fv2_run():
+    global v617fv2_thread
+    t0=time.time()
+    try:
+        V617FV2_DIR.mkdir(parents=True,exist_ok=True)
+        if V617FV2_STOP.exists():V617FV2_STOP.unlink()
+        if not V617FV1_RESULT.exists():raise RuntimeError('Stage 1 result 不存在')
+        s1=json.loads(V617FV1_RESULT.read_text(encoding='utf-8'))
+        if s1.get('verdict')!='PASS_STAGE1':raise RuntimeError('Stage 1 尚未 PASS，禁止 Stage 2')
+        T,M=_v617fv2_build_trades(t0);z=_v617fv2_simulate(T,t0)
+        # Benchmark is reference only; Stage 2 is not forced to match because universe is now expanded.
+        bench={'end_equity':31.45,'cagr':.2312,'maxdd_mtm':-.3830,'calmar':.60}
+        verdict='FINAL_VALIDATION_COMPLETE'
+        res={'version':'V6.17 Final Validation Stage 2','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'verdict':verdict,'rules':{'dna':'Frozen A/B union from Stage 1 strict walk-forward','entry':'CONTROL = observation close','initial_stop':'-7%','winner_hold':'HOLD1260','portfolio':'10 equal slots, no margin','admission':'FIRST_COME; deterministic listing_id tie-break','addon':'OFF','opportunity_gate':'OFF','replacement':'OFF','valuation':'Daily MTM'},'stage1':{'verified_listings':s1.get('verified_listings'),'coverage':s1.get('coverage'),'ended_coverage':s1.get('ended_coverage')},'account':z,'old_validated_branch_reference':bench,'note':'Final Stage 2 uses the expanded historical cache and frozen rules. Old 31.45x / 23.12% / -38.30% is shown only as a reference, not an acceptance target.'}
+        V617FV2_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        V617FV2_REPORT.write_text('\n'.join([f"V6.17 FINAL STAGE 2: {verdict}",f"Period: {z['start_date']} to {z['end_date']}",f"End Equity: {z['end_equity']:.4f}x",f"CAGR: {z['cagr']:.2%}",f"MaxDD: {z['maxdd_mtm']:.2%}",f"Calmar: {z['calmar']:.3f}",f"Trades: {z['trades']}",f"Win rate: {z['win_rate']:.2%}" if z['win_rate'] is not None else 'Win rate: n/a',f"Profit Factor: {z['profit_factor']:.3f}" if z['profit_factor'] is not None else 'Profit Factor: n/a',f"Avg win: {z['avg_win']:.2%}" if z['avg_win'] is not None else 'Avg win: n/a',f"Avg loss: {z['avg_loss']:.2%}" if z['avg_loss'] is not None else 'Avg loss: n/a']),encoding='utf-8')
+        _v617fv2_write(status='done',message='V6.17 Final Validation Stage 2 完成',phase='done',processed=1,total=1,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        if str(ex)=='__STOPPED__':_v617fv2_write(status='paused',message='已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v617fv2_write(status='error',message='Stage 2 失败',phase='error',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v617fv2_thread=None
+
+def _v617fv2_start():
+    global v617fv2_thread
+    if _v617fv2_alive():return False
+    v617fv2_thread=threading.Thread(target=_v617fv2_run,daemon=True);v617fv2_thread.start();return True
+
+@APP.route('/v617/final-validation-stage2/run',methods=['GET','POST'])
+def v617_final_validation_stage2_run():_v617fv2_start();return redirect('/v617/final-validation-stage2')
+@APP.get('/v617/final-validation-stage2/stop')
+def v617_final_validation_stage2_stop():V617FV2_DIR.mkdir(parents=True,exist_ok=True);V617FV2_STOP.write_text('stop',encoding='utf-8');return redirect('/v617/final-validation-stage2')
+@APP.get('/api/v617/final-validation-stage2/status')
+def v617_final_validation_stage2_api():return jsonify(_v617fv2_status())
+@APP.get('/v617/final-validation-stage2')
+def v617_final_validation_stage2_page():
+    import html;e=lambda x:html.escape(str(x));s=_v617fv2_status();r={}
+    if V617FV2_RESULT.exists():
+        try:r=json.loads(V617FV2_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    a=r.get('account',{});running=_v617fv2_alive();btn='' if running else '<a href="/v617/final-validation-stage2/run"><button>▶ 开始 Final Stage 2</button></a>';stop='<a href="/v617/final-validation-stage2/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    def pct(k):return f"{float(a.get(k,0) or 0):.2%}"
+    def num(k,n=2):return f"{float(a.get(k,0) or 0):.{n}f}"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:15px}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800;margin-right:8px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left}}</style></head><body><div class="w"><a href="/v617/final-validation">← Stage 1</a><div class="c"><h1>🏁 V6.17 Final Validation · Stage 2</h1><div class="info"><b>最终账户级验证。</b> 大历史池 + Frozen A/B DNA + CONTROL + -7% Stop + HOLD1260 + 10仓 + FIRST_COME + Daily MTM。0 Tiingo，0 调参。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}{('<div class="info">'+e(s.get('error'))+'</div>') if s.get('error') else ''}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><table><tr><th>End Equity</th><td><b>{num('end_equity')}×</b></td><th>CAGR</th><td><b>{pct('cagr')}</b></td></tr><tr><th>MaxDD</th><td><b>{pct('maxdd_mtm')}</b></td><th>Calmar</th><td>{num('calmar')}</td></tr><tr><th>Trades</th><td>{int(a.get('trades',0) or 0):,}</td><th>Win Rate</th><td>{pct('win_rate')}</td></tr><tr><th>Profit Factor</th><td>{num('profit_factor')}</td><th>Avg Win / Loss</th><td>{pct('avg_win')} / {pct('avg_loss')}</td></tr><tr><th>Win/Loss Ratio</th><td>{num('win_loss_ratio')}</td><th>Skipped Capacity</th><td>{int(a.get('skipped_capacity',0) or 0):,}</td></tr><tr><th>Avg Exposure</th><td>{pct('avg_exposure')}</td><th>Worst Year</th><td>{pct('worst_year')}</td></tr></table></div><div class="c"><div class="ok"><b>旧分支参考（不是验收目标）：</b> End Equity 31.45× · CAGR 23.12% · MaxDD -38.30% · Calmar 0.60。现在看的是扩大历史池后的真实冻结规则结果。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v617/final-validation-stage2/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
