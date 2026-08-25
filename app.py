@@ -20671,12 +20671,180 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 </div></body></html>"""
 
 
+
 # ========================= V6.28.1 Data Integrity Audit =========================
 V6281_DIR=DATA_DIR/'v6281_data_integrity'
+V6281_STATUS=V6281_DIR/'status.json'
+V6281_RESULT=V6281_DIR/'result.json'
+V6281_STOP=V6281_DIR/'STOP'
+v6281_thread=None
+
+def _v6281_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V6281_STATUS.exists():
+        try:x.update(json.loads(V6281_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6281_write(**kw):
+    V6281_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6281_status();x.update(kw)
+    V6281_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6281_alive():
+    return v6281_thread is not None and v6281_thread.is_alive()
+
+def _v6281_nearest_row(d, day):
+    z=d[d.date<=day]
+    if z.empty:return None
+    return z.iloc[-1]
+
+def _v6281_run():
+    global v6281_thread
+    t0=time.time()
+    try:
+        V6281_DIR.mkdir(parents=True,exist_ok=True)
+        if V6281_STOP.exists():V6281_STOP.unlink()
+        _v6281_write(status='running',message='V6.28.1 数据完整性审计启动',phase='load',processed=0,total=1,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy()
+        T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+        needed=set(T.listing_id.astype(str))
+        mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in needed}
+        groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+        rows=[]; total=len(mm)
+        for n,(lid,mr) in enumerate(mm.items(),1):
+            if V6281_STOP.exists():raise RuntimeError('__STOPPED__')
+            g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy()
+            d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+            for _,r in g.iterrows():
+                er=_v6281_nearest_row(d,pd.Timestamp(r.entry_date).normalize())
+                xr=_v6281_nearest_row(d,pd.Timestamp(r.exit_date).normalize())
+                if er is None or xr is None:continue
+                ec=float(er.close); xc=float(xr.close); ep=float(r.entry_px); xp=float(r.exit_px)
+                if not all(np.isfinite(v) and v>0 for v in [ec,xc,ep,xp]):continue
+                z=d[(d.date>=pd.Timestamp(r.entry_date).normalize())&(d.date<=pd.Timestamp(r.exit_date).normalize())].copy()
+                c=pd.to_numeric(z.close,errors='coerce').dropna()
+                jumps=0; max_jump=1.0
+                if len(c)>=2:
+                    rat=(c/c.shift(1)).replace([np.inf,-np.inf],np.nan).dropna()
+                    jumps=int(((rat>=4.0)|(rat<=0.25)).sum())
+                    if len(rat):
+                        max_jump=float(max(rat.max(),1.0/max(rat.min() if rat.min()>0 else 1e-9)))
+                entry_ratio=ep/ec
+                exit_ratio=xp/xc
+                stage_ret=xp/ep-1.0
+                cache_close_ret=xc/ec-1.0
+                # Large basis mismatch at entry or scale changes between entry and exit are suspicious.
+                entry_basis_bad=bool(entry_ratio>=4.0 or entry_ratio<=0.25)
+                scale_change=exit_ratio/entry_ratio if entry_ratio>0 else np.nan
+                scale_bad=bool(np.isfinite(scale_change) and (scale_change>=4.0 or scale_change<=0.25))
+                extreme_path=bool(max_jump>=4.0)
+                rows.append({
+                    'ticker':str(r.ticker),'listing_id':lid,'entry_date':str(pd.Timestamp(r.entry_date).date()),
+                    'exit_date':str(pd.Timestamp(r.exit_date).date()),'entry_px':ep,'cache_entry_close':ec,
+                    'entry_ratio':entry_ratio,'exit_px':xp,'cache_exit_close':xc,'exit_ratio':exit_ratio,
+                    'scale_change':scale_change,'stage_return':stage_ret,'cache_close_return':cache_close_ret,
+                    'split_like_jumps':jumps,'max_single_day_scale_jump':max_jump,
+                    'entry_basis_bad':entry_basis_bad,'scale_bad':scale_bad,'extreme_path':extreme_path,
+                    'flag':bool(entry_basis_bad or scale_bad or extreme_path)
+                })
+            if n==1 or n%100==0 or n==total:
+                _v6281_write(status='running',message='检查 Entry/Exit 与缓存价格口径 + 路径跳变',phase='audit',
+                             processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        if not rows:raise RuntimeError('没有生成数据审计记录')
+        A=pd.DataFrame(rows)
+        flags=A[A.flag].copy()
+        clean=A[~A.flag].copy()
+        summary={
+            'trades_checked':int(len(A)),
+            'flagged_trades':int(len(flags)),
+            'flagged_rate':float(len(flags)/len(A)),
+            'entry_basis_bad':int(A.entry_basis_bad.sum()),
+            'scale_change_bad':int(A.scale_bad.sum()),
+            'split_like_path_bad':int(A.extreme_path.sum()),
+            'clean_trades':int(len(clean)),
+            'median_entry_ratio':float(A.entry_ratio.median()),
+            'median_abs_log_entry_ratio':float(np.log(A.entry_ratio).abs().median()),
+        }
+        verdict='PRICE_BASIS_CONTAMINATION_CONFIRMED' if summary['flagged_rate']>=0.005 else 'PRICE_BASIS_MOSTLY_CLEAN'
+        diagnosis=('发现足够多 split/reverse-split/价格调整口径异常，V6.28 的极端 MFE/Giveback 不可信；下一步必须用同口径价格路径重算。'
+                   if verdict=='PRICE_BASIS_CONTAMINATION_CONFIRMED'
+                   else '绝大多数交易价格口径一致；V6.28 极端案例可能集中在少数异常票，可在清洗后重算。')
+        top=flags.sort_values(['max_single_day_scale_jump','entry_ratio'],ascending=[False,False]).head(50)
+        res={'version':'V6.28.1 Data Integrity Fix','generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data','verdict':verdict,'diagnosis':diagnosis,
+             'summary':summary,
+             'worst_anomalies':top.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'method':'Compare Stage-2 entry/exit prices with same-date Historical Cache closes; detect entry basis ratios >=4x or <=0.25x, entry-to-exit scale changes >=4x or <=0.25x, and within-trade single-day close jumps >=4x or <=0.25x.',
+             'fix_plan':'For the next Shape/Giveback rerun, use internally consistent cached-price ratios anchored to the entry date and exclude unresolved within-hold split-like jumps instead of trusting raw mixed-basis MFE.',
+             'rule_note':'Diagnostic only. No Entry/Stop/Exit/portfolio rule changes.',
+             'cache_note':'1996–2026; reuses Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.'}
+        V6281_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V6281_DIR/'audit_rows.csv.gz',index=False,compression='gzip')
+        except OSError:pass
+        _v6281_write(status='done',message=f'V6.28.1 完成：{verdict}',phase='done',processed=total,total=total,current='Data integrity',elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v6281_write(status='paused',message='V6.28.1 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v6281_write(status='error',message='V6.28.1 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v6281_write(status='error',message='V6.28.1 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v6281_thread=None
+
+def _v6281_start():
+    global v6281_thread
+    if _v6281_alive():return False
+    _v6281_write(status='starting',message='V6.28.1 正在启动',phase='startup',processed=0,total=1,current='',elapsed_sec=0,error=None)
+    v6281_thread=threading.Thread(target=_v6281_run,daemon=True);v6281_thread.start();return True
+
+@APP.route('/v6281/run',methods=['GET','POST'])
+def v6281_run():
+    _v6281_start();return redirect('/v6281/data-integrity')
+
+@APP.get('/v6281/stop')
+def v6281_stop():
+    V6281_DIR.mkdir(parents=True,exist_ok=True);V6281_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v6281/data-integrity')
+
+@APP.get('/api/v6281/status')
+def v6281_status_api():return jsonify(_v6281_status())
+
 @APP.get('/v6281/data-integrity')
 def v6281_page():
-    return """<html><body style="font-family:-apple-system;padding:24px"><h1>🧹 V6.28.1 Data Integrity Fix</h1>
-<p>目的：先验证 Entry/Exit 与 Historical Cache OHLC 是否处于同一价格调整口径，识别 split / reverse-split / corporate-action 异常；本版不改变任何交易规则。</p>
-<p><b>检查项：</b> entry_px 对 entry-date cached close 比率、exit_px 对 exit-date cached close 比率、路径单日异常跳变、极端 MFE/Giveback。</p>
-<p><b>原则：</b>1996–2026；复用 Stage-2 + Historical Cache；0 Tiingo；不重建股票池。</p>
-<p>这是数据审计入口。下一步只在价格口径验证通过后重跑 Shape/Giveback。</p></body></html>"""
+    import html
+    e=lambda x:html.escape(str(x));st=_v6281_status();r={};sm={}
+    if V6281_RESULT.exists():
+        try:r=json.loads(V6281_RESULT.read_text(encoding='utf-8'));sm=r.get('summary',{})
+        except Exception:r={};sm={}
+    running=_v6281_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v6281/run"><button>▶ 开始 V6.28.1 数据审计</button></a>'
+    stop='<a href="/v6281/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('worst_anomalies',[])[:30]:
+        trs+=f"<tr><td><b>{e(x.get('ticker',''))}</b></td><td>{e(x.get('entry_date',''))}</td><td>{float(x.get('entry_ratio',0) or 0):.3g}x</td><td>{float(x.get('scale_change',0) or 0):.3g}x</td><td>{int(x.get('split_like_jumps',0) or 0)}</td><td>{float(x.get('max_single_day_scale_jump',0) or 0):.1f}x</td><td>{float(x.get('stage_return',0) or 0):+.1%}</td><td>{float(x.get('cache_close_return',0) or 0):+.1%}</td></tr>"
+    err=f'<div class="danger"><b>Error:</b> {e(st.get("error"))}</div>' if st.get('error') else ''
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:22px;padding:26px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.danger{{background:#fff1f2;border:1px solid #fda4af;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 17px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v628/shape-giveback-autopsy">← V6.28 Shape/Giveback</a>
+<div class="c"><h1>🧹 V6.28.1 Data Integrity Fix</h1><div class="info"><b>这次是真的跑数据审计，不是说明页。</b><br>检查 Stage-2 Entry/Exit 与 Historical Cache OHLC 是否同一调整口径，并识别 split / reverse-split / corporate-action 异常。交易规则完全不改。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}{err}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="warn">{e(r.get('diagnosis','等待运行'))}</div></div>
+<div class="c"><h2>摘要</h2><table><tr><th>检查交易</th><th>异常交易</th><th>异常率</th><th>Entry口径异常</th><th>Entry→Exit缩放异常</th><th>路径Split-like跳变</th><th>Clean</th></tr><tr><td>{int(sm.get('trades_checked',0)):,}</td><td>{int(sm.get('flagged_trades',0)):,}</td><td>{float(sm.get('flagged_rate',0) or 0):.2%}</td><td>{int(sm.get('entry_basis_bad',0)):,}</td><td>{int(sm.get('scale_change_bad',0)):,}</td><td>{int(sm.get('split_like_path_bad',0)):,}</td><td>{int(sm.get('clean_trades',0)):,}</td></tr></table></div>
+<div class="c"><h2>最严重异常</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>Entry</th><th>Entry ratio</th><th>Scale change</th><th>Jump days</th><th>Max jump</th><th>Stage Return</th><th>Cache Close Return</th></tr>{trs}</table></div></div>
+<div class="c"><div class="warn"><b>方法：</b>{e(r.get('method',''))}<br><b>修复方案：</b>{e(r.get('fix_plan',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6281/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
