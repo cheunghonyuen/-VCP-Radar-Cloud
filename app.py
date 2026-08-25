@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v632-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div><h2>🔎 V6.32 True-Failure Entry / Trigger Autopsy</h2><div class="muted">只查未到+1R就STOP7 · Entry日 + D+1/3/5/10 follow-through · 不重复旧factor search</div><a href="/v632/true-failure-entry-autopsy"><button type="button">打开 V6.32</button></a></div></div>
+
 <div class="card" id="v631-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.31 Winner Profit Protection</h2><div class="muted">不固定止盈 · +1R/+2R/+3R/+5R 后逐级抬 Stop · 保留超级 Winner · 30Y 10-slot Replay</div></div><a href="/v631/winner-protection"><button type="button">打开 V6.31</button></a></div></div>
 
 <div class="card" id="v630-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.30 Trade Path / Win-Rate Reconciliation</h2><div class="muted">不调参数 · 查清 6% Win Rate：真失败 vs 先赚后吐 · +1R/+2R/+3R/+10/+20% 路径归因</div></div><a href="/v630/winrate-reconciliation"><button type="button">打开 V6.30</button></a></div></div>
@@ -22142,3 +22144,175 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>本轮：</b>{e(r.get('tests',''))}<br><b>时序：</b>{e(r.get('timing_note',''))}<br><b>目的：</b>{e(r.get('purpose',''))}<br><b>数据：</b>{e(r.get('data_note',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v631/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ========================= V6.32 True-Failure Entry / Trigger Autopsy =========================
+V632_DIR=DATA_DIR/'v632_true_failure_entry_autopsy'
+V632_STATUS=V632_DIR/'status.json'; V632_RESULT=V632_DIR/'result.json'; V632_STOP=V632_DIR/'STOP'
+v632_thread=None
+
+def _v632_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V632_STATUS.exists():
+        try:x.update(json.loads(V632_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v632_write(**kw):
+    V632_DIR.mkdir(parents=True,exist_ok=True);x=_v632_status();x.update(kw)
+    V632_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v632_alive(): return v632_thread is not None and v632_thread.is_alive()
+
+def _v632_feat(r,d):
+    ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+    pre=d[d.date<ed].tail(30); post=d[(d.date>=ed)&(d.date<=xd)].head(11)
+    if post.empty:return None
+    ep=float(r.entry_px)
+    op=pd.to_numeric(post.open,errors='coerce');hi=pd.to_numeric(post.high,errors='coerce')
+    lo=pd.to_numeric(post.low,errors='coerce');cl=pd.to_numeric(post.close,errors='coerce')
+    vol=pd.to_numeric(post.volume,errors='coerce') if 'volume' in post.columns else pd.Series(np.nan,index=post.index)
+    prehi=pd.to_numeric(pre.high,errors='coerce') if 'high' in pre.columns else pd.to_numeric(pre.close,errors='coerce')
+    prelo=pd.to_numeric(pre.low,errors='coerce') if 'low' in pre.columns else pd.to_numeric(pre.close,errors='coerce')
+    precl=pd.to_numeric(pre.close,errors='coerce')
+    prevol=pd.to_numeric(pre.volume,errors='coerce') if 'volume' in pre.columns else pd.Series(np.nan,index=pre.index)
+    def rr(n):
+        return float(cl.iloc[n]/ep-1) if len(cl)>n and np.isfinite(cl.iloc[n]) else np.nan
+    ec=float(cl.iloc[0]); eo=float(op.iloc[0]); eh=float(hi.iloc[0]); el=float(lo.iloc[0])
+    rng=eh-el if np.isfinite(eh) and np.isfinite(el) else np.nan
+    close_loc=(ec-el)/rng if np.isfinite(rng) and rng>0 else np.nan
+    p20h=float(prehi.tail(20).max()) if prehi.tail(20).notna().any() else np.nan
+    p20l=float(prelo.tail(20).min()) if prelo.tail(20).notna().any() else np.nan
+    p10h=float(prehi.tail(10).max()) if prehi.tail(10).notna().any() else np.nan
+    p10l=float(prelo.tail(10).min()) if prelo.tail(10).notna().any() else np.nan
+    p20v=float(prevol.tail(20).median()) if prevol.tail(20).notna().any() else np.nan
+    ev=float(vol.iloc[0]) if len(vol) and np.isfinite(vol.iloc[0]) else np.nan
+    prev=float(precl.iloc[-1]) if len(precl) and np.isfinite(precl.iloc[-1]) else np.nan
+    return {
+        'listing_id':str(r.listing_id),'ticker':str(r.ticker),'entry_date':ed,'exit_date':xd,
+        'entry_close_loc':close_loc,
+        'entry_gap':eo/prev-1 if np.isfinite(eo) and np.isfinite(prev) and prev>0 else np.nan,
+        'entry_vol_ratio':ev/p20v if np.isfinite(ev) and np.isfinite(p20v) and p20v>0 else np.nan,
+        'dist_from_pre20_high':ep/p20h-1 if np.isfinite(p20h) and p20h>0 else np.nan,
+        'pre20_depth':p20h/p20l-1 if np.isfinite(p20h) and np.isfinite(p20l) and p20l>0 else np.nan,
+        'pre10_depth':p10h/p10l-1 if np.isfinite(p10h) and np.isfinite(p10l) and p10l>0 else np.nan,
+        'd1_ret':rr(1),'d3_ret':rr(3),'d5_ret':rr(5),'d10_ret':rr(10),
+        'below_entry_d1':bool(len(cl)>1 and cl.iloc[1]<ep),
+        'below_entry_d3':bool(len(cl)>3 and cl.iloc[3]<ep),
+        'below_entry_d5':bool(len(cl)>5 and cl.iloc[5]<ep),
+        'below_entry_share_5':float((cl.iloc[:min(6,len(cl))]<ep).mean())
+    }
+
+def _v632_effects(A):
+    specs=[('entry_close_loc','Entry close location'),('entry_gap','Entry gap'),('entry_vol_ratio','Entry volume / pre20 median'),
+           ('dist_from_pre20_high','Entry distance vs pre20 high'),('pre20_depth','Pre20 depth'),('pre10_depth','Pre10 depth'),
+           ('d1_ret','D+1 return'),('d3_ret','D+3 return'),('d5_ret','D+5 return'),('d10_ret','D+10 return'),
+           ('below_entry_share_5','First 5D below-entry share')]
+    rows=[]
+    for c,label in specs:
+        f=pd.to_numeric(A.loc[A.group.eq('TRUE_FAILURE'),c],errors='coerce').dropna()
+        g=pd.to_numeric(A.loc[A.group.eq('REACHED_1R'),c],errors='coerce').dropna()
+        if not len(f) or not len(g):continue
+        pooled=pd.concat([f,g],ignore_index=True);iqr=float(pooled.quantile(.75)-pooled.quantile(.25))
+        mf=float(f.median());mg=float(g.median())
+        rows.append({'feature':c,'label':label,'true_failure_median':mf,'reached_1r_median':mg,
+                     'delta_good_minus_fail':mg-mf,'robust_effect_iqr':(mg-mf)/iqr if abs(iqr)>1e-12 else np.nan})
+    return pd.DataFrame(rows)
+
+def _v632_run():
+    global v632_thread
+    t0=time.time()
+    try:
+        V632_DIR.mkdir(parents=True,exist_ok=True)
+        p=V630_DIR/'base_trade_path_reconciliation.csv.gz'
+        if not p.exists():raise RuntimeError('找不到 V6.30 base_trade_path_reconciliation.csv.gz')
+        P=pd.read_csv(p,compression='gzip')
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['exit_date']=pd.to_datetime(P.exit_date,errors='coerce').dt.normalize()
+        P['mfe']=pd.to_numeric(P.mfe,errors='coerce')
+        if 'admitted' in P.columns:P=P[P.admitted.astype(bool)]
+        P=P.dropna(subset=['entry_date','exit_date','mfe'])
+        P['group']=np.where(P.exit_reason.astype(str).eq('STOP7')&(P.mfe<.07),'TRUE_FAILURE','REACHED_1R')
+        ids=set(P.listing_id.astype(str))
+        M=_v615b_read_manifest();M=M[M.listing_id.astype(str).isin(ids)].copy()
+        groups={str(k):g.copy() for k,g in P.groupby(P.listing_id.astype(str))}
+        rows=[];total=len(M)
+        _v632_write(status='running',message='重建 TRUE_FAILURE vs REACHED_1R 入场前后路径',phase='features',processed=0,total=total,current='',elapsed_sec=0,error=None)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            if V632_STOP.exists():raise RuntimeError('__STOPPED__')
+            lid=str(mr.listing_id);g=groups.get(lid)
+            if g is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close','volume']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+            for _,r in g.iterrows():
+                z=_v632_feat(r,d)
+                if z is not None:z['group']=str(r.group);rows.append(z)
+            if n==1 or n%50==0 or n==total:_v632_write(status='running',message='重建 Entry / D+1/3/5/10 路径',phase='features',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('V6.32 没有生成样本')
+        E=_v632_effects(A)
+        entry_set={'entry_close_loc','entry_gap','entry_vol_ratio','dist_from_pre20_high','pre20_depth','pre10_depth'}
+        post_set={'d1_ret','d3_ret','d5_ret','d10_ret','below_entry_share_5'}
+        ent=float(E[E.feature.isin(entry_set)].robust_effect_iqr.abs().median()) if len(E[E.feature.isin(entry_set)]) else 0.
+        post=float(E[E.feature.isin(post_set)].robust_effect_iqr.abs().median()) if len(E[E.feature.isin(post_set)]) else 0.
+        if post>=max(.35,ent*1.5):
+            verdict='FAILURE_SEPARATION_AFTER_ENTRY'
+            diagnosis='差异主要出现在入场后的1–10日 follow-through；下一步应测试短期失败确认，而不是继续加静态选股过滤。'
+        elif ent>=.35:
+            verdict='ENTRY_DAY_QUALITY_SEPARATION_FOUND'
+            diagnosis='买入当天/突破前结构已有明显差异，可验证少量 Entry-quality gate。'
+        else:
+            verdict='NO_STRONG_SIMPLE_ENTRY_SEPARATOR'
+            diagnosis='简单 Entry/Trigger 变量不能稳定区分真失败，不应硬加新过滤器。'
+        top=E.assign(a=E.robust_effect_iqr.abs()).sort_values('a',ascending=False).drop(columns=['a']).head(12)
+        bools=[]
+        for c,label in [('below_entry_d1','D+1 close below entry'),('below_entry_d3','D+3 close below entry'),('below_entry_d5','D+5 close below entry')]:
+            f=A[A.group.eq('TRUE_FAILURE')][c].astype(bool);g=A[A.group.eq('REACHED_1R')][c].astype(bool)
+            bools.append({'signal':label,'true_failure_rate':float(f.mean()),'reached_1r_rate':float(g.mean()),'delta_fail_minus_good':float(f.mean()-g.mean())})
+        res={'version':'V6.32 True-Failure Entry / Trigger Autopsy','verdict':verdict,'diagnosis':diagnosis,
+             'counts':{'true_failure':int((A.group=='TRUE_FAILURE').sum()),'reached_1r':int((A.group=='REACHED_1R').sum()),'total':int(len(A))},
+             'entry_strength':ent,'post_entry_strength':post,
+             'top_differentiators':top.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'boolean_signatures':bools,
+             'purpose':'Diagnostic only. No new filter or exit. Compare V6.30 TRUE_FAILURE vs trades reaching at least +1R.',
+             'cache_note':'Reuses V6.30 BASE trades + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'Entry separation -> test max 2-3 gates. Post-entry separation -> test D+3/D+5 failure confirmation. No separator -> revisit exact JLaw trigger definitions.'}
+        V632_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V632_DIR/'v632_rows.csv.gz',index=False,compression='gzip')
+        except OSError:pass
+        _v632_write(status='done',message=f'V6.32 完成：{verdict}',phase='done',processed=3,total=3,current='Entry/Trigger attribution',elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v632_write(status='paused',message='V6.32 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v632_write(status='error',message='V6.32 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v632_write(status='error',message='V6.32 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v632_thread=None
+
+def _v632_start():
+    global v632_thread
+    if _v632_alive():return False
+    v632_thread=threading.Thread(target=_v632_run,daemon=True);v632_thread.start();return True
+
+@APP.route('/v632/run',methods=['GET','POST'])
+def v632_run():_v632_start();return redirect('/v632/true-failure-entry-autopsy')
+@APP.get('/v632')
+def v632_alias():return redirect('/v632/true-failure-entry-autopsy')
+@APP.get('/api/v632/status')
+def v632_status_api():return jsonify(_v632_status())
+@APP.get('/v632/true-failure-entry-autopsy')
+def v632_page():
+    import html;e=lambda x:html.escape(str(x));st=_v632_status();r={};cnt={}
+    if V632_RESULT.exists():
+        try:r=json.loads(V632_RESULT.read_text(encoding='utf-8'));cnt=r.get('counts',{})
+        except Exception:pass
+    running=_v632_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v632/run"><button>▶ 开始 V6.32 Entry/Trigger Autopsy</button></a>'
+    top=''.join([f"<tr><td><b>{e(x.get('label',''))}</b></td><td>{float(x.get('true_failure_median',0) or 0):+.3f}</td><td>{float(x.get('reached_1r_median',0) or 0):+.3f}</td><td>{float(x.get('delta_good_minus_fail',0) or 0):+.3f}</td><td>{float(x.get('robust_effect_iqr',0) or 0):+.2f}</td></tr>" for x in r.get('top_differentiators',[])])
+    bs=''.join([f"<tr><td><b>{e(x.get('signal',''))}</b></td><td>{float(x.get('true_failure_rate',0) or 0):.1%}</td><td>{float(x.get('reached_1r_rate',0) or 0):.1%}</td><td>{float(x.get('delta_fail_minus_good',0) or 0):+.1%}</td></tr>" for x in r.get('boolean_signatures',[])])
+    return f"""<!doctype html><html><body style="font-family:-apple-system;background:#f3f6fa;padding:16px"><div style="max-width:1500px;margin:auto"><a href="/v631/winner-protection">← V6.31</a><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h1>🔎 V6.32 True-Failure Entry / Trigger Autopsy</h1><p><b>只查连 +1R 都没到就 STOP7 的真失败。</b> 不重复旧 factor search。</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('diagnosis','等待运行'))}</p><p>TRUE_FAILURE {int(cnt.get('true_failure',0))} · REACHED_1R {int(cnt.get('reached_1r',0))} · Entry strength {float(r.get('entry_strength',0) or 0):.2f} · Post-entry strength {float(r.get('post_entry_strength',0) or 0):.2f}</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0;overflow:auto"><h2>最能区分的变量</h2><table style="width:100%"><tr><th>变量</th><th>Fail中位</th><th>Reached1R中位</th><th>Good-Fail</th><th>Effect/IQR</th></tr>{top}</table><h2>早期失败信号</h2><table style="width:100%"><tr><th>信号</th><th>TRUE_FAILURE</th><th>REACHED_1R</th><th>差值</th></tr>{bs}</table></div><div style="background:#fffbeb;padding:20px;border-radius:16px"><b>下一步：</b>{e(r.get('next_step',''))}</div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v632/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>"""
