@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v628-shortcut" style="border:3px solid #059669;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.28 Shape Deterioration & Winner Giveback Autopsy</h2><div class="muted">直接查股票自身形态为什么走差 · MFE/利润回吐/10MA/20MA/峰值回撤 · 1996–2026 · 0 Tiingo</div></div><a href="/v628/shape-giveback-autopsy"><button type="button">打开 V6.28</button></a></div></div>
+
 <div class="card" id="v627-shortcut" style="border:3px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.27 Overheat Filter Validation</h2><div class="muted">把 V6.26 找到的过热毒区真正拿掉做30年10仓Replay · BASE / EXTREME / HOT · 0 Tiingo</div></div><a href="/v627/overheat-filter-validation"><button type="button">打开 V6.27</button></a></div></div>
 
 <div class="card" id="v626-shortcut" style="border:3px solid #f97316;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔥 V6.26 Overheat / Late-Stage Failure Audit</h2><div class="muted">1996–2026 · 60D+252D 联合过热 · STOP7 / PF / 超级赢家归因 · 0 Tiingo</div></div><a href="/v626/overheat-audit"><button type="button">打开 V6.26</button></a></div></div>
@@ -20415,4 +20417,253 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>1996–2026 · 10-slot Account Replay</h2><div style="overflow:auto"><table><tr><th>方案</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Win Rate</th><th>Account Trades</th><th>候选保留</th><th>+100%赢家</th><th>+100%保留</th><th>+200%保留</th><th>+500%保留</th><th>Pass</th></tr>{trs}</table></div></div>
 <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>本轮只测：</b>{e(r.get('tests',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v627/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.28 Shape Deterioration & Winner Giveback Autopsy =========================
+V628_DIR=DATA_DIR/'v628_shape_deterioration_autopsy'
+V628_STATUS=V628_DIR/'status.json'; V628_RESULT=V628_DIR/'result.json'; V628_STOP=V628_DIR/'STOP'
+v628_thread=None
+
+def _v628_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V628_STATUS.exists():
+        try:x.update(json.loads(V628_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v628_write(**kw):
+    V628_DIR.mkdir(parents=True,exist_ok=True); x=_v628_status(); x.update(kw)
+    V628_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v628_alive(): return v628_thread is not None and v628_thread.is_alive()
+
+def _v628_fwd(close, i, n):
+    j=min(len(close)-1,i+n)
+    if j<=i or not np.isfinite(close[i]) or close[i]<=0:return np.nan
+    return float(close[j]/close[i]-1.0)
+
+def _v628_event_row(base, label, event_i, close, dates, running_peak, final_ret, max_future_ret):
+    if event_i is None:return None
+    px=float(close[event_i]); peak=float(running_peak[event_i])
+    return {
+        **base,'event':label,'event_date':str(pd.Timestamp(dates[event_i]).date()),
+        'event_profit':float(px/base['entry_px']-1.0),
+        'drawdown_from_peak':float(px/peak-1.0) if peak>0 else np.nan,
+        'fwd20':_v628_fwd(close,event_i,20),'fwd40':_v628_fwd(close,event_i,40),'fwd60':_v628_fwd(close,event_i,60),
+        'event_to_final':float(final_ret-(px/base['entry_px']-1.0)),
+        'future_plus100_from_entry':bool(max_future_ret>=1.0),
+    }
+
+def _v628_analyze_trade(r,d):
+    ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+    z=d[(d.date>=ed)&(d.date<=xd)].copy()
+    if z.empty:return None,[]
+    z=z.sort_values('date').drop_duplicates('date',keep='last')
+    close=pd.to_numeric(z.close,errors='coerce').to_numpy(float)
+    high=pd.to_numeric(z.high if 'high' in z.columns else z.close,errors='coerce').to_numpy(float)
+    dates=z.date.to_numpy()
+    ep=float(r.entry_px)
+    if not np.isfinite(ep) or ep<=0 or len(close)<2:return None,[]
+    # Avoid bad split/cache artifacts dominating diagnostics.
+    valid=np.isfinite(close)&(close>0)
+    if valid.sum()<2:return None,[]
+    close=np.where(valid,close,np.nan)
+    high=np.where(np.isfinite(high)&(high>0),high,close)
+    # Rolling MAs use only information known that day.
+    cs=pd.Series(close)
+    ma10=cs.rolling(10,min_periods=5).mean().to_numpy()
+    ma20=cs.rolling(20,min_periods=10).mean().to_numpy()
+    run_peak=np.maximum.accumulate(np.where(np.isfinite(high),high,-np.inf))
+    mfe=float(np.nanmax(high)/ep-1.0)
+    final_ret=float(r.exit_px/ep-1.0)
+    peak_i=int(np.nanargmax(high))
+    # first day threshold reached
+    reach20=np.where(high/ep-1>=.20)[0]
+    first20=int(reach20[0]) if len(reach20) else None
+    if first20 is None:
+        summary={'ticker':str(r.ticker),'listing_id':str(r.listing_id),'entry_date':str(ed.date()),
+                 'exit_date':str(xd.date()),'entry_px':ep,'final_return':final_ret,'mfe':mfe,
+                 'giveback':float(mfe-final_ret),'exit_reason':str(getattr(r,'exit_reason','')),
+                 'reached20':False,'reached30':bool(mfe>=.30),'reached50':bool(mfe>=.50),'reached100':bool(mfe>=1.0),
+                 'peak_day':peak_i,'peak_to_exit_days':int(len(z)-1-peak_i),'peak_profit':mfe}
+        return summary,[]
+    # events only after trade has first reached +20%
+    below10=0; below20=0; ev10=ev20=dd15=dd20=None
+    for i in range(first20,len(close)):
+        if np.isfinite(close[i]) and np.isfinite(ma10[i]) and close[i]<ma10[i]: below10+=1
+        else: below10=0
+        if np.isfinite(close[i]) and np.isfinite(ma20[i]) and close[i]<ma20[i]: below20+=1
+        else: below20=0
+        if ev10 is None and below10>=2:ev10=i
+        if ev20 is None and below20>=2:ev20=i
+        if np.isfinite(close[i]) and np.isfinite(run_peak[i]) and run_peak[i]>0:
+            dd=close[i]/run_peak[i]-1
+            if dd15 is None and dd<=-.15:dd15=i
+            if dd20 is None and dd<=-.20:dd20=i
+    max_future=lambda i: float(np.nanmax(high[i:])/ep-1.0) if i is not None and i<len(high) else np.nan
+    base={'ticker':str(r.ticker),'listing_id':str(r.listing_id),'entry_date':str(ed.date()),'entry_px':ep,
+          'final_return':final_ret,'mfe':mfe,'exit_reason':str(getattr(r,'exit_reason',''))}
+    events=[]
+    for lab,idx in [('2CLOSE_BELOW_10MA',ev10),('2CLOSE_BELOW_20MA',ev20),('PEAK_DD15',dd15),('PEAK_DD20',dd20)]:
+        q=_v628_event_row(base,lab,idx,close,dates,run_peak,final_ret,max_future(idx))
+        if q is not None:events.append(q)
+    summary={'ticker':str(r.ticker),'listing_id':str(r.listing_id),'entry_date':str(ed.date()),
+             'exit_date':str(xd.date()),'entry_px':ep,'final_return':final_ret,'mfe':mfe,
+             'giveback':float(mfe-final_ret),'exit_reason':str(getattr(r,'exit_reason','')),
+             'reached20':True,'reached30':bool(mfe>=.30),'reached50':bool(mfe>=.50),'reached100':bool(mfe>=1.0),
+             'peak_day':peak_i,'peak_to_exit_days':int(len(z)-1-peak_i),'peak_profit':mfe}
+    return summary,events
+
+def _v628_group_summary(S):
+    rows=[]
+    buckets=[('MFE20_30',(S.mfe>=.20)&(S.mfe<.30)),('MFE30_50',(S.mfe>=.30)&(S.mfe<.50)),
+             ('MFE50_100',(S.mfe>=.50)&(S.mfe<1.0)),('MFE100_PLUS',S.mfe>=1.0)]
+    for name,m in buckets:
+        g=S[m].copy()
+        if g.empty:continue
+        rows.append({'bucket':name,'trades':int(len(g)),'median_mfe':float(g.mfe.median()),
+                     'median_final_return':float(g.final_return.median()),'median_giveback':float(g.giveback.median()),
+                     'ended_loss_rate':float((g.final_return<=0).mean()),
+                     'stop7_rate':float(g.exit_reason.astype(str).eq('STOP7').mean()),
+                     'gave_back_half_rate':float((g.final_return<=g.mfe*.50).mean()),
+                     'gave_back_to_loss_rate':float((g.final_return<=0).mean())})
+    return pd.DataFrame(rows)
+
+def _v628_event_summary(E):
+    rows=[]
+    for ev,g in E.groupby('event'):
+        rows.append({'event':str(ev),'events':int(len(g)),
+                     'median_event_profit':float(g.event_profit.median()),
+                     'median_dd_from_peak':float(g.drawdown_from_peak.median()),
+                     'median_fwd20':float(g.fwd20.median()) if g.fwd20.notna().any() else np.nan,
+                     'median_fwd40':float(g.fwd40.median()) if g.fwd40.notna().any() else np.nan,
+                     'median_fwd60':float(g.fwd60.median()) if g.fwd60.notna().any() else np.nan,
+                     'positive_fwd40_rate':float((g.fwd40>0).mean()),
+                     'future_plus100_rate':float(g.future_plus100_from_entry.mean()),
+                     'event_to_final_median':float(g.event_to_final.median())})
+    return pd.DataFrame(rows)
+
+def _v628_run():
+    global v628_thread
+    t0=time.time()
+    try:
+        V628_DIR.mkdir(parents=True,exist_ok=True)
+        if V628_STOP.exists():V628_STOP.unlink()
+        _v628_write(status='running',message='V6.28 Shape Deterioration Autopsy 启动',phase='load',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+        mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in set(T.listing_id.astype(str))}
+        groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+        summaries=[];events=[];total=len(mm)
+        for n,(lid,mr) in enumerate(mm.items(),1):
+            if V628_STOP.exists():raise RuntimeError('__STOPPED__')
+            g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','close']).sort_values('date')
+            for _,r in g.iterrows():
+                sm,ev=_v628_analyze_trade(r,d)
+                if sm is not None:summaries.append(sm)
+                if ev:events.extend(ev)
+            if n==1 or n%100==0 or n==total:
+                _v628_write(status='running',message='Phase 1/3 · 重建每笔交易真实价格路径',phase='paths',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        if not summaries:raise RuntimeError('没有生成交易路径诊断')
+        S=pd.DataFrame(summaries);E=pd.DataFrame(events)
+        _v628_write(status='running',message='Phase 2/3 · 分析赢家回吐与形态恶化事件',phase='autopsy',processed=2,total=3,current=f'{len(S):,} trade paths',elapsed_sec=round(time.time()-t0,1),error=None)
+        B=_v628_group_summary(S)
+        ES=_v628_event_summary(E) if len(E) else pd.DataFrame()
+        reached=S[S.reached20].copy()
+        stop_after_profit=reached[reached.exit_reason.astype(str).eq('STOP7')].copy()
+        key={'trades_analyzed':int(len(S)),'reached20':int(len(reached)),
+             'reached20_rate':float(len(reached)/len(S)) if len(S) else np.nan,
+             'reached20_then_stop7':int(len(stop_after_profit)),
+             'reached20_then_stop7_rate':float(len(stop_after_profit)/len(reached)) if len(reached) else np.nan,
+             'median_giveback_after_reach20':float(reached.giveback.median()) if len(reached) else np.nan,
+             'mfe50_then_final_below20_rate':float(((S.mfe>=.50)&(S.final_return<.20)).sum()/max(1,(S.mfe>=.50).sum())),
+             'mfe100_then_final_below50_rate':float(((S.mfe>=1.0)&(S.final_return<.50)).sum()/max(1,(S.mfe>=1.0).sum()))}
+        # Diagnostic verdict: require meaningful profit-then-stop population and at least one event with negative post-event median.
+        useful=ES[(ES.events>=100)&(ES.event_to_final_median<0)] if len(ES) else pd.DataFrame()
+        if len(stop_after_profit)>=100 and len(useful):
+            verdict='SHAPE_DERIORATION_SIGNAL_FOUND'
+            diagnosis='大量交易曾先达到至少 +20%，随后仍以 STOP7/大幅回吐结束；至少一种价格形态恶化事件之后的剩余持有收益中位数为负，值得进入受控 Exit/Recycle 验证。'
+        elif len(stop_after_profit)>=100:
+            verdict='GIVEBACK_PROBLEM_FOUND_TRIGGER_UNCLEAR'
+            diagnosis='确认存在“先赚后吐回”问题，但当前 10MA/20MA/峰值回撤事件尚不能稳定指向更好的退出点。'
+        else:
+            verdict='NO_LARGE_GIVEBACK_CLUSTER'
+            diagnosis='当前30年样本没有发现足够大的“先明显盈利再 STOP7”群体，不支持继续围绕赢家回吐开发退出规则。'
+        examples=stop_after_profit.sort_values('giveback',ascending=False).head(20)
+        excols=['ticker','entry_date','exit_date','mfe','final_return','giveback','peak_day','peak_to_exit_days','exit_reason']
+        res={'version':'V6.28 Shape Deterioration & Winner Giveback Autopsy','generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data','verdict':verdict,'diagnosis':diagnosis,'key':key,
+             'mfe_buckets':B.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'event_summary':ES.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records') if len(ES) else [],
+             'worst_giveback_examples':examples[excols].replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records') if len(examples) else [],
+             'rule_note':'Diagnostic only. This version does NOT change exits. It reconstructs each trade path and asks whether profitable trades later deteriorated before the frozen STOP7/HOLD1260 exit.',
+             'events_note':'Point-in-time shape events tested only for diagnosis: two consecutive closes below 10MA; two below 20MA; 15% drawdown from running peak; 20% drawdown from running peak. Events are evaluated only after a trade first reached +20%.',
+             'not_retested':'No 60D/252D admission filter tuning. No old 10MA/20MA exit strategy rerun. No Giveback strategy rerun. No Replacement/Gate/Add-on.',
+             'cache_note':'Reuses V6.17 Stage-2 trades + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'Only if a shape event shows meaningful post-event deterioration while preserving future +100% potential should V6.29 run a small predeclared Exit + Capital-Recycle account replay.'}
+        V628_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v628_write(status='done',message=f'V6.28 完成：{verdict}',phase='done',processed=3,total=3,current='Shape/giveback attribution',elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v628_write(status='paused',message='V6.28 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v628_write(status='error',message='V6.28 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v628_write(status='error',message='V6.28 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v628_thread=None
+
+def _v628_start():
+    global v628_thread
+    if _v628_alive():return False
+    _v628_write(status='starting',message='V6.28 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v628_thread=threading.Thread(target=_v628_run,daemon=True);v628_thread.start();return True
+
+@APP.route('/v628/run',methods=['GET','POST'])
+def v628_run():_v628_start();return redirect('/v628/shape-giveback-autopsy')
+@APP.get('/v628/stop')
+def v628_stop():V628_DIR.mkdir(parents=True,exist_ok=True);V628_STOP.write_text('stop',encoding='utf-8');return redirect('/v628/shape-giveback-autopsy')
+@APP.get('/api/v628/status')
+def v628_status_api():return jsonify(_v628_status())
+
+@APP.get('/v628/shape-giveback-autopsy')
+def v628_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v628_status(); r={};k={}
+    if V628_RESULT.exists():
+        try:r=json.loads(V628_RESULT.read_text(encoding='utf-8'));k=r.get('key',{})
+        except Exception:r={};k={}
+    running=_v628_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v628/run"><button>▶ 开始 V6.28 Shape/Giveback Autopsy</button></a>'
+    stop='<a href="/v628/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    bs=''
+    for x in r.get('mfe_buckets',[]):
+        bs+=f"<tr><td><b>{e(x.get('bucket',''))}</b></td><td>{int(x.get('trades',0)):,}</td><td>{float(x.get('median_mfe',0) or 0):.1%}</td><td>{float(x.get('median_final_return',0) or 0):.1%}</td><td>{float(x.get('median_giveback',0) or 0):.1%}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('gave_back_half_rate',0) or 0):.1%}</td></tr>"
+    es=''
+    for x in r.get('event_summary',[]):
+        es+=f"<tr><td><b>{e(x.get('event',''))}</b></td><td>{int(x.get('events',0)):,}</td><td>{float(x.get('median_event_profit',0) or 0):.1%}</td><td>{float(x.get('median_dd_from_peak',0) or 0):.1%}</td><td>{float(x.get('median_fwd20',0) or 0):+.1%}</td><td>{float(x.get('median_fwd40',0) or 0):+.1%}</td><td>{float(x.get('median_fwd60',0) or 0):+.1%}</td><td>{float(x.get('positive_fwd40_rate',0) or 0):.1%}</td><td>{float(x.get('future_plus100_rate',0) or 0):.1%}</td><td>{float(x.get('event_to_final_median',0) or 0):+.1%}</td></tr>"
+    ex=''
+    for x in r.get('worst_giveback_examples',[]):
+        ex+=f"<tr><td><b>{e(x.get('ticker',''))}</b></td><td>{e(x.get('entry_date',''))}</td><td>{e(x.get('exit_date',''))}</td><td>{float(x.get('mfe',0) or 0):.1%}</td><td>{float(x.get('final_return',0) or 0):+.1%}</td><td>{float(x.get('giveback',0) or 0):.1%}</td><td>{int(x.get('peak_to_exit_days',0) or 0)}</td><td>{e(x.get('exit_reason',''))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#f0fdf4;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}</style></head><body><div class="w">
+<a href="/v627/overheat-filter-validation">← V6.27 Filter Validation</a>
+<div class="c"><h1>🔬 V6.28 Shape Deterioration & Winner Giveback Autopsy</h1><div class="info"><b>这次不再问“60天/252天为什么”。直接看每只股票自己的走势。</b><br>检查：买入以后曾经赚到 +20/+30/+50/+100% 的票，有多少后来把利润吐掉甚至 STOP7；利润开始回吐前，价格有没有跌破10MA/20MA或从自身高点回撤15%/20%。本版只验尸，不改卖点。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>阶段：{e(st.get('phase',''))} · {int(st.get('processed',0))}/{int(st.get('total',0))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="info">{e(r.get('diagnosis','尚未运行'))}</div></div>
+<div class="c"><h2>最简单的答案</h2><table><tr><th>分析交易</th><th>曾到+20%</th><th>到+20%后仍STOP7</th><th>比例</th><th>+20%组中位回吐</th><th>MFE≥50%最后&lt;20%</th><th>MFE≥100%最后&lt;50%</th></tr><tr><td>{int(k.get('trades_analyzed',0)):,}</td><td>{int(k.get('reached20',0)):,}</td><td>{int(k.get('reached20_then_stop7',0)):,}</td><td>{float(k.get('reached20_then_stop7_rate',0) or 0):.1%}</td><td>{float(k.get('median_giveback_after_reach20',0) or 0):.1%}</td><td>{float(k.get('mfe50_then_final_below20_rate',0) or 0):.1%}</td><td>{float(k.get('mfe100_then_final_below50_rate',0) or 0):.1%}</td></tr></table></div>
+<div class="c"><h2>1. 曾经赚很多，最后吐掉多少？</h2><div style="overflow:auto"><table><tr><th>最高盈利层</th><th>交易数</th><th>中位最高盈利</th><th>中位最终收益</th><th>中位回吐</th><th>STOP7</th><th>吐掉一半以上</th></tr>{bs}</table></div></div>
+<div class="c"><h2>2. 哪一种“形态走差”之后真的继续变差？</h2><div class="warn">这里不是拿10MA/20MA直接当卖出规则，而是先看事件发生以后20/40/60天还会不会继续涨。</div><div style="overflow:auto"><table><tr><th>事件</th><th>N</th><th>事件时盈利</th><th>距高点回撤</th><th>后20D</th><th>后40D</th><th>后60D</th><th>40D继续涨</th><th>之后仍能到+100%</th><th>事件→最终</th></tr>{es}</table></div></div>
+<div class="c"><h2>3. 最严重“先赚后吐”例子</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>Entry</th><th>Exit</th><th>最高赚</th><th>最终</th><th>吐掉</th><th>高点→退出天数</th><th>Exit</th></tr>{ex}</table></div></div>
+<div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note',''))}<br><b>形态事件：</b>{e(r.get('events_note',''))}<br><b>不重复：</b>{e(r.get('not_retested',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v628/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
