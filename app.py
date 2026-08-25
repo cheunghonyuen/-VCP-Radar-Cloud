@@ -6963,6 +6963,17 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 
 <div class="card" id="v616h322-shortcut" style="border:3px solid #8b5cf6"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">➕ V6.16H.3.2.2 Daily MTM Low-Disk</h2><div class="muted">10-slot daily MTM · real MaxDD / Calmar / yearly returns · BASE vs QUALITY/MFE +100%</div></div><a href="/v616h322/daily-mtm"><button type="button">打开 V6.16H.3.2.2</button></a></div></div>
 
+
+<div class="card" id="v618-shortcut" style="border:3px solid #2563eb;background:#eff6ff">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">🚀 V6.18 三目标优化</h2>
+      <div class="muted">目标：Win Rate ↑ · CAGR ↑ · MaxDD ↓。复用 V6.17 Stage 2 Cache；0 Tiingo；不重建股票池；不重复旧失败实验。</div>
+    </div>
+    <a href="/v618/optimization-lab"><button type="button">打开 V6.18 Optimization Lab</button></a>
+  </div>
+</div>
+
 <div class="card" id="v617-production-shortcut" style="border:4px solid #10b981;background:#f0fdf4">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
     <div>
