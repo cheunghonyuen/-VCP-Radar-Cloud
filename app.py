@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v635-shortcut" style="border:4px solid #9333ea;background:#faf5ff"><div><h2>🧾 V6.35 Source-Faithful Trigger Reconstruction</h2><div class="muted">从43个字幕原文重建 Pullback / Support / Trigger / Execution / Volume · 不做新回测</div><a href="/v635/source-faithful-trigger"><button type="button">打开 V6.35</button></a></div></div>
+
 <div class="card" id="v634-shortcut" style="border:4px solid #0f766e;background:#f0fdfa"><div><h2>📚 V6.34 JLaw Spec Reconciliation</h2><div class="muted">不再乱调 Exit · 对照当前代码与 JLaw 原始概念 · 标记 Proxy / Implementation / Spec drift</div><a href="/v634/jlaw-spec"><button type="button">打开 V6.34</button></a></div></div>
 
 <div class="card" id="v633-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div><h2>🚨 V6.33 Failure Confirmation Replay</h2><div class="muted">D+1/D+3/D+5 失败确认 · 次日退出 · 保留超级 Winner · 30Y 10-slot Replay</div><a href="/v633/failure-confirmation"><button type="button">打开 V6.33</button></a></div></div>
@@ -22720,3 +22722,279 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class="c"><p><b>方法：</b>{e(r.get('method',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v634/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
+
+
+# ========================= V6.35 Source-Faithful Trigger Reconstruction =========================
+V635_DIR=DATA_DIR/'v635_source_faithful_trigger_reconstruction'
+V635_RESULT=V635_DIR/'result.json'
+V635_STATUS=V635_DIR/'status.json'
+v635_thread=None
+
+def _v635_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V635_STATUS.exists():
+        try:x.update(json.loads(V635_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v635_write(**kw):
+    V635_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v635_status();x.update(kw)
+    V635_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v635_alive(): return v635_thread is not None and v635_thread.is_alive()
+
+V635_TOPICS = [
+    {
+        'topic':'First Pullback timing',
+        'keywords':['first pullback','pullback','retracement','first retracement'],
+        'current_code':'当前实现只搜 breakout 后 +2 到 +15 根，且回撤深度 2%~12%。',
+        'proxy_fields':['+2~+15 sessions','2%~12% pullback']
+    },
+    {
+        'topic':'Pivot / 10MA / 20MA support zone',
+        'keywords':['pivot','10ma','10 day','20ma','20 day','support','support area','support zone'],
+        'current_code':'当前实现对 Pivot/10MA/20MA 使用固定距离容差，并要求多 anchor 聚集。',
+        'proxy_fields':['pivot 1.8% tolerance','10MA/20MA 1.5% tolerance','anchor cluster <=2.5%']
+    },
+    {
+        'topic':'Re-strength / trigger confirmation',
+        'keywords':['re-strength','restrength','strength','confirmation','reclaim','turn up','turn higher','trigger'],
+        'current_code':'META 必须等 _v613_restrength_trigger；普通 Pullback 则不是同一套 trigger。',
+        'proxy_fields':['custom re-strength trigger']
+    },
+    {
+        'topic':'Execution timing',
+        'keywords':['buy','entry','enter','open','next day','next session','confirmation'],
+        'current_code':'普通 Pullback 满足条件后下一交易日 open 入场；若 next open > signal close*1.03 则跳过。',
+        'proxy_fields':['next-session open execution','3% skip-chase rule']
+    },
+    {
+        'topic':'Volume on pullback / breakout',
+        'keywords':['low volume','dry up','dry-up','volume contraction','volume','breakout volume'],
+        'current_code':'回踩 volume / v20 <=0.85 且相对 breakout volume <=0.80；breakout 也有固定量比门槛。',
+        'proxy_fields':['0.85 pullback volume ratio','0.80 vs breakout volume','1.2x breakout volume']
+    },
+]
+
+def _v635_corpus():
+    rows=[]
+    idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid)
+        text=''
+        try:
+            if tp.exists():
+                text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'))
+                text=str(q.get('transcript',''))
+        except Exception:
+            pass
+        if text:
+            rows.append({'video_id':vid,'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+def _v635_hits(corpus, keywords, max_hits=30):
+    hits=[]
+    seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        for kw in keywords:
+            start=0
+            kl=kw.lower()
+            while True:
+                pos=low.find(kl,start)
+                if pos<0:break
+                a=max(0,pos-220);b=min(len(row['text']),pos+len(kw)+360)
+                snippet=row['text'][a:b].strip()
+                key=(row['video_id'],snippet[:180])
+                if key not in seen:
+                    seen.add(key)
+                    hits.append({'video_id':row['video_id'],'term':kw,'snippet':snippet})
+                    if len(hits)>=max_hits:return hits
+                start=pos+max(1,len(kl))
+    return hits
+
+def _v635_numeric_mentions(snippet):
+    # Pull out explicit numbers near trigger language. We do NOT assume they are rules.
+    pats=re.findall(r'(?<![A-Za-z])(?:\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*(?:day|days|session|sessions|week|weeks|r|R))',snippet)
+    out=[]
+    for x in pats:
+        x=x.strip()
+        if x not in out:out.append(x)
+    return out[:12]
+
+def _v635_assess_topic(topic, hits):
+    nums=[]
+    for h in hits:
+        nums.extend(_v635_numeric_mentions(h['snippet']))
+    nums_unique=[]
+    for x in nums:
+        if x not in nums_unique:nums_unique.append(x)
+
+    # Strictly source-faithful: only exact phrase presence is considered evidence.
+    # We intentionally do not "infer" that our precise thresholds are JLaw rules.
+    if not hits:
+        status='NO_SOURCE_HIT'
+        assessment='现有字幕缓存没有找到足够直接的相关片段；不能把当前数字阈值视为 JLaw 原规则。'
+    elif len(hits)>=3:
+        status='CONCEPT_SUPPORTED_NUMERICS_UNVERIFIED'
+        assessment='字幕对该概念有多处直接讨论，但当前代码中的精确数字/窗口仍需逐条原文确认，不能自动继承。'
+    else:
+        status='LIMITED_SOURCE_SUPPORT'
+        assessment='只有少量直接片段；概念可能有支持，但不足以验证当前实现细节。'
+
+    return status,assessment,nums_unique
+
+def _v635_run():
+    global v635_thread
+    t0=time.time()
+    try:
+        _v635_write(status='running',message='读取43个已缓存字幕并重建 Trigger 原文证据…',elapsed_sec=0,error=None)
+        corpus=_v635_corpus()
+        topics=[]
+
+        for spec in V635_TOPICS:
+            hits=_v635_hits(corpus,spec['keywords'],max_hits=24)
+            status,assessment,nums=_v635_assess_topic(spec['topic'],hits)
+
+            # Keep only the best compact evidence set for page readability.
+            display_hits=[]
+            used_videos=set()
+            for h in hits:
+                if h['video_id'] not in used_videos or len(display_hits)<5:
+                    display_hits.append(h);used_videos.add(h['video_id'])
+                if len(display_hits)>=8:break
+
+            topics.append({
+                'topic':spec['topic'],
+                'current_code':spec['current_code'],
+                'proxy_fields':spec['proxy_fields'],
+                'source_status':status,
+                'assessment':assessment,
+                'hit_count':len(hits),
+                'numeric_mentions':nums,
+                'evidence_hits':display_hits,
+            })
+
+        # Construct only source-faithful reconstruction principles; no numeric rules are invented.
+        principles=[
+            {
+                'name':'Pullback definition',
+                'reconstruction':'Use the source wording around “first pullback / retracement” as the event definition. Do not hard-code +2~+15 sessions or 2%~12% unless those exact bounds are explicitly supported in source context.',
+                'action':'REMOVE_UNVERIFIED_NUMERIC_PROXY'
+            },
+            {
+                'name':'Support zone definition',
+                'reconstruction':'Treat Pivot / 10MA / 20MA as contextual support references. Do not require 1.8% / 1.5% / 2.5% geometric tolerances unless the source explicitly states equivalent precision.',
+                'action':'REPLACE_WITH_SOURCE_CONTEXT'
+            },
+            {
+                'name':'Trigger confirmation',
+                'reconstruction':'Unify ordinary Pullback and META around the source-supported confirmation language. Do not let one path buy automatically next open while another requires a custom re-strength trigger unless the source clearly distinguishes them.',
+                'action':'UNIFY_TRIGGER_LOGIC'
+            },
+            {
+                'name':'Execution',
+                'reconstruction':'Separate “signal is valid” from “how backtest executes.” Next-session open may remain an execution assumption, but it must be labeled as an execution model, not a JLaw trading rule.',
+                'action':'LABEL_EXECUTION_ASSUMPTION'
+            },
+            {
+                'name':'Volume',
+                'reconstruction':'Preserve the source concept of quieter pullback / constructive volume behavior, but remove fixed 0.85 / 0.80 / 1.2x thresholds unless explicitly supported.',
+                'action':'REMOVE_UNVERIFIED_NUMERIC_PROXY'
+            },
+        ]
+
+        supported=sum(t['source_status']=='CONCEPT_SUPPORTED_NUMERICS_UNVERIFIED' for t in topics)
+        nohit=sum(t['source_status']=='NO_SOURCE_HIT' for t in topics)
+        verdict='SOURCE_FAITHFUL_RECONSTRUCTION_READY' if len(corpus)>0 else 'TRANSCRIPT_CACHE_UNAVAILABLE'
+
+        res={
+            'version':'V6.35 Source-Faithful Trigger Reconstruction',
+            'verdict':verdict,
+            'summary':{
+                'transcript_videos':len(corpus),
+                'topics':len(topics),
+                'concept_supported_topics':supported,
+                'no_source_hit_topics':nohit,
+            },
+            'topics':topics,
+            'principles':principles,
+            'method':'Source-only reconstruction. This version does not claim that a number is a JLaw rule merely because the topic appears in subtitles. Numeric thresholds remain unverified unless the source context itself explicitly supports them.',
+            'important':'This is not a backtest and does not change production trading rules. It creates a source-faithful spec for the next controlled implementation.',
+            'next_step':'Build V6.36 as a controlled A/B between CURRENT_PROXY and SOURCE_FAITHFUL_TRIGGER only. Keep universe, DNA, stop, portfolio, winner holding and 1996–2026 benchmark frozen. Do not add unrelated factors or exits.',
+            'cache_note':'Reads existing Railway YouTube transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+
+        V635_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v635_write(status='done',message=f'V6.35 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v635_write(status='error',message='V6.35 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v635_thread=None
+
+def _v635_start():
+    global v635_thread
+    if _v635_alive():return False
+    _v635_write(status='starting',message='V6.35 正在启动',elapsed_sec=0,error=None)
+    v635_thread=threading.Thread(target=_v635_run,daemon=True);v635_thread.start();return True
+
+@APP.route('/v635/run',methods=['GET','POST'])
+def v635_run():_v635_start();return redirect('/v635/source-faithful-trigger')
+@APP.get('/v635')
+def v635_alias():return redirect('/v635/source-faithful-trigger')
+@APP.get('/api/v635/status')
+def v635_status_api():return jsonify(_v635_status())
+
+@APP.get('/v635/source-faithful-trigger')
+def v635_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v635_status();r={};sm={}
+    if V635_RESULT.exists():
+        try:r=json.loads(V635_RESULT.read_text(encoding='utf-8'));sm=r.get('summary',{})
+        except Exception:pass
+    running=_v635_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v635/run"><button>▶ 开始 V6.35 Source Reconstruction</button></a>'
+    err=f"<div style='padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    topic_html=''
+    for t in r.get('topics',[]):
+        ev=''
+        for h in t.get('evidence_hits',[]):
+            ev+=f"<div style='margin:8px 0;padding:10px;background:#f8fafc;border-radius:10px'><b>{e(h.get('video_id'))}</b> · {e(h.get('term'))}<br>{e(h.get('snippet'))}</div>"
+        nums=', '.join(t.get('numeric_mentions',[])) or '—'
+        proxies=', '.join(t.get('proxy_fields',[]))
+        topic_html+=f"""
+        <div class="c">
+          <h2>{e(t.get('topic'))}</h2>
+          <p><b>当前代码：</b>{e(t.get('current_code'))}</p>
+          <p><b>Proxy：</b>{e(proxies)}</p>
+          <p><b>Source status：</b>{e(t.get('source_status'))} · hits {int(t.get('hit_count',0))}</p>
+          <p><b>字幕中出现的数字：</b>{e(nums)}</p>
+          <p><b>判断：</b>{e(t.get('assessment'))}</p>
+          <details><summary style="cursor:pointer;font-weight:800">展开原文证据片段</summary>{ev or '<p>无直接片段</p>'}</details>
+        </div>"""
+
+    principle_rows=''
+    for p in r.get('principles',[]):
+        principle_rows+=f"<tr><td><b>{e(p.get('name'))}</b></td><td>{e(p.get('reconstruction'))}</td><td>{e(p.get('action'))}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;vertical-align:top;text-align:left}}</style></head><body><div class="w">
+<a href="/v634/jlaw-spec">← V6.34 Spec Reconciliation</a>
+<div class="c"><h1>🧾 V6.35 Source-Faithful Trigger Reconstruction</h1><p><b>只做一件事：</b>从现有 JLaw 字幕原文重建 Pullback / Support / Trigger / Execution / Volume 的规则边界，不再把我们的固定数字自动当成 JLaw 规则。</p></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(sm.get('transcript_videos',0))} · Topics：{int(sm.get('topics',0))} · 概念有直接支持：{int(sm.get('concept_supported_topics',0))} · 无直接命中：{int(sm.get('no_source_hit_topics',0))}</p><p>{e(r.get('important','等待运行'))}</p></div>
+{topic_html}
+<div class="c"><h2>Source-Faithful Reconstruction Principles</h2><table><tr><th>项目</th><th>重建原则</th><th>动作</th></tr>{principle_rows}</table></div>
+<div class="c"><p><b>方法：</b>{e(r.get('method',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v635/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
