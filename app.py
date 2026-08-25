@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v631-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.31 Winner Profit Protection</h2><div class="muted">不固定止盈 · +1R/+2R/+3R/+5R 后逐级抬 Stop · 保留超级 Winner · 30Y 10-slot Replay</div></div><a href="/v631/winner-protection"><button type="button">打开 V6.31</button></a></div></div>
+
 <div class="card" id="v630-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.30 Trade Path / Win-Rate Reconciliation</h2><div class="muted">不调参数 · 查清 6% Win Rate：真失败 vs 先赚后吐 · +1R/+2R/+3R/+10/+20% 路径归因</div></div><a href="/v630/winrate-reconciliation"><button type="button">打开 V6.30</button></a></div></div>
 
 <div class="card" id="v629-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">💰 V6.29 Take-Profit / R-Multiple / Capital Recycling</h2><div class="muted">+12% / +20% / +30% · +20%卖半+30%清仓 · 3R · 2R/3R分批 · 卖出后快速换新 VCP</div></div><a href="/v629/take-profit-recycling"><button type="button">打开 V6.29</button></a></div></div>
@@ -21821,3 +21823,322 @@ def v630_page():
     ms=''.join([f"<tr><td><b>{e(x.get('milestone',''))}</b></td><td>{int(x.get('all_base_count',0)):,}</td><td>{float(x.get('all_base_rate',0) or 0):.1%}</td><td>{int(x.get('stop7_count_before_stop',0)):,}</td><td>{float(x.get('stop7_rate_before_stop',0) or 0):.1%}</td></tr>" for x in r.get('milestones',[])])
     gs=''.join([f"<tr><td><b>{e(x.get('group',''))}</b></td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('share_of_base',0) or 0):.1%}</td><td>{float(x.get('share_of_stop7',0) or 0):.1%}</td><td>{float(x.get('median_mfe',0) or 0):.1%}</td><td>{float(x.get('median_final',0) or 0):+.1%}</td><td>{float(x.get('median_giveback',0) or 0):.1%}</td></tr>" for x in r.get('groups',[])])
     return f'''<!doctype html><html><body style="font-family:-apple-system;background:#f3f6fa;padding:16px"><div style="max-width:1600px;margin:auto"><a href="/v629/take-profit-recycling">← V6.29</a><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h1>🧭 V6.30 Trade Path / Win-Rate Reconciliation</h1><p><b>不调参数，只查 6% Win Rate 为什么这么低。</b> 1R = BASE 固定7%风险。</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('diagnosis','等待运行'))}</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0;overflow:auto"><h2>责任拆分</h2><table style="width:100%;border-collapse:collapse"><tr><th>BASE</th><th>Final WR</th><th>STOP7</th><th>STOP率</th><th>未到1R就STOP</th><th>占STOP7</th><th>到1R后STOP</th><th>占STOP7</th><th>到2R后STOP</th><th>到20%后STOP</th><th>最终+100%</th></tr><tr><td>{int(sm.get('base_trades',0)):,}</td><td>{float(sm.get('base_final_win_rate',0) or 0):.1%}</td><td>{int(sm.get('stop7_trades',0)):,}</td><td>{float(sm.get('stop7_rate',0) or 0):.1%}</td><td>{int(sm.get('true_failure_stop_before_1r',0)):,}</td><td>{float(sm.get('true_failure_share_of_stop7',0) or 0):.1%}</td><td>{int(sm.get('stop_after_1r',0)):,}</td><td>{float(sm.get('stop_after_1r_share_of_stop7',0) or 0):.1%}</td><td>{int(sm.get('stop_after_2r',0)):,}</td><td>{int(sm.get('stop_after_20pct',0)):,}</td><td>{int(sm.get('final_100pct_plus',0)):,}</td></tr></table><h2>路径里程碑</h2><table style="width:100%"><tr><th>里程碑</th><th>BASE笔数</th><th>BASE率</th><th>STOP7曾达到</th><th>STOP7比例</th></tr>{ms}</table><h2>交易类型</h2><table style="width:100%"><tr><th>类型</th><th>N</th><th>占BASE</th><th>占STOP7</th><th>中位MFE</th><th>中位最终</th><th>中位Giveback</th></tr>{gs}</table></div><div style="background:#fffbeb;padding:20px;border-radius:16px"><b>下一步：</b>{e(r.get('next_step',''))}</div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v630/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+
+
+# ========================= V6.31 Winner Profit Protection / Ratchet Stop Replay =========================
+V631_DIR=DATA_DIR/'v631_winner_profit_protection'
+V631_STATUS=V631_DIR/'status.json'; V631_RESULT=V631_DIR/'result.json'; V631_STOP=V631_DIR/'STOP'
+v631_thread=None
+
+def _v631_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V631_STATUS.exists():
+        try:x.update(json.loads(V631_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v631_write(**kw):
+    V631_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v631_status(); x.update(kw)
+    V631_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v631_alive(): return v631_thread is not None and v631_thread.is_alive()
+
+V631_VARIANTS = {
+    'BASE_30Y': [],
+    # Very gentle: once +1R is seen, never allow the trade to become a loss again.
+    'PROTECT_1R_BE': [(1.0, 0.0)],
+    # Only protect after a stronger move: +2R reached -> protect +1R.
+    'PROTECT_2R_1R': [(2.0, 1.0)],
+    # Gentle staircase. New ratchet becomes active NEXT session, never same-day.
+    'LADDER_GENTLE': [(1.0, 0.0), (2.0, 0.5), (3.0, 1.0), (5.0, 2.0)],
+    # Stronger staircase, included as a bounded contrast rather than a grid search.
+    'LADDER_STRONG': [(1.0, 0.0), (2.0, 1.0), (3.0, 2.0), (5.0, 3.0)],
+}
+
+def _v631_exit_event(r, d, variant):
+    """
+    Frozen BASE stop = -7%. Ratchets only raise the stop after a profit milestone
+    has been observed. To avoid same-day OHLC ordering bias, a newly earned ratchet
+    becomes effective on the NEXT session.
+    """
+    if variant=='BASE_30Y':
+        return {'exit_date':pd.Timestamp(r.exit_date).normalize(),'exit_px':float(r.exit_px),
+                'reason':str(r.exit_reason or 'BASE_EXIT'),'peak_r':np.nan,'ratchet_r':np.nan}
+
+    nh,_=_v629_clean_path(d,r)
+    if nh is None or nh.empty:
+        return {'exit_date':pd.Timestamp(r.exit_date).normalize(),'exit_px':float(r.exit_px),
+                'reason':str(r.exit_reason or 'BASE_EXIT'),'peak_r':np.nan,'ratchet_r':np.nan}
+
+    ep=float(r.entry_px); R=.07
+    op=pd.to_numeric(nh.open,errors='coerce').to_numpy(float)
+    hi=pd.to_numeric(nh.high,errors='coerce').to_numpy(float)
+    lo=pd.to_numeric(nh.low,errors='coerce').to_numpy(float)
+    dates=pd.to_datetime(nh.date,errors='coerce').dt.normalize().tolist()
+
+    active_stop_r=-1.0     # -1R = -7%
+    next_stop_r=active_stop_r
+    peak_r=-np.inf
+
+    ladder=V631_VARIANTS[variant]
+
+    for i,dt in enumerate(dates):
+        # Activate only what was earned on prior sessions.
+        active_stop_r=max(active_stop_r,next_stop_r)
+        stop_px=ep*(1.0+active_stop_r*R)
+
+        oo=op[i] if i<len(op) else np.nan
+        ll=lo[i] if i<len(lo) else np.nan
+        hh=hi[i] if i<len(hi) else np.nan
+
+        # Stop is checked first using the stop level known before this session.
+        if np.isfinite(ll) and ll<=stop_px:
+            xp=float(oo) if np.isfinite(oo) and oo>0 and oo<stop_px else float(stop_px)
+            return {'exit_date':pd.Timestamp(dt),'exit_px':xp,
+                    'reason':f'RATCHET_STOP_{active_stop_r:+.1f}R',
+                    'peak_r':float(peak_r) if np.isfinite(peak_r) else np.nan,
+                    'ratchet_r':float(active_stop_r)}
+
+        # After surviving the session, use today's high to earn a tighter stop for tomorrow.
+        if np.isfinite(hh) and hh>0:
+            today_r=(hh/ep-1.0)/R
+            peak_r=max(peak_r,float(today_r))
+            earned=next_stop_r
+            for trigger_r, protect_r in ladder:
+                if peak_r>=trigger_r:
+                    earned=max(earned,float(protect_r))
+            next_stop_r=max(next_stop_r,earned)
+
+    return {'exit_date':pd.Timestamp(r.exit_date).normalize(),'exit_px':float(r.exit_px),
+            'reason':str(r.exit_reason or 'BASE_EXIT'),
+            'peak_r':float(peak_r) if np.isfinite(peak_r) else np.nan,
+            'ratchet_r':float(active_stop_r)}
+
+def _v631_build_trades(T,t0):
+    M=_v615b_read_manifest()
+    if M is None or M.empty: raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str)); M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    variants=list(V631_VARIANTS.keys())
+    rows=[]; price={}; date_set=set(); total=len(M)
+
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V631_STOP.exists(): raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id); g=groups.get(lid)
+        if g is None or g.empty: continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty: continue
+        d=d.copy(); d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,pd.to_numeric(dz.close,errors='coerce').astype(float)))
+            date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            for v in variants:
+                ex=_v631_exit_event(r,d,v)
+                rows.append({
+                    'variant':v,'listing_id':lid,'ticker':str(r.ticker),
+                    'entry_date':pd.Timestamp(r.entry_date).normalize(),'entry_px':float(r.entry_px),
+                    'exit_date':pd.Timestamp(ex['exit_date']).normalize(),'exit_px':float(ex['exit_px']),
+                    'exit_reason':str(ex['reason']),'peak_r':ex.get('peak_r'),'ratchet_r':ex.get('ratchet_r')
+                })
+
+        if n==1 or n%50==0 or n==total:
+            _v631_write(status='running',message='Phase 1/3 · 构建 Profit-Protection 交易路径',
+                        phase='trade_paths',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    if not rows: raise RuntimeError('没有生成 V6.31 trades')
+    return pd.DataFrame(rows), price, sorted(date_set)
+
+def _v631_replay(X,price,cal,label,t0,vi,vn):
+    X=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=X.to_dict('index'); entries={}; exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.0; pos={}; last={}; ledger=[]; eqrows=[]; skipped=0; admitted=0; step=max(1,len(cal)//24)
+
+    for di,dt in enumerate(cal,1):
+        if V631_STOP.exists(): raise RuntimeError('__STOPPED__')
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None: continue
+            xp=float(rec[i]['exit_px']); proceeds=p['shares']*xp; cash+=proceeds
+            ret=xp/p['entry_px']-1.0
+            ledger.append({'ret':ret,'pnl':proceeds-p['cost'],'reason':str(rec[i]['exit_reason']),
+                           'entry_date':p['entry_date'],'exit_date':dt})
+            last.pop(i,None)
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp; hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10: skipped+=1; continue
+            r=rec[i]; ep=float(r['entry_px']); target=eq_now/10.0
+            if ep<=0 or cash+1e-12<target: skipped+=1; continue
+            cash-=target; shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep; admitted+=1
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp; hv+=p['shares']*cp
+        eq=cash+hv; eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v631_write(status='running',message=f'Phase 2/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=label,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']); L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]); end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0
+    dd=C.equity/C.equity.cummax()-1; maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum()); gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=float(gp/gl) if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avg_win=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avg_loss=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        ratchet_share=float(L.reason.astype(str).str.startswith('RATCHET_STOP').mean())
+        avg_hold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+        winner100=int((L.ret>=1.0).sum()); winner200=int((L.ret>=2.0).sum()); winner500=int((L.ret>=5.0).sum())
+    else:
+        pf=wr=avg_win=avg_loss=ratchet_share=avg_hold=np.nan
+        winner100=winner200=winner500=0
+
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':pf,'win_rate':wr,'avg_win':avg_win,'avg_loss':avg_loss,
+            'ratchet_exit_share':ratchet_share,'avg_hold_days':avg_hold,
+            'winner100':winner100,'winner200':winner200,'winner500':winner500,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),
+            'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v631_run():
+    global v631_thread
+    t0=time.time()
+    try:
+        V631_DIR.mkdir(parents=True,exist_ok=True)
+        if V631_STOP.exists():V631_STOP.unlink()
+        _v631_write(status='running',message='V6.31 Winner Profit Protection 启动',phase='load',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty: raise RuntimeError('1996–2026 没有 Stage-2 trades')
+
+        META,price,cal=_v631_build_trades(T,t0)
+        variants=list(V631_VARIANTS.keys())
+        rows=[]
+        for i,v in enumerate(variants,1):
+            rows.append(_v631_replay(META,price,cal,v,t0,i,len(variants)))
+
+        O=pd.DataFrame(rows)
+        B=O[O.strategy.eq('BASE_30Y')].iloc[0]
+        for c in ['cagr','maxdd','profit_factor','winner100','winner200','winner500']:
+            O['delta_'+c]=O[c]-float(B[c])
+
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['winner200_retention']=O.winner200/max(1,float(B.winner200))
+        O['winner500_retention']=O.winner500/max(1,float(B.winner500))
+
+        O['screen_pass']=(
+            O.strategy.ne('BASE_30Y') &
+            (O.cagr>float(B.cagr)) &
+            (O.maxdd>=float(B.maxdd)) &
+            (O.profit_factor>=float(B.profit_factor)*0.80) &
+            (O.winner100_retention>=0.80)
+        )
+        O=O.sort_values(['screen_pass','cagr','calmar'],ascending=[False,False,False]).reset_index(drop=True)
+
+        verdict='WINNER_PROTECTION_CANDIDATE' if O.screen_pass.any() else 'NO_WINNER_PROTECTION_PASS'
+        res={
+            'version':'V6.31 Winner Profit Protection / Ratchet Stop Replay',
+            'generated_at':datetime.now(timezone.utc).isoformat(),
+            'window':'1996-01-01 through available 2026 data',
+            'verdict':verdict,
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'tests':'Exactly five predeclared variants: BASE; +1R then breakeven; +2R then protect +1R; gentle ladder (+1R→0R, +2R→+0.5R, +3R→+1R, +5R→+2R); strong ladder (+1R→0R, +2R→+1R, +3R→+2R, +5R→+3R). No grid search.',
+            'timing_note':'A newly earned ratchet is activated only on the NEXT trading session. This avoids assuming whether same-day high or low happened first.',
+            'purpose':'Protect profitable trades without capping upside. There is no fixed take-profit. Real super-winners are allowed to continue until a ratchet or frozen BASE exit is hit.',
+            'data_note':'Uses V6.28.2 split-normalized paths and V6.28.4-style isolated bad-high repair for milestone detection; no winner blacklist.',
+            'acceptance':'PASS only if CAGR beats BASE, MaxDD is no worse than BASE, PF retains at least 80% of BASE, and at least 80% of BASE +100% winners remain.',
+            'cache_note':'1996–2026; reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.',
+            'next_step':'If one ratchet passes, validate yearly/stress-window stability. If none passes, stop generic winner-protection tuning and move to the V6.30-identified true-failure Entry/Trigger branch.'
+        }
+        V631_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V631_DIR/'v631_results.csv',index=False)
+        except OSError:pass
+
+        _v631_write(status='done',message=f'V6.31 完成：{verdict}',phase='done',processed=3,total=3,
+                    current=str(O.iloc[0].strategy),elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v631_write(status='paused',message='V6.31 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v631_write(status='error',message='V6.31 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v631_write(status='error',message='V6.31 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v631_thread=None
+
+def _v631_start():
+    global v631_thread
+    if _v631_alive(): return False
+    _v631_write(status='starting',message='V6.31 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v631_thread=threading.Thread(target=_v631_run,daemon=True); v631_thread.start(); return True
+
+@APP.route('/v631/run',methods=['GET','POST'])
+def v631_run(): _v631_start(); return redirect('/v631/winner-protection')
+@APP.get('/v631')
+def v631_alias(): return redirect('/v631/winner-protection')
+@APP.get('/v631/stop')
+def v631_stop():
+    V631_DIR.mkdir(parents=True,exist_ok=True); V631_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v631/winner-protection')
+@APP.get('/api/v631/status')
+def v631_status_api(): return jsonify(_v631_status())
+
+@APP.get('/v631/winner-protection')
+def v631_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v631_status(); r={}
+    if V631_RESULT.exists():
+        try:r=json.loads(V631_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v631_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v631/run"><button>▶ 开始 V6.31 Winner Protection Replay</button></a>'
+    stop='<a href="/v631/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ PASS' if x.get('screen_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('ratchet_exit_share',0) or 0):.1%}</td><td>{float(x.get('avg_hold_days',0) or 0):.0f}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1750px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v630/winrate-reconciliation">← V6.30 Win-Rate Audit</a>
+<div class="c"><h1>🛡️ V6.31 Winner Profit Protection / Ratchet Stop</h1><div class="info"><b>不设 Take Profit，不砍上涨空间。</b><br>股票先证明自己：达到 +1R/+2R/+3R/+5R 后，才把最坏退出逐级抬高。新止损只从下一交易日生效，避免用日内先后顺序作弊。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>1996–2026 · 10-slot Replay</h2><div style="overflow:auto"><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Ratchet Exit</th><th>Avg Hold</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div></div>
+<div class="c"><div class="warn"><b>本轮：</b>{e(r.get('tests',''))}<br><b>时序：</b>{e(r.get('timing_note',''))}<br><b>目的：</b>{e(r.get('purpose',''))}<br><b>数据：</b>{e(r.get('data_note',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v631/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
