@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v638-shortcut" style="border:4px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧩 V6.38 Pullback / Arm Source Reconstruction</h2><div class="muted">只查 touch→arm 主延迟 · 对照 JLaw 字幕原文 · 不回测 · 不碰 Exit</div></div><a href="/v638/pullback-arm-source"><button type="button">打开 V6.38</button></a></div></div>
+
 <div class="card" id="v637-shortcut" style="border:4px solid #8b5cf6;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.37 Trigger Latency Autopsy</h2><div class="muted">拆解 Source Trigger 29.4-session 等待 · Support Touch / Quiet Arm / Re-strength Confirmation · 不改策略</div></div><a href="/v637/trigger-latency"><button type="button">打开 V6.37</button></a></div></div>
 
 <div class="card" id="v636-shortcut" style="border:4px solid #0891b2;background:#ecfeff"><div><h2>⚖️ V6.36 CURRENT_PROXY vs SOURCE_FAITHFUL_TRIGGER</h2><div class="muted">冻结其它全部规则 · 只替换 Entry/Trigger · 移除无原文支持的数字 Proxy · 30Y 10-slot A/B</div><a href="/v636/source-trigger-ab"><button type="button">打开 V6.36</button></a></div></div>
@@ -23517,3 +23519,236 @@ def v637_page():
 <div class="c"><h2>未触发候选：卡在哪里</h2><table><tr><th>Failure Stage</th><th>N</th><th>% All</th><th>% Failures</th></tr>{fr}</table></div>
 <div class="c"><div class="warn"><b>下一步：</b>{e(r.get("next_step","跑完后只重建最大延迟/失败阶段对应的 JLaw 原始定义；不碰 Exit。"))}<br><b>Cache：</b>{e(r.get("cache_note","Reuses V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild."))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch("/api/v637/status",{{cache:"no-store"}}),x=await q.json();if(x.status==="starting"||x.status==="running")location.reload()}}catch(e){{}}}},2500)</script>"""
+
+
+# ========================= V6.38 Pullback / Arm Source Reconstruction =========================
+V638_DIR=DATA_DIR/'v638_pullback_arm_source_reconstruction'
+V638_STATUS=V638_DIR/'status.json'; V638_RESULT=V638_DIR/'result.json'
+v638_thread=None
+
+def _v638_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V638_STATUS.exists():
+        try:x.update(json.loads(V638_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v638_write(**kw):
+    V638_DIR.mkdir(parents=True,exist_ok=True);x=_v638_status();x.update(kw)
+    V638_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v638_alive(): return v638_thread is not None and v638_thread.is_alive()
+
+def _v638_corpus():
+    rows=[]
+    idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid)
+        text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'))
+                text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:rows.append({'video_id':vid,'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+def _v638_hits(corpus, terms, max_hits=40):
+    hits=[];seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        for term in terms:
+            t=term.lower();start=0
+            while True:
+                pos=low.find(t,start)
+                if pos<0:break
+                a=max(0,pos-260);b=min(len(row['text']),pos+len(term)+420)
+                sn=row['text'][a:b].strip()
+                key=(row['video_id'],sn[:220])
+                if key not in seen:
+                    seen.add(key);hits.append({'video_id':row['video_id'],'term':term,'snippet':sn})
+                    if len(hits)>=max_hits:return hits
+                start=pos+max(1,len(t))
+    return hits
+
+def _v638_classify_language(snippet):
+    low=snippet.lower()
+    out=[]
+    # process / context language
+    for k,label in [
+        ('as it pulls back','PROCESS_PULLBACK'),
+        ('pulls back','PROCESS_PULLBACK'),
+        ('come into','APPROACH_SUPPORT'),
+        ('comes into','APPROACH_SUPPORT'),
+        ('support','SUPPORT_CONTEXT'),
+        ('10 day','10MA_CONTEXT'),
+        ('20 day','20MA_CONTEXT'),
+        ('volume dries','VOLUME_DRYING'),
+        ('dry up','VOLUME_DRYING'),
+        ('lower volume','LOWER_VOLUME'),
+        ('quiet','QUIET_VOLUME'),
+        ('tight','TIGHT_ACTION'),
+        ('turn up','RE_STRENGTH'),
+        ('reclaim','RE_STRENGTH'),
+        ('confirmation','CONFIRMATION'),
+        ('pivot','PIVOT_CONTEXT'),
+    ]:
+        if k in low and label not in out:out.append(label)
+    return out
+
+def _v638_run():
+    global v638_thread
+    t0=time.time()
+    try:
+        _v638_write(status='running',message='读取 JLaw 字幕，专查 Pullback → Arm 的原始语义…',elapsed_sec=0,error=None)
+        corpus=_v638_corpus()
+
+        topics=[
+            {
+                'topic':'Does pullback support need same-day overlap?',
+                'terms':['pullback','support','10 day','20 day','pivot'],
+                'question':'JLaw 是否明确要求某一天的 high/low 必须“穿过” Pivot/10MA/20MA 才算 support touch？',
+                'current_proxy':'V6.36 要求当天 bar 的 low<=anchor<=high，才算 touch。'
+            },
+            {
+                'topic':'Does quiet volume need simultaneous confirmation?',
+                'terms':['low volume','lower volume','volume dry','dry up','quiet volume','pullback volume'],
+                'question':'JLaw 是把“低量回踩”描述为一个过程/状态，还是要求 touch 当天同时低于 breakout volume 和20日中位量？',
+                'current_proxy':'V6.36 要求 touch 同一天 volume < breakout volume AND volume < rolling-20 median。'
+            },
+            {
+                'topic':'Constructive behavior during pullback',
+                'terms':['constructive','tight','close','support','hold support','pullback'],
+                'question':'JLaw 对 constructive pullback 的判断是单日 close 站在 anchor 上，还是多日走势/不破支撑/收紧？',
+                'current_proxy':'V6.36 touch 当天至少 close>=一个 touched anchor 才能 Arm。'
+            },
+            {
+                'topic':'When is pullback tradeable / armed?',
+                'terms':['buy','entry','pullback','turn up','trigger','reclaim','strength','confirmation'],
+                'question':'JLaw 在什么时点认为 pullback 已经可以交易：触支撑即买、缩量后买、还是等重新转强？',
+                'current_proxy':'V6.36 先 touch+quiet+constructive 同日 Arm，再等 bullish close > prior high 且站回 support area。'
+            },
+        ]
+
+        rows=[]
+        for t in topics:
+            hits=_v638_hits(corpus,t['terms'],40)
+            labels={}
+            numeric=[]
+            for h in hits:
+                for lab in _v638_classify_language(h['snippet']):
+                    labels[lab]=labels.get(lab,0)+1
+                for x in re.findall(r'(?<![A-Za-z])(?:\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*(?:day|days|session|sessions|week|weeks))',h['snippet']):
+                    if x not in numeric:numeric.append(x)
+            display=[]
+            used=set()
+            for h in hits:
+                if h['video_id'] not in used or len(display)<5:
+                    display.append(h);used.add(h['video_id'])
+                if len(display)>=10:break
+
+            # Conservative assessment: do not claim exact numeric/boolean rule without explicit source.
+            if not hits:
+                assessment='NO_DIRECT_SOURCE'
+                conclusion='现有字幕缓存没有足够直接证据。不能把当前 Arm 条件视为 JLaw 原规则。'
+            else:
+                assessment='CONTEXT_SUPPORTED_EXACT_RULE_UNVERIFIED'
+                conclusion='字幕支持 Pullback / Support / Volume / Re-strength 这些概念，但当前“同一天同时满足”的布尔组合和精确执行顺序仍未被原文验证。'
+
+            rows.append({
+                'topic':t['topic'],'question':t['question'],'current_proxy':t['current_proxy'],
+                'assessment':assessment,'conclusion':conclusion,'hit_count':len(hits),
+                'language_signals':labels,'numeric_mentions':numeric[:16],'evidence_hits':display
+            })
+
+        # Reconstruction principles: intentionally qualitative; no invented threshold.
+        principles=[
+            {
+                'name':'Support touch',
+                'current_problem':'Exact same-day bar-overlap is an implementation proxy.',
+                'source_faithful_reconstruction':'Treat Pivot/10MA/20MA as a support area/context around the pullback. Arm logic should not require the price bar to mathematically cross an exact line unless source explicitly says so.',
+                'proposed_ab':'AREA_CONTEXT vs EXACT_OVERLAP'
+            },
+            {
+                'name':'Quiet volume',
+                'current_problem':'V6.36 requires two volume inequalities on the same touch day.',
+                'source_faithful_reconstruction':'Treat quieter/drying volume as pullback behavior over the pullback segment, not necessarily a single-day conjunction.',
+                'proposed_ab':'SEGMENT_QUIETNESS vs SAME_DAY_DOUBLE_VOLUME_GATE'
+            },
+            {
+                'name':'Constructive pullback',
+                'current_problem':'Current Arm requires same-day close above one touched anchor.',
+                'source_faithful_reconstruction':'Use “holds support / tightens / does not break down” as a multi-bar condition if source context supports that language; avoid single-bar close geometry unless explicitly stated.',
+                'proposed_ab':'MULTI_BAR_HOLDING vs SAME_DAY_CLOSE_GATE'
+            },
+            {
+                'name':'Arm vs Trigger',
+                'current_problem':'Current code combines support, volume and constructive on one day before allowing confirmation.',
+                'source_faithful_reconstruction':'Separate setup state from execution trigger: support/quiet pullback may establish a tradeable area over several bars; re-strength is then the trigger.',
+                'proposed_ab':'STATEFUL_PULLBACK_AREA -> RE_STRENGTH'
+            }
+        ]
+
+        res={
+            'version':'V6.38 Pullback / Arm Source Reconstruction',
+            'verdict':'PULLBACK_ARM_SPEC_DRIFT_CONFIRMED',
+            'transcript_videos':len(corpus),
+            'topics':rows,
+            'principles':principles,
+            'critical_point':'V6.37 showed the dominant delay is touch_to_arm. V6.38 therefore audits only that stage. The source concepts are supported, but the current same-day conjunction (exact support overlap + two volume gates + constructive close) is an implementation proxy unless the transcript explicitly states it.',
+            'next_step':'Build V6.39 as ONE controlled A/B: keep V6.36 selection/stop/holding frozen, replace only same-day Arm with a stateful pullback-area Arm reconstructed from source context. No new exit, no factor search, no numeric grid.',
+            'cache_note':'Reads existing Railway JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V638_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v638_write(status='done',message='V6.38 完成：PULLBACK_ARM_SPEC_DRIFT_CONFIRMED',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v638_write(status='error',message='V6.38 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v638_thread=None
+
+def _v638_start():
+    global v638_thread
+    if _v638_alive():return False
+    _v638_write(status='starting',message='V6.38 正在启动',elapsed_sec=0,error=None)
+    v638_thread=threading.Thread(target=_v638_run,daemon=True);v638_thread.start();return True
+
+@APP.route('/v638/run',methods=['GET','POST'])
+def v638_run():_v638_start();return redirect('/v638/pullback-arm-source')
+@APP.get('/v638')
+def v638_alias():return redirect('/v638/pullback-arm-source')
+@APP.get('/api/v638/status')
+def v638_status_api():return jsonify(_v638_status())
+
+@APP.get('/v638/pullback-arm-source')
+def v638_page():
+    import html;e=lambda x:html.escape(str(x));st=_v638_status();r={}
+    if V638_RESULT.exists():
+        try:r=json.loads(V638_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v638_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v638/run"><button>▶ 开始 V6.38 Pullback/Arm Source Audit</button></a>'
+    err=f"<div style='padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    cards=''
+    for t in r.get('topics',[]):
+        sig=', '.join(f"{k}:{v}" for k,v in t.get('language_signals',{}).items()) or '—'
+        nums=', '.join(t.get('numeric_mentions',[])) or '—'
+        ev=''
+        for h in t.get('evidence_hits',[]):
+            ev+=f"<div style='margin:8px 0;padding:10px;background:#f8fafc;border-radius:10px'><b>{e(h.get('video_id'))}</b> · {e(h.get('term'))}<br>{e(h.get('snippet'))}</div>"
+        cards+=f"""<div class="c"><h2>{e(t.get('topic'))}</h2><p><b>问题：</b>{e(t.get('question'))}</p><p><b>当前 Proxy：</b>{e(t.get('current_proxy'))}</p><p><b>判断：</b>{e(t.get('assessment'))} · hits {int(t.get('hit_count',0))}</p><p>{e(t.get('conclusion'))}</p><p><b>Language signals：</b>{e(sig)}</p><p><b>字幕数字：</b>{e(nums)}</p><details><summary style="font-weight:800;cursor:pointer">展开原文证据</summary>{ev or '<p>无直接证据</p>'}</details></div>"""
+    prs=''
+    for p in r.get('principles',[]):
+        prs+=f"<tr><td><b>{e(p.get('name'))}</b></td><td>{e(p.get('current_problem'))}</td><td>{e(p.get('source_faithful_reconstruction'))}</td><td>{e(p.get('proposed_ab'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:26px;margin:16px 0}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;vertical-align:top;text-align:left}}</style></head><body><div class="w">
+<a href="/v637/trigger-latency">← V6.37 Trigger Latency</a>
+<div class="c"><h1>🧩 V6.38 Pullback / Arm Source Reconstruction</h1><p><b>只查 V6.37 找到的主问题：touch_to_arm。</b><br>重点确认我们是不是错误地要求“同一天同时满足 exact support overlap + 两个 volume gate + constructive close”。这轮不回测。</p></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point','等待运行'))}</p><p>字幕视频：{int(r.get('transcript_videos',0))}</p></div>
+{cards}
+<div class="c"><h2>Source-Faithful Arm Reconstruction</h2><table><tr><th>项目</th><th>当前问题</th><th>重建原则</th><th>下一版A/B</th></tr>{prs}</table></div>
+<div class="c"><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v638/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
