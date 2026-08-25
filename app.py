@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v637-shortcut" style="border:4px solid #8b5cf6;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.37 Trigger Latency Autopsy</h2><div class="muted">拆解 Source Trigger 29.4-session 等待 · Support Touch / Quiet Arm / Re-strength Confirmation · 不改策略</div></div><a href="/v637/trigger-latency"><button type="button">打开 V6.37</button></a></div></div>
+
 <div class="card" id="v636-shortcut" style="border:4px solid #0891b2;background:#ecfeff"><div><h2>⚖️ V6.36 CURRENT_PROXY vs SOURCE_FAITHFUL_TRIGGER</h2><div class="muted">冻结其它全部规则 · 只替换 Entry/Trigger · 移除无原文支持的数字 Proxy · 30Y 10-slot A/B</div><a href="/v636/source-trigger-ab"><button type="button">打开 V6.36</button></a></div></div>
 
 <div class="card" id="v635-shortcut" style="border:4px solid #9333ea;background:#faf5ff"><div><h2>🧾 V6.35 Source-Faithful Trigger Reconstruction</h2><div class="muted">从43个字幕原文重建 Pullback / Support / Trigger / Execution / Volume · 不做新回测</div><a href="/v635/source-faithful-trigger"><button type="button">打开 V6.35</button></a></div></div>
