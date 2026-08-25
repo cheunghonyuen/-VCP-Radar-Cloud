@@ -6974,6 +6974,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
   </div>
 </div>
 
+<div class="card" id="v624-shortcut" style="border:3px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">📆 V6.24 1996–2026 30-Year Rebaseline</h2><div class="muted">主回测统一到 1996–2026 · ALL / LEGACY 446 / OUTSIDE 同规则重算 · Stage-2 + Historical Cache · 0 Tiingo</div></div><a href="/v624/30y-rebaseline"><button type="button">打开 V6.24</button></a></div></div>
+
 <div class="card" id="v623-shortcut" style="border:3px solid #0ea5e9;background:#f0f9ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.23 Time / Market-Regime Audit</h2><div class="muted">同年 / 同历史阶段比较 LEGACY 446 vs OUTSIDE · 排除牛熊市时间偏差 · 0 Tiingo</div></div><a href="/v623/time-regime-audit"><button type="button">打开 V6.23 Time Audit</button></a></div></div>
 
 <div class="card" id="v622-shortcut" style="border:3px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.22 Universe Dilution Audit</h2><div class="muted">诊断旧 446-symbol Universe vs 全历史扩展池 · 候选/止损/超级赢家/账户Replay · 0 Tiingo</div></div><a href="/v622/universe-audit"><button type="button">打开 V6.22 Universe Audit</button></a></div></div>
@@ -19833,3 +19835,121 @@ def v623_page():
         ars+=f"<tr><td><b>{e(x.get('cohort',''))}</b></td><td>{pc('cagr')}</td><td><b>{pc('maxdd')}</b></td><td>{nu('calmar')}</td><td>{nu('profit_factor')}</td><td>{pc('win_rate')}</td><td>{int(x.get('trades',0)):,}</td><td>{int(x.get('skipped_capacity',0)):,}</td><td>{pc('avg_exposure')}</td></tr>"
     q=r.get('summary',{});qp=lambda k:f"{float(q.get(k,0) or 0):.1%}";qn=lambda k:'—' if q.get(k) is None else f"{float(q.get(k)):.2f}"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1700px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #fbbf24;border-radius:14px;padding:15px;line-height:1.6}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:15px;line-height:1.6}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/v622/universe-audit">← V6.22 Universe Dilution Audit</a><div class="c"><h1>🧭 V6.23 Time / Market-Regime Audit</h1><div class="info"><b>回答：446 的好成绩是不是因为刚好处在牛市/好年代？</b><br>只做同年、同历史阶段比较 + matched 10-slot replay。没有新过滤器，没有新交易规则。Stage-2 + Historical Cache，0 Tiingo。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}{('<div class="warn">'+e(s.get('error'))+'</div>') if s.get('error') else ''}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><div class="ok"><b>{e(r.get('diagnosis','等待运行'))}</b></div></div><div class="c"><h2>1. 同年 Matched Comparison</h2><p>LEGACY 与 OUTSIDE 当年都至少 20 个候选交易才计入。</p><div style="overflow:auto"><table><tr><th>Year</th><th>Legacy Trades</th><th>Outside Trades</th><th>Legacy WR</th><th>Outside WR</th><th>Legacy PF</th><th>Outside PF</th><th>Legacy STOP7</th><th>Outside STOP7</th><th>Legacy +100%</th><th>Outside +100%</th></tr>{yrs}</table></div></div><div class="c"><h2>2. 历史阶段 / Stress Windows</h2><p style="font-size:12px;color:#64748b">STRESS 只是固定日历诊断桶，不是 market-timing 规则。</p><div style="overflow:auto"><table><tr><th>Period</th><th>Cohort</th><th>Trades</th><th>Win Rate</th><th>PF</th><th>STOP7</th><th>+100%</th><th>+200%</th><th>+500%</th></tr>{prs}</table></div></div><div class="c"><h2>3. 同年样本 10-slot Account Replay</h2><div style="overflow:auto"><table><tr><th>Cohort</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Win Rate</th><th>Trades</th><th>Capacity Skip</th><th>Avg Exposure</th></tr>{ars}</table></div></div><div class="c"><h2>4. Summary</h2><table><tr><th>Legacy median yearly PF</th><th>Outside median yearly PF</th><th>Legacy mean WR</th><th>Outside mean WR</th><th>Legacy PF better years</th><th>Legacy WR better years</th></tr><tr><td>{qn('legacy_median_year_pf')}</td><td>{qn('outside_median_year_pf')}</td><td>{qp('legacy_mean_year_win_rate')}</td><td>{qp('outside_mean_year_win_rate')}</td><td>{qp('legacy_pf_better_year_share')}</td><td>{qp('legacy_winrate_better_year_share')}</td></tr></table></div><div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note','Diagnostic only.'))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v623/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+
+# ==================== V6.24 1996-2026 30-YEAR REBASELINE ====================
+V624_DIR=DATA_DIR/'v624_30y_rebaseline'
+V624_STATUS=V624_DIR/'status.json'; V624_RESULT=V624_DIR/'result.json'; V624_STOP=V624_DIR/'STOP'
+v624_thread=None
+V624_START=pd.Timestamp('1996-01-01'); V624_END=pd.Timestamp('2026-12-31')
+
+def _v624_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V624_STATUS.exists():
+        try:x.update(json.loads(V624_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v624_write(**kw):
+    V624_DIR.mkdir(parents=True,exist_ok=True); x=_v624_status(); x.update(kw)
+    V624_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v624_alive(): return v624_thread is not None and v624_thread.is_alive()
+
+def _v624_metrics(T):
+    rows=[]; total=len(T)
+    for label,g in [('ALL_30Y',T),('LEGACY_446_30Y',T[T.cohort.eq('LEGACY_446')]),('OUTSIDE_446_30Y',T[T.cohort.eq('OUTSIDE_446')])]:
+        m=_v623_metrics(g); m.update({'cohort':label,'trade_share':float(len(g)/total) if total else np.nan}); rows.append(m)
+    return pd.DataFrame(rows)
+
+def _v624_replay(X,price,cal,label,t0,vi,vn):
+    X=X.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    if X.empty:return {'cohort':label,'trades':0}
+    rec=X.to_dict('index'); entries={}; exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i); exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.; pos={}; last={}; ledger=[]; eqrows=[]; skipped=0; step=max(1,len(cal)//20)
+    for di,dt in enumerate(cal,1):
+        if V624_STOP.exists(): raise RuntimeError('__STOPPED__')
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None: continue
+            proceeds=p['shares']*float(rec[i]['exit_px']); cash+=proceeds; ledger.append({'pnl':proceeds-p['cost']}); last.pop(i,None)
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px'])); cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']); last[i]=cp; hv+=p['shares']*cp
+        eq_now=cash+hv
+        for i in entries.get(dt,[]):
+            if len(pos)>=10: skipped+=1; continue
+            r=rec[i]; ep=float(r['entry_px']); target=eq_now/10.
+            if ep<=0 or cash+1e-12<target: skipped+=1; continue
+            cash-=target; pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,'entry_px':ep,'cost':target}; last[i]=ep
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px'])); cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']); last[i]=cp; hv+=p['shares']*cp
+        eq=cash+hv; eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+        if di%step==0 or di==len(cal): _v624_write(status='running',message=f'Phase 3/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',phase='account_replay',processed=vi,total=vn,current=label,elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']); L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]); end=float(C.equity.iloc[-1]); yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.; dd=C.equity/C.equity.cummax()-1; maxdd=float(dd.min())
+    if len(L):
+        wins=L[L.pnl>0]; loss=L[L.pnl<=0]; gp=float(wins.pnl.sum()); gl=float(-loss.pnl.sum()); pf=float(gp/gl) if gl>0 else np.inf; wr=float((L.pnl>0).mean())
+    else: pf=wr=np.nan
+    return {'cohort':label,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,'profit_factor':pf,'win_rate':wr,'trades':int(len(L)),'skipped_capacity':int(skipped),'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v624_run():
+    global v624_thread; t0=time.time()
+    try:
+        V624_DIR.mkdir(parents=True,exist_ok=True)
+        if V624_STOP.exists(): V624_STOP.unlink()
+        _v624_write(status='running',message='V6.24 1996–2026 30-Year Rebaseline 启动',phase='filter_30y',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty: raise RuntimeError('1996–2026 没有 Stage-2 candidate trades')
+        O=_v624_metrics(T); Y=_v623_yearly_rows(T); P=_v623_period_rows(T)
+        Y=Y[(Y.year>=1996)&(Y.year<=2026)].copy(); P=P[~P.period.eq('1972-1997')].copy()
+        _v624_write(status='running',message='Phase 1/3 · 1996–2026 候选流归因完成',phase='filter_30y',processed=1,total=3,current=f'{len(T):,} candidate trades',elapsed_sec=round(time.time()-t0,1),error=None)
+        M=_v615b_read_manifest(); needed=set(T.listing_id.astype(str)); M=M[M.listing_id.astype(str).isin(needed)].copy(); price={}; date_set=set(); total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            if V624_STOP.exists(): raise RuntimeError('__STOPPED__')
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is not None and len(d):
+                d=d.copy(); d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize(); d['close']=pd.to_numeric(d.close,errors='coerce'); d=d.dropna(subset=['date','close']); d=d[(d.date>=V624_START)&(d.date<=V624_END)]
+                if len(d):
+                    z=dict(zip(d.date,d.close.astype(float))); price[str(mr.listing_id)]=z; date_set.update(z.keys())
+            if n==1 or n%100==0 or n==total: _v624_write(status='running',message='Phase 2/3 · 读取 1996–2026 Historical Cache',phase='load_cache',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        cal=sorted(date_set)
+        A=pd.DataFrame([_v624_replay(g,price,cal,label,t0,i,3) for i,(label,g) in enumerate([('ALL_30Y',T),('LEGACY_446_30Y',T[T.cohort.eq('LEGACY_446')]),('OUTSIDE_446_30Y',T[T.cohort.eq('OUTSIDE_446')])],1)])
+        L=A[A.cohort.eq('LEGACY_446_30Y')].iloc[0]; X=A[A.cohort.eq('OUTSIDE_446_30Y')].iloc[0]
+        if float(L.maxdd)>float(X.maxdd)+.15 and float(L.profit_factor)>float(X.profit_factor)*1.25: verdict='MODERN_DILUTION_CONFIRMED'; diagnosis='只看 1996–2026 后，LEGACY 仍有明显更浅 MaxDD 与更高 PF；Universe dilution 在现代30年样本内仍成立。'
+        elif float(L.profit_factor)>float(X.profit_factor) and float(L.maxdd)>float(X.maxdd): verdict='MODERN_DILUTION_LIKELY'; diagnosis='1996–2026 内 LEGACY 仍整体优于 OUTSIDE，但差距未达到强确认门槛。'
+        else: verdict='OLD_HISTORY_WAS_MATERIAL'; diagnosis='限制到 1996–2026 后 LEGACY 优势明显缩小/消失；更老历史确实显著影响此前结论。'
+        res={'version':'V6.24 1996–2026 30-Year Rebaseline','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'window':'1996-01-01 through available 2026 data','verdict':verdict,'diagnosis':diagnosis,'candidate_total':int(len(T)),'cohort_metrics':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),'yearly':Y.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),'period_metrics':P.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),'account_replays':A.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),'rule_note':'1996–2026 is the primary evaluation window. No universe filter, no market-timing rule, no Entry/Stop/Exit changes.','cache_note':'Reuses V6.17 Stage-2 candidate trades + Historical Cache; 0 Tiingo; no universe rebuild.','next_step':'Use this 30-year rebaseline as the primary benchmark; pre-1996 history becomes secondary stress/reference only.'}
+        V624_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); _v624_write(status='done',message=f'V6.24 完成：{verdict}',phase='done',processed=3,total=3,current='1996–2026 rebaseline',elapsed_sec=res['elapsed_sec'],error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__': _v624_write(status='paused',message='V6.24 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else: traceback.print_exc(); _v624_write(status='error',message='V6.24 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc(); _v624_write(status='error',message='V6.24 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally: v624_thread=None
+
+def _v624_start():
+    global v624_thread
+    if _v624_alive(): return False
+    _v624_write(status='starting',message='V6.24 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None); v624_thread=threading.Thread(target=_v624_run,daemon=True); v624_thread.start(); return True
+
+@APP.route('/v624/run',methods=['GET','POST'])
+def v624_run(): _v624_start(); return redirect('/v624/30y-rebaseline')
+@APP.get('/v624/stop')
+def v624_stop(): V624_DIR.mkdir(parents=True,exist_ok=True); V624_STOP.write_text('stop',encoding='utf-8'); return redirect('/v624/30y-rebaseline')
+@APP.get('/api/v624/status')
+def v624_status_api(): return jsonify(_v624_status())
+@APP.get('/v624/30y-rebaseline')
+def v624_page():
+    import html; e=lambda x:html.escape(str(x)); s=_v624_status(); r={}
+    if V624_RESULT.exists():
+        try:r=json.loads(V624_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v624_alive() or s.get('status') in ('starting','running'); btn='' if running else '<a href="/v624/run"><button>▶ 开始 V6.24 1996–2026 Rebaseline</button></a>'; stop='<a href="/v624/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    cms=''.join([f"<tr><td><b>{e(x.get('cohort',''))}</b></td><td>{int(x.get('trades',0)):,}</td><td>{int(x.get('tickers',0)):,}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('pf',0) or 0):.2f}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{int(x.get('winner100',0))}</td><td>{int(x.get('winner200',0))}</td><td>{int(x.get('winner500',0))}</td></tr>" for x in r.get('cohort_metrics',[])])
+    ars=''.join([f"<tr><td><b>{e(x.get('cohort',''))}</b></td><td><b>{float(x.get('cagr',0) or 0):.2%}</b></td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('calmar',0) or 0):.2f}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.2%}</td><td>{int(x.get('trades',0)):,}</td><td>{int(x.get('skipped_capacity',0)):,}</td><td>{float(x.get('avg_exposure',0) or 0):.2%}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td></tr>" for x in r.get('account_replays',[])])
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1700px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #fbbf24;border-radius:14px;padding:15px;line-height:1.6}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:15px;line-height:1.6}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/v623/time-regime-audit">← V6.23 Time / Market-Regime Audit</a><div class="c"><h1>📆 V6.24 · 1996–2026 30-Year Rebaseline</h1><div class="info"><b>以后主回测统一看 1996–2026。</b><br>相同 Frozen A/B DNA + CONTROL + -7% Stop + HOLD1260 + 10-slot；ALL / LEGACY 446 / OUTSIDE 重算。0 Tiingo，不重建股票池。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0)}/{int(s.get('total',0) or 0)} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><div class="ok"><b>{e(r.get('diagnosis','等待运行'))}</b></div></div><div class="c"><h2>1. 1996–2026 Candidate Stream</h2><div style="overflow:auto"><table><tr><th>Cohort</th><th>Trades</th><th>Tickers</th><th>Win Rate</th><th>PF*</th><th>Avg Win</th><th>Avg Loss</th><th>STOP7</th><th>+100%</th><th>+200%</th><th>+500%</th></tr>{cms}</table></div></div><div class="c"><h2>2. 1996–2026 10-slot Account Replay</h2><div style="overflow:auto"><table><tr><th>Cohort</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Win Rate</th><th>Trades</th><th>Capacity Skip</th><th>Avg Exposure</th><th>Final Multiple</th></tr>{ars}</table></div></div><div class="c"><div class="warn"><b>主区间：</b>{e(r.get('window','1996–2026'))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v624/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
