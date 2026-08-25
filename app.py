@@ -17951,6 +17951,351 @@ def v617_overnight_page():
     <p>退市/结束覆盖：<b>{ec:.1%}</b>（要求 ≥90%）</p><progress max="1" value="{min(1,ec)}"></progress>
     <p>{btn}{stop}</p></div>
     <script>setTimeout(()=>location.reload(),8000)</script></div></body></html>"""
+
+# ==================== V6.17 FINAL VALIDATION · STAGE 1 ====================
+# Purpose:
+#   Reuse the expanded historical listing cache (including ended/delisted listings)
+#   and validate the frozen Big-Winner DNA with strict year-by-year walk-forward OOS.
+#   NO Tiingo calls. NO new factor search. NO entry/stop/exit tuning.
+V617FV1_DIR=DATA_DIR/"v617_final_validation_stage1"
+V617FV1_STATUS=V617FV1_DIR/"status.json"
+V617FV1_RESULT=V617FV1_DIR/"result.json"
+V617FV1_YEAR_DIR=V617FV1_DIR/"year_features"
+V617FV1_STOP=V617FV1_DIR/"STOP"
+v617fv1_thread=None
+
+def _v617fv1_status():
+    d={"status":"idle","message":"尚未运行","phase":"","processed":0,"total":0,
+       "current":"","elapsed_sec":0,"error":None}
+    if V617FV1_STATUS.exists():
+        try:d.update(json.loads(V617FV1_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return d
+
+def _v617fv1_write(**kw):
+    V617FV1_DIR.mkdir(parents=True,exist_ok=True)
+    d=_v617fv1_status();d.update(kw)
+    V617FV1_STATUS.write_text(json.dumps(d,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return d
+
+def _v617fv1_alive():
+    return v617fv1_thread is not None and v617fv1_thread.is_alive()
+
+def _v617fv1_read_price(row):
+    lid=str(row.get("listing_id",""))
+    p=_v617o_existing_price_path(lid)
+    if not p or not p.exists():
+        return None
+    d,err=_v615c_read_local_csv(p)
+    return d
+
+def _v617fv1_feature_rows(row,d):
+    # Compact subset only: exactly what the frozen V6.15F A/B OOS needs.
+    # Sample every 20 trading days, same cadence as the original Factor Store.
+    if d is None or len(d)<320:return []
+    c=pd.to_numeric(d["close"],errors="coerce")
+    h=pd.to_numeric(d["high"],errors="coerce")
+    l=pd.to_numeric(d["low"],errors="coerce")
+    v=pd.to_numeric(d["volume"],errors="coerce")
+    v20=v.rolling(20).mean()
+    ret60=c/c.shift(60)-1
+    ret120=c/c.shift(120)-1
+    ret252=c/c.shift(252)-1
+    rows=[]
+    for idx in range(259,len(d)-60,20):
+        entry=float(c.iloc[idx]) if pd.notna(c.iloc[idx]) else np.nan
+        if not np.isfinite(entry) or entry<=0:continue
+        future=d.iloc[idx+1:min(len(d),idx+61)]
+        if future.empty:continue
+        fh=pd.to_numeric(future["high"],errors="coerce")
+        fl=pd.to_numeric(future["low"],errors="coerce")
+        if fh.notna().sum()==0 or fl.notna().sum()==0:continue
+        mfe=float(fh.max()/entry-1.0)
+        mae=float(fl.min()/entry-1.0)
+        vv=np.nan
+        if pd.notna(v.iloc[idx]) and pd.notna(v20.iloc[idx]) and float(v20.iloc[idx])>0:
+            vv=float(v.iloc[idx]/v20.iloc[idx])
+        dt=pd.Timestamp(d.iloc[idx]["date"])
+        rows.append({
+            "listing_id":str(row.get("listing_id","")),
+            "ticker":str(row.get("ticker","")),
+            "obs_date":dt.strftime("%Y-%m-%d"),
+            "year":int(dt.year),
+            "ret60":float(ret60.iloc[idx]) if pd.notna(ret60.iloc[idx]) else np.nan,
+            "ret120":float(ret120.iloc[idx]) if pd.notna(ret120.iloc[idx]) else np.nan,
+            "ret252":float(ret252.iloc[idx]) if pd.notna(ret252.iloc[idx]) else np.nan,
+            "vol_vs20":vv,
+            "mfe60":mfe,
+            "mae60":mae
+        })
+    return rows
+
+def _v617fv1_append_year(rows):
+    if not rows:return
+    X=pd.DataFrame(rows)
+    V617FV1_YEAR_DIR.mkdir(parents=True,exist_ok=True)
+    for y,g in X.groupby("year"):
+        p=V617FV1_YEAR_DIR/f"{int(y)}.csv.gz"
+        g.to_csv(p,index=False,mode="a",header=not p.exists(),compression="gzip")
+
+def _v617fv1_pf_from_path(g):
+    # Descriptive payoff proxy using 60D close not available in compact store.
+    # Stage 1 therefore validates right-tail DNA, not account CAGR.
+    return None
+
+def _v617fv1_build_features(M,t0):
+    V617FV1_YEAR_DIR.mkdir(parents=True,exist_ok=True)
+    # Clean only Stage-1 derived files, never touch historical price cache.
+    for p in V617FV1_YEAR_DIR.glob("*.csv.gz"):
+        try:p.unlink()
+        except Exception:pass
+
+    ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+    W=M[ver].copy()
+    total=len(W)
+    buffer=[]
+    for n,(idx,row) in enumerate(W.iterrows(),1):
+        if V617FV1_STOP.exists():
+            _v617fv1_write(status="paused",message="已安全暂停；历史价格 Cache 未动",
+                            phase="feature_store",processed=n-1,total=total,
+                            elapsed_sec=round(time.time()-t0,1))
+            return False
+        if n==1 or n%10==0:
+            _v617fv1_write(status="running",
+                message="Stage 1/2 · 从现有历史 Cache 建立紧凑 Feature Store（0 API）",
+                phase="feature_store",processed=n-1,total=total,
+                current=str(row.get("ticker","")),elapsed_sec=round(time.time()-t0,1))
+        try:
+            d=_v617fv1_read_price(row)
+            if d is None:continue
+            rr=_v617fv1_feature_rows(row,d)
+            if rr:buffer.extend(rr)
+        except Exception:
+            continue
+        if len(buffer)>=20000:
+            _v617fv1_append_year(buffer);buffer=[]
+    if buffer:_v617fv1_append_year(buffer)
+    return True
+
+def _v617fv1_load_year(y):
+    p=V617FV1_YEAR_DIR/f"{int(y)}.csv.gz"
+    if not p.exists():return pd.DataFrame()
+    try:return pd.read_csv(p,compression="gzip")
+    except Exception:return pd.DataFrame()
+
+def _v617fv1_walkforward(M,t0):
+    years=sorted(int(p.stem.split(".")[0]) for p in V617FV1_YEAR_DIR.glob("*.csv.gz"))
+    if not years:raise RuntimeError("没有生成年度 Feature Store")
+
+    # Frozen candidates from V6.15F. No new factor search.
+    candidates=[
+        ("A_MOM60_MOM120_VOLDRY","ret60","ret120"),
+        ("B_MOM252_MOM120_VOLDRY","ret252","ret120"),
+    ]
+    rows=[]
+    tests=[]
+    for y in years:
+        # require at least 3 prior calendar years to avoid tiny training windows
+        train_years=[yy for yy in years if yy<y]
+        if len(train_years)<3:continue
+        test=_v617fv1_load_year(y)
+        if len(test)<50:continue
+
+        # Low-memory training: concatenate only 3 momentum columns from prior-year files.
+        parts=[]
+        for yy in train_years:
+            z=_v617fv1_load_year(yy)
+            if z.empty:continue
+            keep=[c for c in ["ret60","ret120","ret252"] if c in z.columns]
+            if keep:parts.append(z[keep])
+        if not parts:continue
+        train=pd.concat(parts,ignore_index=True)
+        if len(train)<1000:continue
+        qs={c:float(pd.to_numeric(train[c],errors="coerce").quantile(.75))
+            for c in ["ret60","ret120","ret252"]}
+        del train,parts
+
+        for c in ["ret60","ret120","ret252","vol_vs20","mfe60","mae60"]:
+            test[c]=pd.to_numeric(test[c],errors="coerce")
+        base20=float((test["mfe60"]>=.20).mean())
+        base30=float((test["mfe60"]>=.30).mean())
+        base40=float((test["mfe60"]>=.40).mean())
+        base50=float((test["mfe60"]>=.50).mean())
+
+        for name,c1,c2 in candidates:
+            g=test[
+                (test[c1]>=qs[c1]) &
+                (test[c2]>=qs[c2]) &
+                (test["vol_vs20"]<=.80)
+            ].copy()
+            n=len(g)
+            r={
+                "year":int(y),"candidate":name,"train_years":len(train_years),
+                "test_n":int(len(test)),"selected_n":int(n),
+                "bw20":float((g["mfe60"]>=.20).mean()) if n else np.nan,
+                "bw30":float((g["mfe60"]>=.30).mean()) if n else np.nan,
+                "bw40":float((g["mfe60"]>=.40).mean()) if n else np.nan,
+                "bw50":float((g["mfe60"]>=.50).mean()) if n else np.nan,
+                "base20":base20,"base30":base30,"base40":base40,"base50":base50,
+                "avg_mfe":float(g["mfe60"].mean()) if n else np.nan,
+                "avg_mae":float(g["mae60"].mean()) if n else np.nan,
+            }
+            for k in [20,30,40,50]:
+                b=r[f"base{k}"];x=r[f"bw{k}"]
+                r[f"lift{k}"]=float(x/b) if n and np.isfinite(x) and b>0 else np.nan
+            rows.append(r)
+        tests.append(int(y))
+        _v617fv1_write(status="running",
+            message="Stage 2/2 · Strict Walk-Forward OOS（阈值只来自更早年份）",
+            phase="walkforward",processed=len(tests),total=max(1,len(years)-3),
+            current=str(y),elapsed_sec=round(time.time()-t0,1))
+
+    R=pd.DataFrame(rows)
+    if R.empty:raise RuntimeError("没有形成可用的 Strict OOS 年份")
+
+    summaries=[]
+    for name,_,_ in candidates:
+        z=R[(R["candidate"]==name)&(R["selected_n"]>=10)].copy()
+        n=int(z["selected_n"].sum())
+        o={"candidate":name,"years":int(len(z)),"selected_n":n}
+        for k in [20,30,40,50]:
+            valid=z[z[f"lift{k}"].notna()]
+            o[f"median_year_lift{k}"]=float(valid[f"lift{k}"].median()) if len(valid) else np.nan
+            o[f"positive_lift{k}_years"]=int((valid[f"lift{k}"]>1).sum()) if len(valid) else 0
+            o[f"positive_lift{k}_share"]=float((valid[f"lift{k}"]>1).mean()) if len(valid) else 0.0
+            if n and len(z):
+                o[f"bw{k}"]=float(np.average(z[f"bw{k}"],weights=z["selected_n"]))
+                o[f"base{k}"]=float(np.average(z[f"base{k}"],weights=z["test_n"]))
+                o[f"lift{k}"]=float(o[f"bw{k}"]/o[f"base{k}"]) if o[f"base{k}"]>0 else np.nan
+            else:
+                o[f"bw{k}"]=o[f"base{k}"]=o[f"lift{k}"]=np.nan
+        o["avg_mae"]=float(np.average(z["avg_mae"],weights=z["selected_n"])) if n else np.nan
+        o["pass"]=bool(
+            o.get("median_year_lift30",0)>1.0 and
+            o.get("positive_lift30_share",0)>=0.60 and
+            o.get("lift30",0)>1.0
+        )
+        summaries.append(o)
+
+    # Coverage metadata from expanded manifest.
+    ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+    ended=M["ended"].astype(str).str.lower().isin(["true","1","yes"]) if "ended" in M.columns else pd.Series(False,index=M.index)
+    coverage=float(ver.mean()) if len(M) else 0.0
+    ended_coverage=float(ver[ended].mean()) if ended.any() else 0.0
+
+    verdict="PASS_STAGE1" if any(x["pass"] for x in summaries) else "FAIL_STAGE1"
+    result={
+        "version":"V6.17 Final Validation Stage 1",
+        "generated_at":datetime.now(timezone.utc).isoformat(),
+        "elapsed_sec":round(time.time()-t0,2),
+        "manifest_total":int(len(M)),
+        "verified_listings":int(ver.sum()),
+        "coverage":coverage,
+        "ended_coverage":ended_coverage,
+        "test_years":tests,
+        "summary":summaries,
+        "year_rows":R.replace({np.nan:None}).to_dict("records"),
+        "verdict":verdict,
+        "acceptance":"Frozen A/B Big-Winner DNA must show overall Lift30 > 1, median OOS-year Lift30 > 1, and positive Lift30 in at least 60% of comparable test years.",
+        "rule_note":"No Tiingo requests. No new factor search. 75th-percentile momentum cutoffs are recalculated only from earlier years; VOL_DRY is frozen at <=0.80. Entry/Stop/HOLD1260 are not retuned here.",
+        "next_step":"If Stage 1 passes, run the final account-level 10-slot Daily-MTM/CAGR simulation on the frozen production rules.",
+        "limit":"Historical listing cache is large but not 100% complete; this Stage reports actual total and ended/delisted coverage explicitly."
+    }
+    V617FV1_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+def _v617fv1_run():
+    global v617fv1_thread
+    t0=time.time()
+    try:
+        if V617FV1_STOP.exists():
+            try:V617FV1_STOP.unlink()
+            except Exception:pass
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError("找不到历史 manifest")
+        ver=M["verified"].astype(str).str.lower().isin(["true","1","yes"])
+        if int(ver.sum())<5000:
+            raise RuntimeError(f"历史覆盖太小：仅 {int(ver.sum())} verified listings")
+        _v617fv1_write(status="running",message="启动 V6.17 Final Validation Stage 1",
+                       phase="start",processed=0,total=int(ver.sum()),elapsed_sec=0,error=None)
+        ok=_v617fv1_build_features(M,t0)
+        if not ok:return
+        res=_v617fv1_walkforward(M,t0)
+        _v617fv1_write(status="done",message=f"Stage 1 完成：{res['verdict']}",
+                       phase="done",processed=int(ver.sum()),total=int(ver.sum()),
+                       elapsed_sec=res["elapsed_sec"],error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v617fv1_write(status="error",message="V6.17 Final Validation Stage 1 失败",
+                       phase="error",error=f"{type(ex).__name__}: {ex}",
+                       elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v617fv1_thread=None
+
+def _v617fv1_start():
+    global v617fv1_thread
+    if _v617fv1_alive():return False
+    v617fv1_thread=threading.Thread(target=_v617fv1_run,daemon=True)
+    v617fv1_thread.start();return True
+
+@APP.route("/v617/final-validation/run",methods=["GET","POST"])
+def v617_final_validation_run():
+    _v617fv1_start()
+    return redirect("/v617/final-validation")
+
+@APP.get("/v617/final-validation/stop")
+def v617_final_validation_stop():
+    V617FV1_DIR.mkdir(parents=True,exist_ok=True)
+    V617FV1_STOP.write_text("stop",encoding="utf-8")
+    return redirect("/v617/final-validation")
+
+@APP.get("/api/v617/final-validation/status")
+def v617_final_validation_status_api():
+    return jsonify(_v617fv1_status())
+
+@APP.get("/v617/final-validation")
+def v617_final_validation_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    s=_v617fv1_status();r={}
+    if V617FV1_RESULT.exists():
+        try:r=json.loads(V617FV1_RESULT.read_text(encoding="utf-8"))
+        except Exception:r={}
+    running=_v617fv1_alive()
+    btn="" if running else '<a href="/v617/final-validation/run"><button>▶ 开始 V6.17 大股票池 Final Validation</button></a>'
+    stop='<a href="/v617/final-validation/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ""
+    summary=""
+    for x in r.get("summary",[]):
+        summary+=(
+            f"<tr><td><b>{e(x.get('candidate'))}</b></td>"
+            f"<td>{int(x.get('selected_n',0)):,}</td>"
+            f"<td>{float(x.get('lift20',0) or 0):.2f}×</td>"
+            f"<td><b>{float(x.get('lift30',0) or 0):.2f}×</b></td>"
+            f"<td>{float(x.get('lift40',0) or 0):.2f}×</td>"
+            f"<td>{float(x.get('lift50',0) or 0):.2f}×</td>"
+            f"<td>{float(x.get('median_year_lift30',0) or 0):.2f}×</td>"
+            f"<td>{float(x.get('positive_lift30_share',0) or 0):.0%}</td>"
+            f"<td>{float(x.get('avg_mae',0) or 0):.1%}</td>"
+            f"<td>{'PASS' if x.get('pass') else 'FAIL'}</td></tr>"
+        )
+    verdict=r.get("verdict","—")
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:15px;line-height:1.6}}.verdict{{font-size:28px;font-weight:900}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:#fff;font-weight:800;margin-right:8px}}table{{width:100%;border-collapse:collapse;min-width:950px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}</style></head>
+    <body><div class="w"><a href="/v617/production">← V6.17 主系统</a>
+    <div class="c"><h1>🧪 V6.17 Final Validation · Stage 1</h1>
+    <div class="info"><b>现在验证真正的大股票池，不再下载。</b> 只读取已经完成的 Historical Cache；冻结 A/B Big-Winner DNA，逐年 Walk-Forward。这里不调 Entry、不调 -7% Stop、不调 HOLD1260。</div></div>
+    <div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p>
+    <p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>
+    {btn}{stop}
+    {('<div class="warn"><b>Error:</b> '+e(s.get('error'))+'</div>') if s.get('error') else ''}</div>
+    <div class="c"><div class="verdict">Verdict：{e(verdict)}</div>
+    <p>Historical coverage：{float(r.get('coverage',0) or 0):.1%} · 退市/结束覆盖：{float(r.get('ended_coverage',0) or 0):.1%} · Verified listings：{int(r.get('verified_listings',0) or 0):,}</p></div>
+    <div class="c"><h2>Strict OOS Big-Winner DNA</h2><div style="overflow:auto"><table><tr><th>DNA</th><th>OOS N</th><th>Lift20</th><th>Lift30</th><th>Lift40</th><th>Lift50</th><th>年度中位 Lift30</th><th>Lift30&gt;1 年份</th><th>Avg MAE</th><th>Pass</th></tr>{summary}</table></div></div>
+    <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>下一步：</b>{e(r.get('next_step','Stage 1 通过后才跑账户级 Daily-MTM / CAGR。'))}<br><b>限制：</b>{e(r.get('limit',''))}</div></div>
+    <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v617/final-validation/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+    </div></body></html>"""
+
+
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
@@ -17980,6 +18325,6 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/overnight">🌙 整晚全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/final-validation">🧪 大股票池 Final Validation</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 整晚全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
