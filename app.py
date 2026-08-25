@@ -6974,6 +6974,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
   </div>
 </div>
 
+<div class="card" id="v621-shortcut" style="border:3px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">V6.21 Adaptive DD Brake</h2><div class="muted">DD10 soft-cap + hysteresis recovery · CAP8/7/6 · protect right-tail · 0 Tiingo</div></div><a href="/v621/adaptive-dd-brake"><button type="button">打开 V6.21 Adaptive Brake</button></a></div></div>
+
 <div class="card" id="v620-shortcut" style="border:3px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛡️ V6.20 Portfolio Risk Brake</h2><div class="muted">只限制坏环境的新开仓容量 · 不强卖右尾赢家 · 复用 Stage-2 + Historical Cache · 0 Tiingo</div></div><a href="/v620/risk-brake"><button type="button">打开 V6.20 风险刹车</button></a></div></div>
 
 <div class="card" id="v619-shortcut" style="border:3px solid #ef4444;background:#fff1f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.19 MaxDD Autopsy</h2><div class="muted">只诊断 BASE_UNION 深回撤来源 · 保护超级赢家右尾 · 复用 Stage-2 Cache · 0 Tiingo</div></div><a href="/v619/maxdd-autopsy"><button type="button">打开 V6.19 回撤尸检</button></a></div></div>
@@ -19087,6 +19089,166 @@ def v620_page():
         trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('win_rate') or 0):.2%}</td><td>{float(x.get('cagr') or 0):.2%}</td><td>{float(x.get('delta_cagr') or 0):+.2%}</td><td><b>{float(x.get('maxdd') or 0):.2%}</b></td><td>{float(x.get('delta_maxdd') or 0):+.2%}</td><td>{float(x.get('calmar') or 0):.2f}</td><td>{float(x.get('profit_factor') or 0):.2f}</td><td>{float(x.get('avg_win') or 0):.1%}</td><td>{int(x.get('trades',0) or 0):,}</td><td>{int(x.get('skipped_brake',0) or 0):,}</td><td>{int(x.get('brake_days',0) or 0):,}</td><td>{float(x.get('avg_exposure') or 0):.1%}</td><td>{float(x.get('right_tail_capture') or 0):.1%}</td><td>{p}</td></tr>"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:15px;line-height:1.6}}.danger{{background:#fff1f2;border:1px solid #fda4af;border-radius:14px;padding:15px}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/v619/maxdd-autopsy">← V6.19 MaxDD Autopsy</a><div class="c"><h1>🛡️ V6.20 Portfolio Risk Brake</h1><div class="info"><b>这一轮只解决“坏环境里少买”，不改变“赢家怎么卖”。</b><br>不改 DNA / Entry / -7% Stop / HOLD1260。只用当时已经发生的账户回撤与最近已实现交易，降低<b>新开仓容量</b>；已有大赢家不强卖。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}{('<div class="danger">'+e(s.get('error'))+'</div>') if s.get('error') else ''}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><div style="overflow:auto"><table><tr><th>方案</th><th>Win Rate</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>Calmar</th><th>PF</th><th>Avg Win</th><th>Trades</th><th>Brake Skip</th><th>Brake Days</th><th>Avg Exposure</th><th>+100%赢家保留</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>本轮测试：</b>{e(r.get('tests',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v620/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
 
+
+# ==================== V6.21 ADAPTIVE DD BRAKE ====================
+# Follow-up to V6.20. V6.20 proved DD10_CAP5 can improve MaxDD materially,
+# but the brake stayed active too long and sacrificed too much CAGR.
+# V6.21 keeps the same frozen DNA / Entry / -7% Stop / HOLD1260 and only
+# softens NEW-entry capacity with a hysteresis release rule.
+# No cluster branch, no grid search, no new stock factors, 0 Tiingo.
+V621_DIR=DATA_DIR/'v621_adaptive_dd_brake'
+V621_STATUS=V621_DIR/'status.json'
+V621_RESULT=V621_DIR/'result.json'
+V621_REPORT=V621_DIR/'results.csv'
+V621_STOP=V621_DIR/'STOP'
+v621_thread=None
+
+def _v621_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V621_STATUS.exists():
+        try:x.update(json.loads(V621_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v621_write(**kw):
+    V621_DIR.mkdir(parents=True,exist_ok=True);x=_v621_status();x.update(kw)
+    V621_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v621_alive():return v621_thread is not None and v621_thread.is_alive()
+
+def _v621_load(t0):
+    if not V617FV2_TRADES.exists():raise RuntimeError('缺少 V6.17 Stage 2 trades.csv.gz；先完成 Stage 2')
+    T=pd.read_csv(V617FV2_TRADES,compression='gzip')
+    if T.empty:raise RuntimeError('V6.17 Stage 2 trades cache 为空')
+    req=['listing_id','ticker','entry_date','exit_date','entry_px','exit_px']
+    miss=[c for c in req if c not in T.columns]
+    if miss:raise RuntimeError('Stage 2 trades 缺字段: '+','.join(miss))
+    T=T.copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize();T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']);T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
+    if 'dna' not in T.columns:T['dna']=''
+    if 'exit_reason' not in T.columns:T['exit_reason']=''
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));mm={str(r.listing_id):r for _,r in M.iterrows() if str(r.listing_id) in needed};price={};date_set=set();total=len(mm)
+    for n,(lid,mr) in enumerate(mm.items(),1):
+        if V621_STOP.exists():raise RuntimeError('__STOPPED__')
+        d=_v617fv1_read_price(mr)
+        if d is not None and len(d):
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize();d['close']=pd.to_numeric(d.close,errors='coerce');d=d.dropna(subset=['date','close']);z=dict(zip(d.date,d.close.astype(float)));price[lid]=z;date_set.update(z.keys())
+        if n==1 or n%50==0 or n==total:_v621_write(status='running',message='Phase 1/3 · 复用 Historical Cache 读取 MTM',phase='load_cache',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+    if not date_set:raise RuntimeError('Historical Cache 没有可用价格')
+    _v621_write(status='running',message='Phase 1/3 · Cache ready；0 Tiingo / 不重建股票池',phase='cache_ready',processed=1,total=1,current='Stage-2 + Historical Cache',elapsed_sec=round(time.time()-t0,1),error=None)
+    return T,price,sorted(date_set)
+
+def _v621_variant_replay(T,price,cal,label,trigger=None,cap=10,release=None,vi=1,vn=1,t0=0):
+    X=T.sort_values(['entry_date','listing_id']).reset_index(drop=True);rec=X.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};eqrows=[];ledger=[];skipped_capacity=0;skipped_brake=0;admitted=0
+    equity_peak=1.0;brake_on=False;brake_days=0;brake_episodes=0;step=max(1,len(cal)//30)
+    for di,dt in enumerate(cal,1):
+        if V621_STOP.exists():raise RuntimeError('__STOPPED__')
+        for i in exits.get(dt,[]):
+            q=pos.pop(i,None)
+            if q is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=q['shares']*xp;cash+=proceeds;ret=xp/float(rec[i]['entry_px'])-1.0
+            ledger.append({'trade_id':i,'ticker':rec[i].get('ticker',''),'dna':rec[i].get('dna',''),'entry_date':rec[i]['entry_date'],'exit_date':rec[i]['exit_date'],'return':ret,'pnl_dollars':proceeds-q['cost'],'exit_reason':rec[i].get('exit_reason',''),'allocated':q['cost']});last.pop(i,None)
+        hv=0.0
+        for i,q in pos.items():
+            cp=price.get(q['listing_id'],{}).get(dt,last.get(i,q['entry_px']));cp=cp if np.isfinite(cp) else last.get(i,q['entry_px']);last[i]=cp;hv+=q['shares']*cp
+        equity_now=cash+hv
+        if np.isfinite(equity_now):equity_peak=max(equity_peak,equity_now)
+        dd_now=(equity_now/equity_peak-1.0) if equity_peak>0 else 0.0
+        if trigger is None:brake_on=False
+        else:
+            if (not brake_on) and dd_now<=-abs(float(trigger)):
+                brake_on=True;brake_episodes+=1
+            elif brake_on and release is not None and dd_now>=-abs(float(release)):
+                brake_on=False
+        allowed=int(cap) if brake_on else 10
+        if brake_on:brake_days+=1
+        for i in entries.get(dt,[]):
+            if len(pos)>=allowed:
+                skipped_brake+=1 if brake_on else 0;skipped_capacity+=1;continue
+            r=rec[i];target=equity_now/10.0;ep=float(r['entry_px'])
+            if ep<=0 or cash+1e-12<target:skipped_capacity+=1;continue
+            cash-=target;pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,'entry_px':ep,'cost':target};last[i]=ep;admitted+=1
+        hv=0.0
+        for i,q in pos.items():
+            cp=price.get(q['listing_id'],{}).get(dt,last.get(i,q['entry_px']));cp=cp if np.isfinite(cp) else last.get(i,q['entry_px']);last[i]=cp;hv+=q['shares']*cp
+        eq=cash+hv;eqrows.append({'date':dt,'equity':eq,'cash':cash,'holdings_value':hv,'exposure':hv/eq if eq>0 else np.nan,'open_slots':len(pos),'allowed_slots':allowed,'brake':bool(brake_on),'dd_pre_entry':dd_now})
+        if di%step==0 or di==len(cal):_v621_write(status='running',message=f'Phase 2/3 · {label} {int(round(di/len(cal)*100))}%',phase='replay',processed=vi,total=vn,current=label,elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows);L=pd.DataFrame(ledger)
+    if C.empty:return None
+    C['date']=pd.to_datetime(C.date);C['peak']=C.equity.cummax();C['dd']=C.equity/C.peak-1
+    yrs=max((C.date.iloc[-1]-C.date.iloc[0]).days/365.25,1/365.25);end=float(C.equity.iloc[-1]);cagr=end**(1/yrs)-1 if end>0 else -1.0;maxdd=float(C.dd.min())
+    allret=pd.to_numeric(X.exit_px,errors='coerce')/pd.to_numeric(X.entry_px,errors='coerce')-1.0;mega=set(X.index[allret>=1.0].tolist());mega_total=len(mega)
+    if len(L):
+        rr=pd.to_numeric(L['return'],errors='coerce');gp=float(L.loc[L.pnl_dollars>0,'pnl_dollars'].sum());gl=float(-L.loc[L.pnl_dollars<0,'pnl_dollars'].sum());pf=(gp/gl if gl>0 else np.inf);wr=float((rr>0).mean());avgwin=float(rr[rr>0].mean()) if (rr>0).any() else np.nan;avgloss=float(rr[rr<=0].mean()) if (rr<=0).any() else np.nan
+        captured_ids=set(int(z) for z in L.trade_id.astype(int).tolist());captured=len(mega & captured_ids);tail_capture=(captured/mega_total if mega_total else np.nan)
+    else:pf=wr=avgwin=avgloss=np.nan;captured=0;tail_capture=np.nan
+    CY=C.copy();CY['year']=CY.date.dt.year;yearrets=[]
+    for _,g in CY.groupby('year'):
+        if len(g)>=2:yearrets.append(float(g.equity.iloc[-1]/g.equity.iloc[0]-1))
+    return {'strategy':label,'trigger':trigger,'cap':cap,'release':release,'end_equity':end,'cagr':cagr,'maxdd':maxdd,'calmar':(cagr/abs(maxdd) if maxdd<0 else np.nan),'profit_factor':pf,'win_rate':wr,'avg_win':avgwin,'avg_loss':avgloss,'trades':int(len(L)),'admitted':int(admitted),'skipped_capacity':int(skipped_capacity),'skipped_brake':int(skipped_brake),'brake_days':int(brake_days),'brake_episodes':int(brake_episodes),'avg_exposure':float(C.exposure.mean()),'worst_year':min(yearrets) if yearrets else np.nan,'mega_winners_total':int(mega_total),'mega_winners_captured':int(captured),'right_tail_capture':tail_capture}
+
+def _v621_run():
+    global v621_thread;t0=time.time()
+    try:
+        V621_DIR.mkdir(parents=True,exist_ok=True)
+        if V621_STOP.exists():V621_STOP.unlink()
+        _v621_write(status='running',message='V6.21 Adaptive DD Brake 启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T,price,cal=_v621_load(t0)
+        variants=[('BASE_10',None,10,None),('DD10_CAP8_REL7',0.10,8,0.07),('DD10_CAP7_REL7',0.10,7,0.07),('DD10_CAP6_REL7',0.10,6,0.07),('DD10_CAP7_REL5',0.10,7,0.05)]
+        rows=[]
+        for vi,(label,trig,cap,rel) in enumerate(variants,1):
+            z=_v621_variant_replay(T,price,cal,label,trig,cap,rel,vi,len(variants),t0)
+            if z is not None:rows.append(z)
+        O=pd.DataFrame(rows)
+        if O.empty:raise RuntimeError('V6.21 没有生成 replay 结果')
+        base=O[O.strategy.eq('BASE_10')].iloc[0]
+        O['delta_cagr']=O.cagr-float(base.cagr);O['delta_maxdd']=O.maxdd-float(base.maxdd);O['delta_pf']=O.profit_factor-float(base.profit_factor)
+        base_tail_count=max(int(base.mega_winners_captured),1);O['tail_count_retention']=O.mega_winners_captured/base_tail_count
+        O['screen_pass']=(O.strategy.ne('BASE_10')&(O.delta_maxdd>=0.15)&(O.cagr>=float(base.cagr)*0.85)&(O.profit_factor>=3.0)&(O.tail_count_retention>=0.80))
+        O['strong_pass']=(O.strategy.ne('BASE_10')&(O.delta_maxdd>=0.20)&(O.cagr>=float(base.cagr)*0.85)&(O.profit_factor>=3.0)&(O.tail_count_retention>=0.80))
+        O=O.sort_values(['strong_pass','screen_pass','calmar','cagr'],ascending=[False,False,False,False]).reset_index(drop=True)
+        try:O.to_csv(V621_REPORT,index=False)
+        except OSError:pass
+        strong=O[O.strong_pass];winners=O[O.screen_pass];verdict='STRONG_ADAPTIVE_BRAKE' if len(strong) else ('ADAPTIVE_BRAKE_CANDIDATE' if len(winners) else 'NO_ADAPTIVE_BRAKE_PASS');best=O.iloc[0].to_dict()
+        res={'version':'V6.21 Adaptive DD Brake · Hysteresis Recovery','generated_at':datetime.now(timezone.utc).isoformat(),'elapsed_sec':round(time.time()-t0,2),'verdict':verdict,'best':{k:(None if pd.isna(v) else v) for k,v in best.items()},'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),'acceptance':'候选：MaxDD 至少改善15个百分点；CAGR 保留 BASE >=85%；PF >=3.0；+100%赢家数量至少保留 BASE 的80%。Strong：MaxDD 至少改善20个百分点，其余相同。','rule_note':'DD 到 -10% 才降低 NEW-entry capacity；账户恢复到 release 阈值（-7% 或 -5%）立即恢复10仓。已有持仓不强卖；DNA / Entry / -7% Stop / HOLD1260 全部冻结。','tests':'只延续 V6.20 已证实有效的 DD10 分支：CAP8 / CAP7 / CAP6 + hysteresis release。Cluster/Combo 已停止，不再重复。','tail_note':f'BASE +100% winner count = {int(base.mega_winners_captured)}；页面同时显示候选 count 与相对 BASE retention，修正 V6.20 百分比不直观问题。','cache_note':'Reuses V6.17 Stage-2 trades.csv.gz + Historical Cache; 0 Tiingo; no universe rebuild.'}
+        V621_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v621_write(status='done',message=f'V6.21 完成：{verdict}',phase='done',processed=3,total=3,current=str(best.get('strategy','')),elapsed_sec=res['elapsed_sec'],error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v621_write(status='paused',message='V6.21 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v621_write(status='error',message='V6.21 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:traceback.print_exc();_v621_write(status='error',message='V6.21 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v621_thread=None
+
+def _v621_start():
+    global v621_thread
+    if _v621_alive():return False
+    _v621_write(status='starting',message='V6.21 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None);v621_thread=threading.Thread(target=_v621_run,daemon=True);v621_thread.start();return True
+
+@APP.route('/v621/run',methods=['GET','POST'])
+def v621_run():_v621_start();return redirect('/v621/adaptive-dd-brake')
+@APP.get('/v621/stop')
+def v621_stop():V621_DIR.mkdir(parents=True,exist_ok=True);V621_STOP.write_text('stop',encoding='utf-8');return redirect('/v621/adaptive-dd-brake')
+@APP.get('/api/v621/status')
+def v621_status_api():return jsonify(_v621_status())
+@APP.get('/v621/adaptive-dd-brake')
+def v621_page():
+    import html
+    e=lambda x:html.escape(str(x));s=_v621_status();r={}
+    if V621_RESULT.exists():
+        try:r=json.loads(V621_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v621_alive() or s.get('status') in ('starting','running');btn='' if running else '<a href="/v621/run"><button>▶ 开始 V6.21 Adaptive DD Replay</button></a>';stop='<a href="/v621/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='⭐ STRONG' if x.get('strong_pass') else ('✅ PASS' if x.get('screen_pass') else '—')
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('win_rate') or 0):.2%}</td><td>{float(x.get('cagr') or 0):.2%}</td><td>{float(x.get('delta_cagr') or 0):+.2%}</td><td><b>{float(x.get('maxdd') or 0):.2%}</b></td><td>{float(x.get('delta_maxdd') or 0):+.2%}</td><td>{float(x.get('calmar') or 0):.2f}</td><td>{float(x.get('profit_factor') or 0):.2f}</td><td>{float(x.get('avg_win') or 0):.1%}</td><td>{int(x.get('trades',0) or 0):,}</td><td>{int(x.get('brake_days',0) or 0):,}</td><td>{int(x.get('brake_episodes',0) or 0):,}</td><td>{float(x.get('avg_exposure') or 0):.1%}</td><td>{int(x.get('mega_winners_captured',0) or 0)}/{int(x.get('mega_winners_total',0) or 0)}</td><td>{float(x.get('tail_count_retention') or 0):.1%}</td><td>{p}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px;line-height:1.6}}.warn{{background:#fff7df;border:1px solid #f1c75b;border-radius:14px;padding:15px;line-height:1.6}}.danger{{background:#fff1f2;border:1px solid #fda4af;border-radius:14px;padding:15px}}button{{padding:13px 16px;border:0;border-radius:12px;background:#111827;color:white;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w"><a href="/v620/risk-brake">← V6.20 Portfolio Risk Brake</a><div class="c"><h1>🛡️ V6.21 Adaptive DD Brake</h1><div class="info"><b>V6.20 证明 DD Brake 有效；这一轮只解决“刹车太重、恢复太慢”。</b><br>固定 DD10 触发，只测试 CAP8 / CAP7 / CAP6，并加入 hysteresis：回撤恢复到 -7% 或 -5% 就恢复10仓。已有赢家不卖；不碰 DNA / Entry / Stop / HOLD1260。</div></div><div class="c"><h2>状态：{e(s.get('status'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0) or 0):,}/{int(s.get('total',0) or 0):,} · 当前 {e(s.get('current',''))} · {s.get('elapsed_sec',0)} 秒</p>{btn}{stop}{('<div class="danger">'+e(s.get('error'))+'</div>') if s.get('error') else ''}</div><div class="c"><h2>Verdict：{e(r.get('verdict','—'))}</h2><div style="overflow:auto"><table><tr><th>方案</th><th>Win Rate</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>Calmar</th><th>PF</th><th>Avg Win</th><th>Trades</th><th>Brake Days</th><th>Episodes</th><th>Avg Exposure</th><th>+100%赢家 Count</th><th>vs BASE Retention</th><th>Pass</th></tr>{trs}</table></div></div><div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>本轮测试：</b>{e(r.get('tests',''))}<br><b>右尾：</b>{e(r.get('tail_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v621/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+
+
 # ==================== V6.17 PRODUCTION CANDIDATE ====================
 # Frozen production baseline promoted from the validated V6.16 research branch.
 # Research experiments remain available in legacy routes but are NOT part of the
@@ -19116,7 +19278,7 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v620/risk-brake">🛡️ V6.20 风险刹车</a> &nbsp; <a class="btn" href="/v619/maxdd-autopsy">🧬 V6.19 回撤尸检</a> &nbsp; <a class="btn" href="/v618/optimization-lab">🚀 V6.18 三目标优化</a> &nbsp; <a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v621/adaptive-dd-brake">🛡️ V6.21 Adaptive Brake</a> &nbsp; <a class="btn" href="/v620/risk-brake">🛡️ V6.20 风险刹车</a> &nbsp; <a class="btn" href="/v619/maxdd-autopsy">🧬 V6.19 回撤尸检</a> &nbsp; <a class="btn" href="/v618/optimization-lab">🚀 V6.18 三目标优化</a> &nbsp; <a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
 
