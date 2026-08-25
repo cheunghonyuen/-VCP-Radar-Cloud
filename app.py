@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v6284-shortcut" style="border:3px solid #ef4444;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.28.4 Root-Cause Price Repair</h2><div class="muted">查清极端 MFE 到底是真牛股还是 split / reverse-split / 复权断层，并修正明确的数据异常</div></div><a href="/v6284/root-cause-repair"><button type="button">打开 V6.28.4</button></a></div></div>
+
 <div class="card" id="v6283-shortcut" style="border:3px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">✂️ V6.28.3 Extreme Tail Audit</h2><div class="muted">数清楚 &gt;+3000% 到底涉及几只股票 · 生成可逆坏数据名单</div></div><a href="/v6283/tail-audit"><button type="button">打开 V6.28.3</button></a></div></div>
 
 <div class="card" id="v6282-shortcut" style="border:3px solid #0ea5e9;background:#f0f9ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧼 V6.28.2 Price-Normalized Rebaseline</h2><div class="muted">清理 split-like 跳变后重算 MFE / Giveback / Shape · 1996–2026 · 0 Tiingo</div></div><a href="/v6282/normalized-rebaseline"><button type="button">打开 V6.28.2</button></a></div></div>
