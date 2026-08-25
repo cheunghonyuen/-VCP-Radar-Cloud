@@ -17528,6 +17528,7 @@ V617O_STATUS=V617O_DIR/"status.json"
 V617O_STOP=V617O_DIR/"STOP"
 v617o_thread=None
 V617O_BATCH_SIZE=max(20,int(os.environ.get("V617_OVERNIGHT_BATCH_SIZE","200")))
+V617O_MAX_FAILED_RETRIES=max(1,int(os.environ.get("V617_MAX_FAILED_RETRIES","2")))
 # Low-disk V6.17: historical listing caches are stored as gzip CSV.
 # Existing .csv files remain readable and are migrated safely on resume.
 V617O_DISK_RESERVE_MB=max(256,int(os.environ.get("V617_OVERNIGHT_DISK_RESERVE_MB","768")))
@@ -17748,6 +17749,11 @@ def _v617o_engine():
             return
         M=_v617o_prepare_manifest()
         M=_v617o_reconcile_files(M)
+
+        # Fair failed-retry bookkeeping. Older manifests do not have this column.
+        if "retry_count" not in M.columns:
+            M["retry_count"]=0
+        M["retry_count"]=pd.to_numeric(M["retry_count"],errors="coerce").fillna(0).astype(int)
         _v615b_atomic_manifest(M)
 
         while True:
@@ -17780,15 +17786,39 @@ def _v617o_engine():
                 _v615b_atomic_manifest(M)
                 phase="unverified"
             else:
-                # Phase B: only after all other unverified rows are exhausted, retry FAILED.
-                P=M[(~ver)&st.eq("FAILED")].copy()
+                # Phase B: fair retry of FAILED listings.
+                # IMPORTANT: never keep taking the same first 200 failures forever.
+                failed_mask=(~ver)&st.eq("FAILED")
+                retryable=failed_mask & (M["retry_count"] < V617O_MAX_FAILED_RETRIES)
+
+                P=M[retryable].copy()
                 if P.empty:
+                    exhausted=int(failed_mask.sum())
+                    if exhausted:
+                        _v617o_write(
+                            status="retry_complete",
+                            message=f"失败项重试已完成：仍有 {exhausted} 个在 {V617O_MAX_FAILED_RETRIES} 轮重试后无法验证；停止死循环，等待失败原因分类。",
+                            phase="retry_complete",
+                            final_failed=exhausted,
+                            max_failed_retries=V617O_MAX_FAILED_RETRIES,
+                            **met
+                        )
+                        return
                     _v617o_write(status="needs_review",message="没有未验证项目，但覆盖仍未达门槛；检查 manifest 一致性",**met)
                     return
+
+                # Fair ordering: always process the listings with FEWEST retries first.
+                # Therefore all failed names get retry #1 before any name gets retry #2.
+                min_retry=int(P["retry_count"].min())
+                P=P[P["retry_count"].eq(min_retry)].copy()
                 P=_v617o_sort_work(P).head(V617O_BATCH_SIZE)
+
+                # Increment BEFORE execution; if Railway restarts mid-batch, these names
+                # will not monopolize the front of the queue forever.
+                M.loc[P.index,"retry_count"]=M.loc[P.index,"retry_count"].astype(int)+1
                 M.loc[P.index,"status"]="PENDING"
                 _v615b_atomic_manifest(M)
-                phase="retry_failed"
+                phase=f"retry_failed_r{min_retry+1}"
 
             batch_no+=1
             _v617o_write(status="running",message=f"第 {batch_no} 批：{phase} · {len(P)} listings",
@@ -17908,13 +17938,13 @@ def v617_overnight_page():
     <style>body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}button{{padding:13px 16px;background:#111827;color:#fff;border:0;border-radius:12px;font-weight:800;margin-right:8px}}progress{{width:100%;height:22px}}</style></head>
     <body><div class="w"><a href="/v617/production">V6.17 主系统</a>
     <div class="c"><h1>🌙 V6.17 整晚全历史股票池扩展</h1>
-    <div class="info"><b>批次引擎（修正版）。</b> 不再只认 PENDING：所有「尚未验证且非 FAILED」的股票都会进入待处理队列；失败项先跳过，全部未验证新项跑完后再重试失败项。只有 Tiingo 429 才进入冷却。<br><b>低磁盘模式：</b>历史文件完成后立即 gzip 压缩；旧 CSV 会在启动时逐个安全压缩；预留至少 768MB 空间，低于保留线自动暂停，不再要求继续买磁盘。</div></div>
+    <div class="info"><b>批次引擎（修正版）。</b> 不再只认 PENDING：所有「尚未验证且非 FAILED」的股票都会进入待处理队列；失败项先跳过；主队列完成后按公平轮转重试失败项，每只先完成第1轮再进入第2轮，不会反复卡住同一批。只有 Tiingo 429 才进入冷却。<br><b>低磁盘模式：</b>历史文件完成后立即 gzip 压缩；旧 CSV 会在启动时逐个安全压缩；预留至少 768MB 空间，低于保留线自动暂停，不再要求继续买磁盘。</div></div>
     <div class="c"><h2>状态：{e(s.get("status"))}</h2>
     <p>后台线程：<b>{"运行中" if running else "未运行"}</b></p>
     <p>{e(s.get("message"))}</p>
     {f'<div style="background:#fff1f2;border:1px solid #fda4af;border-radius:12px;padding:12px;margin:10px 0"><b>错误详情：</b>{e(s.get("error"))}</div>' if s.get("error") else ''}
     <p>当前：{e(s.get("current",""))}</p>
-    <p>批次：{int(s.get("batch",0) or 0)} · 阶段：{e(s.get("phase",""))}</p>
+    <p>批次：{int(s.get("batch",0) or 0)} · 阶段：{e(s.get("phase",""))}</p><p>失败重试上限：{V617O_MAX_FAILED_RETRIES} 轮（公平轮转，不重复卡队头）</p>
     <p>完整历史股票：<b>{int(s.get("completed",0) or 0)} / {int(s.get("total",0) or 0)}</b></p>
     <p>待处理：{int(s.get("pending",0) or 0)} · 失败：{int(s.get("failed",0) or 0)}</p>
     <p>全部覆盖：<b>{cov:.1%}</b>（要求 ≥95%）</p><progress max="1" value="{min(1,cov)}"></progress>
