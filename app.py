@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v634-shortcut" style="border:4px solid #0f766e;background:#f0fdfa"><div><h2>📚 V6.34 JLaw Spec Reconciliation</h2><div class="muted">不再乱调 Exit · 对照当前代码与 JLaw 原始概念 · 标记 Proxy / Implementation / Spec drift</div><a href="/v634/jlaw-spec"><button type="button">打开 V6.34</button></a></div></div>
+
 <div class="card" id="v633-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div><h2>🚨 V6.33 Failure Confirmation Replay</h2><div class="muted">D+1/D+3/D+5 失败确认 · 次日退出 · 保留超级 Winner · 30Y 10-slot Replay</div><a href="/v633/failure-confirmation"><button type="button">打开 V6.33</button></a></div></div>
 
 <div class="card" id="v632-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div><h2>🔎 V6.32 True-Failure Entry / Trigger Autopsy</h2><div class="muted">只查未到+1R就STOP7 · Entry日 + D+1/3/5/10 follow-through · 不重复旧factor search</div><a href="/v632/true-failure-entry-autopsy"><button type="button">打开 V6.32</button></a></div></div>
@@ -22541,4 +22543,180 @@ body{{font-family:-apple-system;background:#f3f6fa;padding:16px;color:#0f172a}}.
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot Replay</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>Avg Win</th><th>Avg Loss</th><th>Early Exit</th><th>Avg Hold</th><th>+100%</th><th>+100%保留</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><p><b>本轮：</b>{e(r.get('tests',''))}</p><p><b>时序：</b>{e(r.get('timing_note',''))}</p><p><b>验收：</b>{e(r.get('acceptance',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v633/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.34 JLaw Spec Reconciliation =========================
+V634_DIR=DATA_DIR/'v634_jlaw_spec_reconciliation'
+V634_RESULT=V634_DIR/'result.json'
+V634_STATUS=V634_DIR/'status.json'
+v634_thread=None
+
+def _v634_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V634_STATUS.exists():
+        try:x.update(json.loads(V634_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v634_write(**kw):
+    V634_DIR.mkdir(parents=True,exist_ok=True);x=_v634_status();x.update(kw)
+    V634_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v634_alive(): return v634_thread is not None and v634_thread.is_alive()
+
+def _v634_transcript_corpus():
+    rows=[];idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid)
+        text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'))
+                text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:rows.append({'video_id':vid,'text':text,'chars':len(text)})
+    return rows
+
+def _v634_keyword_hits(corpus,terms,limit=8):
+    hits=[]
+    for r in corpus:
+        low=r['text'].lower()
+        for term in terms:
+            t=term.lower()
+            pos=low.find(t)
+            if pos>=0:
+                a=max(0,pos-110);b=min(len(r['text']),pos+len(term)+180)
+                snippet=re.sub(r'\s+',' ',r['text'][a:b]).strip()
+                hits.append({'video_id':r['video_id'],'term':term,'snippet':snippet})
+                break
+        if len(hits)>=limit:break
+    return hits
+
+def _v634_run():
+    global v634_thread
+    t0=time.time()
+    try:
+        _v634_write(status='running',message='读取当前代码规则与云端 JLaw 字幕库…',elapsed_sec=0,error=None)
+        corpus=_v634_transcript_corpus()
+
+        # This ledger deliberately separates: CODE FACT, previously-attributed JLaw concept,
+        # and exact numeric thresholds that are clearly implementation proxies.
+        spec=[
+          {'stage':'Universe / Trend','concept':'趋势/Stage-2/leader context',
+           'code_rule':'当前系统有 trend / RS / sector / leader / supply 等量化条件与评分。',
+           'classification':'MIXED','risk':'中',
+           'why':'概念层面接近 JLaw/成长股方法，但具体分数、权重和阈值是程序量化实现。',
+           'terms':['stage 2','relative strength','leader','sector','trend']},
+          {'stage':'VCP contraction','concept':'VCP 收缩',
+           'code_rule':'早期扫描使用 60 日三段窗口；示例阈值 c1<30%、c2<22%、c3<16%，至少2段收缩。',
+           'classification':'PROXY','risk':'高',
+           'why':'“收缩”是核心概念，但固定三段窗口和 30/22/16% 是实现阈值，不应自动视为 JLaw 原话。',
+           'terms':['contraction','vcp','tight','volatility contraction']},
+          {'stage':'Volume dry-up','concept':'突破前量缩',
+           'code_rule':'volume dry-up 存在固定比率门槛；First Pullback 又要求 pullback volume / v20 <=0.85 且相对 breakout volume <=0.80。',
+           'classification':'PROXY','risk':'高',
+           'why':'低量回踩/量缩概念合理，但 0.85 / 0.80 属于程序化阈值。',
+           'terms':['volume dry','dry up','low volume','volume contraction']},
+          {'stage':'Pivot proximity','concept':'接近 Pivot / 突破',
+           'code_rule':'扫描层 near_pivot 曾使用 -10% 到 +3%；breakout 使用 pivot 上方 0%~5% 且 volratio>=1.2。',
+           'classification':'PROXY','risk':'高',
+           'why':'Pivot/突破是原策略语言，但区间与 1.2x 量比是代码阈值。',
+           'terms':['pivot','breakout','break out']},
+          {'stage':'First Pullback window','concept':'突破后的第一次低风险回踩',
+           'code_rule':'只搜 breakout 后第 +2 到 +15 根；回撤深度限定 2%~12%。',
+           'classification':'PROXY','risk':'高',
+           'why':'First Pullback 是交易概念；固定 +2~+15 日、2%~12% 是我们为因果回测定义的窗口。',
+           'terms':['first pullback','pullback','retracement']},
+          {'stage':'Support anchors','concept':'Pivot / 10MA / 20MA 支撑区',
+           'code_rule':'靠近 Pivot 容差1.8%；10MA/20MA 容差1.5%；META 要至少2个 anchor，且聚集宽度<=2.5%。',
+           'classification':'PROXY','risk':'很高',
+           'why':'多重支撑/交易区概念有依据，但 1.8%、1.5%、2.5% 是非常具体的工程参数。',
+           'terms':['10 day','10ma','20 day','20ma','support','pivot']},
+          {'stage':'META trigger','concept':'回踩后重新转强再买',
+           'code_rule':'META 不在“碰到支撑”时买；必须等待 _v613_restrength_trigger，之后按其 entry_i/entry 入场。',
+           'classification':'CONCEPT_ALIGNED','risk':'中',
+           'why':'“等重新转强确认”比单纯触支撑更贴近主动交易逻辑，但 trigger 的精确定义仍需与字幕逐条核对。',
+           'terms':['re-strength','strength','reclaim','turn up','confirmation']},
+          {'stage':'Plain pullback execution','concept':'普通 First Pullback 入场',
+           'code_rule':'普通 PULLBACK 模式在满足条件后直接下一交易日 open 入场；若 next open > 当日 close*1.03 则跳过。',
+           'classification':'IMPLEMENTATION','risk':'很高',
+           'why':'“次日开盘买 + 不追高3%”是执行假设，未确认是 JLaw 的明确原规则。',
+           'terms':['next day','open','entry','buy']},
+          {'stage':'Stop','concept':'小亏快速退出',
+           'code_rule':'当前主 BASE 长期冻结使用 -7% terminal stop；过去也研究过结构止损/-4~-7%。',
+           'classification':'MIXED','risk':'高',
+           'why':'控制小亏是明确原则，但固定 -7% 不等于每笔 JLaw 的结构止损。',
+           'terms':['stop loss','stop','risk','loss']},
+          {'stage':'Winner holding','concept':'让 Winner 跑',
+           'code_rule':'BASE 使用长尾 HOLD1260；V6.29/V6.31 已证明机械 TP / ratchet 会严重伤害右尾。',
+           'classification':'IMPLEMENTATION','risk':'高',
+           'why':'让赢家跑是理念；HOLD1260 是研究框架，不是 JLaw 原始卖出规则。',
+           'terms':['winner','hold','sell','exit','profit']},
+        ]
+
+        for x in spec:
+            x['evidence_hits']=_v634_keyword_hits(corpus,x.pop('terms'),limit=5)
+            x['evidence_count']=len(x['evidence_hits'])
+
+        summary={
+          'transcript_videos':len(corpus),
+          'transcript_chars':sum(r['chars'] for r in corpus),
+          'code_spec_rows':len(spec),
+          'proxy_rows':sum(x['classification']=='PROXY' for x in spec),
+          'high_risk_rows':sum(x['risk'] in ('高','很高') for x in spec),
+          'no_transcript_warning':len(corpus)==0
+        }
+
+        verdict='SPEC_DRIFT_RISK_CONFIRMED'
+        res={'version':'V6.34 JLaw Spec Reconciliation','verdict':verdict,'summary':summary,'spec':spec,
+             'method':'Static reconciliation only. It reads the current code definitions and any already-cached Railway YouTube transcripts. Keyword hits are evidence pointers, NOT proof that a numeric threshold was stated by JLaw.',
+             'critical_point':'Concept names such as VCP, Pivot, low-volume pullback, support and re-strength can be directionally aligned while the numeric thresholds/window/execution rules are our own proxies. That can materially change trade frequency and win rate.',
+             'next_step':'Do not tune another exit. First choose the 2-3 highest-risk implementation proxies with weak/no source support, then replace them with source-faithful trigger definitions or run controlled A/B only on those exact discrepancies.',
+             'cache_note':'0 Tiingo; no universe rebuild; no historical replay. Reads code + existing YouTube transcript cache only.'}
+        V634_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v634_write(status='done',message=f'V6.34 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v634_write(status='error',message='V6.34 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v634_thread=None
+
+def _v634_start():
+    global v634_thread
+    if _v634_alive():return False
+    _v634_write(status='starting',message='V6.34 正在启动',elapsed_sec=0,error=None)
+    v634_thread=threading.Thread(target=_v634_run,daemon=True);v634_thread.start();return True
+
+@APP.route('/v634/run',methods=['GET','POST'])
+def v634_run():_v634_start();return redirect('/v634/jlaw-spec')
+@APP.get('/v634')
+def v634_alias():return redirect('/v634/jlaw-spec')
+@APP.get('/api/v634/status')
+def v634_status_api():return jsonify(_v634_status())
+
+@APP.get('/v634/jlaw-spec')
+def v634_page():
+    import html;e=lambda x:html.escape(str(x));st=_v634_status();r={};sm={}
+    if V634_RESULT.exists():
+        try:r=json.loads(V634_RESULT.read_text(encoding='utf-8'));sm=r.get('summary',{})
+        except Exception:pass
+    running=_v634_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v634/run"><button>▶ 开始 V6.34 Spec Reconciliation</button></a>'
+    trs=''
+    for x in r.get('spec',[]):
+        ev=''.join([f"<div style='margin:4px 0'><b>{e(h.get('video_id'))}</b> · {e(h.get('term'))}: {e(h.get('snippet'))}</div>" for h in x.get('evidence_hits',[])])
+        if not ev:ev='<span style="color:#b45309">当前字幕缓存未找到直接关键词证据</span>'
+        trs+=f"<tr><td><b>{e(x.get('stage'))}</b></td><td>{e(x.get('concept'))}</td><td>{e(x.get('code_rule'))}</td><td><b>{e(x.get('classification'))}</b></td><td>{e(x.get('risk'))}</td><td>{e(x.get('why'))}</td><td style='min-width:380px;white-space:normal'>{ev}</td></tr>"
+    err=f"<div style='padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1900px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:10px;border-bottom:1px solid #ddd;vertical-align:top;text-align:left}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v633/failure-confirmation">← V6.33</a>
+<div class="c"><h1>📚 V6.34 JLaw Spec Reconciliation</h1><p><b>这轮不做新策略回测。</b> 把“JLaw概念”与“我们代码实际规则”拆开，特别标出固定数字、窗口、执行方式到底是原规则还是量化 proxy。</p></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point','等待运行'))}</p><p>字幕视频：{int(sm.get('transcript_videos',0))} · 字幕字符：{int(sm.get('transcript_chars',0)):,} · Spec rows：{int(sm.get('code_spec_rows',0))} · Proxy rows：{int(sm.get('proxy_rows',0))} · 高风险偏差：{int(sm.get('high_risk_rows',0))}</p></div>
+<div class="c" style="overflow:auto"><h2>Current Code vs JLaw Spec Ledger</h2><table><tr><th>阶段</th><th>概念</th><th>当前代码</th><th>分类</th><th>偏差风险</th><th>为什么</th><th>字幕关键词证据指针</th></tr>{trs}</table></div>
+<div class="c"><p><b>方法：</b>{e(r.get('method',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v634/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
