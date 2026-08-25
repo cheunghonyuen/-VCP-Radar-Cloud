@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v6283-shortcut" style="border:3px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">✂️ V6.28.3 Extreme Tail Audit</h2><div class="muted">数清楚 &gt;+3000% 到底涉及几只股票 · 生成可逆坏数据名单</div></div><a href="/v6283/tail-audit"><button type="button">打开 V6.28.3</button></a></div></div>
+
 <div class="card" id="v6282-shortcut" style="border:3px solid #0ea5e9;background:#f0f9ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧼 V6.28.2 Price-Normalized Rebaseline</h2><div class="muted">清理 split-like 跳变后重算 MFE / Giveback / Shape · 1996–2026 · 0 Tiingo</div></div><a href="/v6282/normalized-rebaseline"><button type="button">打开 V6.28.2</button></a></div></div>
 
 <div class="card" id="v6281-shortcut" style="border:3px solid #2563eb;background:#eff6ff"><div><h2>🧹 V6.28.1 Data Integrity Fix</h2><div class="muted">先查 split / reverse split / OHLC adjustment basis；不改交易规则</div><a href="/v6281/data-integrity"><button type="button">打开 V6.28.1</button></a></div></div>
@@ -21110,4 +21112,100 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>2. 干净后的 Shape Events</h2><div style="overflow:auto"><table><tr><th>事件</th><th>N</th><th>事件时盈利</th><th>后20D</th><th>后40D</th><th>后60D</th><th>之后仍能到+100%</th></tr>{es}</table></div></div>
 <div class="c"><div class="warn"><b>方法：</b>{e(r.get('method',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6282/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.28.3 Extreme Tail Ticker Audit =========================
+V6283_DIR=DATA_DIR/'v6283_extreme_tail_ticker_audit'
+V6283_STATUS=V6283_DIR/'status.json'; V6283_RESULT=V6283_DIR/'result.json'
+v6283_thread=None
+
+def _v6283_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V6283_STATUS.exists():
+        try:x.update(json.loads(V6283_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+def _v6283_write(**kw):
+    V6283_DIR.mkdir(parents=True,exist_ok=True);x=_v6283_status();x.update(kw)
+    V6283_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+def _v6283_alive(): return v6283_thread is not None and v6283_thread.is_alive()
+
+def _v6283_run():
+    global v6283_thread
+    t0=time.time()
+    try:
+        _v6283_write(status='running',message='读取 V6.28.2 标准化交易结果…',elapsed_sec=0,error=None)
+        p=V6282_DIR/'normalized_trade_paths_summary.csv.gz'
+        if not p.exists(): raise RuntimeError('找不到 V6.28.2 normalized_trade_paths_summary.csv.gz，请先完成 V6.28.2')
+        S=pd.read_csv(p)
+        if 'mfe' not in S.columns or 'ticker' not in S.columns: raise RuntimeError('V6.28.2 summary 缺少 mfe/ticker')
+        S['mfe']=pd.to_numeric(S.mfe,errors='coerce')
+        cuts=[5,10,30,100]  # +500%, +1000%, +3000%, +10000%
+        tiers=[]
+        for c in cuts:
+            q=S[S.mfe>c].copy()
+            tiers.append({'threshold_pct':int(c*100),'trades':int(len(q)),
+                          'tickers':int(q.ticker.astype(str).nunique()),
+                          'trade_share':float(len(q)/max(1,len(S))),
+                          'ticker_list':sorted(q.ticker.astype(str).unique().tolist())})
+        Q=S[S.mfe>30].copy()
+        by=[]
+        if len(Q):
+            g=Q.groupby(Q.ticker.astype(str))
+            for tic,z in g:
+                by.append({'ticker':tic,'trades_over_3000':int(len(z)),
+                           'max_mfe':float(z.mfe.max()),
+                           'median_mfe':float(z.mfe.median()),
+                           'entries':'; '.join(sorted(set(z.entry_date.astype(str)))[:12])})
+            by=sorted(by,key=lambda x:(x['max_mfe'],x['trades_over_3000']),reverse=True)
+        # conservative exclusion proposal: only tickers with >3000% normalized MFE
+        bad=sorted(Q.ticker.astype(str).unique().tolist())
+        verdict='SMALL_TAIL_BLACKLIST_OK' if len(bad)<=50 else 'TAIL_TOO_BROAD_FOR_SIMPLE_BLACKLIST'
+        res={'version':'V6.28.3 Extreme Tail Ticker Audit','verdict':verdict,
+             'input_trades':int(len(S)),'unique_tickers':int(S.ticker.astype(str).nunique()),
+             'thresholds':tiers,'blacklist_threshold':'+3000% normalized MFE',
+             'blacklist_count':len(bad),'blacklist':bad,'ticker_detail':by,
+             'rule':'Diagnostic only. No files are deleted. Proposed blacklist is reversible and applies only if user adopts it.',
+             'next_step':'If blacklist is small, exclude these tickers from research replay and proceed to V6.29 Take-Profit / R-multiple / partial-harvest / capital-recycling tests.'}
+        V6283_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        (V6283_DIR/'DATA_BAD_TICKERS.txt').write_text('\n'.join(bad)+('\n' if bad else ''),encoding='utf-8')
+        _v6283_write(status='done',message=f'完成：>+3000% 涉及 {len(bad)} 只股票',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v6283_write(status='error',message='V6.28.3 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v6283_thread=None
+
+def _v6283_start():
+    global v6283_thread
+    if _v6283_alive():return False
+    v6283_thread=threading.Thread(target=_v6283_run,daemon=True);v6283_thread.start();return True
+
+@APP.route('/v6283/run',methods=['GET','POST'])
+def v6283_run():_v6283_start();return redirect('/v6283/tail-audit')
+@APP.get('/api/v6283/status')
+def v6283_status_api():return jsonify(_v6283_status())
+
+@APP.get('/v6283/tail-audit')
+def v6283_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6283_status();r={}
+    if V6283_RESULT.exists():
+        try:r=json.loads(V6283_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    tiers=''
+    for x in r.get('thresholds',[]):
+        tiers+=f"<tr><td><b>&gt;+{x['threshold_pct']:,}%</b></td><td>{x['trades']:,}</td><td>{x['tickers']:,}</td><td>{x['trade_share']:.3%}</td></tr>"
+    det=''
+    for x in r.get('ticker_detail',[])[:100]:
+        det+=f"<tr><td><b>{e(x['ticker'])}</b></td><td>{x['trades_over_3000']:,}</td><td>{x['max_mfe']:.1%}</td><td>{x['median_mfe']:.1%}</td><td>{e(x['entries'])}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v6282/normalized-rebaseline">← V6.28.2 Normalized Rebaseline</a>
+<div class="c"><h1>✂️ V6.28.3 Extreme Tail Ticker Audit</h1><div class="info"><b>按你说的：先数清楚到底只有几只。</b><br>不再修 corporate action。直接统计标准化后 MFE &gt;+500%、+1000%、+3000%、+10000% 分别涉及多少笔、多少只股票。若 &gt;+3000% 只是很少几只，就生成可逆 DATA_BAD_TICKERS 黑名单。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{'' if _v6283_alive() else '<a href="/v6283/run"><button>▶ 开始 V6.28.3 尾部统计</button></a>'}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>标准化交易：{int(r.get('input_trades',0)):,} · 股票：{int(r.get('unique_tickers',0)):,} · 建议黑名单股票：<b>{int(r.get('blacklist_count',0)):,}</b></p></div>
+<div class="c"><h2>到底有多少？</h2><table><tr><th>MFE门槛</th><th>交易笔数</th><th>股票数</th><th>占全部交易</th></tr>{tiers}</table></div>
+<div class="c"><h2>&gt;+3000% 股票名单</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>异常交易数</th><th>最大MFE</th><th>中位MFE</th><th>Entry dates</th></tr>{det}</table></div></div>
+<div class="c"><div class="warn"><b>处理原则：</b>这里只生成名单，不删除 Historical Cache。确认数量够小后，下一版 Replay 统一排除 DATA_BAD_TICKERS，然后直接进入 V6.29 Take-Profit / R倍数 / 分批止盈 / Capital Recycling。</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6283/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
