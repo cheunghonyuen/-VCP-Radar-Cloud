@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v627-shortcut" style="border:3px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.27 Overheat Filter Validation</h2><div class="muted">把 V6.26 找到的过热毒区真正拿掉做30年10仓Replay · BASE / EXTREME / HOT · 0 Tiingo</div></div><a href="/v627/overheat-filter-validation"><button type="button">打开 V6.27</button></a></div></div>
+
 <div class="card" id="v626-shortcut" style="border:3px solid #f97316;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔥 V6.26 Overheat / Late-Stage Failure Audit</h2><div class="muted">1996–2026 · 60D+252D 联合过热 · STOP7 / PF / 超级赢家归因 · 0 Tiingo</div></div><a href="/v626/overheat-audit"><button type="button">打开 V6.26</button></a></div></div>
 
 <div class="card" id="v625-shortcut" style="border:3px solid #7c3aed;background:#f5f3ff">
@@ -20255,4 +20257,162 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>3. 年度稳定性：Overheat vs Non-overheat</h2><p>Stable-year share: {sy}</p><div style="overflow:auto"><table><tr><th>Year</th><th>Hot N</th><th>Hot WR</th><th>Cool WR</th><th>Hot PF</th><th>Cool PF</th><th>Hot STOP7</th><th>Cool STOP7</th></tr>{yrs}</table></div></div>
 <div class="c"><div class="note"><b>规则：</b>{e(r.get('rule_note','Diagnostic only.'))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v626/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.27 Overheat Filter Validation =========================
+V627_DIR=DATA_DIR/'v627_overheat_filter_validation'
+V627_STATUS=V627_DIR/'status.json'; V627_RESULT=V627_DIR/'result.json'; V627_STOP=V627_DIR/'STOP'
+v627_thread=None
+
+def _v627_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V627_STATUS.exists():
+        try:x.update(json.loads(V627_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v627_write(**kw):
+    V627_DIR.mkdir(parents=True,exist_ok=True); x=_v627_status(); x.update(kw)
+    V627_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v627_alive(): return v627_thread is not None and v627_thread.is_alive()
+
+def _v627_prepare_variants(T,F):
+    feat=F[['listing_id','entry_date','ret60','ret252']].copy()
+    feat['listing_id']=feat.listing_id.astype(str); feat['entry_date']=pd.to_datetime(feat.entry_date,errors='coerce').dt.normalize()
+    feat=feat.sort_values(['listing_id','entry_date']).drop_duplicates(['listing_id','entry_date'],keep='last')
+    X=T.copy(); X['listing_id']=X.listing_id.astype(str); X['entry_date']=pd.to_datetime(X.entry_date,errors='coerce').dt.normalize()
+    X=X.merge(feat,on=['listing_id','entry_date'],how='left')
+    X['ret60']=pd.to_numeric(X.ret60,errors='coerce'); X['ret252']=pd.to_numeric(X.ret252,errors='coerce')
+    both_extreme=(X.ret60>0.70)&(X.ret252>1.98)
+    both_hot=(X.ret60>0.45)&(X.ret252>1.22)
+    return [
+        ('BASE_30Y',X.copy(),'No filter'),
+        ('EXCLUDE_BOTH_EXTREME',X[~both_extreme.fillna(False)].copy(),'Exclude only ret60>70% AND ret252>198%'),
+        ('EXCLUDE_BOTH_HOT',X[~both_hot.fillna(False)].copy(),'Exclude ret60>45% AND ret252>122%'),
+    ]
+
+def _v627_tail_stats(base, g):
+    br=pd.to_numeric(base['return'],errors='coerce'); gr=pd.to_numeric(g['return'],errors='coerce')
+    out={'candidate_trades':int(len(g)),'candidate_keep':float(len(g)/len(base)) if len(base) else np.nan}
+    for p,name in [(1,'winner100'),(2,'winner200'),(5,'winner500')]:
+        b=int((br>=p).sum()); k=int((gr>=p).sum())
+        out[name+'_count']=k; out[name+'_retention']=float(k/b) if b else np.nan
+    return out
+
+def _v627_load_prices(T,t0):
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str)); M=M[M.listing_id.astype(str).isin(needed)].copy()
+    price={}; date_set=set(); total=len(M)
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V627_STOP.exists():raise RuntimeError('__STOPPED__')
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is not None and len(d):
+            d=d.copy(); d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize(); d['close']=pd.to_numeric(d.close,errors='coerce')
+            d=d.dropna(subset=['date','close']); d=d[(d.date>=V624_START)&(d.date<=V624_END)]
+            if len(d):
+                z=dict(zip(d.date,d.close.astype(float))); price[str(mr.listing_id)]=z; date_set.update(z.keys())
+        if n==1 or n%100==0 or n==total:
+            _v627_write(status='running',message='Phase 2/3 · 读取 1996–2026 Historical Cache',phase='load_cache',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+    return price,sorted(date_set)
+
+def _v627_run():
+    global v627_thread
+    t0=time.time()
+    try:
+        V627_DIR.mkdir(parents=True,exist_ok=True)
+        if V627_STOP.exists():V627_STOP.unlink()
+        _v627_write(status='running',message='V6.27 Overheat Filter Validation 启动',phase='prepare',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 candidate trades')
+        F=_v625_attach_pit_features(T,t0)
+        variants=_v627_prepare_variants(T,F)
+        base=variants[0][1]
+        tails=[]
+        for label,g,rule in variants:
+            q=_v627_tail_stats(base,g); q.update({'strategy':label,'rule':rule}); tails.append(q)
+        _v627_write(status='running',message='Phase 1/3 · 三个预设方案准备完成',phase='prepare',processed=1,total=3,current='BASE / EXTREME / HOT',elapsed_sec=round(time.time()-t0,1),error=None)
+        price,cal=_v627_load_prices(T,t0)
+        rows=[]
+        for i,(label,g,rule) in enumerate(variants,1):
+            if V627_STOP.exists():raise RuntimeError('__STOPPED__')
+            z=_v624_replay(g,price,cal,label,t0,i,len(variants)); z['rule']=rule; rows.append(z)
+        A=pd.DataFrame(rows); tail=pd.DataFrame(tails); A=A.merge(tail,on=['strategy'] if 'strategy' in A.columns else [],how='left') if False else A
+        # _v624_replay returns cohort, so merge manually.
+        tail=tail.rename(columns={'strategy':'cohort'})
+        O=A.merge(tail,on='cohort',how='left')
+        B=O[O.cohort.eq('BASE_30Y')].iloc[0]
+        O['delta_cagr']=O.cagr-float(B.cagr); O['delta_maxdd']=O.maxdd-float(B.maxdd); O['delta_pf']=O.profit_factor-float(B.profit_factor)
+        O['screen_pass']=(
+            O.cohort.ne('BASE_30Y') &
+            (O.maxdd>=float(B.maxdd)+0.05) &
+            (O.cagr>=float(B.cagr)*0.90) &
+            (O.winner100_retention>=0.90) &
+            (O.profit_factor>=float(B.profit_factor)*0.90)
+        )
+        O['strong_pass']=(
+            O.screen_pass &
+            (O.maxdd>=float(B.maxdd)+0.10) &
+            (O.cagr>=float(B.cagr)*0.95)
+        )
+        O=O.sort_values(['strong_pass','screen_pass','calmar','cagr'],ascending=[False,False,False,False]).reset_index(drop=True)
+        winners=O[O.screen_pass]
+        verdict='OVERHEAT_FILTER_CANDIDATE' if len(winners) else 'NO_OVERHEAT_FILTER_PASS'
+        if len(O[O.strong_pass]):verdict='STRONG_OVERHEAT_FILTER_CANDIDATE'
+        res={'version':'V6.27 Overheat Filter Validation','generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data','verdict':verdict,
+             'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'acceptance':'PASS: MaxDD improves >=5 percentage points; CAGR >=90% of BASE; PF >=90% of BASE; retain >=90% of +100% candidate winners. STRONG: MaxDD improves >=10 points and CAGR >=95%.',
+             'tests':'Exactly three predeclared variants: BASE, exclude BOTH_EXTREME (60D>70% AND 252D>198%), exclude BOTH_HOT (60D>45% AND 252D>122%). No grid search.',
+             'rule_note':'Only candidate admission changes. DNA / Entry / -7% Stop / HOLD1260 / 10-slot FIRST_COME remain frozen.',
+             'cache_note':'Reuses V6.17 Stage-2 candidate trades + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'If neither filter passes, stop overheat-filter tuning. If one passes, validate it against yearly/stress-window behavior before any production adoption.'}
+        V627_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v627_write(status='done',message=f'V6.27 完成：{verdict}',phase='done',processed=3,total=3,current=str(O.iloc[0].cohort),elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v627_write(status='paused',message='V6.27 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v627_write(status='error',message='V6.27 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v627_write(status='error',message='V6.27 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v627_thread=None
+
+def _v627_start():
+    global v627_thread
+    if _v627_alive():return False
+    _v627_write(status='starting',message='V6.27 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v627_thread=threading.Thread(target=_v627_run,daemon=True);v627_thread.start();return True
+
+@APP.route('/v627/run',methods=['GET','POST'])
+def v627_run():_v627_start();return redirect('/v627/overheat-filter-validation')
+@APP.get('/v627/stop')
+def v627_stop():V627_DIR.mkdir(parents=True,exist_ok=True);V627_STOP.write_text('stop',encoding='utf-8');return redirect('/v627/overheat-filter-validation')
+@APP.get('/api/v627/status')
+def v627_status_api():return jsonify(_v627_status())
+
+@APP.get('/v627/overheat-filter-validation')
+def v627_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v627_status(); r={}
+    if V627_RESULT.exists():
+        try:r=json.loads(V627_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v627_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v627/run"><button>▶ 开始 V6.27 Filter Validation</button></a>'
+    stop='<a href="/v627/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ STRONG' if x.get('strong_pass') else ('✅ PASS' if x.get('screen_pass') else '—')
+        trs+=f"<tr><td><b>{e(x.get('cohort',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('calmar',0) or 0):.2f}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.2%}</td><td>{int(x.get('trades',0) or 0):,}</td><td>{float(x.get('candidate_keep',0) or 0):.1%}</td><td>{int(x.get('winner100_count',0) or 0):,}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{float(x.get('winner200_retention',0) or 0):.1%}</td><td>{float(x.get('winner500_retention',0) or 0):.1%}</td><td>{p}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}</style></head><body><div class="w">
+<a href="/v626/overheat-audit">← V6.26 Overheat Audit</a>
+<div class="c"><h1>🧪 V6.27 Overheat Filter Validation</h1><div class="info"><b>V6.26 是“找问题”，V6.27 才是“真的试着不买这些问题票”。</b><br>BASE完全不改；方案A只跳过最极端过热；方案B跳过同时过热。然后用1996–2026完整30年10仓账户Replay，看 CAGR / MaxDD / PF 和超级赢家有没有被误杀。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>阶段：{e(st.get('phase',''))} · {int(st.get('processed',0))}/{int(st.get('total',0))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>1996–2026 · 10-slot Account Replay</h2><div style="overflow:auto"><table><tr><th>方案</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Win Rate</th><th>Account Trades</th><th>候选保留</th><th>+100%赢家</th><th>+100%保留</th><th>+200%保留</th><th>+500%保留</th><th>Pass</th></tr>{trs}</table></div></div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>本轮只测：</b>{e(r.get('tests',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v627/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
