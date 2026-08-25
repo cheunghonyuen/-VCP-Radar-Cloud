@@ -12735,12 +12735,17 @@ def _v615c_read_local_csv(path):
         d["_date"]=pd.to_datetime(d[date_col],errors="coerce",utc=True).dt.tz_convert(None)
         d=d.dropna(subset=["_date"]).sort_values("_date")
         close_col=next((c for c in ["Close","close","adjClose","Adj Close","adj_close"] if c in d.columns),None)
+        open_col=next((c for c in ["Open","open","adjOpen","Adj Open","adj_open"] if c in d.columns),None)
         high_col=next((c for c in ["High","high","adjHigh","adj_high"] if c in d.columns),None)
         low_col=next((c for c in ["Low","low","adjLow","adj_low"] if c in d.columns),None)
         vol_col=next((c for c in ["Volume","volume","adjVolume","adj_volume"] if c in d.columns),None)
         if close_col is None:return None,"missing close"
+        # Historical V6.17 cache files contain OHLCV. Keep Open because Stage 2
+        # needs it for gap-through-stop execution. For legacy close-only caches,
+        # fall back to close rather than crashing.
         out=pd.DataFrame({
             "date":d["_date"],
+            "open":pd.to_numeric(d[open_col],errors="coerce") if open_col else pd.to_numeric(d[close_col],errors="coerce"),
             "close":pd.to_numeric(d[close_col],errors="coerce"),
             "high":pd.to_numeric(d[high_col],errors="coerce") if high_col else pd.to_numeric(d[close_col],errors="coerce"),
             "low":pd.to_numeric(d[low_col],errors="coerce") if low_col else pd.to_numeric(d[close_col],errors="coerce"),
@@ -18415,6 +18420,10 @@ def _v617fv2_build_trades(t0):
         except Exception:d=None
         if d is None or len(d)<1260:continue
         d=d.copy();d['date']=pd.to_datetime(d['date']).dt.normalize()
+        # Defensive OHLC normalization for old/new cache formats.
+        if 'open' not in d.columns:d['open']=d['close']
+        if 'high' not in d.columns:d['high']=d['close']
+        if 'low' not in d.columns:d['low']=d['close']
         for c in ['open','high','low','close']:d[c]=pd.to_numeric(d[c],errors='coerce')
         im={pd.Timestamp(x).normalize():i for i,x in enumerate(d.date)}
         lows=d.low.to_numpy(float);opens=d.open.to_numpy(float);closes=d.close.to_numpy(float);dates=d.date.to_numpy()
@@ -18423,10 +18432,10 @@ def _v617fv2_build_trades(t0):
             if ei is None or ei+1259>=len(d):continue
             px=float(closes[ei])
             if not np.isfinite(px) or px<=0:continue
-            stop=px*.93;window=lows[ei:ei+1260]
+            stop=px*.93;window=lows[ei+1:ei+1260]
             hit=np.flatnonzero(np.isfinite(window)&(window<=stop))
             if len(hit):
-                xi=ei+int(hit[0]);xp=float(opens[xi]) if opens[xi]<stop else stop;reason='STOP7'
+                xi=ei+1+int(hit[0]);opx=float(opens[xi]) if np.isfinite(opens[xi]) and opens[xi]>0 else float(closes[xi]);xp=opx if opx<stop else stop;reason='STOP7'
             else:
                 xi=ei+1259;xp=float(closes[xi]);reason='HOLD1260'
             rows.append({'listing_id':lid,'ticker':str(r.ticker),'dna':str(r.dna),'signal_date':dt,'entry_date':dt,'entry_px':px,'exit_date':pd.Timestamp(dates[xi]),'exit_px':xp,'exit_reason':reason,'return':xp/px-1.0})
