@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v626-shortcut" style="border:3px solid #f97316;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔥 V6.26 Overheat / Late-Stage Failure Audit</h2><div class="muted">1996–2026 · 60D+252D 联合过热 · STOP7 / PF / 超级赢家归因 · 0 Tiingo</div></div><a href="/v626/overheat-audit"><button type="button">打开 V6.26</button></a></div></div>
+
 <div class="card" id="v625-shortcut" style="border:3px solid #7c3aed;background:#f5f3ff">
   <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
     <div>
@@ -20081,3 +20083,176 @@ def v625_page():
     sep=''.join([f"<tr><td><b>{e(x.get('feature',''))}</b></td><td>{float(x.get('legacy_median',0) or 0):,.3g}</td><td>{float(x.get('outside_median',0) or 0):,.3g}</td><td>{float(x.get('relative_gap',0) or 0):+.1%}</td></tr>" for x in r.get('feature_separation',[])])
     dec=''.join([f"<tr><td>{e(x.get('feature',''))}</td><td>{e(x.get('bucket',''))}</td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('pf',0) or 0):.2f}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('winner100_rate',0) or 0):.2%}</td></tr>" for x in r.get('deciles',[])])
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:24px;padding:28px;margin:18px 0}}.note{{background:#eff6ff;border:1px solid #93c5fd;border-radius:16px;padding:18px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:left;white-space:nowrap}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}h2{{font-size:26px}}</style></head><body><div class="w"><a href="/v624/30y-rebaseline">← V6.24 30-Year Rebaseline</a><div class="c"><h1>🔎 V6.25 Point-in-Time Universe Quality Audit</h1><div class="note"><b>先找 15K 稀释来自哪里，不先发明过滤器。</b><br>固定主区间 1996–2026；只读取买入当日或之前已经存在的数据。0 Tiingo，不重建股票池。</div></div><div class="c"><h2>状态：{e(s.get('status','idle'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0))}/{int(s.get('total',0))} · {float(s.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div><div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Featured candidates: {int(r.get('featured_candidates',0)):,}</p></div><div class="c"><h2>1. LEGACY vs OUTSIDE 买入当日特征差异</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>LEGACY Median</th><th>OUTSIDE Median</th><th>Relative Gap</th></tr>{sep}</table></div></div><div class="c"><h2>2. 全30年候选按特征十分位表现</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>Decile</th><th>N</th><th>Win Rate</th><th>PF*</th><th>STOP7</th><th>+100% Rate</th></tr>{dec}</table></div></div><div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note','Diagnostic only; no filter adopted.'))}<br><b>特征：</b>{e(r.get('features_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v625/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+
+
+# ========================= V6.26 Overheat / Late-Stage Failure Attribution =========================
+V626_DIR=DATA_DIR/'v626_overheat_failure_audit'
+V626_STATUS=V626_DIR/'status.json'; V626_RESULT=V626_DIR/'result.json'; V626_STOP=V626_DIR/'STOP'
+v626_thread=None
+
+def _v626_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V626_STATUS.exists():
+        try:x.update(json.loads(V626_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v626_write(**kw):
+    V626_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v626_status(); x.update(kw)
+    V626_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v626_alive(): return v626_thread is not None and v626_thread.is_alive()
+
+def _v626_zone_metrics(g, label, cohort):
+    if g is None or g.empty:
+        return {'zone':label,'cohort':cohort,'n':0,'win_rate':0,'pf':0,'stop7_rate':0,'winner100_rate':0,'winner200_rate':0,'winner500_rate':0,'gross_profit':0,'gross_loss':0}
+    r=pd.to_numeric(g['return'],errors='coerce').fillna(0.0)
+    gp=float(r[r>0].sum()); gl=float(-r[r<=0].sum())
+    return {'zone':label,'cohort':cohort,'n':int(len(g)),'win_rate':float((r>0).mean()),
+            'pf':float(gp/gl) if gl>0 else np.inf,'stop7_rate':float(g.exit_reason.astype(str).eq('STOP7').mean()),
+            'winner100_rate':float((r>=1).mean()),'winner200_rate':float((r>=2).mean()),
+            'winner500_rate':float((r>=5).mean()),'gross_profit':gp,'gross_loss':gl}
+
+def _v626_build_zones(F):
+    x=F.copy()
+    x['ret60']=pd.to_numeric(x.ret60,errors='coerce'); x['ret252']=pd.to_numeric(x.ret252,errors='coerce')
+    zones=[
+        ('BASE_ALL', pd.Series(True,index=x.index)),
+        ('COOL_CORE', (x.ret60<=0.45)&(x.ret252<=1.22)),
+        ('HOT60', x.ret60>0.45),
+        ('HOT252', x.ret252>1.22),
+        ('BOTH_HOT', (x.ret60>0.45)&(x.ret252>1.22)),
+        ('EXTREME60', x.ret60>0.70),
+        ('EXTREME252', x.ret252>1.98),
+        ('BOTH_EXTREME', (x.ret60>0.70)&(x.ret252>1.98)),
+        ('MID_MOMENTUM', (x.ret60>0.096)&(x.ret60<=0.341)&(x.ret252>-0.04)&(x.ret252<=0.90)),
+    ]
+    rows=[]
+    for cohort in ['ALL','LEGACY_446','OUTSIDE_446']:
+        sub=x if cohort=='ALL' else x[x.cohort.eq(cohort)]
+        for label,mask in zones:
+            rows.append(_v626_zone_metrics(sub[mask.loc[sub.index].fillna(False)],label,cohort))
+    return pd.DataFrame(rows)
+
+def _v626_joint_grid(F):
+    x=F.copy()
+    x['ret60']=pd.to_numeric(x.ret60,errors='coerce'); x['ret252']=pd.to_numeric(x.ret252,errors='coerce')
+    b60=[-np.inf,0.096,0.222,0.341,0.45,0.70,np.inf]; l60=['<=9.6%','9.6–22.2%','22.2–34.1%','34.1–45%','45–70%','>70%']
+    b252=[-np.inf,0.206,0.57,0.90,1.22,1.98,np.inf]; l252=['<=20.6%','20.6–57%','57–90%','90–122%','122–198%','>198%']
+    x['r60_bin']=pd.cut(x.ret60,b60,labels=l60,right=True); x['r252_bin']=pd.cut(x.ret252,b252,labels=l252,right=True)
+    rows=[]
+    for cohort in ['ALL','OUTSIDE_446','LEGACY_446']:
+        z=x if cohort=='ALL' else x[x.cohort.eq(cohort)]
+        for (a,b),g in z.dropna(subset=['r60_bin','r252_bin']).groupby(['r60_bin','r252_bin'],observed=True):
+            m=_v626_zone_metrics(g,f'{a} | {b}',cohort); m['ret60_bin']=str(a); m['ret252_bin']=str(b); rows.append(m)
+    return pd.DataFrame(rows)
+
+def _v626_year_stability(F):
+    x=F.copy(); x['year']=pd.to_datetime(x.entry_date,errors='coerce').dt.year
+    x['ret60']=pd.to_numeric(x.ret60,errors='coerce'); x['ret252']=pd.to_numeric(x.ret252,errors='coerce')
+    x['overheat']=((x.ret60>0.45)|(x.ret252>1.22))
+    rows=[]
+    for y,g in x.groupby('year'):
+        if len(g)<100: continue
+        hot=g[g.overheat.fillna(False)]; cool=g[~g.overheat.fillna(False)]
+        if len(hot)<20 or len(cool)<20: continue
+        hm=_v626_zone_metrics(hot,'OVERHEAT','ALL'); cm=_v626_zone_metrics(cool,'NON_OVERHEAT','ALL')
+        rows.append({'year':int(y),'hot_n':int(len(hot)),'cool_n':int(len(cool)),
+                     'hot_win_rate':hm['win_rate'],'cool_win_rate':cm['win_rate'],'hot_pf':hm['pf'],'cool_pf':cm['pf'],
+                     'hot_stop7_rate':hm['stop7_rate'],'cool_stop7_rate':cm['stop7_rate'],
+                     'hot_winner100_rate':hm['winner100_rate'],'cool_winner100_rate':cm['winner100_rate']})
+    return pd.DataFrame(rows)
+
+def _v626_run():
+    global v626_thread
+    t0=time.time()
+    try:
+        V626_DIR.mkdir(parents=True,exist_ok=True)
+        if V626_STOP.exists():V626_STOP.unlink()
+        _v626_write(status='running',message='V6.26 Overheat Failure Audit 启动',phase='load',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy(); T=T[(T.entry_date>=V625_START)&(T.entry_date<=V625_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 candidate trades')
+        F=_v625_attach_pit_features(T,t0)
+        if V626_STOP.exists():raise RuntimeError('__STOPPED__')
+        _v626_write(status='running',message='Phase 2/3 · 联合分析 60D / 252D 过热与 STOP7 / 超级赢家',phase='attribution',
+                    processed=2,total=3,current=f'{len(F):,} featured candidates',elapsed_sec=round(time.time()-t0,1),error=None)
+        Z=_v626_build_zones(F); G=_v626_joint_grid(F); Y=_v626_year_stability(F)
+        allbase=Z[(Z.cohort=='ALL')&(Z.zone=='BASE_ALL')].iloc[0]
+        hot=Z[(Z.cohort=='ALL')&(Z.zone=='BOTH_HOT')]
+        ext=Z[(Z.cohort=='ALL')&(Z.zone=='BOTH_EXTREME')]
+        h=hot.iloc[0] if len(hot) else None; e=ext.iloc[0] if len(ext) else None
+        stable_year_share=None
+        if len(Y): stable_year_share=float(((Y.hot_win_rate<Y.cool_win_rate)&(Y.hot_stop7_rate>Y.cool_stop7_rate)).mean())
+        if h is not None and h['n']>=500 and h['win_rate']<allbase['win_rate']*0.75 and h['stop7_rate']>allbase['stop7_rate']+0.03:
+            verdict='OVERHEAT_FAILURE_CONFIRMED'; diagnosis='60D+252D 同时过热的候选明显更易 STOP7、胜率更低；Late-stage/overextended breakout 很可能是扩展池失败来源之一。'
+        elif e is not None and e['n']>=200 and e['win_rate']<allbase['win_rate']*0.75:
+            verdict='EXTREME_OVERHEAT_LIKELY'; diagnosis='极端过热区表现明显恶化，但普通过热区仍需谨慎；只支持继续做极端区小范围验证。'
+        else:
+            verdict='OVERHEAT_NOT_PROVEN'; diagnosis='联合动量过热没有稳定解释失败；不要基于 V6.25 单维十分位直接加过滤器。'
+        res={'version':'V6.26 Overheat / Late-Stage Failure Attribution','generated_at':datetime.now(timezone.utc).isoformat(),
+             'window':'1996-01-01 through available 2026 data','verdict':verdict,'diagnosis':diagnosis,'featured_candidates':int(len(F)),
+             'zone_metrics':Z.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'joint_grid':G.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'year_stability':Y.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'stable_year_share':stable_year_share,
+             'rule_note':'Diagnostic only. No universe filter is adopted. No Entry/Stop/Exit/portfolio changes. Thresholds are predeclared from V6.25 descriptive deciles and are used only for attribution.',
+             'cache_note':'Reuses V6.17 Stage-2 candidate trades + Historical Cache; 0 Tiingo; no universe rebuild.',
+             'next_step':'If overheat failure is confirmed and stable across years, run one small predeclared 30Y account replay that excludes only the clearly toxic overheat zone; otherwise do not filter.'}
+        V626_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v626_write(status='done',message=f'V6.26 完成：{verdict}',phase='done',processed=3,total=3,current='Overheat attribution',elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v626_write(status='paused',message='V6.26 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v626_write(status='error',message='V6.26 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v626_write(status='error',message='V6.26 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v626_thread=None
+
+def _v626_start():
+    global v626_thread
+    if _v626_alive():return False
+    _v626_write(status='starting',message='V6.26 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v626_thread=threading.Thread(target=_v626_run,daemon=True);v626_thread.start();return True
+
+@APP.route('/v626/run',methods=['GET','POST'])
+def v626_run():_v626_start();return redirect('/v626/overheat-audit')
+@APP.get('/v626/stop')
+def v626_stop():V626_DIR.mkdir(parents=True,exist_ok=True);V626_STOP.write_text('stop',encoding='utf-8');return redirect('/v626/overheat-audit')
+@APP.get('/api/v626/status')
+def v626_status_api():return jsonify(_v626_status())
+
+@APP.get('/v626/overheat-audit')
+def v626_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v626_status(); r={}
+    if V626_RESULT.exists():
+        try:r=json.loads(V626_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    running=_v626_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v626/run"><button>▶ 开始 V6.26 Overheat Audit</button></a>'
+    stop='<a href="/v626/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    zones=''
+    for x in r.get('zone_metrics',[]):
+        if x.get('cohort')!='ALL': continue
+        zones+=f"<tr><td><b>{e(x.get('zone',''))}</b></td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('pf',0) or 0):.2f}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('winner100_rate',0) or 0):.2%}</td><td>{float(x.get('winner200_rate',0) or 0):.2%}</td><td>{float(x.get('winner500_rate',0) or 0):.2%}</td></tr>"
+    outs=''
+    for x in r.get('zone_metrics',[]):
+        if x.get('cohort')!='OUTSIDE_446' or x.get('zone') not in ('BASE_ALL','BOTH_HOT','BOTH_EXTREME','MID_MOMENTUM'): continue
+        outs+=f"<tr><td><b>{e(x.get('zone',''))}</b></td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('pf',0) or 0):.2f}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('winner100_rate',0) or 0):.2%}</td></tr>"
+    yrs=''
+    for x in r.get('year_stability',[]):
+        yrs+=f"<tr><td>{int(x.get('year',0))}</td><td>{int(x.get('hot_n',0)):,}</td><td>{float(x.get('hot_win_rate',0) or 0):.1%}</td><td>{float(x.get('cool_win_rate',0) or 0):.1%}</td><td>{float(x.get('hot_pf',0) or 0):.2f}</td><td>{float(x.get('cool_pf',0) or 0):.2f}</td><td>{float(x.get('hot_stop7_rate',0) or 0):.1%}</td><td>{float(x.get('cool_stop7_rate',0) or 0):.1%}</td></tr>"
+    sy='—' if r.get('stable_year_share') is None else f"{float(r.get('stable_year_share')):.1%}"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.note{{background:#fff7ed;border:1px solid #fdba74;border-radius:16px;padding:18px}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:left;white-space:nowrap}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}</style></head><body><div class="w">
+<a href="/v625/pit-universe-quality">← V6.25 PIT Universe Quality</a>
+<div class="c"><h1>🔥 V6.26 Overheat / Late-Stage Failure Audit</h1><div class="note"><b>先查“涨太多才突破”是不是毒区，不先过滤。</b><br>1996–2026；联合看 60D + 252D momentum 对 STOP7、PF 和 +100/+200/+500% 右尾的影响。只用买入当日已知数据。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>阶段：{e(st.get('phase',''))} · {int(st.get('processed',0))}/{int(st.get('total',0))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="ok">{e(r.get('diagnosis','尚未运行'))}</div></div>
+<div class="c"><h2>1. 全部候选 · 过热区归因</h2><div style="overflow:auto"><table><tr><th>Zone</th><th>N</th><th>Win Rate</th><th>PF*</th><th>STOP7</th><th>+100%</th><th>+200%</th><th>+500%</th></tr>{zones}</table></div></div>
+<div class="c"><h2>2. OUTSIDE 446 · 是否特别受过热拖累</h2><div style="overflow:auto"><table><tr><th>Zone</th><th>N</th><th>Win Rate</th><th>PF*</th><th>STOP7</th><th>+100%</th></tr>{outs}</table></div></div>
+<div class="c"><h2>3. 年度稳定性：Overheat vs Non-overheat</h2><p>Stable-year share: {sy}</p><div style="overflow:auto"><table><tr><th>Year</th><th>Hot N</th><th>Hot WR</th><th>Cool WR</th><th>Hot PF</th><th>Cool PF</th><th>Hot STOP7</th><th>Cool STOP7</th></tr>{yrs}</table></div></div>
+<div class="c"><div class="note"><b>规则：</b>{e(r.get('rule_note','Diagnostic only.'))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v626/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
