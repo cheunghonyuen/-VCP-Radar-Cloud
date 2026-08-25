@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v640-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.40 Trigger Bottleneck / Missed-Winner</h2><div class="muted">不改策略 · 查未触发候选卡在哪一关 · 找出错杀 +100/+200/+500 Winner 最多的 Gate</div></div><a href="/v640/trigger-bottleneck"><button type="button">打开 V6.40</button></a></div></div>
+
 <div class="card" id="v639-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧠 V6.39 Stateful Pullback-Area Arm A/B</h2><div class="muted">只换 Arm · Same-Day conjunction vs Stateful pullback area · Re-strength/Stop/HOLD1260 全冻结</div></div><a href="/v639/stateful-arm-ab"><button type="button">打开 V6.39</button></a></div></div>
 
 <div class="card" id="v638-shortcut" style="border:4px solid #f59e0b;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧩 V6.38 Pullback / Arm Source Reconstruction</h2><div class="muted">只查 touch→arm 主延迟 · 对照 JLaw 字幕原文 · 不回测 · 不碰 Exit</div></div><a href="/v638/pullback-arm-source"><button type="button">打开 V6.38</button></a></div></div>
@@ -24117,4 +24119,317 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><div class="warn"><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>来源依据：</b>{e(r.get('source_basis',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v639/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.40 Trigger Bottleneck / Missed-Winner Decomposition =========================
+V640_DIR=DATA_DIR/'v640_trigger_bottleneck_missed_winner'
+V640_STATUS=V640_DIR/'status.json'; V640_RESULT=V640_DIR/'result.json'; V640_STOP=V640_DIR/'STOP'
+V640_DETAIL=V640_DIR/'v640_candidate_bottleneck_detail.csv.gz'
+v640_thread=None
+
+def _v640_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V640_STATUS.exists():
+        try:x.update(json.loads(V640_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v640_write(**kw):
+    V640_DIR.mkdir(parents=True,exist_ok=True);x=_v640_status();x.update(kw)
+    V640_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v640_alive(): return v640_thread is not None and v640_thread.is_alive()
+
+def _v640_future_path_metrics(d, ed, ep, horizon=1260):
+    z=d[d.date>=pd.Timestamp(ed).normalize()].copy().head(int(horizon)+1)
+    if z.empty or not np.isfinite(ep) or ep<=0:
+        return {'mfe':np.nan,'mae':np.nan,'hit20':False,'hit50':False,'hit100':False,'hit200':False,'hit500':False}
+    hi=pd.to_numeric(z.high,errors='coerce')
+    lo=pd.to_numeric(z.low,errors='coerce')
+    mfe=float(hi.max()/ep-1.0) if hi.notna().any() else np.nan
+    mae=float(lo.min()/ep-1.0) if lo.notna().any() else np.nan
+    return {'mfe':mfe,'mae':mae,
+            'hit20':bool(np.isfinite(mfe) and mfe>=.20),
+            'hit50':bool(np.isfinite(mfe) and mfe>=.50),
+            'hit100':bool(np.isfinite(mfe) and mfe>=1.00),
+            'hit200':bool(np.isfinite(mfe) and mfe>=2.00),
+            'hit500':bool(np.isfinite(mfe) and mfe>=5.00)}
+
+def _v640_trace_stateful(r,d):
+    """
+    Diagnostic trace of V6.39 STATEFUL_PULLBACK_AREA.
+    No trading rule changes. Captures where each candidate stops progressing:
+      NO_PULLBACK_AREA -> AREA_FOUND -> QUIET_EVIDENCE -> HOLDING/ARMED -> RE_STRENGTH -> EXECUTED.
+    Also preserves exact stage timestamps/latencies and future MFE from frozen BASE opportunity.
+    """
+    ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize();ep=float(r.entry_px)
+    pre=d[d.date<ed].tail(30).copy()
+    post=d[(d.date>=ed)&(d.date<=xd)].copy()
+    x=pd.concat([pre,post],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+    out={'listing_id':str(r.listing_id),'ticker':str(r.ticker),'base_entry_date':ed,'base_exit_date':xd,'base_entry_px':ep,
+         'area_i':np.nan,'quiet_i':np.nan,'armed_i':np.nan,'confirm_i':np.nan,'execute_i':np.nan,
+         'stage':'NO_PULLBACK_AREA','supports':'','delay_area':np.nan,'delay_quiet':np.nan,'delay_armed':np.nan,
+         'delay_confirm':np.nan,'delay_execute':np.nan,'triggered':False}
+
+    if len(post)<3 or x.empty:
+        out['stage']='INSUFFICIENT_PATH'
+        out.update(_v640_future_path_metrics(d,ed,ep,1260)); return out
+
+    x['ma10']=pd.to_numeric(x.close,errors='coerce').rolling(10,min_periods=10).mean()
+    x['ma20']=pd.to_numeric(x.close,errors='coerce').rolling(20,min_periods=20).mean()
+    x['vmed20']=pd.to_numeric(x.volume,errors='coerce').rolling(20,min_periods=10).median()
+    idxs=x.index[x.date.eq(ed)].tolist()
+    if not idxs:
+        out['stage']='ENTRY_DATE_NOT_FOUND'
+        out.update(_v640_future_path_metrics(d,ed,ep,1260)); return out
+
+    start_i=int(idxs[0])
+    breakout_vol=float(x.loc[start_i,'volume']) if pd.notna(x.loc[start_i,'volume']) else np.nan
+    state=None;quiet_seen=False;hold_ok=True
+
+    for j in range(start_i+1,len(x)-1):
+        rr=x.iloc[j]
+        o,h,l,c,v=map(float,[rr.open,rr.high,rr.low,rr.close,rr.volume])
+        ma10=float(rr.ma10) if pd.notna(rr.ma10) else np.nan
+        ma20=float(rr.ma20) if pd.notna(rr.ma20) else np.nan
+        vm=float(rr.vmed20) if pd.notna(rr.vmed20) else np.nan
+
+        anchors=[('PIVOT',ep)]
+        if np.isfinite(ma10) and ma10>0:anchors.append(('10MA',ma10))
+        if np.isfinite(ma20) and ma20>0:anchors.append(('20MA',ma20))
+        vals=[a[1] for a in anchors if np.isfinite(a[1]) and a[1]>0]
+        if not vals:continue
+        area_low=min(vals);area_high=max(vals)
+        interacts=(l<=area_high and h>=area_low) or (area_low<=c<=area_high)
+
+        if state is None:
+            if not interacts:continue
+            state={'start_i':j,'area_low':area_low,'area_high':area_high,'supports':' + '.join(a[0] for a in anchors)}
+            out['area_i']=int(j);out['stage']='AREA_FOUND';out['supports']=state['supports']
+
+        state['area_low']=min(state['area_low'],area_low)
+        state['area_high']=max(state['area_high'],area_high)
+
+        q_break=(not np.isfinite(breakout_vol)) or (np.isfinite(v) and v<breakout_vol)
+        q_ctx=(not np.isfinite(vm)) or (np.isfinite(v) and v<vm)
+        if q_break or q_ctx:
+            quiet_seen=True
+            if pd.isna(out['quiet_i']):
+                out['quiet_i']=int(j);out['stage']='QUIET_EVIDENCE'
+
+        if c<state['area_low']:
+            hold_ok=False
+            out['stage']='SUPPORT_BREAKDOWN_BEFORE_ARM'
+            state=None;quiet_seen=False;hold_ok=True
+            # keep looking for a later pullback area, but preserve first bottleneck history
+            continue
+
+        if quiet_seen and hold_ok:
+            if pd.isna(out['armed_i']):
+                out['armed_i']=int(j);out['stage']='ARMED'
+
+            if j>state['start_i']:
+                prev=x.iloc[j-1]
+                if c>float(prev.high) and c>o and c>state['area_high']:
+                    out['confirm_i']=int(j);out['stage']='RE_STRENGTH_CONFIRMED'
+                    out['execute_i']=int(j+1);out['triggered']=True;out['stage']='EXECUTED'
+                    break
+
+    if pd.notna(out['area_i']): out['delay_area']=float(out['area_i']-start_i)
+    if pd.notna(out['quiet_i']): out['delay_quiet']=float(out['quiet_i']-start_i)
+    if pd.notna(out['armed_i']): out['delay_armed']=float(out['armed_i']-start_i)
+    if pd.notna(out['confirm_i']): out['delay_confirm']=float(out['confirm_i']-start_i)
+    if pd.notna(out['execute_i']): out['delay_execute']=float(out['execute_i']-start_i)
+
+    # Final bottleneck classification for non-triggered candidates
+    if not out['triggered']:
+        if pd.isna(out['area_i']): out['stage']='NO_PULLBACK_AREA'
+        elif pd.isna(out['quiet_i']): out['stage']='AREA_BUT_NO_QUIET_EVIDENCE'
+        elif pd.isna(out['armed_i']): out['stage']='QUIET_BUT_NOT_ARMED'
+        elif pd.isna(out['confirm_i']): out['stage']='ARMED_BUT_NO_RE_STRENGTH'
+
+    out.update(_v640_future_path_metrics(d,ed,ep,1260))
+    return out
+
+def _v640_run():
+    global v640_thread
+    t0=time.time()
+    try:
+        V640_DIR.mkdir(parents=True,exist_ok=True)
+        if V640_STOP.exists():V640_STOP.unlink()
+        _v640_write(status='running',message='V6.40 Trigger Bottleneck / Missed-Winner Autopsy 启动',
+                    phase='load',processed=0,total=2,current='',elapsed_sec=0,error=None)
+
+        T=_v622_load_trades().copy()
+        T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+        needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+        groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+        rows=[];total=len(M)
+
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            if V640_STOP.exists():raise RuntimeError('__STOPPED__')
+            lid=str(mr.listing_id);g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close','volume']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+            for _,r in g.iterrows():
+                rows.append(_v640_trace_stateful(r,d))
+
+            if n==1 or n%50==0 or n==total:
+                _v640_write(status='running',message='Phase 1/2 · 拆解候选在 Trigger pipeline 卡点',
+                            phase='bottleneck_trace',processed=n,total=total,current=str(mr.get('ticker','')),
+                            elapsed_sec=round(time.time()-t0,1),error=None)
+
+        D=pd.DataFrame(rows)
+        if D.empty:raise RuntimeError('V6.40 没有生成诊断记录')
+        try:D.to_csv(V640_DETAIL,index=False,compression='gzip')
+        except OSError:pass
+
+        # stage attribution
+        stage_counts=[]
+        for stage,g in D.groupby('stage',dropna=False):
+            n=len(g)
+            stage_counts.append({
+                'stage':str(stage),'n':int(n),'pct_all':float(n/len(D)),
+                'mfe_median':float(pd.to_numeric(g.mfe,errors='coerce').median()) if n else np.nan,
+                'hit20':float(g.hit20.mean()),'hit50':float(g.hit50.mean()),
+                'hit100':float(g.hit100.mean()),'hit200':float(g.hit200.mean()),'hit500':float(g.hit500.mean())
+            })
+        S=pd.DataFrame(stage_counts).sort_values('n',ascending=False)
+
+        # missed-winner concentration among non-triggered only
+        N=D[~D.triggered.eq(True)].copy()
+        missed=[]
+        for stage,g in N.groupby('stage',dropna=False):
+            missed.append({
+                'stage':str(stage),'n':int(len(g)),
+                'missed_20':int(g.hit20.sum()),'missed_50':int(g.hit50.sum()),
+                'missed_100':int(g.hit100.sum()),'missed_200':int(g.hit200.sum()),'missed_500':int(g.hit500.sum())
+            })
+        MW=pd.DataFrame(missed)
+        total_m100=max(1,int(N.hit100.sum()))
+        if len(MW):
+            MW['share_of_all_missed_100']=MW.missed_100/total_m100
+            MW=MW.sort_values(['missed_100','n'],ascending=False)
+
+        # latency stats for successful stateful triggers
+        G=D[D.triggered.eq(True)].copy()
+        def stcol(c):
+            z=pd.to_numeric(G[c],errors='coerce').dropna()
+            return {'n':int(len(z)),
+                    'mean':float(z.mean()) if len(z) else None,
+                    'median':float(z.median()) if len(z) else None,
+                    'p90':float(z.quantile(.9)) if len(z) else None}
+        latency={c:stcol(c) for c in ['delay_area','delay_quiet','delay_armed','delay_confirm','delay_execute']}
+
+        # Identify the gate that loses the most +100% future winners.
+        worst=None
+        if len(MW):
+            worst=str(MW.iloc[0].stage)
+
+        verdict='MISSED_WINNER_BOTTLENECK_IDENTIFIED' if worst else 'NO_DOMINANT_MISSED_WINNER_BOTTLENECK'
+        res={
+            'version':'V6.40 Trigger Bottleneck / Missed-Winner Decomposition',
+            'verdict':verdict,
+            'summary':{
+                'candidates':int(len(D)),
+                'triggered':int(D.triggered.sum()),
+                'coverage':float(D.triggered.mean()),
+                'non_triggered':int((~D.triggered.eq(True)).sum()),
+                'missed_hit20':int(N.hit20.sum()),
+                'missed_hit50':int(N.hit50.sum()),
+                'missed_hit100':int(N.hit100.sum()),
+                'missed_hit200':int(N.hit200.sum()),
+                'missed_hit500':int(N.hit500.sum()),
+                'dominant_missed_100_stage':worst
+            },
+            'stage_attribution':S.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'missed_winner_attribution':MW.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'trigger_latency':latency,
+            'definition':'Missed winner = candidate did NOT execute under V6.39 STATEFUL_PULLBACK_AREA, but from the frozen BASE opportunity price its later historical path reached the stated MFE threshold. This is diagnostic attribution, not a tradable look-ahead rule.',
+            'rules_frozen':'Exact V6.39 STATEFUL_PULLBACK_AREA pipeline; no selection/stop/exit changes.',
+            'next_step':'Only modify the single bottleneck stage that discards the largest share of future +100% winners. Before any A/B, reconstruct that stage from JLaw source examples; do not tune unrelated gates or exits.',
+            'cache_note':'Reuses V6.17 Stage-2 + Historical Cache; saves V6.40 detail cache; 0 Tiingo; no universe rebuild.'
+        }
+        V640_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v640_write(status='done',message=f'V6.40 完成：{verdict}',phase='done',
+                    processed=2,total=2,current=str(worst or ''),elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v640_write(status='paused',message='V6.40 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v640_write(status='error',message='V6.40 失败',phase='error',
+                error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v640_write(status='error',message='V6.40 失败',phase='error',
+            error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v640_thread=None
+
+def _v640_start():
+    global v640_thread
+    if _v640_alive():return False
+    _v640_write(status='starting',message='V6.40 正在启动',phase='startup',processed=0,total=2,current='',elapsed_sec=0,error=None)
+    v640_thread=threading.Thread(target=_v640_run,daemon=True);v640_thread.start();return True
+
+@APP.route('/v640/run',methods=['GET','POST'])
+def v640_run():_v640_start();return redirect('/v640/trigger-bottleneck')
+@APP.get('/v640')
+def v640_alias():return redirect('/v640/trigger-bottleneck')
+@APP.get('/v640/stop')
+def v640_stop():
+    V640_DIR.mkdir(parents=True,exist_ok=True);V640_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v640/trigger-bottleneck')
+@APP.get('/api/v640/status')
+def v640_status_api():return jsonify(_v640_status())
+
+@APP.get('/v640/trigger-bottleneck')
+def v640_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v640_status();r={};sm={}
+    if V640_RESULT.exists():
+        try:r=json.loads(V640_RESULT.read_text(encoding='utf-8'));sm=r.get('summary',{})
+        except Exception:pass
+    running=_v640_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v640/run"><button>▶ 开始 V6.40 Bottleneck / Missed-Winner Autopsy</button></a>'
+    stop='<a href="/v640/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    srows=''
+    for x in r.get('stage_attribution',[]):
+        srows+=f"<tr><td><b>{e(x.get('stage'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('pct_all',0) or 0):.1%}</td><td>{float(x.get('mfe_median',0) or 0):.1%}</td><td>{float(x.get('hit20',0) or 0):.1%}</td><td>{float(x.get('hit50',0) or 0):.1%}</td><td>{float(x.get('hit100',0) or 0):.1%}</td><td>{float(x.get('hit200',0) or 0):.1%}</td><td>{float(x.get('hit500',0) or 0):.1%}</td></tr>"
+
+    mrows=''
+    for x in r.get('missed_winner_attribution',[]):
+        mrows+=f"<tr><td><b>{e(x.get('stage'))}</b></td><td>{int(x.get('n',0)):,}</td><td>{int(x.get('missed_20',0)):,}</td><td>{int(x.get('missed_50',0)):,}</td><td>{int(x.get('missed_100',0)):,}</td><td>{float(x.get('share_of_all_missed_100',0) or 0):.1%}</td><td>{int(x.get('missed_200',0)):,}</td><td>{int(x.get('missed_500',0)):,}</td></tr>"
+
+    lrows=''
+    for k,x in r.get('trigger_latency',{}).items():
+        lrows+=f"<tr><td>{e(k)}</td><td>{int(x.get('n',0))}</td><td>{e(x.get('mean'))}</td><td>{e(x.get('median'))}</td><td>{e(x.get('p90'))}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1800px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v639/stateful-arm-ab">← V6.39 Stateful Arm A/B</a>
+<div class="c"><h1>🧭 V6.40 Trigger Bottleneck / Missed-Winner Decomposition</h1><div class="info"><b>这轮不改任何交易规则。</b><br>只回答：V6.39 没触发的候选，到底卡在哪一关？更重要的是，哪些 gate 错杀了后来能 +20/+50/+100/+200/+500% 的股票。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>候选：{int(sm.get('candidates',0)):,} · Triggered：{int(sm.get('triggered',0)):,} · Coverage：{float(sm.get('coverage',0) or 0):.1%} · 未触发：{int(sm.get('non_triggered',0)):,}</p><p>未触发但后来 +100%：<b>{int(sm.get('missed_hit100',0)):,}</b> · +200%：{int(sm.get('missed_hit200',0)):,} · +500%：{int(sm.get('missed_hit500',0)):,}</p><p><b>错杀 +100% Winner 最多的阶段：</b>{e(sm.get('dominant_missed_100_stage','—'))}</p></div>
+<div class="c" style="overflow:auto"><h2>每个 Pipeline Stage 后来到底表现怎样</h2><table><tr><th>Stage</th><th>N</th><th>% All</th><th>MFE中位</th><th>+20%</th><th>+50%</th><th>+100%</th><th>+200%</th><th>+500%</th></tr>{srows}</table></div>
+<div class="c" style="overflow:auto"><h2>未触发 Winner 被哪一道 Gate 错杀</h2><table><tr><th>Stage</th><th>未触发N</th><th>后来+20%</th><th>+50%</th><th>+100%</th><th>占全部漏掉+100%</th><th>+200%</th><th>+500%</th></tr>{mrows}</table></div>
+<div class="c" style="overflow:auto"><h2>成功触发者 Latency</h2><table><tr><th>阶段</th><th>N</th><th>Mean</th><th>Median</th><th>P90</th></tr>{lrows}</table></div>
+<div class="c"><div class="warn"><b>定义：</b>{e(r.get('definition',''))}<br><b>冻结：</b>{e(r.get('rules_frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v640/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
