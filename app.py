@@ -18289,7 +18289,9 @@ def v617_final_validation_page():
     {btn}{stop}
     {('<div class="warn"><b>Error:</b> '+e(s.get('error'))+'</div>') if s.get('error') else ''}</div>
     <div class="c"><div class="verdict">Verdict：{e(verdict)}</div>
-    <p>Historical coverage：{float(r.get('coverage',0) or 0):.1%} · 退市/结束覆盖：{float(r.get('ended_coverage',0) or 0):.1%} · Verified listings：{int(r.get('verified_listings',0) or 0):,}</p></div>
+    <p>Historical coverage：{float(r.get('coverage',0) or 0):.1%} · 退市/结束覆盖：{float(r.get('ended_coverage',0) or 0):.1%} · Verified listings：{int(r.get('verified_listings',0) or 0):,}</p>
+    {('<p style="margin-top:16px"><a href="/v617/final-validation-stage2"><button style="font-size:17px;padding:14px 18px">🏁 进入 Final Stage 2 · 10仓 Daily-MTM</button></a></p>' if verdict=="PASS_STAGE1" else '')}
+    </div>
     <div class="c"><h2>Strict OOS Big-Winner DNA</h2><div style="overflow:auto"><table><tr><th>DNA</th><th>OOS N</th><th>Lift20</th><th>Lift30</th><th>Lift40</th><th>Lift50</th><th>年度中位 Lift30</th><th>Lift30&gt;1 年份</th><th>Avg MAE</th><th>Pass</th></tr>{summary}</table></div></div>
     <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>下一步：</b>{e(r.get('next_step','Stage 1 通过后才跑账户级 Daily-MTM / CAGR。'))}<br><b>限制：</b>{e(r.get('limit',''))}</div></div>
     <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v617/final-validation/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
@@ -18325,7 +18327,7 @@ def v617_production_page():
     <style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:18px;padding:20px;margin:14px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:15px}}.ok{{background:#effcf3;border:1px solid #86efac;border-radius:14px;padding:15px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}a.btn{{display:inline-block;background:#111827;color:white;text-decoration:none;border-radius:12px;padding:13px 16px;font-weight:800}}</style></head><body><div class="w"><a href="/">Back</a>
     <div class="c"><h1>🚀 V6.17 · Production Candidate 主系统</h1><div class="info"><b>主系统开始。</b> 这一版不再把未通过的小实验塞进交易规则。先冻结已经验证的核心骨架，让主系统可以每天工作；研究测试以后单独升级，不阻塞生产版。</div></div>
     <div class="c"><h2>V6.17 当前生产规则（冻结）</h2><table><tr><th>项目</th><th>当前生产决定</th></tr>{rows}</table></div>
-    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/final-validation">🧪 大股票池 Final Validation</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 整晚全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
+    <div class="c"><h2>当前扫描器</h2><p><b>Status:</b> {status}</p><p>{msg}</p><a class="btn" href="/v617/final-validation">🧪 Stage 1 大股票池验证</a> &nbsp; <a class="btn" href="/v617/final-validation-stage2">🏁 Stage 2 最终账户验证</a> &nbsp; <a class="btn" href="/v617/overnight">🌙 全历史股票池扩展</a> &nbsp; <a class="btn" href="/">进入 VCP Radar 主仪表盘</a></div>
     <div class="c"><div class="ok"><b>当前回测基准：</b> 最终资金 31.45倍 · 年化收益 23.12% · 最大回撤 -38.30% · 收益回撤比 0.60。以上为历史回测结果，不代表未来保证。</div></div>
     </div></body></html>'''
 
