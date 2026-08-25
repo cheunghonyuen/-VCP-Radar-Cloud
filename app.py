@@ -21209,3 +21209,138 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>处理原则：</b>这里只生成名单，不删除 Historical Cache。确认数量够小后，下一版 Replay 统一排除 DATA_BAD_TICKERS，然后直接进入 V6.29 Take-Profit / R倍数 / 分批止盈 / Capital Recycling。</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6283/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
+
+# ========================= V6.28.4 Extreme MFE Root-Cause Audit =========================
+V6284_DIR=DATA_DIR/'v6284_extreme_mfe_root_cause'
+V6284_STATUS=V6284_DIR/'status.json'; V6284_RESULT=V6284_DIR/'result.json'
+v6284_thread=None
+
+def _v6284_status():
+    x={'status':'idle','message':'尚未运行','processed':0,'total':0,'elapsed_sec':0,'error':None}
+    if V6284_STATUS.exists():
+        try:x.update(json.loads(V6284_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6284_write(**kw):
+    V6284_DIR.mkdir(parents=True,exist_ok=True); x=_v6284_status(); x.update(kw)
+    V6284_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v6284_alive(): return v6284_thread is not None and v6284_thread.is_alive()
+
+def _v6284_run():
+    global v6284_thread
+    t0=time.time()
+    try:
+        V6284_DIR.mkdir(parents=True,exist_ok=True)
+        p=V6282_DIR/'normalized_trade_paths_summary.csv.gz'
+        if not p.exists(): raise RuntimeError('找不到 V6.28.2 normalized_trade_paths_summary.csv.gz')
+        S=pd.read_csv(p)
+        S['mfe']=pd.to_numeric(S['mfe'],errors='coerce')
+        # Audit a broad tail; MFE alone NEVER means bad data.
+        Q=S[S.mfe>10].copy().sort_values('mfe',ascending=False)   # > +1000%
+        M=_v615b_read_manifest()
+        if M is None or M.empty: raise RuntimeError('找不到 Historical Cache manifest')
+        mm={str(r.listing_id):r for _,r in M.iterrows()}
+        rows=[]; total=len(Q)
+        _v6284_write(status='running',message='审计 >+1000% MFE 的真实价格路径…',processed=0,total=total,elapsed_sec=0,error=None)
+        for n,(_,r) in enumerate(Q.iterrows(),1):
+            lid=str(r.listing_id); mr=mm.get(lid)
+            if mr is None: continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception: d=None
+            if d is None or d.empty: continue
+            d=d.copy(); d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            ed=pd.Timestamp(r.entry_date).normalize(); xd=pd.Timestamp(r.exit_date).normalize()
+            z=d[(d.date>=ed)&(d.date<=xd)].dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if len(z)<2: continue
+            nd,meta=_v6282_normalize_path(z,float(r.entry_px))
+            if nd is None: continue
+            # Find the bar that creates MFE after close-scale normalization.
+            ep=float(r.entry_px); hi=pd.to_numeric(nd.high,errors='coerce').to_numpy(float)
+            cl=pd.to_numeric(nd.close,errors='coerce').to_numpy(float); op=pd.to_numeric(nd.open,errors='coerce').to_numpy(float)
+            lo=pd.to_numeric(nd.low,errors='coerce').to_numpy(float)
+            pi=int(np.nanargmax(hi)); peak_hi=float(hi[pi]); peak_close=float(cl[pi]); peak_open=float(op[pi]) if np.isfinite(op[pi]) else peak_close
+            body_ref=max(peak_close,peak_open,1e-12); high_body_ratio=peak_hi/body_ref
+            close_rat=np.r_[np.nan,cl[1:]/cl[:-1]]
+            max_close_jump=float(np.nanmax(np.maximum(close_rat,1/close_rat))) if len(cl)>1 else 1.0
+            # Cross-check whether the extreme is supported by closes, not just one high print.
+            close_mfe=float(np.nanmax(cl)/ep-1.0)
+            high_mfe=float(peak_hi/ep-1.0)
+            high_vs_close_multiple=(1+high_mfe)/max(1e-12,1+close_mfe)
+            # Classification is evidence-based, not return-threshold based.
+            if high_body_ratio>=4.0 and high_vs_close_multiple>=2.0:
+                cause='SINGLE_BAR_HIGH_SPIKE'; confidence='HIGH'; proposed='REPAIR_HIGH_ONLY'
+            elif max_close_jump>=4.0 or int(meta.get('jump_count',0))>0:
+                cause='PRICE_SCALE_CORPORATE_ACTION'; confidence='HIGH'; proposed='USE_NORMALIZED_PATH'
+            elif high_body_ratio>=2.0 and high_vs_close_multiple>=1.5:
+                cause='POSSIBLE_BAD_HIGH_PRINT'; confidence='MEDIUM'; proposed='MANUAL_REVIEW'
+            else:
+                cause='PATH_SUPPORTED_REAL_WINNER'; confidence='HIGH'; proposed='KEEP'
+            # Conservative repaired MFE: only for clear isolated bad-high evidence, cap that day's high to max(open,close).
+            repaired_hi=hi.copy()
+            if cause=='SINGLE_BAR_HIGH_SPIKE': repaired_hi[pi]=body_ref
+            repaired_mfe=float(np.nanmax(repaired_hi)/ep-1.0)
+            rows.append({'ticker':str(r.ticker),'listing_id':lid,'entry_date':str(ed.date()),'exit_date':str(xd.date()),
+                         'reported_mfe':float(r.mfe),'close_mfe':close_mfe,'repaired_mfe':repaired_mfe,
+                         'peak_date':str(pd.Timestamp(nd.iloc[pi].date).date()),'peak_high':peak_hi,'peak_close':peak_close,
+                         'high_body_ratio':float(high_body_ratio),'high_vs_close_multiple':float(high_vs_close_multiple),
+                         'max_close_scale_jump':max_close_jump,'normalized_close_jumps':int(meta.get('jump_count',0)),
+                         'cause':cause,'confidence':confidence,'proposed_action':proposed})
+            if n==1 or n%25==0 or n==total:
+                _v6284_write(status='running',message='逐笔定位极端 MFE 来源',processed=n,total=total,elapsed_sec=round(time.time()-t0,1),error=None)
+        A=pd.DataFrame(rows)
+        if A.empty: raise RuntimeError('没有可审计的极端交易')
+        A.to_csv(V6284_DIR/'extreme_mfe_root_cause.csv.gz',index=False,compression='gzip')
+        counts=A.groupby(['cause','proposed_action']).size().reset_index(name='trades').sort_values('trades',ascending=False)
+        bad=A[A.proposed_action.eq('REPAIR_HIGH_ONLY')]
+        keep=A[A.proposed_action.eq('KEEP')]
+        review=A[A.proposed_action.eq('MANUAL_REVIEW')]
+        affected=sorted(bad.ticker.astype(str).unique().tolist())
+        res={'version':'V6.28.4 Extreme MFE Root-Cause Audit','verdict':'ROOT_CAUSE_AUDIT_COMPLETE',
+             'audited_trades':int(len(A)),'audited_tickers':int(A.ticker.astype(str).nunique()),
+             'confirmed_bad_high_trades':int(len(bad)),'confirmed_bad_high_tickers':int(bad.ticker.astype(str).nunique()),
+             'supported_real_winner_trades':int(len(keep)),'supported_real_winner_tickers':int(keep.ticker.astype(str).nunique()),
+             'manual_review_trades':int(len(review)),'affected_tickers':affected,
+             'cause_counts':counts.to_dict('records'),
+             'worst_examples':A.sort_values('reported_mfe',ascending=False).head(100).replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'rule':'MFE size is never used as a deletion rule. Only path evidence classifies a data error. No ticker is blacklisted and Historical Cache is not deleted.',
+             'repair_note':'Confirmed isolated high-print spikes are repaired only for diagnostic MFE by replacing that single anomalous high with max(open, close). Close-scale corporate-action breaks continue to use V6.28.2 normalized paths. Real path-supported winners are preserved.',
+             'next_step':'If confirmed bad-high cases are limited, feed the repaired diagnostic MFE into V6.29 Take-Profit / R-multiple / partial-harvest / capital-recycling replay; keep real super-winners.'}
+        V6284_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v6284_write(status='done',message=f"完成：确认 bad-high {len(bad)} 笔 / {bad.ticker.astype(str).nunique()} 只；真实路径赢家 {len(keep)} 笔",processed=total,total=total,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc(); _v6284_write(status='error',message='V6.28.4 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v6284_thread=None
+
+def _v6284_start():
+    global v6284_thread
+    if _v6284_alive(): return False
+    v6284_thread=threading.Thread(target=_v6284_run,daemon=True); v6284_thread.start(); return True
+
+@APP.route('/v6284/run',methods=['GET','POST'])
+def v6284_run(): _v6284_start(); return redirect('/v6284/root-cause')
+@APP.get('/api/v6284/status')
+def v6284_status_api(): return jsonify(_v6284_status())
+@APP.get('/v6284/root-cause')
+def v6284_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v6284_status(); r={}
+    if V6284_RESULT.exists():
+        try:r=json.loads(V6284_RESULT.read_text(encoding='utf-8'))
+        except Exception:r={}
+    cc=''.join(f"<tr><td><b>{e(x.get('cause',''))}</b></td><td>{int(x.get('trades',0)):,}</td><td>{e(x.get('proposed_action',''))}</td></tr>" for x in r.get('cause_counts',[]))
+    ex=''
+    for x in r.get('worst_examples',[])[:100]:
+        ex+=f"<tr><td><b>{e(x.get('ticker',''))}</b></td><td>{e(x.get('entry_date',''))}</td><td>{float(x.get('reported_mfe',0) or 0):.1%}</td><td>{float(x.get('close_mfe',0) or 0):.1%}</td><td>{float(x.get('repaired_mfe',0) or 0):.1%}</td><td>{float(x.get('high_body_ratio',0) or 0):.1f}x</td><td>{e(x.get('cause',''))}</td><td>{e(x.get('proposed_action',''))}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:24px;padding:28px;margin:18px 0}}.info{{background:#ecfdf5;border:1px solid #86efac;border-radius:16px;padding:18px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px;line-height:1.6}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}</style></head><body><div class="w">
+<a href="/v6283/tail-audit">← V6.28.3 Tail Audit</a><div class="c"><h1>🔎 V6.28.4 Extreme MFE Root-Cause Audit</h1><div class="info"><b>不按涨幅删股票，直接查为什么会这么夸张。</b><br>审计所有 MFE &gt;+1000% 交易：区分真实超级赢家、单根 High 坏点、复权/拆股尺度断层。只有价格路径证据明确才修；真实赢家全部保留。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{'' if _v6284_alive() else '<a href="/v6284/run"><button>▶ 开始 V6.28.4 根因审计</button></a>'}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>审计 {int(r.get('audited_trades',0)):,} 笔 / {int(r.get('audited_tickers',0)):,} 只 · 明确坏 High：<b>{int(r.get('confirmed_bad_high_trades',0)):,} 笔 / {int(r.get('confirmed_bad_high_tickers',0)):,} 只</b> · 路径支持真实赢家：<b>{int(r.get('supported_real_winner_trades',0)):,}</b> 笔 · 待人工：{int(r.get('manual_review_trades',0)):,} 笔</p></div>
+<div class="c"><h2>根因分类</h2><table><tr><th>原因</th><th>交易数</th><th>动作</th></tr>{cc}</table></div>
+<div class="c"><h2>最极端交易：修正前 → 修正后</h2><div style="overflow:auto"><table><tr><th>Ticker</th><th>Entry</th><th>原MFE</th><th>Close支持MFE</th><th>修正MFE</th><th>High/Body</th><th>根因</th><th>动作</th></tr>{ex}</table></div></div>
+<div class="c"><div class="warn"><b>原则：</b>{e(r.get('rule',''))}<br><b>修复：</b>{e(r.get('repair_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6284/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
