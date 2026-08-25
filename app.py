@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v6281-shortcut" style="border:3px solid #2563eb;background:#eff6ff"><div><h2>🧹 V6.28.1 Data Integrity Fix</h2><div class="muted">先查 split / reverse split / OHLC adjustment basis；不改交易规则</div><a href="/v6281/data-integrity"><button type="button">打开 V6.28.1</button></a></div></div>
+
 <div class="card" id="v628-shortcut" style="border:3px solid #059669;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔬 V6.28 Shape Deterioration & Winner Giveback Autopsy</h2><div class="muted">直接查股票自身形态为什么走差 · MFE/利润回吐/10MA/20MA/峰值回撤 · 1996–2026 · 0 Tiingo</div></div><a href="/v628/shape-giveback-autopsy"><button type="button">打开 V6.28</button></a></div></div>
 
 <div class="card" id="v627-shortcut" style="border:3px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.27 Overheat Filter Validation</h2><div class="muted">把 V6.26 找到的过热毒区真正拿掉做30年10仓Replay · BASE / EXTREME / HOT · 0 Tiingo</div></div><a href="/v627/overheat-filter-validation"><button type="button">打开 V6.27</button></a></div></div>
@@ -20667,3 +20669,14 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note',''))}<br><b>形态事件：</b>{e(r.get('events_note',''))}<br><b>不重复：</b>{e(r.get('not_retested',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v628/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ========================= V6.28.1 Data Integrity Audit =========================
+V6281_DIR=DATA_DIR/'v6281_data_integrity'
+@APP.get('/v6281/data-integrity')
+def v6281_page():
+    return """<html><body style="font-family:-apple-system;padding:24px"><h1>🧹 V6.28.1 Data Integrity Fix</h1>
+<p>目的：先验证 Entry/Exit 与 Historical Cache OHLC 是否处于同一价格调整口径，识别 split / reverse-split / corporate-action 异常；本版不改变任何交易规则。</p>
+<p><b>检查项：</b> entry_px 对 entry-date cached close 比率、exit_px 对 exit-date cached close 比率、路径单日异常跳变、极端 MFE/Giveback。</p>
+<p><b>原则：</b>1996–2026；复用 Stage-2 + Historical Cache；0 Tiingo；不重建股票池。</p>
+<p>这是数据审计入口。下一步只在价格口径验证通过后重跑 Shape/Giveback。</p></body></html>"""
