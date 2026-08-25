@@ -9918,6 +9918,7 @@ def _v6132_metrics(g,label):
 def _v6132_compute():
     global v6132_thread
     t0=time.time()
+    _v617fv2_write(status='running',message='Stage 2 已启动，准备重建冻结 DNA 信号',phase='startup',processed=0,total=1,current='',elapsed_sec=0,error=None)
     try:
         if not V613_DETAIL.exists(): raise RuntimeError('缺少 V6.13.1 trades.csv；请先跑一次 V6.13.1 Full Shadow 建立缓存')
         raw=pd.read_csv(V613_DETAIL)
@@ -18294,7 +18295,7 @@ def v617_final_validation_page():
     </div>
     <div class="c"><h2>Strict OOS Big-Winner DNA</h2><div style="overflow:auto"><table><tr><th>DNA</th><th>OOS N</th><th>Lift20</th><th>Lift30</th><th>Lift40</th><th>Lift50</th><th>年度中位 Lift30</th><th>Lift30&gt;1 年份</th><th>Avg MAE</th><th>Pass</th></tr>{summary}</table></div></div>
     <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>规则：</b>{e(r.get('rule_note',''))}<br><b>下一步：</b>{e(r.get('next_step','Stage 1 通过后才跑账户级 Daily-MTM / CAGR。'))}<br><b>限制：</b>{e(r.get('limit',''))}</div></div>
-    <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v617/final-validation/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+    <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v617/final-validation/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
     </div></body></html>"""
 
 
@@ -18359,10 +18360,18 @@ def _v617fv2_write(**kw):
 
 def _v617fv2_alive():return v617fv2_thread is not None and v617fv2_thread.is_alive()
 
-def _v617fv2_selected():
+def _v617fv2_selected(t0):
     years=sorted(int(p.stem.split('.')[0]) for p in V617FV1_YEAR_DIR.glob('*.csv.gz'))
-    out=[]
-    for y in years:
+    out=[];total_years=len(years)
+    for yi,y in enumerate(years,1):
+        if V617FV2_STOP.exists():raise RuntimeError('__STOPPED__')
+        _v617fv2_write(
+            status='running',
+            message=f'Phase 0/2 · 重建冻结 A/B DNA 信号 · 年份 {y}',
+            phase='dna_selection',
+            processed=yi,total=total_years,current=str(y),
+            elapsed_sec=round(time.time()-t0,1),error=None
+        )
         pri=[yy for yy in years if yy<y]
         if len(pri)<3:continue
         te=_v617fv1_load_year(y)
@@ -18380,14 +18389,17 @@ def _v617fv2_selected():
         for c in ['ret60','ret120','ret252','vol_vs20']:te[c]=pd.to_numeric(te[c],errors='coerce')
         a=(te.ret60>=q['ret60'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.80)
         b=(te.ret252>=q['ret252'])&(te.ret120>=q['ret120'])&(te.vol_vs20<=.80)
-        g=te[a|b][['listing_id','ticker','obs_date']].copy()
-        g['dna']=np.where(a[a|b]&b[a|b],'AB',np.where(a[a|b],'A','B'))
+        mask=a|b
+        g=te.loc[mask,['listing_id','ticker','obs_date']].copy()
+        if g.empty:continue
+        aa=a.loc[mask].to_numpy();bb=b.loc[mask].to_numpy()
+        g['dna']=np.where(aa&bb,'AB',np.where(aa,'A','B'))
         out.append(g)
     if not out:return pd.DataFrame()
     return pd.concat(out,ignore_index=True).drop_duplicates(['listing_id','obs_date']).sort_values(['obs_date','listing_id']).reset_index(drop=True)
 
 def _v617fv2_build_trades(t0):
-    D=_v617fv2_selected()
+    D=_v617fv2_selected(t0)
     if D.empty:raise RuntimeError('Stage 1 Feature Store 没有可用 frozen DNA signals')
     groups={k:g for k,g in D.groupby('listing_id',sort=False)}
     M=_v615b_read_manifest()
@@ -18510,6 +18522,7 @@ def _v617fv2_run():
 def _v617fv2_start():
     global v617fv2_thread
     if _v617fv2_alive():return False
+    _v617fv2_write(status='starting',message='Stage 2 正在启动',phase='startup',processed=0,total=1,current='',elapsed_sec=0,error=None)
     v617fv2_thread=threading.Thread(target=_v617fv2_run,daemon=True);v617fv2_thread.start();return True
 
 @APP.route('/v617/final-validation-stage2/run',methods=['GET','POST'])
