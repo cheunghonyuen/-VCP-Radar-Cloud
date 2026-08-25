@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v630-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.30 Trade Path / Win-Rate Reconciliation</h2><div class="muted">不调参数 · 查清 6% Win Rate：真失败 vs 先赚后吐 · +1R/+2R/+3R/+10/+20% 路径归因</div></div><a href="/v630/winrate-reconciliation"><button type="button">打开 V6.30</button></a></div></div>
+
 <div class="card" id="v629-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">💰 V6.29 Take-Profit / R-Multiple / Capital Recycling</h2><div class="muted">+12% / +20% / +30% · +20%卖半+30%清仓 · 3R · 2R/3R分批 · 卖出后快速换新 VCP</div></div><a href="/v629/take-profit-recycling"><button type="button">打开 V6.29</button></a></div></div>
 
 <div class="card" id="v6284-shortcut" style="border:3px solid #ef4444;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧬 V6.28.4 Root-Cause Price Repair</h2><div class="muted">查清极端 MFE 到底是真牛股还是 split / reverse-split / 复权断层，并修正明确的数据异常</div></div><a href="/v6284/root-cause"><button type="button">打开 V6.28.4</button></a></div></div>
@@ -21696,3 +21698,126 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>BASE一致性检查：</b> expected CAGR 16.14% / MaxDD -64.07%；本轮 BASE = {float(bc.get('actual_cagr',0) or 0):.2%} / {float(bc.get('actual_maxdd',0) or 0):.2%}。<br><b>测试：</b>{e(r.get('tests',''))}<br><b>结构R说明：</b>{e(r.get('structure_note',''))}<br><b>轮换：</b>{e(r.get('recycling_note',''))}<br><b>数据：</b>{e(r.get('data_note',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v629/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ========================= V6.30 Trade Path / Win-Rate Reconciliation Audit =========================
+V630_DIR=DATA_DIR/'v630_winrate_reconciliation'
+V630_STATUS=V630_DIR/'status.json'; V630_RESULT=V630_DIR/'result.json'; V630_STOP=V630_DIR/'STOP'
+v630_thread=None
+
+def _v630_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V630_STATUS.exists():
+        try:x.update(json.loads(V630_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v630_write(**kw):
+    V630_DIR.mkdir(parents=True,exist_ok=True);x=_v630_status();x.update(kw)
+    V630_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v630_alive(): return v630_thread is not None and v630_thread.is_alive()
+
+def _v630_trade_path_metrics(r,d):
+    nh,_=_v629_clean_path(d,r)
+    if nh is None or nh.empty:return None
+    ep=float(r.entry_px);hi=pd.to_numeric(nh.high,errors='coerce');lo=pd.to_numeric(nh.low,errors='coerce')
+    if ep<=0 or not hi.notna().any():return None
+    mfe=float(hi.max()/ep-1.0);mae=float(lo.min()/ep-1.0) if lo.notna().any() else np.nan;final=float(r.exit_px/ep-1.0);R=.07
+    return {'listing_id':str(r.listing_id),'ticker':str(r.ticker),'entry_date':pd.Timestamp(r.entry_date).normalize(),'exit_date':pd.Timestamp(r.exit_date).normalize(),'entry_px':ep,'final_return':final,'exit_reason':str(r.exit_reason),'mfe':mfe,'mae':mae,'hit_1r':bool(mfe>=R),'hit_2r':bool(mfe>=2*R),'hit_3r':bool(mfe>=3*R),'hit_5pct':bool(mfe>=.05),'hit_10pct':bool(mfe>=.10),'hit_20pct':bool(mfe>=.20),'hit_30pct':bool(mfe>=.30),'hit_50pct':bool(mfe>=.50),'hit_100pct':bool(mfe>=1.0),'giveback':float(mfe-final)}
+
+def _v630_admitted_ids(T,price,cal,t0):
+    X=T.sort_values(['entry_date','listing_id']).reset_index(drop=True);rec=X.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.;pos={};last={};admitted=[];step=max(1,len(cal)//20)
+    for di,dt in enumerate(cal,1):
+        if V630_STOP.exists():raise RuntimeError('__STOPPED__')
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is not None:cash+=p['shares']*float(rec[i]['exit_px']);last.pop(i,None)
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']));cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:continue
+            cash-=target;pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,'entry_px':ep};last[i]=ep;admitted.append((str(r['listing_id']),pd.Timestamp(r['entry_date']).normalize()))
+        if di%step==0 or di==len(cal):_v630_write(status='running',message='Phase 2/3 · 重建 BASE 10-slot 实际入场交易',phase='base_admission',processed=2,total=3,current=f'{len(admitted):,} admitted',elapsed_sec=round(time.time()-t0,1),error=None)
+    return set(admitted)
+
+def _v630_run():
+    global v630_thread
+    t0=time.time()
+    try:
+        V630_DIR.mkdir(parents=True,exist_ok=True)
+        if V630_STOP.exists():V630_STOP.unlink()
+        _v630_write(status='running',message='V6.30 Win-Rate Reconciliation 启动',phase='paths',processed=0,total=3,current='',elapsed_sec=0,error=None)
+        T=_v622_load_trades().copy();T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+        M=_v615b_read_manifest();needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy();groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+        path_rows=[];price={};date_set=set();total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            if V630_STOP.exists():raise RuntimeError('__STOPPED__')
+            lid=str(mr.listing_id);g=groups.get(lid)
+            if g is None or g.empty:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            for c in ['open','high','low','close']:
+                if c not in d.columns:d[c]=np.nan
+                d[c]=pd.to_numeric(d[c],errors='coerce')
+            d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last');dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+            if len(dz):price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+            for _,r in g.iterrows():
+                q=_v630_trade_path_metrics(r,d)
+                if q is not None:path_rows.append(q)
+            if n==1 or n%50==0 or n==total:_v630_write(status='running',message='Phase 1/3 · 重算每笔交易 MFE / +R 里程碑',phase='paths',processed=n,total=total,current=str(mr.get('ticker','')),elapsed_sec=round(time.time()-t0,1),error=None)
+        P=pd.DataFrame(path_rows);admitted=_v630_admitted_ids(T,price,sorted(date_set),t0);P['admitted']=P.apply(lambda r:(str(r.listing_id),pd.Timestamp(r.entry_date).normalize()) in admitted,axis=1);A=P[P.admitted].copy()
+        if A.empty:raise RuntimeError('没有重建到 BASE 实际入场交易')
+        stop=A[A.exit_reason.astype(str).eq('STOP7')].copy();milestones=[]
+        for col,label in [('hit_5pct','+5%'),('hit_1r','+1R (+7%)'),('hit_10pct','+10%'),('hit_2r','+2R (+14%)'),('hit_20pct','+20%'),('hit_3r','+3R (+21%)'),('hit_30pct','+30%'),('hit_50pct','+50%'),('hit_100pct','+100%')]:milestones.append({'milestone':label,'all_base_rate':float(A[col].mean()),'all_base_count':int(A[col].sum()),'stop7_rate_before_stop':float(stop[col].mean()) if len(stop) else np.nan,'stop7_count_before_stop':int(stop[col].sum()) if len(stop) else 0})
+        true_fail=stop[~stop.hit_1r];after1=stop[stop.hit_1r];after2=stop[stop.hit_2r];after20=stop[stop.hit_20pct];winners=A[A.final_return>0];superw=A[A.final_return>=1]
+        def gr(name,g):return {'group':name,'n':int(len(g)),'share_of_base':float(len(g)/len(A)),'share_of_stop7':float(len(g)/len(stop)) if len(stop) else np.nan,'median_mfe':float(g.mfe.median()) if len(g) else np.nan,'median_final':float(g.final_return.median()) if len(g) else np.nan,'median_giveback':float(g.giveback.median()) if len(g) else np.nan}
+        groups_out=[gr('TRUE_FAILURE_STOP_BEFORE_1R',true_fail),gr('STOP_AFTER_REACHING_1R',after1),gr('STOP_AFTER_REACHING_2R',after2),gr('STOP_AFTER_REACHING_20PCT',after20),gr('FINAL_POSITIVE',winners),gr('FINAL_100PCT_PLUS',superw)]
+        tf=float(len(true_fail)/len(stop)) if len(stop) else 0.;am=float(len(after1)/len(stop)) if len(stop) else 0.
+        if tf>=.70:verdict='PRIMARY_PROBLEM_SELECTION_OR_ENTRY';diagnosis='绝大多数 STOP7 在达到 +1R 前就失败，主要矛盾更靠前：候选质量 / Entry timing。'
+        elif am>=.40:verdict='PRIMARY_PROBLEM_WINNER_MANAGEMENT';diagnosis='相当多 STOP7 曾先达到 +1R，利润保护 / Winner management 是主要矛盾之一。'
+        else:verdict='MIXED_SELECTION_ENTRY_AND_MANAGEMENT';diagnosis='真失败与先赚后吐都占明显比例，应拆成 Selection/Entry 与 Winner management 两条支线。'
+        sm={'base_trades':int(len(A)),'base_final_win_rate':float((A.final_return>0).mean()),'stop7_trades':int(len(stop)),'stop7_rate':float(len(stop)/len(A)),'true_failure_stop_before_1r':int(len(true_fail)),'true_failure_share_of_stop7':tf,'stop_after_1r':int(len(after1)),'stop_after_1r_share_of_stop7':am,'stop_after_2r':int(len(after2)),'stop_after_2r_share_of_stop7':float(len(after2)/len(stop)) if len(stop) else np.nan,'stop_after_20pct':int(len(after20)),'stop_after_20pct_share_of_stop7':float(len(after20)/len(stop)) if len(stop) else np.nan,'final_100pct_plus':int(len(superw))}
+        res={'version':'V6.30 Trade Path / Win-Rate Reconciliation Audit','generated_at':datetime.now(timezone.utc).isoformat(),'window':'1996-01-01 through available 2026 data','verdict':verdict,'diagnosis':diagnosis,'summary':sm,'milestones':milestones,'groups':groups_out,'definition':'1R = frozen BASE -7% stop distance. Milestones mean price reached that level before the frozen BASE exit; they are not alternative exits.','purpose':'Diagnostic only: reconcile the apparent final win rate with intratrade path success. No selection/entry/stop/exit/portfolio changes.','data_note':'Uses V6.28.2 split normalization + V6.28.4 bad-high repair; real super-winners remain intact.','cache_note':'1996–2026; V6.17 Stage-2 + Historical Cache; 0 Tiingo; no universe rebuild.','next_step':'If Selection/Entry dominates, audit setup-vs-trigger / entry timing without old factor-search reruns. If Winner Management dominates, test evidence-based protection after +1R/+2R while preserving super-winners.'}
+        V630_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V630_DIR/'base_trade_path_reconciliation.csv.gz',index=False,compression='gzip')
+        except OSError:pass
+        _v630_write(status='done',message=f'V6.30 完成：{verdict}',phase='done',processed=3,total=3,current='Responsibility split',elapsed_sec=round(time.time()-t0,1),error=None)
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':_v630_write(status='paused',message='V6.30 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:traceback.print_exc();_v630_write(status='error',message='V6.30 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:traceback.print_exc();_v630_write(status='error',message='V6.30 失败',phase='error',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v630_thread=None
+
+def _v630_start():
+    global v630_thread
+    if _v630_alive():return False
+    _v630_write(status='starting',message='V6.30 正在启动',phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None);v630_thread=threading.Thread(target=_v630_run,daemon=True);v630_thread.start();return True
+
+@APP.route('/v630/run',methods=['GET','POST'])
+def v630_run():_v630_start();return redirect('/v630/winrate-reconciliation')
+@APP.get('/v630')
+def v630_alias():return redirect('/v630/winrate-reconciliation')
+@APP.get('/v630/stop')
+def v630_stop():V630_DIR.mkdir(parents=True,exist_ok=True);V630_STOP.write_text('stop',encoding='utf-8');return redirect('/v630/winrate-reconciliation')
+@APP.get('/api/v630/status')
+def v630_status_api():return jsonify(_v630_status())
+@APP.get('/v630/winrate-reconciliation')
+def v630_page():
+    import html;e=lambda x:html.escape(str(x));st=_v630_status();r={};sm={}
+    if V630_RESULT.exists():
+        try:r=json.loads(V630_RESULT.read_text(encoding='utf-8'));sm=r.get('summary',{})
+        except Exception:pass
+    running=_v630_alive() or st.get('status') in ('starting','running');btn='' if running else '<a href="/v630/run"><button>▶ 开始 V6.30 Win-Rate Audit</button></a>';stop='<a href="/v630/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    ms=''.join([f"<tr><td><b>{e(x.get('milestone',''))}</b></td><td>{int(x.get('all_base_count',0)):,}</td><td>{float(x.get('all_base_rate',0) or 0):.1%}</td><td>{int(x.get('stop7_count_before_stop',0)):,}</td><td>{float(x.get('stop7_rate_before_stop',0) or 0):.1%}</td></tr>" for x in r.get('milestones',[])])
+    gs=''.join([f"<tr><td><b>{e(x.get('group',''))}</b></td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('share_of_base',0) or 0):.1%}</td><td>{float(x.get('share_of_stop7',0) or 0):.1%}</td><td>{float(x.get('median_mfe',0) or 0):.1%}</td><td>{float(x.get('median_final',0) or 0):+.1%}</td><td>{float(x.get('median_giveback',0) or 0):.1%}</td></tr>" for x in r.get('groups',[])])
+    return f'''<!doctype html><html><body style="font-family:-apple-system;background:#f3f6fa;padding:16px"><div style="max-width:1600px;margin:auto"><a href="/v629/take-profit-recycling">← V6.29</a><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h1>🧭 V6.30 Trade Path / Win-Rate Reconciliation</h1><p><b>不调参数，只查 6% Win Rate 为什么这么低。</b> 1R = BASE 固定7%风险。</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('diagnosis','等待运行'))}</p></div><div style="background:white;padding:26px;border-radius:22px;margin:16px 0;overflow:auto"><h2>责任拆分</h2><table style="width:100%;border-collapse:collapse"><tr><th>BASE</th><th>Final WR</th><th>STOP7</th><th>STOP率</th><th>未到1R就STOP</th><th>占STOP7</th><th>到1R后STOP</th><th>占STOP7</th><th>到2R后STOP</th><th>到20%后STOP</th><th>最终+100%</th></tr><tr><td>{int(sm.get('base_trades',0)):,}</td><td>{float(sm.get('base_final_win_rate',0) or 0):.1%}</td><td>{int(sm.get('stop7_trades',0)):,}</td><td>{float(sm.get('stop7_rate',0) or 0):.1%}</td><td>{int(sm.get('true_failure_stop_before_1r',0)):,}</td><td>{float(sm.get('true_failure_share_of_stop7',0) or 0):.1%}</td><td>{int(sm.get('stop_after_1r',0)):,}</td><td>{float(sm.get('stop_after_1r_share_of_stop7',0) or 0):.1%}</td><td>{int(sm.get('stop_after_2r',0)):,}</td><td>{int(sm.get('stop_after_20pct',0)):,}</td><td>{int(sm.get('final_100pct_plus',0)):,}</td></tr></table><h2>路径里程碑</h2><table style="width:100%"><tr><th>里程碑</th><th>BASE笔数</th><th>BASE率</th><th>STOP7曾达到</th><th>STOP7比例</th></tr>{ms}</table><h2>交易类型</h2><table style="width:100%"><tr><th>类型</th><th>N</th><th>占BASE</th><th>占STOP7</th><th>中位MFE</th><th>中位最终</th><th>中位Giveback</th></tr>{gs}</table></div><div style="background:#fffbeb;padding:20px;border-radius:16px"><b>下一步：</b>{e(r.get('next_step',''))}</div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v630/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
