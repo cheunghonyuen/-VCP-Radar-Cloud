@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v643-shortcut" style="border:4px solid #0891b2;background:#ecfeff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.43 Example-Level Re-Strength Reconstruction</h2><div class="muted">停止猜 Trigger 公式 · 回到 JLaw 字幕案例上下文 · 区分 Setup 与真正 Execution Trigger</div></div><a href="/v643/example-reconstruction"><button type="button">打开 V6.43</button></a></div></div>
+
 <div class="card" id="v642-shortcut" style="border:4px solid #eab308;background:#fefce8"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.42 Source-Event Re-Strength A/B</h2><div class="muted">只换 Re-strength · Current Triple Gate vs Source Event · Stateful Pullback / Stop / HOLD1260 全冻结</div></div><a href="/v642/source-event-ab"><button type="button">打开 V6.42</button></a></div></div>
 
 <div class="card" id="v641-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.41 Re-Strength Gate Source Reconstruction</h2><div class="muted">只查 ARMED_BUT_NO_RE_STRENGTH · 对照 JLaw 原始 Trigger · 不回测 · 不碰 Exit</div></div><a href="/v641/restrength-source"><button type="button">打开 V6.41</button></a></div></div>
@@ -24968,4 +24970,196 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><div class="warn"><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>Source Note：</b>{e(r.get('source_note',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v642/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.43 Example-Level Re-Strength Case Reconstruction =========================
+V643_DIR=DATA_DIR/'v643_restrength_example_reconstruction'
+V643_STATUS=V643_DIR/'status.json'; V643_RESULT=V643_DIR/'result.json'
+v643_thread=None
+
+def _v643_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V643_STATUS.exists():
+        try:x.update(json.loads(V643_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v643_write(**kw):
+    V643_DIR.mkdir(parents=True,exist_ok=True);x=_v643_status();x.update(kw)
+    V643_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v643_alive(): return v643_thread is not None and v643_thread.is_alive()
+
+def _v643_corpus():
+    rows=[]
+    idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid);text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'));text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:
+            rows.append({'video_id':vid,'title':str(r.get('title','')),'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+def _v643_extract_cases(corpus,max_cases=60):
+    """
+    Extract context-rich transcript cases around re-strength / pullback / reclaim / trigger language.
+    No formula inference; each case keeps the original surrounding transcript.
+    """
+    anchors=['pullback','reclaim','turn up','turns up','trigger','confirmation','take out the high',
+             'break the high','higher high','higher low','support','10 day','20 day','pivot']
+    cases=[];seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        for term in anchors:
+            start=0
+            while True:
+                p=low.find(term,start)
+                if p<0:break
+                a=max(0,p-500);b=min(len(row['text']),p+len(term)+900)
+                sn=row['text'][a:b].strip()
+                key=(row['video_id'],sn[:260])
+                if key not in seen:
+                    seen.add(key)
+                    cases.append({'video_id':row['video_id'],'title':row.get('title',''),'term':term,'snippet':sn})
+                    if len(cases)>=max_cases:return cases
+                start=p+max(1,len(term))
+    return cases
+
+def _v643_case_tags(sn):
+    low=sn.lower()
+    tags=[]
+    rules=[
+        ('pullback','PULLBACK'),
+        ('support','SUPPORT'),
+        ('pivot','PIVOT'),
+        ('10 day','10MA'),
+        ('20 day','20MA'),
+        ('volume','VOLUME'),
+        ('dry up','DRY_UP'),
+        ('tight','TIGHT'),
+        ('reclaim','RECLAIM'),
+        ('turn up','TURN_UP'),
+        ('turns up','TURN_UP'),
+        ('take out the high','TAKE_OUT_HIGH'),
+        ('break the high','BREAK_HIGH'),
+        ('higher high','HIGHER_HIGH'),
+        ('higher low','HIGHER_LOW'),
+        ('buy','BUY'),
+        ('entry','ENTRY'),
+        ('trigger','TRIGGER'),
+        ('confirmation','CONFIRMATION')
+    ]
+    for k,t in rules:
+        if k in low and t not in tags:tags.append(t)
+    return tags
+
+def _v643_run():
+    global v643_thread
+    t0=time.time()
+    try:
+        _v643_write(status='running',message='读取 JLaw 字幕，提取 Re-strength 实际案例上下文…',elapsed_sec=0,error=None)
+        corpus=_v643_corpus()
+        cases=_v643_extract_cases(corpus,60)
+
+        rows=[]
+        for c in cases:
+            tags=_v643_case_tags(c['snippet'])
+            nums=[]
+            for x in re.findall(r'(?<![A-Za-z])(?:\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*(?:day|days|session|sessions|week|weeks))',c['snippet']):
+                if x not in nums:nums.append(x)
+            rows.append({
+                'video_id':c['video_id'],'title':c.get('title',''),'anchor_term':c['term'],
+                'tags':tags,'numeric_mentions':nums[:15],'snippet':c['snippet']
+            })
+
+        # Aggregate tag co-occurrence to see what source examples actually discuss together.
+        tag_counts={}
+        pair_counts={}
+        for r in rows:
+            tags=r['tags']
+            for t in tags:tag_counts[t]=tag_counts.get(t,0)+1
+            for i in range(len(tags)):
+                for j in range(i+1,len(tags)):
+                    a,b=sorted([tags[i],tags[j]])
+                    pair_counts[(a,b)]=pair_counts.get((a,b),0)+1
+
+        pairs=sorted([{'a':a,'b':b,'n':n} for (a,b),n in pair_counts.items()],key=lambda x:x['n'],reverse=True)[:30]
+
+        # We explicitly do not create a new formula here.
+        res={
+            'version':'V6.43 Example-Level Re-Strength Case Reconstruction',
+            'verdict':'EXAMPLE_LEVEL_RECONSTRUCTION_READY' if rows else 'NO_SOURCE_CASES_FOUND',
+            'transcript_videos':len(corpus),
+            'cases':rows,
+            'tag_counts':tag_counts,
+            'top_cooccurrences':pairs,
+            'v642_context':{
+                'current_cagr':0.1219,'source_event_cagr':0.0444,
+                'current_win_rate':0.113,'source_event_win_rate':0.078,
+                'current_pf':4.58,'source_event_pf':1.43,
+                'current_winner100':23,'source_event_winner100':16
+            },
+            'critical_point':'V6.42 proved that simply loosening Re-strength to an earlier turn-up/reclaim event is harmful. V6.43 therefore stops formula tuning and reconstructs the source examples at case level.',
+            'interpretation_rule':'Do not infer a trading rule merely because two words co-occur. Each candidate rule for V6.44 must be traceable to one or more context-rich source examples and must distinguish setup context from actual execution trigger.',
+            'next_step':'Use these example-level cases to define at most 2 source-supported trigger archetypes for V6.44. Then run a controlled A/B against CURRENT_TRIPLE_GATE. No numeric grid and no exit changes.',
+            'cache_note':'Reads existing Railway JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V643_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v643_write(status='done',message='V6.43 完成：EXAMPLE_LEVEL_RECONSTRUCTION_READY',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v643_write(status='error',message='V6.43 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v643_thread=None
+
+def _v643_start():
+    global v643_thread
+    if _v643_alive():return False
+    _v643_write(status='starting',message='V6.43 正在启动',elapsed_sec=0,error=None)
+    v643_thread=threading.Thread(target=_v643_run,daemon=True);v643_thread.start();return True
+
+@APP.route('/v643/run',methods=['GET','POST'])
+def v643_run():_v643_start();return redirect('/v643/example-reconstruction')
+@APP.get('/v643')
+def v643_alias():return redirect('/v643/example-reconstruction')
+@APP.get('/api/v643/status')
+def v643_status_api():return jsonify(_v643_status())
+
+@APP.get('/v643/example-reconstruction')
+def v643_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v643_status();r={}
+    if V643_RESULT.exists():
+        try:r=json.loads(V643_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v643_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v643/run"><button>▶ 开始 V6.43 Example Reconstruction</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    pairrows=''.join(f"<tr><td>{e(x.get('a'))}</td><td>{e(x.get('b'))}</td><td>{int(x.get('n',0))}</td></tr>" for x in r.get('top_cooccurrences',[]))
+
+    cards=''
+    for i,c in enumerate(r.get('cases',[]),1):
+        tags=', '.join(c.get('tags',[])) or '—'
+        nums=', '.join(c.get('numeric_mentions',[])) or '—'
+        cards+=f"""<div class="case"><h3>Case {i} · {e(c.get('video_id'))} · {e(c.get('anchor_term'))}</h3><p><b>Tags：</b>{e(tags)}</p><p><b>Numbers：</b>{e(nums)}</p><div class="quote">{e(c.get('snippet'))}</div></div>"""
+
+    ctx=r.get('v642_context',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}.case{{background:#fff;padding:20px;border-radius:18px;margin:12px 0}}.quote{{background:#f8fafc;padding:14px;border-radius:12px;line-height:1.55}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v642/source-event-ab">← V6.42 Source-Event A/B</a>
+<div class="c"><h1>🧪 V6.43 Example-Level Re-Strength Reconstruction</h1><div class="info"><b>停止继续猜公式。</b><br>V6.42 已证明“更早 turn-up/reclaim”会明显恶化 CAGR / PF / Win Rate。V6.43 直接回到 JLaw 字幕案例上下文，区分 setup context 与真正 execution trigger。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point','等待运行'))}</p><p>字幕视频：{int(r.get('transcript_videos',0))} · 提取案例：{len(r.get('cases',[]))}</p><p>V6.42 对照：Current WR {float(ctx.get('current_win_rate',0) or 0):.1%} / PF {float(ctx.get('current_pf',0) or 0):.2f} / CAGR {float(ctx.get('current_cagr',0) or 0):.2%}；Source Event WR {float(ctx.get('source_event_win_rate',0) or 0):.1%} / PF {float(ctx.get('source_event_pf',0) or 0):.2f} / CAGR {float(ctx.get('source_event_cagr',0) or 0):.2%}</p></div>
+<div class="c"><h2>Source language co-occurrence（只作导航，不当作规则）</h2><table><tr><th>A</th><th>B</th><th>N</th></tr>{pairrows}</table></div>
+<div class="c"><h2>Context-rich source cases</h2><p><b>解释原则：</b>{e(r.get('interpretation_rule',''))}</p></div>
+{cards}
+<div class="c"><div class="warn"><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v643/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
