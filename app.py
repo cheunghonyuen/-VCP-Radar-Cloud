@@ -29478,3 +29478,261 @@ if _v659_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v659_home_base:APP.view_functions[ep]=_v659_home_wrap
+
+
+# ========================= V6.60 Winner Exit Path Attribution =========================
+V660_DIR=DATA_DIR/'v660_winner_exit_path_attribution'
+V660_STATUS=V660_DIR/'status.json'; V660_RESULT=V660_DIR/'result.json'
+v660_thread=None
+
+def _v660_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V660_STATUS.exists():
+        try:x.update(json.loads(V660_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v660_write(**kw):
+    V660_DIR.mkdir(parents=True,exist_ok=True);x=_v660_status();x.update(kw)
+    V660_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v660_alive(): return v660_thread is not None and v660_thread.is_alive()
+
+def _v660_load_trade_cache():
+    """
+    Use saved V6.44/V6.17 trade cache only.
+    No universe rebuild, no fresh historical scan, no Tiingo.
+    """
+    candidates=[]
+    for name in ['V644_TRADE_CACHE','V617_TRADE_CACHE','STAGE2_TRADE_CACHE']:
+        p=globals().get(name)
+        if p:
+            try:
+                pp=Path(p)
+                if pp.exists(): candidates.append(pp)
+            except Exception:pass
+    # fallback search inside DATA_DIR for likely cached trade files
+    if not candidates:
+        for pat in ['*v644*trade*.csv*','*v617*trade*.csv*','*stage2*trade*.csv*']:
+            try:
+                candidates.extend(list(DATA_DIR.rglob(pat)))
+            except Exception:pass
+    if not candidates:
+        raise RuntimeError('找不到 V6.44/V6.17 trade cache')
+
+    p=max(candidates,key=lambda x:x.stat().st_mtime)
+    if p.suffix=='.gz' or str(p).endswith('.csv.gz'):
+        df=pd.read_csv(p,compression='gzip')
+    elif p.suffix.lower()=='.parquet':
+        df=pd.read_parquet(p)
+    else:
+        df=pd.read_csv(p)
+    return p,df
+
+def _v660_pick_col(df,names):
+    low={str(c).lower():c for c in df.columns}
+    for n in names:
+        if n.lower() in low:return low[n.lower()]
+    for c in df.columns:
+        cl=str(c).lower()
+        if any(n.lower() in cl for n in names):return c
+    return None
+
+def _v660_run():
+    global v660_thread
+    t0=time.time()
+    try:
+        _v660_write(status='running',message='直接追踪真实 trade cache 的 exit_reason / exit_px / winner path…',elapsed_sec=0,error=None)
+        cache_path,T=_v660_load_trade_cache()
+
+        # Freeze to V6.44 strategy when variant column exists.
+        vcol=_v660_pick_col(T,['variant','strategy','scheme'])
+        if vcol is not None:
+            mask=T[vcol].astype(str).str.contains('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',case=False,na=False)
+            if mask.any():T=T[mask].copy()
+
+        entry_px=_v660_pick_col(T,['entry_px','entry_price','buy_px','buy_price'])
+        exit_px=_v660_pick_col(T,['exit_px','exit_price','sell_px','sell_price'])
+        reason=_v660_pick_col(T,['exit_reason','reason'])
+        entry_date=_v660_pick_col(T,['entry_date','buy_date'])
+        exit_date=_v660_pick_col(T,['exit_date','sell_date'])
+        mfe_col=_v660_pick_col(T,['mfe','max_favorable_excursion','max_gain'])
+        final_ret_col=_v660_pick_col(T,['ret','return','final_return','pnl_pct'])
+
+        if reason is None:
+            raise RuntimeError('trade cache 没有 exit_reason/reason，不能做真实 Exit Path Attribution')
+
+        if final_ret_col is not None:
+            rr=pd.to_numeric(T[final_ret_col],errors='coerce')
+            # normalize percent columns if clearly percent-scaled
+            med=rr.abs().median()
+            if pd.notna(med) and med>3: rr=rr/100.0
+            T['_v660_ret']=rr
+        elif entry_px is not None and exit_px is not None:
+            ep=pd.to_numeric(T[entry_px],errors='coerce')
+            xp=pd.to_numeric(T[exit_px],errors='coerce')
+            T['_v660_ret']=xp/ep-1
+        else:
+            T['_v660_ret']=float('nan')
+
+        if mfe_col is not None:
+            mfe=pd.to_numeric(T[mfe_col],errors='coerce')
+            med=mfe.abs().median()
+            if pd.notna(med) and med>3:mfe=mfe/100.0
+            T['_v660_mfe']=mfe
+        else:
+            T['_v660_mfe']=float('nan')
+
+        T['_v660_reason']=T[reason].astype(str).fillna('UNKNOWN')
+        T['_v660_w100']=T['_v660_mfe']>=1.0
+        T['_v660_w200']=T['_v660_mfe']>=2.0
+        T['_v660_w500']=T['_v660_mfe']>=5.0
+
+        # If no MFE is cached, fall back to final return winners only and mark limitation.
+        has_mfe=T['_v660_mfe'].notna().any()
+        if not has_mfe:
+            T['_v660_w100']=T['_v660_ret']>=1.0
+            T['_v660_w200']=T['_v660_ret']>=2.0
+            T['_v660_w500']=T['_v660_ret']>=5.0
+
+        grp=[]
+        for rs,g in T.groupby('_v660_reason',dropna=False):
+            grp.append({
+              'exit_reason':str(rs),
+              'trades':int(len(g)),
+              'share':float(len(g)/len(T)) if len(T) else 0.0,
+              'avg_final_return':float(g['_v660_ret'].mean()) if g['_v660_ret'].notna().any() else None,
+              'median_final_return':float(g['_v660_ret'].median()) if g['_v660_ret'].notna().any() else None,
+              'w100':int(g['_v660_w100'].sum()),
+              'w200':int(g['_v660_w200'].sum()),
+              'w500':int(g['_v660_w500'].sum()),
+              'avg_mfe':float(g['_v660_mfe'].mean()) if g['_v660_mfe'].notna().any() else None
+            })
+        grp=sorted(grp,key=lambda x:(-x['w100'],-x['w200'],-x['trades']))
+
+        # Winner-attribution tables: where the future big winners actually exited.
+        attrib={}
+        for label,col in [('+100%','_v660_w100'),('+200%','_v660_w200'),('+500%','_v660_w500')]:
+            W=T[T[col]].copy()
+            rows=[]
+            if len(W):
+                for rs,g in W.groupby('_v660_reason'):
+                    rows.append({
+                      'exit_reason':str(rs),'n':int(len(g)),
+                      'share_of_winners':float(len(g)/len(W)),
+                      'avg_final_return':float(g['_v660_ret'].mean()) if g['_v660_ret'].notna().any() else None,
+                      'avg_mfe':float(g['_v660_mfe'].mean()) if g['_v660_mfe'].notna().any() else None
+                    })
+            attrib[label]=sorted(rows,key=lambda x:-x['n'])
+
+        # Identify the dominant exit reason among +100 winners.
+        top100=attrib.get('+100%',[])
+        biggest=top100[0] if top100 else {}
+        biggest_reason=biggest.get('exit_reason','—')
+
+        # Special HOLD1260 diagnostic.
+        hold_mask=T['_v660_reason'].str.contains('hold1260',case=False,na=False)
+        H=T[hold_mask].copy()
+        hold_diag={
+          'trades':int(len(H)),
+          'w100':int(H['_v660_w100'].sum()) if len(H) else 0,
+          'w200':int(H['_v660_w200'].sum()) if len(H) else 0,
+          'w500':int(H['_v660_w500'].sum()) if len(H) else 0,
+          'avg_final_return':float(H['_v660_ret'].mean()) if len(H) and H['_v660_ret'].notna().any() else None,
+          'avg_mfe':float(H['_v660_mfe'].mean()) if len(H) and H['_v660_mfe'].notna().any() else None
+        }
+
+        verdict='WINNER_EXIT_PATH_ATTRIBUTED'
+        if hold_diag['w100']>0 and biggest_reason.lower().find('hold1260')>=0:
+            verdict='HOLD1260_DOMINATES_BIG_WINNER_EXITS'
+        elif biggest:
+            verdict='DOMINANT_WINNER_EXIT_REASON_IDENTIFIED'
+
+        res={
+          'version':'V6.60 Winner Exit Path Attribution',
+          'verdict':verdict,
+          'cache_path':str(cache_path),
+          'trades':int(len(T)),
+          'has_mfe':bool(has_mfe),
+          'exit_reason_ledger':grp,
+          'winner_attribution':attrib,
+          'hold1260_diagnostic':hold_diag,
+          'biggest_w100_exit_reason':biggest,
+          'critical_point':'This version does not scan Python keywords. It attributes actual cached trades by their real exit_reason and identifies which exit path terminated future +100/+200/+500 winners.',
+          'acceptance':'Only an exit path that actually accounts for a material share of big-winner exits may advance. Diagnostic prose or helper-code references cannot create a gap.',
+          'important_negative':'This is attribution only. It does not yet change HOLD1260, stop, partial profit, final exit, position size, trigger, or selection.',
+          'next_step':'If HOLD1260 dominates big-winner exits, V6.61 should inspect the post-HOLD1260 path of those winners using existing historical cache to test whether mechanical time exit is truncating the payoff tail. If another exit reason dominates, inspect that reason instead. No broad exit overhaul.',
+          'frozen':'V6.44 benchmark 28.25% CAGR; -7% stop; HOLD1260; 10-slot; universe; trigger/selection frozen.',
+          'cache_note':'Saved trade cache only; 0 Tiingo; no universe rebuild; no full historical replay.'
+        }
+        V660_DIR.mkdir(parents=True,exist_ok=True)
+        V660_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:pd.DataFrame(grp).to_csv(V660_DIR/'exit_reason_ledger.csv',index=False)
+        except Exception:pass
+        _v660_write(status='done',message=f'V6.60 完成：{verdict} · +100 Winner dominant exit: {biggest_reason}',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v660_write(status='error',message='V6.60 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v660_thread=None
+
+def _v660_start():
+    global v660_thread
+    if _v660_alive():return False
+    _v660_write(status='starting',message='V6.60 正在启动',elapsed_sec=0,error=None)
+    v660_thread=threading.Thread(target=_v660_run,daemon=True);v660_thread.start();return True
+
+@APP.route('/v660/run',methods=['GET','POST'])
+def v660_run():_v660_start();return redirect('/v660/winner-exit-path-attribution')
+
+@APP.get('/api/v660/status')
+def v660_status_api():return jsonify(_v660_status())
+
+@APP.get('/v660/winner-exit-path-attribution')
+def v660_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v660_status();r={}
+    if V660_RESULT.exists():
+        try:r=json.loads(V660_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v660_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v660/run"><button>▶ 开始 V6.60 Winner Exit Path Attribution</button></a>'
+
+    rows=''
+    for x in r.get('exit_reason_ledger',[]):
+        avg='—' if x.get('avg_final_return') is None else f"{float(x.get('avg_final_return'))*100:.1f}%"
+        mfe='—' if x.get('avg_mfe') is None else f"{float(x.get('avg_mfe'))*100:.1f}%"
+        rows+=f"<tr><td><b>{e(x.get('exit_reason'))}</b></td><td>{int(x.get('trades',0))}</td><td>{float(x.get('share',0))*100:.1f}%</td><td>{int(x.get('w100',0))}</td><td>{int(x.get('w200',0))}</td><td>{int(x.get('w500',0))}</td><td>{avg}</td><td>{mfe}</td></tr>"
+
+    a100=''
+    for x in r.get('winner_attribution',{}).get('+100%',[])[:12]:
+        a100+=f"<tr><td><b>{e(x.get('exit_reason'))}</b></td><td>{int(x.get('n',0))}</td><td>{float(x.get('share_of_winners',0))*100:.1f}%</td></tr>"
+
+    h=r.get('hold1260_diagnostic',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #67e8f9;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}.hero{{background:#fef2f2;border-left:6px solid #dc2626;padding:16px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v659b/winner-exit-reconciliation">← V6.59B</a>
+<div class="c"><h1>🧬 V6.60 Winner Exit Path Attribution</h1><div class="info"><b>不再扫代码关键词。</b><br>直接读取真实 trade cache 的 exit_reason / return / MFE，找出 +100% / +200% / +500% Winner 到底被哪条 Exit Path 卖掉。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="hero"><b>+100 Winner dominant exit：</b>{e(r.get('biggest_w100_exit_reason',{}).get('exit_reason','—'))}<br><b>Share：</b>{float(r.get('biggest_w100_exit_reason',{}).get('share_of_winners',0) or 0)*100:.1f}%</div><p>Trades：{int(r.get('trades',0) or 0)} · MFE cache：{'YES' if r.get('has_mfe') else 'NO / final-return fallback'}</p></div>
+<div class="c"><h2>HOLD1260 Diagnostic</h2><p>Trades：{int(h.get('trades',0) or 0)} · +100：{int(h.get('w100',0) or 0)} · +200：{int(h.get('w200',0) or 0)} · +500：{int(h.get('w500',0) or 0)}</p></div>
+<div class="c"><h2>Actual Exit Reason Ledger</h2><table><tr><th>Exit Reason</th><th>Trades</th><th>Share</th><th>+100</th><th>+200</th><th>+500</th><th>Avg Final</th><th>Avg MFE</th></tr>{rows or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>+100 Winner Exit Attribution</h2><table><tr><th>Exit Reason</th><th>N</th><th>Share of +100 Winners</th></tr>{a100 or '<tr><td colspan="3">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v660_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v660_home_base is not None:
+    def _v660_home_wrap(*args,**kwargs):
+        resp=_v660_home_base(*args,**kwargs)
+        card="""<div id="v660-winner-exit-path" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V6.60 Winner Exit Path Attribution</h2><p>真实 trade cache × exit_reason × +100/+200/+500 Winner · 不再扫描代码关键词</p><a href="/v660/winner-exit-path-attribution"><button>打开 V6.60</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.59B');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v660_home_base:APP.view_functions[ep]=_v660_home_wrap
