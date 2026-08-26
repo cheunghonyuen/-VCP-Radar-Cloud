@@ -10096,7 +10096,7 @@ def v6132_page():
         for x in r.get('metrics',[]): trs+=f"<tr><td><b>{esc(x['label'])}</b></td><td>{x['trades']}</td><td>{x.get('win_rate',0):.1%}</td><td>{x.get('avg_return',0):.2%}</td><td><b>{x.get('pf',0):.2f}</b></td><td>{x.get('avg_win',0):.2%}</td><td>{x.get('avg_loss',0):.2%}</td><td>{x.get('winner20',0):.1%}</td><td>{x.get('winner30',0):.1%}</td><td>{x.get('giveback',0):.2%}</td><td>{x.get('avg_hold',0):.1f}</td></tr>"
         for x in r.get('winner_diagnostic',[]): diag+=f"<tr><td><b>{esc(x['mode'])}</b></td><td>{x['big_mfe_trades']}</td><td>{x['avg_exit_on_big']:.2%}</td><td>{x['kept_10pct']:.1%}</td><td>{x['kept_20pct']:.1%}</td></tr>"
     run='' if st.get('status')=='running' else '<form method="post" action="/v6132/run"><button>⚡ 跑 Fast Winner Replay</button></form>'
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1100px;margin:auto}}.c{{background:white;border-radius:18px;padding:18px;margin:14px 0}}button{{border:0;border-radius:12px;padding:13px 16px;background:#111827;color:white;font-weight:800}}.note{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px;line-height:1.55}}.ok{{background:#ecfdf5;border:1px solid #86efac;border-radius:14px;padding:12px}}table{{width:100%;border-collapse:collapse;min-width:850px;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:right}}th:first-child,td:first-child{{text-align:left}}.scroll{{overflow:auto}}</style></head><body><div class="w"><a href="/">← 返回主页</a><div class="c"><h1>⚡ V6.13.2 · Fast Replay + Winner Management</h1><div class="note"><b>不重跑选股。</b>直接读取 V6.13.1 已保存 META trades.csv + OHLCV cache。旧 V6.8/V6.9 已经测过 Break-even，本页不重复；只测 20MA Trend 与 10MA→20MA Hybrid。</div></div><div class="c"><p><b>Build：</b>V6.59B_EXECUTABLE_CODE_ONLY_20260826</p><h2>状态：{esc(st.get('status'))}</h2><p>{esc(st.get('message',''))}　{st.get('processed',0)}/{st.get('total',0)}　耗时 {st.get('elapsed_sec',0)} 秒</p>{run}</div><div class="c"><h2>Winner Management A/B</h2><div class="scroll"><table><tr><th>模式</th><th>交易</th><th>胜率</th><th>Avg Return</th><th>PF</th><th>Avg Win</th><th>Avg Loss</th><th>最终≥20%</th><th>最终≥30%</th><th>平均利润回吐</th><th>持有日</th></tr>{trs}</table></div></div><div class="c"><h2>Big Winner Capture（曾经 MFE≥20%）</h2><div class="scroll"><table><tr><th>模式</th><th>Big MFE样本</th><th>最终平均收益</th><th>最终保住≥10%</th><th>最终保住≥20%</th></tr>{diag}</table></div></div><div class="c"><div class="ok">固定规则：META Entry/Stop 完全冻结；趋势管理只有达到 +2R 后才启动。20MA版跌破20MA后下一日开盘退出；Hybrid版跌破10MA给一次收复机会，跌破20MA则下一日开盘退出。最大观察120日。</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v6132/status',{{cache:'no-store'}}),s=await q.json();if(s.status==='running')location.reload()}}catch(e){{}}}},2000)</script></div></body></html>'''
 
 
 
@@ -29255,19 +29255,25 @@ if _v658d_home_base is not None:
 
 
 # ========================= V6.59B Winner Management Source-vs-Code Reconciliation =========================
-V659_DIR=DATA_DIR/'v659_winner_management_source_vs_code'
+V659_DIR=DATA_DIR/'v659b_corrected_winner_management_source_vs_code'
 V659_STATUS=V659_DIR/'status.json'; V659_RESULT=V659_DIR/'result.json'
 v659_thread=None
 
+V659B_BUILD='V6.59B_EXECUTABLE_CODE_ONLY_20260826'
+
 def _v659_status():
-    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    x={'status':'idle','message':'V6.59B 尚未运行','elapsed_sec':0,'error':None,'build':V659B_BUILD}
     if V659_STATUS.exists():
-        try:x.update(json.loads(V659_STATUS.read_text(encoding='utf-8')))
-        except Exception:pass
+        try:
+            y=json.loads(V659_STATUS.read_text(encoding='utf-8'))
+            if y.get('build') == V659B_BUILD:
+                x.update(y)
+        except Exception:
+            pass
     return x
 
 def _v659_write(**kw):
-    V659_DIR.mkdir(parents=True,exist_ok=True);x=_v659_status();x.update(kw)
+    V659_DIR.mkdir(parents=True,exist_ok=True);x=_v659_status();x.update(kw);x['build']=V659B_BUILD
     V659_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
 
 def _v659_alive(): return v659_thread is not None and v659_thread.is_alive()
@@ -29395,7 +29401,7 @@ def _v659_run():
         }
 
         res={
-          'version':'V6.59B Winner Management Source-vs-Code Reconciliation',
+          'version':'V6.59B Winner Management Source-vs-Code Reconciliation','build':V659B_BUILD,
           'verdict':verdict,
           'source_verdict':r58d.get('verdict',''),
           'source_cases':source_cases,
@@ -29424,21 +29430,25 @@ def _v659_start():
     _v659_write(status='starting',message='V6.59 正在启动',elapsed_sec=0,error=None)
     v659_thread=threading.Thread(target=_v659_run,daemon=True);v659_thread.start();return True
 
-@APP.route('/v659/run',methods=['GET','POST'])
-def v659_run():_v659_start();return redirect('/v659/winner-exit-reconciliation')
+@APP.route('/v659b/run',methods=['GET','POST'])
+def v659_run():_v659_start();return redirect('/v659b/winner-exit-reconciliation')
 
-@APP.get('/api/v659/status')
+@APP.get('/api/v659b/status')
 def v659_status_api():return jsonify(_v659_status())
 
-@APP.get('/v659/winner-exit-reconciliation')
+@APP.get('/v659b/winner-exit-reconciliation')
 def v659_page():
     import html
     e=lambda x:html.escape(str(x));st=_v659_status();r={}
     if V659_RESULT.exists():
-        try:r=json.loads(V659_RESULT.read_text(encoding='utf-8'))
-        except Exception:pass
+        try:
+            r=json.loads(V659_RESULT.read_text(encoding='utf-8'))
+            if r.get('build') != V659B_BUILD:
+                r={}
+        except Exception:
+            r={}
     running=_v659_alive() or st.get('status') in ('starting','running')
-    btn='' if running else '<a href="/v659/run"><button>▶ 开始 V6.59B Corrected Reconciliation</button></a>'
+    btn='' if running else '<a href="/v659b/run"><button>▶ 开始 V6.59B Corrected Reconciliation</button></a>'
     rows=''
     for x in r.get('reconciliation',[]):
         rows+=f"<tr><td><b>{e(x.get('component'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('code_evidence'))}</td><td>{e(x.get('source_support'))}</td><td>{int(x.get('priority_score',0))}</td></tr>"
@@ -29446,7 +29456,7 @@ def v659_page():
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}.gap{{background:#fef2f2;border-left:6px solid #dc2626;padding:16px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}</style></head><body><div class="w">
 <a href="/v658d/golden-case-winner-management">← V6.58D</a>
-<div class="c"><h1>🔎 V6.59B Winner Management Source-vs-Code Reconciliation</h1><div class="info"><b>不回测、不调参数。</b><br>把 V6.58D 的 STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT 与当前冻结 Exit Engine 逐项对账，只找最大 mismatch。</div></div>
+<div class="c"><h1>🛠️ V6.59B CORRECTED Winner Management Code Audit</h1><div class="info"><b>修正版：独立 Cache + Executable-Code-Only Audit。</b><br>把 V6.58D 的 STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT 与当前冻结 Exit Engine 逐项对账，只找最大 mismatch。</div></div>
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="gap"><b>Biggest gap：</b>{e(bg.get('component','—'))}<br><b>Status：</b>{e(bg.get('status','—'))}<br><b>Why：</b>{e(bg.get('source_support',''))}</div></div>
 <div class="c"><h2>Source vs Current Code Ledger</h2><table><tr><th>Component</th><th>Status</th><th>Current Code</th><th>JLaw Source</th><th>Priority</th></tr>{rows or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
@@ -29458,7 +29468,7 @@ _v659_home_base = APP.view_functions.get('home') or APP.view_functions.get('inde
 if _v659_home_base is not None:
     def _v659_home_wrap(*args,**kwargs):
         resp=_v659_home_base(*args,**kwargs)
-        card="""<div id="v659-winner-exit-reconciliation" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🛠️ V6.59B Corrected Winner Management Source-vs-Code</h2><p>V6.58D Golden Cases × 当前冻结 Exit Engine · 只找最大 mismatch · 不回测</p><a href="/v659/winner-exit-reconciliation"><button>打开 V6.59</button></a></div>"""
+        card="""<div id="v659b-winner-exit-reconciliation" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🛠️ V6.59B Corrected Winner Management Source-vs-Code</h2><p>V6.58D Golden Cases × 当前冻结 Exit Engine · 只找最大 mismatch · 不回测</p><a href="/v659b/winner-exit-reconciliation"><button>打开 V6.59B CORRECTED</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('V6.58D');d=body.rfind('<div',0,p) if p>=0 else -1
             pos=d if d>=0 else body.find('<body')
