@@ -6975,6 +6975,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v645-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔎 V6.45 Breakout → Review → Actual Buy Source Audit</h2><div class="muted">冻结 V6.44 breakout · 只重建 JLaw 突破后的 review current conditions 决策层 · 0 Tiingo / 不重扫 universe</div></div><a href="/v645/review-buy-audit"><button type="button">打开 V6.45</button></a></div></div>
 <div class="card" id="v644-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🚀 V6.44 Source-Supported Breakout A/B</h2><div class="muted">Pivot breakout / Pivot+Volume context · 只测 V6.43 原文支持 archetype · 不猜 reclaim 阈值</div></div><a href="/v644/source-breakout-ab"><button type="button">打开 V6.44</button></a></div></div>
 
 <div class="card" id="v643-shortcut" style="border:4px solid #0891b2;background:#ecfeff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.43 Example-Level Re-Strength Reconstruction</h2><div class="muted">停止猜 Trigger 公式 · 回到 JLaw 字幕案例上下文 · 区分 Setup 与真正 Execution Trigger</div></div><a href="/v643/example-reconstruction"><button type="button">打开 V6.43</button></a></div></div>
@@ -25495,4 +25496,206 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><div class="warn"><b>Source Basis：</b>{e(r.get('source_basis',''))}<br><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v644/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.45 Breakout -> Review -> Actual Buy Source Audit =========================
+V645_DIR=DATA_DIR/'v645_review_actual_buy_source_audit'
+V645_STATUS=V645_DIR/'status.json'; V645_RESULT=V645_DIR/'result.json'
+v645_thread=None
+
+def _v645_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V645_STATUS.exists():
+        try:x.update(json.loads(V645_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v645_write(**kw):
+    V645_DIR.mkdir(parents=True,exist_ok=True);x=_v645_status();x.update(kw)
+    V645_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v645_alive(): return v645_thread is not None and v645_thread.is_alive()
+
+def _v645_corpus():
+    # Reuse the exact already-cached JLaw transcript corpus. No web/Tiingo/universe work.
+    if '_v643_corpus' in globals():
+        return _v643_corpus()
+    rows=[];idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid);text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'));text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:rows.append({'video_id':vid,'title':str(r.get('title','')),
+                             'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+V645_TOPICS={
+ 'BREAKOUT_REVIEW':[
+   'review','look at it','take a look','alert','watch list','watchlist','buy decision',
+   'buy point','decide','decision','breakout','pivot'
+ ],
+ 'RELATIVE_STRENGTH':[
+   'relative strength','rs line','rs rating','relative strength line','strength versus',
+   'market leader','leading stock','leader'
+ ],
+ 'RANKING_SELECTION':[
+   'ranking','rank','top stocks','best stocks','watch list','watchlist','screen',
+   'selection','select','filter','strongest'
+ ],
+ 'FUNDAMENTALS':[
+   'earnings','sales','revenue','eps','fundamental','fundamentals','growth',
+   'quarter','annual','institutional','margins'
+ ],
+ 'MARKET_CONTEXT':[
+   'market','general market','market condition','market environment','uptrend',
+   'downtrend','correction','distribution','follow through','follow-through',
+   'bull market','bear market','exposure'
+ ],
+ 'RISK_REWARD_DISCRETION':[
+   'risk reward','risk/reward','reward to risk','stop loss','stop-loss','7%',
+   'too extended','extended','extension','chase','chasing'
+ ]
+}
+
+def _v645_extract(corpus,max_per_topic=30):
+    out=[]
+    for topic,terms in V645_TOPICS.items():
+        seen=set();n=0
+        for row in corpus:
+            low=row['text'].lower()
+            hits=[]
+            for term in terms:
+                start=0
+                while True:
+                    p=low.find(term,start)
+                    if p<0:break
+                    hits.append((p,term));start=p+max(1,len(term))
+            for p,term in sorted(hits):
+                a=max(0,p-650);b=min(len(row['text']),p+len(term)+1200)
+                sn=row['text'][a:b].strip()
+                key=(row['video_id'],sn[:320])
+                if key in seen:continue
+                seen.add(key)
+                # Keep case-level context. This is an evidence pointer, never a formula inference.
+                out.append({'topic':topic,'video_id':row['video_id'],'title':row.get('title',''),
+                            'anchor':term,'snippet':sn})
+                n+=1
+                if n>=max_per_topic:break
+            if n>=max_per_topic:break
+    return out
+
+def _v645_run():
+    global v645_thread
+    t0=time.time()
+    try:
+        _v645_write(status='running',message='读取既有 JLaw 字幕并重建 Breakout 后 review/actual-buy 决策证据…',
+                    phase='source_audit',elapsed_sec=0,error=None)
+        corpus=_v645_corpus()
+        cases=_v645_extract(corpus,30)
+
+        by={}
+        for topic in V645_TOPICS:
+            cc=[x for x in cases if x['topic']==topic]
+            vids=sorted(set(x['video_id'] for x in cc))
+            by[topic]={'cases':len(cc),'videos':len(vids),'video_ids':vids,
+                       'examples':cc[:8]}
+
+        # V6.44 result is read only for context; V6.45 does not rerun or change it.
+        v644={}
+        try:
+            if V644_RESULT.exists():v644=json.loads(V644_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+        overall=v644.get('overall',[]) if isinstance(v644,dict) else []
+        best=None
+        if overall:
+            best=max(overall,key=lambda z:float(z.get('cagr',-999) or -999))
+
+        # A topic is source-usable only when evidence appears in >=2 distinct videos.
+        usable=[k for k,v in by.items() if int(v.get('videos',0))>=2]
+        review_core=[k for k in ['RELATIVE_STRENGTH','RANKING_SELECTION','FUNDAMENTALS','MARKET_CONTEXT']
+                     if k in usable]
+        verdict='REVIEW_LAYER_SOURCE_EVIDENCE_READY' if review_core else 'REVIEW_LAYER_SOURCE_EVIDENCE_INSUFFICIENT'
+
+        res={
+          'version':'V6.45 Breakout → Review → Actual Buy Source Audit',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),
+          'source_cases':len(cases),
+          'topic_summary':by,
+          'usable_topics':usable,
+          'review_core_topics':review_core,
+          'v644_best':best or {},
+          'frozen':'V6.44 candidate stream / breakout archetypes / V6.39 stateful pullback context / -7% stop / HOLD1260 / 10-slot replay. No exit or winner-management changes.',
+          'method':'Case-level transcript reconstruction only. Keyword anchors locate context; they are not treated as trading rules. A review dimension is eligible for the next controlled test only when supported across at least 2 distinct cached JLaw videos, and V6.46 must translate only source-supported language into already-available historical features without look-ahead.',
+          'critical_point':'V6.44 showed that source-supported pivot breakout timing materially improved CAGR, but breakout itself is an alert/candidate event in the source examples. V6.45 audits the missing review-current-conditions layer before actual buy; it does not invent another breakout threshold.',
+          'next_step':'Build V6.46 only from the strongest cross-video review dimensions found here. Use the V6.44 trigger cache + existing Feature Store/Historical Cache. Controlled A/B: breakout-only vs breakout+source-supported review. Report candidate count, WR, PF, CAGR, MaxDD, STOP rate and +100/+200/+500 winner retention.',
+          'cache_note':'Reads existing Railway JLaw transcript cache and V6.44 result only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V645_DIR.mkdir(parents=True,exist_ok=True)
+        V645_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v645_write(status='done',message=f'V6.45 完成：{verdict}',phase='done',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v645_write(status='error',message='V6.45 失败',phase='error',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v645_thread=None
+
+def _v645_start():
+    global v645_thread
+    if _v645_alive():return False
+    _v645_write(status='starting',message='V6.45 正在启动',phase='startup',elapsed_sec=0,error=None)
+    v645_thread=threading.Thread(target=_v645_run,daemon=True);v645_thread.start();return True
+
+@APP.route('/v645/run',methods=['GET','POST'])
+def v645_run():_v645_start();return redirect('/v645/review-buy-audit')
+
+@APP.get('/v645')
+def v645_alias():return redirect('/v645/review-buy-audit')
+
+@APP.get('/api/v645/status')
+def v645_status_api():return jsonify(_v645_status())
+
+@APP.get('/v645/review-buy-audit')
+def v645_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v645_status();r={}
+    if V645_RESULT.exists():
+        try:r=json.loads(V645_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v645_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v645/run"><button>▶ 开始 V6.45 Review / Actual Buy Source Audit</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    trs=''
+    labels={'BREAKOUT_REVIEW':'Breakout → Review language','RELATIVE_STRENGTH':'Relative Strength / Leadership',
+            'RANKING_SELECTION':'Ranking / Selection','FUNDAMENTALS':'Fundamentals',
+            'MARKET_CONTEXT':'General Market Context','RISK_REWARD_DISCRETION':'Risk/Reward / Extension'}
+    sm=r.get('topic_summary',{})
+    for k in V645_TOPICS:
+        q=sm.get(k,{})
+        usable='✅' if int(q.get('videos',0) or 0)>=2 else '—'
+        trs+=f"<tr><td><b>{e(labels.get(k,k))}</b></td><td>{int(q.get('cases',0) or 0)}</td><td>{int(q.get('videos',0) or 0)}</td><td>{usable}</td></tr>"
+    examples=''
+    for k in r.get('review_core_topics',[]):
+        q=sm.get(k,{})
+        for z in q.get('examples',[])[:3]:
+            sn=str(z.get('snippet',''))
+            examples+=f"<div class='quote'><b>{e(labels.get(k,k))}</b> · {e(z.get('title') or z.get('video_id',''))}<br>{e(sn[:1100])}</div>"
+    best=r.get('v644_best',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #60a5fa;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #2563eb;padding:14px;margin:12px 0;line-height:1.55}}</style></head><body><div class="w">
+<a href="/v644/source-breakout-ab">← V6.44 Source Breakout A/B</a>
+<div class="c"><h1>🔎 V6.45 Breakout → Review → Actual Buy Source Audit</h1><div class="info"><b>这轮不改交易规则、不跑新策略回测。</b><br>冻结 V6.44，只查 JLaw 在突破出现后到底怎样“review current conditions”再决定 Actual Buy。重点拆 RS/Leadership、Ranking/Selection、Fundamentals、General Market Context、Risk/Reward。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)} · 可进入下一轮的 review dimensions：{e(', '.join(r.get('review_core_topics',[])) or '—')}</p><p>V6.44 当前最佳：{e(best.get('strategy','—'))} · CAGR {float(best.get('cagr',0) or 0):.2%} · WR {float(best.get('win_rate',0) or 0):.1%} · PF {float(best.get('profit_factor',0) or 0):.2f}</p></div>
+<div class="c"><h2>Source Evidence Ledger</h2><table><tr><th>Review dimension</th><th>Cases</th><th>Distinct videos</th><th>Cross-video usable</th></tr>{trs}</table></div>
+<div class="c"><h2>Context-rich source examples</h2>{examples or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>方法：</b>{e(r.get('method',''))}<br><b>关键：</b>{e(r.get('critical_point',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v645/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2200)</script>
 </div></body></html>"""
