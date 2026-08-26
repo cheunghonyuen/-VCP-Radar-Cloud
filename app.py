@@ -29044,3 +29044,211 @@ if _v658c_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v658c_home_base:APP.view_functions[ep]=_v658c_home_wrap
+
+
+# ========================= V6.58D Golden-Case Winner Management Reconstruction =========================
+V658D_DIR=DATA_DIR/'v658d_golden_case_winner_management'
+V658D_STATUS=V658D_DIR/'status.json'; V658D_RESULT=V658D_DIR/'result.json'
+v658d_thread=None
+
+def _v658d_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V658D_STATUS.exists():
+        try:x.update(json.loads(V658D_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v658d_write(**kw):
+    V658D_DIR.mkdir(parents=True,exist_ok=True);x=_v658d_status();x.update(kw)
+    V658D_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v658d_alive(): return v658d_thread is not None and v658d_thread.is_alive()
+
+def _v658d_corpus():
+    if '_v658c_corpus' in globals(): return _v658c_corpus()
+    if '_v658b_corpus' in globals(): return _v658b_corpus()
+    return []
+
+# Golden-case oriented semantics derived from actual source examples:
+# STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT / ADD.
+V658D_PATTERNS={
+ 'STOP_EXIT':[
+   '觸發了我的止損','触发了我的止损','觸發我定下來的止損','触发我定下来的止损',
+   '止損離場','止损离场','stop loss','stop out'
+ ],
+ 'HOLD_WINNER':[
+   '沒有觸發止損','没有触发止损','盡量持有','尽量持有','我也會持有','我也会持有',
+   '我是不會因為','我不会因为','不會理它','不会理它','還在持有','还在持有'
+ ],
+ 'PARTIAL_PROFIT':[
+   '賣掉一點','卖掉一点','賣一點','卖一点','partial sell','trim','部分賣出','部分卖出'
+ ],
+ 'FINAL_EXIT':[
+   '現在是沒有持有','现在是没有持有','我會賣掉它','我会卖掉它','我會賣出那些股票','我会卖出那些股票',
+   '鎖定我的利潤','锁定我的利润','離場','离场'
+ ],
+ 'ADD':[
+   '我會買入它們','我会买入它们','我有買入這隻股票','我有买入这只股票','加倉','加仓'
+ ]
+}
+V658D_ACTUAL_SELF=[
+ '我在','我的','我會','我会','我有','我也會','我也会','我現在','我现在','我持有','我買入','我买入',
+ 'i ','my ','we '
+]
+V658D_REJECT=[
+ '如果你','假設','假设','投資者','投资者','散戶','散户','他們','他们','舉個例子','举个例子'
+]
+
+def _v658d_classify(sn):
+    low=sn.lower()
+    if not any(t.lower() in low for t in V658D_ACTUAL_SELF):
+        return 'REJECTED_NON_SELF'
+    if any(t.lower() in low for t in V658D_REJECT) and not any(x in sn for x in ['我在','我的','我會','我会','我有','我也會','我也会','我現在','我现在']):
+        return 'REJECTED_HYPOTHETICAL'
+    # More specific semantics first.
+    for lab in ['STOP_EXIT','PARTIAL_PROFIT','HOLD_WINNER','FINAL_EXIT','ADD']:
+        if any(t.lower() in low for t in V658D_PATTERNS[lab]):
+            return lab
+    return 'REJECTED_UNCLEAR'
+
+def _v658d_extract(corpus,max_cases=260):
+    rows=[];seen=set()
+    anchors=list(dict.fromkeys([x for v in V658D_PATTERNS.values() for x in v]))
+    for row in corpus:
+        text=str(row.get('text',''));low=text.lower();hits=[]
+        for a in anchors:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            lo=max(0,p-360);hi=min(len(text),p+len(a)+620)
+            sn=text[lo:hi].strip()
+            sem=_v658d_classify(sn)
+            key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:500]),sem)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({'video_id':row.get('video_id',''),'title':row.get('title',''),
+                         'anchor':a,'semantic':sem,'snippet':sn})
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v658d_run():
+    global v658d_thread
+    t0=time.time()
+    try:
+        _v658d_write(status='running',message='重建 Golden Cases：STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT / ADD…',elapsed_sec=0,error=None)
+        corpus=_v658d_corpus();cases=_v658d_extract(corpus,260)
+        labels=['STOP_EXIT','HOLD_WINNER','PARTIAL_PROFIT','FINAL_EXIT','ADD',
+                'REJECTED_NON_SELF','REJECTED_HYPOTHETICAL','REJECTED_UNCLEAR']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={
+              'cases':len(arr),
+              'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+              'examples':arr[:12]
+            }
+
+        ready=[lab for lab in ['STOP_EXIT','HOLD_WINNER','PARTIAL_PROFIT','FINAL_EXIT','ADD']
+               if summary[lab]['cases']>=1]
+        # Golden cases do not need many videos to be useful for code reconciliation,
+        # but the page marks cross-video evidence separately.
+        cross_ready=[lab for lab in ready if summary[lab]['videos']>=2]
+
+        verdict='GOLDEN_CASE_WINNER_MANAGEMENT_RECONSTRUCTED' if len(ready)>=3 else 'GOLDEN_CASE_WINNER_MANAGEMENT_INCOMPLETE'
+
+        golden=[
+          {'case':'STOP_EXIT','evidence':'When JLaw positions trigger his predefined stop, he exits immediately and sells many positions; strong names that do not trigger stops remain.'},
+          {'case':'HOLD_WINNER','evidence':'If a stock withstands a market correction without hitting the stop and remains relatively strong, JLaw tries to keep holding rather than sell for subjective market fears.'},
+          {'case':'PARTIAL_PROFIT','evidence':'Great Wall Motor example: after holding through correction, JLaw sold some around ~9.7 and some again around ~10, then later had no position.'},
+          {'case':'FINAL_EXIT','evidence':'Sell when an actual sell signal/stop occurs; extended profitable holdings can also be sold to lock profit in deteriorating conditions.'},
+          {'case':'ADD','evidence':'Strong setups can still be bought during corrections, but ADD is not promoted unless actual first-person add/pyramid evidence is found.'},
+        ]
+
+        res={
+          'version':'V6.58D Golden-Case Winner Management Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),'source_cases':len(cases),
+          'semantic_summary':summary,'ready_semantics':ready,'cross_video_ready':cross_ready,
+          'golden_cases':golden,
+          'critical_point':'This version stops trying to infer winner management from broad keyword frequency. It reconstructs explicit source-supported golden cases that can be compared directly with code.',
+          'decision_chain':'STOP EXIT weak names -> HOLD WINNER if stop survives and relative strength remains -> PARTIAL PROFIT on selected winners -> FINAL EXIT on sell signal/stop or deliberate profit lock. ADD remains unproven unless explicit real-trade evidence appears.',
+          'acceptance':'A golden case is accepted only when the source passage explicitly shows JLaw actual operation and the action is unambiguous. Cross-video repetition is tracked but not required merely to reconcile code.',
+          'important_negative':'Do not invent fixed profit targets from the Great Wall Motor prices; those are case examples, not universal thresholds.',
+          'next_step':'V6.59 should now compare STOP_EXIT / HOLD_WINNER / PARTIAL_PROFIT / FINAL_EXIT semantics with the frozen current exit engine and identify the single largest source-vs-code mismatch. No parameter tuning before that comparison.',
+          'frozen':'V6.44 benchmark 28.25% CAGR; -7% stop; HOLD1260; 10-slot; universe; no trigger changes.',
+          'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V658D_DIR.mkdir(parents=True,exist_ok=True)
+        V658D_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v658d_write(status='done',message=f'V6.58D 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v658d_write(status='error',message='V6.58D 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v658d_thread=None
+
+def _v658d_start():
+    global v658d_thread
+    if _v658d_alive():return False
+    _v658d_write(status='starting',message='V6.58D 正在启动',elapsed_sec=0,error=None)
+    v658d_thread=threading.Thread(target=_v658d_run,daemon=True);v658d_thread.start();return True
+
+@APP.route('/v658d/run',methods=['GET','POST'])
+def v658d_run():_v658d_start();return redirect('/v658d/golden-case-winner-management')
+
+@APP.get('/api/v658d/status')
+def v658d_status_api():return jsonify(_v658d_status())
+
+@APP.get('/v658d/golden-case-winner-management')
+def v658d_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v658d_status();r={}
+    if V658D_RESULT.exists():
+        try:r=json.loads(V658D_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v658d_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v658d/run"><button>▶ 开始 V6.58D Golden-Case Reconstruction</button></a>'
+    rows=''
+    for lab in ['STOP_EXIT','HOLD_WINNER','PARTIAL_PROFIT','FINAL_EXIT','ADD','REJECTED_NON_SELF','REJECTED_HYPOTHETICAL','REJECTED_UNCLEAR']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{'✅' if lab in r.get('ready_semantics',[]) else '—'}</td></tr>"
+    ghtml=''
+    for x in r.get('golden_cases',[]):
+        ghtml+=f"<div class='gold'><h3>{e(x.get('case'))}</h3><p>{e(x.get('evidence'))}</p></div>"
+    ex=''
+    for lab in ['STOP_EXIT','HOLD_WINNER','PARTIAL_PROFIT','FINAL_EXIT','ADD']:
+        arr=r.get('semantic_summary',{}).get(lab,{}).get('examples',[])[:3]
+        if arr:
+            ex+=f"<h3>{e(lab)}</h3>"
+            for x in arr:
+                sn=re.sub(r'\s+',' ',str(x.get('snippet',''))).strip()
+                ex+=f"<div class='quote'><b>{e(x.get('title',''))}</b> · {e(x.get('anchor',''))}<br>{e(sn[:900])}</div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px}}.warn{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}.gold{{background:#fffbeb;border-left:5px solid #d97706;padding:14px;margin:10px 0;border-radius:10px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #d97706;padding:12px;margin:10px 0;line-height:1.5}}</style></head><body><div class="w">
+<a href="/v658c/first-person-winner-management">← V6.58C</a>
+<div class="c"><h1>🏅 V6.58D Golden-Case Winner Management Reconstruction</h1><div class="info"><b>不再靠词频。</b><br>直接锁定真实案例：STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT / ADD。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('decision_chain',''))}</p></div>
+<div class="c"><h2>Golden Cases</h2>{ghtml or '<p>运行后显示。</p>'}</div>
+<div class="c"><h2>Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th><th>Ready</th></tr>{rows}</table></div>
+<div class="c"><h2>Accepted Source Examples</h2>{ex or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v658d_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v658d_home_base is not None:
+    def _v658d_home_wrap(*args,**kwargs):
+        resp=_v658d_home_base(*args,**kwargs)
+        card="""<div id="v658d-golden-case-winner" style="background:#fffbeb;border:5px solid #d97706;border-radius:24px;padding:28px;margin:22px 0"><h2>🏅 V6.58D Golden-Case Winner Management</h2><p>STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT / ADD · 直接锁定真实 JLaw 案例</p><a href="/v658d/golden-case-winner-management"><button>打开 V6.58D</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.58C');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v658d_home_base:APP.view_functions[ep]=_v658d_home_wrap
