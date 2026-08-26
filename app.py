@@ -29252,3 +29252,177 @@ if _v658d_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v658d_home_base:APP.view_functions[ep]=_v658d_home_wrap
+
+
+# ========================= V6.59 Winner Management Source-vs-Code Reconciliation =========================
+V659_DIR=DATA_DIR/'v659_winner_management_source_vs_code'
+V659_STATUS=V659_DIR/'status.json'; V659_RESULT=V659_DIR/'result.json'
+v659_thread=None
+
+def _v659_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V659_STATUS.exists():
+        try:x.update(json.loads(V659_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v659_write(**kw):
+    V659_DIR.mkdir(parents=True,exist_ok=True);x=_v659_status();x.update(kw)
+    V659_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v659_alive(): return v659_thread is not None and v659_thread.is_alive()
+
+def _v659_load_json(p):
+    try:
+        p=Path(p)
+        return json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+    except Exception:return {}
+
+def _v659_find_code_text():
+    # Inspect the current app source itself as the frozen code representation.
+    try:
+        return Path(__file__).read_text(encoding='utf-8')
+    except Exception:
+        return ''
+
+def _v659_detect_current_exit_engine(code):
+    low=code.lower()
+    items=[]
+    def add(name,present,evidence,source_support,status):
+        items.append({'component':name,'present':bool(present),'code_evidence':evidence,
+                      'source_support':source_support,'status':status})
+    add('STOP_EXIT',
+        ('stop7' in low or '-7%' in low or '7% stop' in low),
+        'Current code repeatedly references -7% / STOP7.',
+        'Strong: V6.58D source cases show predefined-stop exits immediately.',
+        'ALIGNED' if ('stop7' in low or '-7%' in low or '7% stop' in low) else 'MISSING')
+    add('HOLD_WINNER',
+        ('hold1260' in low or 'hold' in low),
+        'Current baseline includes HOLD1260 / long holding window.',
+        'Strong: source says do not sell strong names merely because market is correcting; keep holding if stop survives.',
+        'PARTIAL_ALIGNMENT')
+    add('PARTIAL_PROFIT',
+        any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']),
+        'Detected partial-profit/trim/scale-out wording in current code.' if any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']) else 'No explicit partial-profit / scale-out component detected.',
+        'Supported by Great Wall Motor golden case: sold some near ~9.7 and some again near ~10.',
+        'PRESENT_NEEDS_AUDIT' if any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']) else 'MISSING')
+    add('FINAL_EXIT_SIGNAL',
+        any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']),
+        'Exit engine contains generic exit/sell-signal hooks.' if any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']) else 'No explicit final sell-signal hook detected.',
+        'Supported: sell on actual sell signal/stop; extended profitable holdings may be sold deliberately to lock profit.',
+        'PRESENT_NEEDS_AUDIT' if any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']) else 'MISSING')
+    add('MARKET_SUBJECTIVE_EXIT_VETO',
+        any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']),
+        'Possible market-regime driven exit logic detected.' if any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']) else 'No obvious market-regime forced exit logic detected.',
+        'Source says market correction alone is NOT a reason to dump strong holdings.',
+        'RISK_OF_DRIFT' if any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']) else 'ALIGNED')
+    return items
+
+def _v659_gap_score(row):
+    # Simple diagnostic priority, not a trading score.
+    if row['status']=='MISSING':
+        return 100
+    if row['status']=='RISK_OF_DRIFT':
+        return 90
+    if row['status']=='PARTIAL_ALIGNMENT':
+        return 60
+    if row['status']=='PRESENT_NEEDS_AUDIT':
+        return 50
+    return 10
+
+def _v659_run():
+    global v659_thread
+    t0=time.time()
+    try:
+        _v659_write(status='running',message='对账 V6.58D Golden Cases 与当前冻结 Exit Engine…',elapsed_sec=0,error=None)
+
+        r58d=_v659_load_json(V658D_RESULT) if 'V658D_RESULT' in globals() else {}
+        code=_v659_find_code_text()
+        rows=_v659_detect_current_exit_engine(code)
+        for r in rows:r['priority_score']=_v659_gap_score(r)
+        rows=sorted(rows,key=lambda x:x['priority_score'],reverse=True)
+
+        biggest=rows[0] if rows else {}
+        verdict='WINNER_EXIT_GAP_IDENTIFIED' if biggest and biggest.get('priority_score',0)>=60 else 'WINNER_EXIT_GAP_NOT_MATERIAL'
+
+        source_cases={
+          'STOP_EXIT':'Predefined stop hit -> exit immediately; weak names leave the portfolio.',
+          'HOLD_WINNER':'Strong names that survive correction without hitting stop remain held; market fear alone is not an exit.',
+          'PARTIAL_PROFIT':'Great Wall Motor: partial sells around ~9.7 and ~10 after holding through correction.',
+          'FINAL_EXIT':'Sell on actual sell signal/stop; may deliberately lock profit on extended profitable holdings.'
+        }
+
+        res={
+          'version':'V6.59 Winner Management Source-vs-Code Reconciliation',
+          'verdict':verdict,
+          'source_verdict':r58d.get('verdict',''),
+          'source_cases':source_cases,
+          'reconciliation':rows,
+          'biggest_gap':biggest,
+          'critical_point':'This round does not run a new backtest. It compares source-supported winner-management semantics with the frozen current exit engine and identifies the single largest mismatch.',
+          'interpretation':'STOP_EXIT is already broadly aligned. HOLD_WINNER is only partially aligned because a long hold window is not the same as an explicit “keep strong survivors unless stop/sell signal” rule. PARTIAL_PROFIT is the most likely missing source-supported behavior if the current engine has no scale-out logic.',
+          'acceptance':'Only one mismatch may advance to V6.60. No combined exit overhaul, no grid search, and no unrelated trigger/selection changes.',
+          'important_negative':'Do not turn the Great Wall Motor ~9.7/~10 prices into universal profit targets. The source supports partial profit-taking behavior, not those exact numeric thresholds.',
+          'next_step':'If PARTIAL_PROFIT is confirmed as the largest mismatch, V6.60 should implement exactly one minimal source-faithful scale-out proxy using existing cached trade paths and compare against frozen V6.44. If another mismatch ranks higher, test only that one.',
+          'frozen':'V6.44 benchmark 28.25% CAGR; -7% stop; HOLD1260; 10-slot; universe; trigger/selection frozen.',
+          'cache_note':'V6.58D result + current app code only; 0 Tiingo; no universe rebuild; no historical replay in V6.59.'
+        }
+        V659_DIR.mkdir(parents=True,exist_ok=True)
+        V659_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v659_write(status='done',message=f"V6.59 完成：{verdict} · Biggest gap: {biggest.get('component','—')}",
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v659_write(status='error',message='V6.59 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v659_thread=None
+
+def _v659_start():
+    global v659_thread
+    if _v659_alive():return False
+    _v659_write(status='starting',message='V6.59 正在启动',elapsed_sec=0,error=None)
+    v659_thread=threading.Thread(target=_v659_run,daemon=True);v659_thread.start();return True
+
+@APP.route('/v659/run',methods=['GET','POST'])
+def v659_run():_v659_start();return redirect('/v659/winner-exit-reconciliation')
+
+@APP.get('/api/v659/status')
+def v659_status_api():return jsonify(_v659_status())
+
+@APP.get('/v659/winner-exit-reconciliation')
+def v659_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v659_status();r={}
+    if V659_RESULT.exists():
+        try:r=json.loads(V659_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v659_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v659/run"><button>▶ 开始 V6.59 Source-vs-Code Reconciliation</button></a>'
+    rows=''
+    for x in r.get('reconciliation',[]):
+        rows+=f"<tr><td><b>{e(x.get('component'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('code_evidence'))}</td><td>{e(x.get('source_support'))}</td><td>{int(x.get('priority_score',0))}</td></tr>"
+    bg=r.get('biggest_gap',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}.gap{{background:#fef2f2;border-left:6px solid #dc2626;padding:16px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}</style></head><body><div class="w">
+<a href="/v658d/golden-case-winner-management">← V6.58D</a>
+<div class="c"><h1>🔎 V6.59 Winner Management Source-vs-Code Reconciliation</h1><div class="info"><b>不回测、不调参数。</b><br>把 V6.58D 的 STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT 与当前冻结 Exit Engine 逐项对账，只找最大 mismatch。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="gap"><b>Biggest gap：</b>{e(bg.get('component','—'))}<br><b>Status：</b>{e(bg.get('status','—'))}<br><b>Why：</b>{e(bg.get('source_support',''))}</div></div>
+<div class="c"><h2>Source vs Current Code Ledger</h2><table><tr><th>Component</th><th>Status</th><th>Current Code</th><th>JLaw Source</th><th>Priority</th></tr>{rows or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>解释：</b>{e(r.get('interpretation',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v659_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v659_home_base is not None:
+    def _v659_home_wrap(*args,**kwargs):
+        resp=_v659_home_base(*args,**kwargs)
+        card="""<div id="v659-winner-exit-reconciliation" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🔎 V6.59 Winner Management Source-vs-Code</h2><p>V6.58D Golden Cases × 当前冻结 Exit Engine · 只找最大 mismatch · 不回测</p><a href="/v659/winner-exit-reconciliation"><button>打开 V6.59</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.58D');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v659_home_base:APP.view_functions[ep]=_v659_home_wrap
