@@ -28159,3 +28159,213 @@ if _v657_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v657_home_base:APP.view_functions[ep]=_v657_home_wrap
+
+
+# ========================= V6.58 Winner Management Source Reconstruction =========================
+V658_DIR=DATA_DIR/'v658_winner_management_source_reconstruction'
+V658_STATUS=V658_DIR/'status.json'; V658_RESULT=V658_DIR/'result.json'
+v658_thread=None
+
+def _v658_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V658_STATUS.exists():
+        try:x.update(json.loads(V658_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v658_write(**kw):
+    V658_DIR.mkdir(parents=True,exist_ok=True);x=_v658_status();x.update(kw)
+    V658_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v658_alive(): return v658_thread is not None and v658_thread.is_alive()
+
+def _v658_corpus():
+    if '_v656_corpus' in globals(): return _v656_corpus()
+    if '_v655_corpus' in globals(): return _v655_corpus()
+    if '_v652_corpus' in globals(): return _v652_corpus()
+    if '_v650_corpus' in globals(): return _v650_corpus()
+    return []
+
+V658_ANCHORS=[
+ 'hold','holding','hold on','continue to hold','sell','selling','exit','take profit','profit taking',
+ 'add','add position','add to position','scale in','reduce','trim','partial sell','partial profit',
+ 'climax','climax top','abnormal action','abnormal','failed breakout','breakout failure',
+ 'break below','moving average','10 day','20 day','50 day','ema','sma',
+ '持有','繼續持有','继续持有','賣出','卖出','離場','离场','止盈','獲利','获利',
+ '加倉','加仓','減倉','减仓','部分賣出','部分卖出','高潮','異常','异常',
+ '突破失敗','突破失败','跌破','均線','均线'
+]
+
+def _v658_semantic(sn):
+    low=sn.lower()
+    # Priority: explicit exit/reduce/add/hold semantics
+    if any(t in low for t in ['failed breakout','breakout failure']) or any(t in sn for t in ['突破失敗','突破失败']):
+        return 'FAILED_BREAKOUT_EXIT'
+    if any(t in low for t in ['climax top','climax']) or '高潮' in sn:
+        return 'CLIMAX_EXIT'
+    if 'abnormal action' in low or 'abnormal' in low or any(t in sn for t in ['異常','异常']):
+        return 'ABNORMAL_ACTION_EXIT'
+    if any(t in low for t in ['partial sell','trim','reduce position','take partial']) or any(t in sn for t in ['部分賣出','部分卖出','減倉','减仓']):
+        return 'REDUCE_TRIM'
+    if any(t in low for t in ['add position','add to position','scale in']) or any(t in sn for t in ['加倉','加仓']):
+        return 'ADD'
+    if any(t in low for t in ['sell','exit','take profit','profit taking']) or any(t in sn for t in ['賣出','卖出','離場','离场','止盈']):
+        return 'SELL_EXIT'
+    if any(t in low for t in ['continue to hold','hold on','holding','hold']) or any(t in sn for t in ['繼續持有','继续持有','持有']):
+        return 'HOLD'
+    return 'UNCLEAR'
+
+def _v658_tags(sn):
+    low=sn.lower();tags=[]
+    rules=[
+      ('MA10',['10 day','10-day','10dma','10 ema','10ema','10天','10日']),
+      ('MA20',['20 day','20-day','20dma','20 ema','20ema','20天','20日']),
+      ('MA50',['50 day','50-day','50dma','50 ema','50ema','50天','50日']),
+      ('BREAKOUT',['breakout','pivot','突破','樞紐','枢纽']),
+      ('GAIN_20',['20%','+20%']),
+      ('GAIN_50',['50%','+50%']),
+      ('GAIN_100',['100%','+100%','double','翻倍']),
+      ('VOLUME',['volume','成交量']),
+      ('EARNINGS',['earnings','earning','盈餘','盈利']),
+      ('MARKET_CONTEXT',['market','市場','大市']),
+    ]
+    for tag,terms in rules:
+        if any(t in low or t in sn for t in terms):tags.append(tag)
+    return tags
+
+def _v658_extract(corpus,max_cases=320):
+    rows=[];seen=set()
+    for row in corpus:
+        text=str(row.get('text','')); low=text.lower();hits=[]
+        for a in V658_ANCHORS:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            lo=max(0,p-1700);hi=min(len(text),p+len(a)+2500)
+            sn=text[lo:hi].strip()
+            sem=_v658_semantic(sn)
+            key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:650]),sem)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({'video_id':row.get('video_id',''),'title':row.get('title',''),'anchor':a,
+                         'semantic':sem,'tags':_v658_tags(sn),'snippet':sn})
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v658_run():
+    global v658_thread
+    t0=time.time()
+    try:
+        _v658_write(status='running',message='从原始 JLaw 字幕重建 Winner Management：HOLD / ADD / REDUCE / SELL / failure exits…',elapsed_sec=0,error=None)
+        corpus=_v658_corpus();cases=_v658_extract(corpus,320)
+
+        labels=['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','UNCLEAR']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={
+              'cases':len(arr),
+              'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+              'examples':arr[:15]
+            }
+
+        tag_ledger={}
+        for tag in ['MA10','MA20','MA50','BREAKOUT','GAIN_20','GAIN_50','GAIN_100','VOLUME','EARNINGS','MARKET_CONTEXT']:
+            arr=[x for x in cases if tag in x['tags']]
+            tag_ledger[tag]={
+              'cases':len(arr),
+              'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+              'mix':{lab:sum(1 for x in arr if x['semantic']==lab) for lab in labels}
+            }
+
+        executable=[]
+        for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+            z=summary[lab]
+            if z['cases']>=3 and z['videos']>=2:
+                executable.append(lab)
+
+        verdict='WINNER_MANAGEMENT_SOURCE_EVIDENCE_READY' if len(executable)>=2 else 'WINNER_MANAGEMENT_SOURCE_EVIDENCE_INCOMPLETE'
+
+        res={
+          'version':'V6.58 Winner Management Source Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),'source_cases':len(cases),
+          'semantic_summary':summary,'tag_ledger':tag_ledger,
+          'executable_semantics':executable,
+          'critical_point':'This round reconstructs source-level winner-management semantics only. It does not change the current exit engine. The aim is to determine whether JLaw explicitly distinguishes HOLD, ADD, REDUCE/TRIM, normal SELL, failed-breakout exits, abnormal-action exits, and climax exits.',
+          'acceptance':'A semantic only advances if it is explicit, repeated across at least 2 videos, and linked to identifiable source conditions. Repeated words alone are not enough to invent a numeric exit rule.',
+          'important_negative':'Do not assume a fixed take-profit. Do not convert MA10/20/50 mentions into exit rules unless source examples clearly tie them to HOLD/SELL behavior.',
+          'next_step':'If at least two winner-management semantics are source-supported, V6.59 will reconcile them against the frozen current exit engine and identify the single largest source-vs-code mismatch before any replay.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; universe; Market Context branch closed as a trading gate.',
+          'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V658_DIR.mkdir(parents=True,exist_ok=True)
+        V658_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v658_write(status='done',message=f'V6.58 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v658_write(status='error',message='V6.58 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v658_thread=None
+
+def _v658_start():
+    global v658_thread
+    if _v658_alive():return False
+    _v658_write(status='starting',message='V6.58 正在启动',elapsed_sec=0,error=None)
+    v658_thread=threading.Thread(target=_v658_run,daemon=True);v658_thread.start();return True
+
+@APP.route('/v658/run',methods=['GET','POST'])
+def v658_run():_v658_start();return redirect('/v658/winner-management-source')
+
+@APP.get('/api/v658/status')
+def v658_status_api():return jsonify(_v658_status())
+
+@APP.get('/v658/winner-management-source')
+def v658_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v658_status();r={}
+    if V658_RESULT.exists():
+        try:r=json.loads(V658_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v658_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v658/run"><button>▶ 开始 V6.58 Winner Management Reconstruction</button></a>'
+    rows=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','UNCLEAR']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{'✅' if lab in r.get('executable_semantics',[]) else '—'}</td></tr>"
+    ex=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+        arr=r.get('semantic_summary',{}).get(lab,{}).get('examples',[])[:4]
+        if arr:
+            ex+=f"<h3>{e(lab)}</h3>"
+            for x in arr:
+                sn=re.sub(r'\s+',' ',str(x.get('snippet',''))).strip()
+                ex+=f"<div class='quote'><b>{e(x.get('title',''))}</b> · {e(x.get('anchor',''))}<br>{e(sn[:1100])}</div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px}}.warn{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #f97316;padding:12px;margin:10px 0;line-height:1.5}}</style></head><body><div class="w">
+<a href="/v657/market-permission-map">← V6.57</a>
+<div class="c"><h1>🏆 V6.58 Winner Management Source Reconstruction</h1><div class="info"><b>不改 Exit。</b><br>只从原始 JLaw 字幕重建 HOLD / ADD / REDUCE / SELL / Failed Breakout / Abnormal Action / Climax 的真实语义。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Winner Management Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th><th>Cross-video Ready</th></tr>{rows}</table></div>
+<div class="c"><h2>Source Examples</h2>{ex or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v658_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v658_home_base is not None:
+    def _v658_home_wrap(*args,**kwargs):
+        resp=_v658_home_base(*args,**kwargs)
+        card="""<div id="v658-winner-management" style="background:#fff7ed;border:5px solid #f97316;border-radius:24px;padding:28px;margin:22px 0"><h2>🏆 V6.58 Winner Management Source Reconstruction</h2><p>HOLD / ADD / REDUCE / SELL / Failed Breakout / Abnormal / Climax · 原始 JLaw 字幕</p><a href="/v658/winner-management-source"><button>打开 V6.58</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.57');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v658_home_base:APP.view_functions[ep]=_v658_home_wrap
