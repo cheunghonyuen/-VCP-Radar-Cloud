@@ -25887,3 +25887,331 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v646/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2200)</script>
 </div></body></html>'''
+
+
+# ========================= V6.47 Source-Supported Selection / Ranking A/B =========================
+V647_DIR=DATA_DIR/'v647_source_supported_ranking_ab'
+V647_STATUS=V647_DIR/'status.json'; V647_RESULT=V647_DIR/'result.json'; V647_STOP=V647_DIR/'STOP'
+V647_CANDIDATES=V647_DIR/'v647_rank_candidates.csv.gz'
+v647_thread=None
+V647_VARIANTS=['BREAKOUT_FIFO','RS_PRIORITY','SOURCE_COMPOSITE_PRIORITY']
+
+def _v647_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V647_STATUS.exists():
+        try:x.update(json.loads(V647_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v647_write(**kw):
+    V647_DIR.mkdir(parents=True,exist_ok=True);x=_v647_status();x.update(kw)
+    V647_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v647_alive():
+    return v647_thread is not None and v647_thread.is_alive()
+
+def _v647_build(t0):
+    B=_v646_load_base().copy()
+    B=B.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    B['row_order']=np.arange(len(B),dtype=int)
+
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(B.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in B.groupby(B.listing_id.astype(str))}
+    spy=_v646_cached_spy()
+
+    rows=[];price={};date_set=set();total=len(M)
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V647_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close','volume']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,dz.close.astype(float)))
+            date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            sd=r.get('signal_date',pd.Timestamp(r.entry_date)-pd.Timedelta(days=1))
+            f=_v646_review_features(d,sd,spy) or {}
+            q=r.to_dict()
+            q['rs_available']=bool(f.get('rs_available',False))
+            q['rs_ok']=bool(f.get('rs_ok',False))
+            q['rs_slope20']=float(f.get('rs_slope20')) if np.isfinite(f.get('rs_slope20',np.nan)) else np.nan
+            q['price_quality']=bool(f.get('price_quality',False))
+            q['dist52']=float(f.get('dist52')) if np.isfinite(f.get('dist52',np.nan)) else np.nan
+            q['review_px']=float(f.get('px')) if np.isfinite(f.get('px',np.nan)) else np.nan
+            rows.append(q)
+
+        if n==1 or n%50==0 or n==total:
+            _v647_write(status='running',message='Phase 1/3 · 构建 ranking features（不删除任何 V6.44 Breakout）',
+                        phase='rank_feature_build',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('V6.47 没有生成候选')
+    X['entry_date']=pd.to_datetime(X.entry_date,errors='coerce').dt.normalize()
+    X['exit_date']=pd.to_datetime(X.exit_date,errors='coerce').dt.normalize()
+    try:X.to_csv(V647_CANDIDATES,index=False,compression='gzip')
+    except OSError:pass
+    return X,price,sorted(date_set),spy
+
+def _v647_sort_entries(ids,rec,variant):
+    if variant=='BREAKOUT_FIFO':
+        return sorted(ids,key=lambda i:(str(rec[i].get('listing_id','')),int(rec[i].get('row_order',i))))
+
+    def rs_bucket(r):
+        if bool(r.get('rs_available',False)):
+            return 2 if bool(r.get('rs_ok',False)) else 0
+        return 1
+
+    if variant=='RS_PRIORITY':
+        return sorted(ids,key=lambda i:(
+            -rs_bucket(rec[i]),
+            -(float(rec[i].get('rs_slope20')) if np.isfinite(rec[i].get('rs_slope20',np.nan)) else -999.0),
+            str(rec[i].get('listing_id',''))
+        ))
+
+    return sorted(ids,key=lambda i:(
+        -rs_bucket(rec[i]),
+        -int(bool(rec[i].get('price_quality',False))),
+        -(float(rec[i].get('rs_slope20')) if np.isfinite(rec[i].get('rs_slope20',np.nan)) else -999.0),
+        -(float(rec[i].get('dist52')) if np.isfinite(rec[i].get('dist52',np.nan)) else -999.0),
+        str(rec[i].get('listing_id',''))
+    ))
+
+def _v647_replay(X,price,cal,variant,t0,vi,vn):
+    Z=X.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0
+    contested_days=0;contested_candidates=0;ranking_changed_days=0
+    admitted_rising=0;admitted_unknown=0;admitted_falling=0;admitted_pq=0
+    step=max(1,len(cal)//24)
+
+    for di,dt in enumerate(cal,1):
+        if V647_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                           'exit_date':dt,'rs_state':p['rs_state'],'price_quality':p['price_quality']})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        ids=list(entries.get(dt,[]))
+        slots=max(0,10-len(pos))
+        if ids and len(ids)>slots:
+            contested_days+=1;contested_candidates+=len(ids)
+
+        ranked=_v647_sort_entries(ids,rec,variant)
+        fifo=_v647_sort_entries(ids,rec,'BREAKOUT_FIFO')
+        if ranked!=fifo and len(ids)>1:ranking_changed_days+=1
+
+        for i in ranked:
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            if bool(r.get('rs_available',False)):
+                rs_state='RISING' if bool(r.get('rs_ok',False)) else 'FALLING'
+            else:
+                rs_state='UNKNOWN'
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,
+                    'entry_date':dt,'rs_state':rs_state,'price_quality':bool(r.get('price_quality',False))}
+            last[i]=ep;admitted+=1
+            if rs_state=='RISING':admitted_rising+=1
+            elif rs_state=='UNKNOWN':admitted_unknown+=1
+            else:admitted_falling+=1
+            if bool(r.get('price_quality',False)):admitted_pq+=1
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v647_write(status='running',message=f'Phase 2/3 · 30Y Ranking Replay {variant} {int(round(di/len(cal)*100))}%',
+                        phase='ranking_replay',processed=vi,total=vn,current=variant,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stoprate=float(L.reason.astype(str).str.startswith('STOP7').mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+    else:
+        pf=wr=avgw=avgl=stoprate=np.nan;w100=w200=w500=0
+
+    return {'strategy':variant,'cagr':float(cagr),'maxdd':maxdd,
+            'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,'stop_rate':stoprate,
+            'winner100':w100,'winner200':w200,'winner500':w500,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),
+            'contested_days':int(contested_days),'contested_candidates':int(contested_candidates),
+            'ranking_changed_days':int(ranking_changed_days),
+            'admitted_rs_rising':int(admitted_rising),'admitted_rs_unknown':int(admitted_unknown),
+            'admitted_rs_falling':int(admitted_falling),'admitted_price_quality':int(admitted_pq),
+            'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v647_run():
+    global v647_thread
+    t0=time.time()
+    try:
+        V647_DIR.mkdir(parents=True,exist_ok=True)
+        if V647_STOP.exists():V647_STOP.unlink()
+        _v647_write(status='running',message='V6.47 Source-Supported Selection / Ranking A/B 启动',
+                    phase='startup',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        X,price,cal,spy=_v647_build(t0)
+        rows=[_v647_replay(X,price,cal,v,t0,i,len(V647_VARIANTS)) for i,v in enumerate(V647_VARIANTS,1)]
+        O=pd.DataFrame(rows);B=O[O.strategy.eq('BREAKOUT_FIFO')].iloc[0]
+
+        for c in ['cagr','maxdd','profit_factor','win_rate','stop_rate','winner100','winner200','winner500']:
+            O['delta_'+c]=O[c]-float(B[c])
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['winner200_retention']=O.winner200/max(1,float(B.winner200))
+        O['winner500_retention']=O.winner500/max(1,float(B.winner500))
+        O['candidate_pass']=(
+            O.strategy.ne('BREAKOUT_FIFO') &
+            (O.cagr>=float(B.cagr)) &
+            (O.win_rate>=float(B.win_rate)) &
+            (O.maxdd>=float(B.maxdd)) &
+            (O.profit_factor>=2.0) &
+            (O.winner100_retention>=.80)
+        )
+
+        rs_cov=float(X.rs_available.mean()) if len(X) else 0.
+        pq_rate=float(X.price_quality.mean()) if len(X) else 0.
+        verdict='SOURCE_RANKING_CANDIDATE' if bool(O.candidate_pass.any()) else 'SOURCE_RANKING_NOT_YET_PASS'
+        if int(O.contested_days.max())<25:
+            verdict += '_LOW_CAPACITY_CONTENTION'
+
+        res={
+            'version':'V6.47 Source-Supported Selection / Ranking A/B',
+            'verdict':verdict,
+            'candidate_count':int(len(X)),
+            'rs_feature_coverage':rs_cov,
+            'price_quality_rate':pq_rate,
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'ranking_rules':{
+                'BREAKOUT_FIFO':'Frozen V6.44 breakout stream; deterministic prior admission order.',
+                'RS_PRIORITY':'No hard rejection. Same-day candidates: rising RS line first; RS unavailable stays eligible; explicitly falling RS last. Within groups, stronger 20-session RS-line change ranks first.',
+                'SOURCE_COMPOSITE_PRIORITY':'No hard rejection. Lexicographic priority: RS state, source-backed Price Quality, RS slope, then proximity to 52-week high. No fitted weights and no grid search.'
+            },
+            'source_basis':'JLaw source examples distinguish breakout alert from actual buy review. A stock with RS Rating 94 but falling RS line is deferred to the watchlist, while a VCP with RS beginning to rise receives relatively higher ranking. Source also explicitly uses proximity to 52-week high and Stage-2/price-quality criteria.',
+            'critical_test':'V6.46 showed these review dimensions are destructive as hard pass/fail gates. V6.47 therefore tests the more source-faithful interpretation: use them to prioritize simultaneous opportunities under limited 10-slot capacity, without deleting the rest.',
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT candidate stream, entry/exit prices, -7% stop, HOLD1260, 10-slot sizing, exits/winner management. No new universe scan, no factor search.',
+            'acceptance':'Ranking must improve or match CAGR and Win Rate, keep MaxDD no worse, PF >=2.0, and retain >=80% of +100% winners versus FIFO.',
+            'next_step':'If ranking helps, validate yearly/era stability and inspect admitted-vs-skipped winner attribution. If ranking has little effect because few days are capacity-contested, do not force it; investigate source-supported discretionary review dimensions that can be represented point-in-time before entry.',
+            'cache_note':'Reuses V6.44 trigger cache + V6.17 Historical Cache; 0 Tiingo; no universe rebuild.'
+        }
+        V647_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V647_DIR/'v647_results.csv',index=False)
+        except OSError:pass
+
+        _v647_write(status='done',message=f'V6.47 完成：{verdict}',phase='done',
+                    processed=3,total=3,current='A/B complete',elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v647_write(status='paused',message='V6.47 已安全暂停',phase='paused',
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc()
+            _v647_write(status='error',message='V6.47 失败',phase='error',
+                        error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc()
+        _v647_write(status='error',message='V6.47 失败',phase='error',
+                    error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v647_thread=None
+
+def _v647_start():
+    global v647_thread
+    if _v647_alive():return False
+    _v647_write(status='starting',message='V6.47 正在启动',phase='startup',
+                processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v647_thread=threading.Thread(target=_v647_run,daemon=True)
+    v647_thread.start()
+    return True
+
+@APP.route('/v647/run',methods=['GET','POST'])
+def v647_run():
+    _v647_start()
+    return redirect('/v647/ranking-ab')
+
+@APP.get('/v647')
+def v647_alias():
+    return redirect('/v647/ranking-ab')
+
+@APP.get('/v647/stop')
+def v647_stop():
+    V647_DIR.mkdir(parents=True,exist_ok=True)
+    V647_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v647/ranking-ab')
+
+@APP.get('/api/v647/status')
+def v647_status_api():
+    return jsonify(_v647_status())
+
+@APP.get('/v647/ranking-ab')
+def v647_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v647_status();r={}
+    if V647_RESULT.exists():
+        try:r=json.loads(V647_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v647_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v647/run"><button>▶ 开始 V6.47 Selection / Ranking A/B</button></a>'
+    stop='<a href="/v647/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ CANDIDATE' if x.get('candidate_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('delta_win_rate',0) or 0):+.1%}</td><td>{float(x.get('stop_rate',0) or 0):.1%}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{int(x.get('contested_days',0) or 0)}</td><td>{int(x.get('ranking_changed_days',0) or 0)}</td><td>{int(x.get('admitted_rs_rising',0) or 0)}</td><td>{int(x.get('admitted_rs_unknown',0) or 0)}</td><td>{int(x.get('admitted_rs_falling',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+    rules=r.get('ranking_rules',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1900px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdfa;border:1px solid #5eead4;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v646/review-layer-ab">← V6.46 Review Layer A/B</a>
+<div class="c"><h1>🏁 V6.47 Source-Supported Selection / Ranking A/B</h1><div class="info"><b>V6.46 的教训：Review 不适合做硬 Gate。</b><br>这轮保留全部 V6.44 Breakout，只在同一天机会超过可用 slot 时，用 JLaw 原文支持的 RS/Leadership 与 Price Quality 做横向优先排序。没有 candidate 因 review 条件被直接删除。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>候选：{int(r.get('candidate_count',0) or 0):,} · RS 历史覆盖：{float(r.get('rs_feature_coverage',0) or 0):.1%} · Price Quality 比例：{float(r.get('price_quality_rate',0) or 0):.1%}</p></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot Ranking A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Contested Days</th><th>Ranking Changed</th><th>Admit RS↑</th><th>Admit RS?</th><th>Admit RS↓</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><h2>Ranking 规则</h2><div class="warn"><b>FIFO：</b>{e(rules.get('BREAKOUT_FIFO',''))}<br><br><b>RS Priority：</b>{e(rules.get('RS_PRIORITY',''))}<br><br><b>Composite：</b>{e(rules.get('SOURCE_COMPOSITE_PRIORITY',''))}<br><br><b>Source Basis：</b>{e(r.get('source_basis',''))}<br><b>关键测试：</b>{e(r.get('critical_test',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v647/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
