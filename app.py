@@ -29956,3 +29956,214 @@ if _v661_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v661_home_base:APP.view_functions[ep]=_v661_home_wrap
+
+
+# ========================= V6.62 STOP7_GAP Loser-Control Audit =========================
+V662_DIR=DATA_DIR/'v662_stop7_gap_loser_control_audit'
+V662_STATUS=V662_DIR/'status.json'; V662_RESULT=V662_DIR/'result.json'
+v662_thread=None
+
+def _v662_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V662_STATUS.exists():
+        try:x.update(json.loads(V662_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v662_write(**kw):
+    V662_DIR.mkdir(parents=True,exist_ok=True);x=_v662_status();x.update(kw)
+    V662_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v662_alive(): return v662_thread is not None and v662_thread.is_alive()
+
+def _v662_run():
+    global v662_thread
+    t0=time.time()
+    try:
+        _v662_write(status='running',message='审计真实 STOP7 / STOP7_GAP 亏损贡献与尾部风险…',elapsed_sec=0,error=None)
+        _,T=_v660_load_trade_cache()
+
+        vcol=_v660_pick_col(T,['variant','strategy','scheme'])
+        if vcol is not None:
+            m=T[vcol].astype(str).str.contains('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',case=False,na=False)
+            if m.any():T=T[m].copy()
+
+        reason=_v660_pick_col(T,['exit_reason','reason'])
+        entry_px=_v660_pick_col(T,['entry_px','entry_price','buy_px','buy_price'])
+        exit_px=_v660_pick_col(T,['exit_px','exit_price','sell_px','sell_price'])
+        retcol=_v660_pick_col(T,['return_pct','final_return','return','ret','pnl_pct'])
+        entry_date=_v660_pick_col(T,['entry_date','buy_date'])
+        exit_date=_v660_pick_col(T,['exit_date','sell_date'])
+        holdcol=_v660_pick_col(T,['hold_days','holding_days','days_held'])
+        if reason is None:
+            raise RuntimeError('trade cache 没有 exit_reason/reason')
+
+        if retcol is not None:
+            rr=pd.to_numeric(T[retcol],errors='coerce')
+            med=rr.abs().median()
+            if pd.notna(med) and med>3:rr=rr/100.0
+            T['_ret']=rr
+        elif entry_px is not None and exit_px is not None:
+            T['_ret']=pd.to_numeric(T[exit_px],errors='coerce')/pd.to_numeric(T[entry_px],errors='coerce')-1
+        else:
+            raise RuntimeError('trade cache 没有可计算 return 的字段')
+
+        T['_reason']=T[reason].astype(str).fillna('UNKNOWN')
+        if entry_date is not None:
+            T['_entry_date']=pd.to_datetime(T[entry_date],errors='coerce')
+            T['_entry_year']=T['_entry_date'].dt.year
+        else:
+            T['_entry_year']=np.nan
+        if holdcol is not None:
+            T['_hold_days']=pd.to_numeric(T[holdcol],errors='coerce')
+        elif entry_date is not None and exit_date is not None:
+            T['_hold_days']=(pd.to_datetime(T[exit_date],errors='coerce')-pd.to_datetime(T[entry_date],errors='coerce')).dt.days
+        else:
+            T['_hold_days']=np.nan
+
+        # Gross loss contribution by real exit path.
+        losers=T[T['_ret']<0].copy()
+        total_loss=float(-losers['_ret'].sum()) if len(losers) else 0.0
+        ledger=[]
+        for rs,g in T.groupby('_reason',dropna=False):
+            gl=float(-g.loc[g['_ret']<0,'_ret'].sum())
+            ledger.append({
+              'exit_reason':str(rs),
+              'trades':int(len(g)),
+              'avg_return':float(g['_ret'].mean()) if g['_ret'].notna().any() else None,
+              'median_return':float(g['_ret'].median()) if g['_ret'].notna().any() else None,
+              'loss_trades':int((g['_ret']<0).sum()),
+              'gross_loss_contribution':gl,
+              'share_of_all_gross_losses':float(gl/total_loss) if total_loss>0 else 0.0
+            })
+        ledger=sorted(ledger,key=lambda x:-x['share_of_all_gross_losses'])
+
+        stop7=T[T['_reason'].str.contains(r'^STOP7$',case=False,regex=True,na=False)].copy()
+        gap=T[T['_reason'].str.contains('STOP7_GAP',case=False,na=False)].copy()
+
+        def qstats(g):
+            r=g['_ret'].dropna()
+            h=g['_hold_days'].dropna()
+            if r.empty:return {}
+            qs=r.quantile([.01,.05,.10,.25,.50,.75,.90]).to_dict()
+            return {
+              'n':int(len(g)),
+              'avg_return':float(r.mean()),'median_return':float(r.median()),
+              'p01':float(qs.get(.01,np.nan)),'p05':float(qs.get(.05,np.nan)),
+              'p10':float(qs.get(.10,np.nan)),'p25':float(qs.get(.25,np.nan)),
+              'p75':float(qs.get(.75,np.nan)),'p90':float(qs.get(.90,np.nan)),
+              'pct_below_minus10':float((r<=-.10).mean()),
+              'pct_below_minus15':float((r<=-.15).mean()),
+              'pct_below_minus20':float((r<=-.20).mean()),
+              'median_hold_days':float(h.median()) if not h.empty else None
+            }
+
+        stop_stats=qstats(stop7);gap_stats=qstats(gap)
+
+        # Year concentration of gap exits.
+        yearly=[]
+        if gap['_entry_year'].notna().any():
+            for y,g in gap.groupby('_entry_year'):
+                if pd.isna(y):continue
+                yearly.append({
+                  'year':int(y),'trades':int(len(g)),
+                  'avg_return':float(g['_ret'].mean()),
+                  'pct_below_minus15':float((g['_ret']<=-.15).mean())
+                })
+            yearly=sorted(yearly,key=lambda x:x['year'])
+
+        # Diagnostic conclusion only; no stop mutation.
+        gap_share=next((x['share_of_all_gross_losses'] for x in ledger if 'STOP7_GAP' in x['exit_reason'].upper()),0.0)
+        if gap_share>=0.35:
+            verdict='STOP7_GAP_DOMINATES_LOSER_TAIL'
+        elif gap_share>=0.20:
+            verdict='STOP7_GAP_MATERIAL_LOSER_DRAG'
+        else:
+            verdict='STOP7_GAP_NOT_DOMINANT'
+
+        res={
+          'version':'V6.62 STOP7_GAP Loser-Control Audit','verdict':verdict,
+          'trades':int(len(T)),'losers':int(len(losers)),
+          'gross_loss_total':total_loss,
+          'loss_ledger':ledger,
+          'stop7_stats':stop_stats,'stop7_gap_stats':gap_stats,
+          'gap_loss_share':gap_share,'gap_yearly':yearly,
+          'critical_question':'Does STOP7_GAP, rather than ordinary STOP7, explain a disproportionate share of the strategy loss tail?',
+          'interpretation':'Ordinary STOP7 is the intended quick-loss mechanism. STOP7_GAP represents losses that jump through the stop and therefore may be structurally different from a normal stop execution.',
+          'acceptance':'Only if STOP7_GAP contributes a disproportionate share of gross losses should the branch advance. No tighter stop, no overnight filter, and no earnings veto may be invented from this audit alone.',
+          'important_negative':'This page is attribution only. A large gap-loss contribution does not prove it is avoidable.',
+          'next_step':('If STOP7_GAP is material, V6.63 should attribute those gap exits to available point-in-time context already in cache (holding age / date / known event fields if present) and determine whether any source-supported, non-lookahead prevention mechanism exists. Do not tune stop percentage.'
+                       if verdict!='STOP7_GAP_NOT_DOMINANT'
+                       else 'Close Loser-Control gap branch. Keep -7% stop frozen and move to the remaining Actual-Buy/selection distinction without reopening old experiments.'),
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR; -7% stop; HOLD1260; 10-slot; trigger/selection/universe frozen.',
+          'cache_note':'Saved V6.44 trade cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V662_DIR.mkdir(parents=True,exist_ok=True)
+        V662_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:pd.DataFrame(ledger).to_csv(V662_DIR/'loss_reason_ledger.csv',index=False)
+        except Exception:pass
+        _v662_write(status='done',message=f"V6.62 完成：{verdict} · STOP7_GAP loss share {gap_share*100:.1f}%",
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v662_write(status='error',message='V6.62 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:v662_thread=None
+
+def _v662_start():
+    global v662_thread
+    if _v662_alive():return False
+    _v662_write(status='starting',message='V6.62 正在启动',elapsed_sec=0,error=None)
+    v662_thread=threading.Thread(target=_v662_run,daemon=True);v662_thread.start();return True
+
+@APP.route('/v662/run',methods=['GET','POST'])
+def v662_run():_v662_start();return redirect('/v662/stop7-gap-loser-control')
+
+@APP.get('/api/v662/status')
+def v662_status_api():return jsonify(_v662_status())
+
+@APP.get('/v662/stop7-gap-loser-control')
+def v662_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v662_status();r={}
+    if V662_RESULT.exists():
+        try:r=json.loads(V662_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v662_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v662/run"><button>▶ 开始 V6.62 STOP7_GAP Audit</button></a>'
+
+    led=''
+    for x in r.get('loss_ledger',[])[:12]:
+        avg='—' if x.get('avg_return') is None else f"{float(x.get('avg_return'))*100:.1f}%"
+        led+=f"<tr><td><b>{e(x.get('exit_reason'))}</b></td><td>{int(x.get('trades',0))}</td><td>{int(x.get('loss_trades',0))}</td><td>{avg}</td><td>{float(x.get('share_of_all_gross_losses',0))*100:.1f}%</td></tr>"
+
+    a=r.get('stop7_stats',{});g=r.get('stop7_gap_stats',{})
+    def pct(v): return '—' if v is None else f"{float(v)*100:.1f}%"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}.hero{{background:#fff7ed;border-left:6px solid #ea580c;padding:16px;border-radius:12px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v661/hold1260-post-exit-tail-audit">← V6.61</a>
+<div class="c"><h1>🩸 V6.62 STOP7_GAP Loser-Control Audit</h1><div class="info"><b>Winner Exit 分支先冻结。</b><br>现在只审计亏损端：普通 STOP7 与 STOP7_GAP 到底谁在制造真正的 loss tail。不开新策略、不调 -7%。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="hero"><b>STOP7_GAP share of gross losses：</b>{float(r.get('gap_loss_share',0) or 0)*100:.1f}%<br><b>Trades：</b>{int(r.get('trades',0) or 0)} · Losers：{int(r.get('losers',0) or 0)}</div></div>
+<div class="c"><h2>STOP7 vs STOP7_GAP</h2><table><tr><th></th><th>N</th><th>Avg</th><th>Median</th><th>≤ -10%</th><th>≤ -15%</th><th>≤ -20%</th><th>Median Hold Days</th></tr>
+<tr><td><b>STOP7</b></td><td>{int(a.get('n',0) or 0)}</td><td>{pct(a.get('avg_return'))}</td><td>{pct(a.get('median_return'))}</td><td>{pct(a.get('pct_below_minus10'))}</td><td>{pct(a.get('pct_below_minus15'))}</td><td>{pct(a.get('pct_below_minus20'))}</td><td>{'—' if a.get('median_hold_days') is None else f"{float(a.get('median_hold_days')):.0f}"}</td></tr>
+<tr><td><b>STOP7_GAP</b></td><td>{int(g.get('n',0) or 0)}</td><td>{pct(g.get('avg_return'))}</td><td>{pct(g.get('median_return'))}</td><td>{pct(g.get('pct_below_minus10'))}</td><td>{pct(g.get('pct_below_minus15'))}</td><td>{pct(g.get('pct_below_minus20'))}</td><td>{'—' if g.get('median_hold_days') is None else f"{float(g.get('median_hold_days')):.0f}"}</td></tr></table></div>
+<div class="c"><h2>Gross Loss Contribution by Exit Reason</h2><table><tr><th>Exit Reason</th><th>Trades</th><th>Loss Trades</th><th>Avg Return</th><th>Share of Gross Losses</th></tr>{led or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>解释：</b>{e(r.get('interpretation',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v662_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v662_home_base is not None:
+    def _v662_home_wrap(*args,**kwargs):
+        resp=_v662_home_base(*args,**kwargs)
+        card="""<div id="v662-stop7-gap-audit" style="background:#fef2f2;border:5px solid #dc2626;border-radius:24px;padding:28px;margin:22px 0"><h2>🩸 V6.62 STOP7_GAP Loser-Control Audit</h2><p>真实 STOP7 vs STOP7_GAP · Gross Loss Contribution · 不改 -7% Stop</p><a href="/v662/stop7-gap-loser-control"><button>打开 V6.62</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('v661-hold1260-tail');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v662_home_base:APP.view_functions[ep]=_v662_home_wrap
