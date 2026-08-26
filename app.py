@@ -27775,3 +27775,68 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v655/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
+
+
+# ========================= V6.55 HOME CARD PATCH =========================
+# Wrap the existing homepage response and insert the newest card before V6.54.
+_v655_original_home_view = APP.view_functions.get('home') or APP.view_functions.get('index')
+
+def _v655_home_card_html():
+    return """
+    <div style="background:#ecfdf5;border:5px solid #059669;border-radius:24px;padding:28px;margin:22px 0;box-shadow:0 10px 24px rgba(15,23,42,.08)">
+      <div style="font-size:clamp(28px,5vw,48px);font-weight:900;line-height:1.08;color:#0f172a">
+        🧭 V6.55 Market Permission / Exposure Semantics
+      </div>
+      <div style="font-size:clamp(18px,3.4vw,30px);line-height:1.35;color:#64748b;margin-top:10px">
+        原始 JLaw 字幕重建 · BUY / WATCH-DEFER / REDUCE EXPOSURE / PASS · 0 Tiingo · 不重建股票池
+      </div>
+      <a href="/v655/market-permission-exposure" style="display:inline-block;margin-top:22px;background:#0f172a;color:white;text-decoration:none;font-weight:900;font-size:clamp(17px,3vw,26px);padding:16px 24px;border-radius:14px">
+        打开 V6.55
+      </a>
+    </div>
+    """
+
+if _v655_original_home_view is not None:
+    def _v655_home_with_card(*args, **kwargs):
+        resp = _v655_original_home_view(*args, **kwargs)
+        # Preserve Flask response status/headers when possible.
+        if hasattr(resp, 'get_data'):
+            body = resp.get_data(as_text=True)
+            marker_candidates = [
+                '🧩 V6.54 Actual-Buy Decision Stack Reconstruction',
+                'V6.54 Actual-Buy Decision Stack Reconstruction',
+                'V6.54'
+            ]
+            pos = -1
+            for marker in marker_candidates:
+                p = body.find(marker)
+                if p >= 0:
+                    # Find containing card/div start.
+                    d = body.rfind('<div', 0, p)
+                    pos = d if d >= 0 else p
+                    break
+            card = _v655_home_card_html()
+            if pos >= 0:
+                body = body[:pos] + card + body[pos:]
+            else:
+                b = body.find('<body')
+                gt = body.find('>', b) if b >= 0 else -1
+                body = body[:gt+1] + card + body[gt+1:] if gt >= 0 else card + body
+            resp.set_data(body)
+            return resp
+        body = str(resp)
+        card = _v655_home_card_html()
+        p = body.find('V6.54')
+        if p >= 0:
+            d = body.rfind('<div', 0, p)
+            p = d if d >= 0 else p
+            body = body[:p] + card + body[p:]
+        else:
+            body = card + body
+        return body
+
+    # Replace whichever endpoint owns the root page.
+    for _ep, _vf in list(APP.view_functions.items()):
+        if _vf is _v655_original_home_view:
+            APP.view_functions[_ep] = _v655_home_with_card
+# ======================= END V6.55 HOME CARD PATCH =======================
