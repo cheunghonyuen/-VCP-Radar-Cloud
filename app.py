@@ -20144,7 +20144,7 @@ def v625_page():
     running=_v625_alive() or s.get('status') in ('starting','running');btn='' if running else '<a href="/v625/run"><button>▶ 开始 V6.25 PIT Universe Audit</button></a>';stop='<a href="/v625/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
     sep=''.join([f"<tr><td><b>{e(x.get('feature',''))}</b></td><td>{float(x.get('legacy_median',0) or 0):,.3g}</td><td>{float(x.get('outside_median',0) or 0):,.3g}</td><td>{float(x.get('relative_gap',0) or 0):+.1%}</td></tr>" for x in r.get('feature_separation',[])])
     dec=''.join([f"<tr><td>{e(x.get('feature',''))}</td><td>{e(x.get('bucket',''))}</td><td>{int(x.get('n',0)):,}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('pf',0) or 0):.2f}</td><td>{float(x.get('stop7_rate',0) or 0):.1%}</td><td>{float(x.get('winner100_rate',0) or 0):.2%}</td></tr>" for x in r.get('deciles',[])])
-    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:24px;padding:28px;margin:18px 0}}.note{{background:#eff6ff;border:1px solid #93c5fd;border-radius:16px;padding:18px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:left;white-space:nowrap}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}h2{{font-size:26px}}</style></head><body><div class="w"><a href="/v624/30y-rebaseline">← V6.24 30-Year Rebaseline</a><div class="c"><h1>🔎 V6.25 Point-in-Time Universe Quality Audit</h1><div class="note"><b>先找 15K 稀释来自哪里，不先发明过滤器。</b><br>固定主区间 1996–2026；只读取买入当日或之前已经存在的数据。0 Tiingo，不重建股票池。</div></div><div class="c"><h2>状态：{e(s.get('status','idle'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0))}/{int(s.get('total',0))} · {float(s.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div><div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Featured candidates: {int(r.get('featured_candidates',0)):,}</p></div><div class="c"><h2>1. LEGACY vs OUTSIDE 买入当日特征差异</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>LEGACY Median</th><th>OUTSIDE Median</th><th>Relative Gap</th></tr>{sep}</table></div></div><div class="c"><h2>2. 全30年候选按特征十分位表现</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>Decile</th><th>N</th><th>Win Rate</th><th>PF*</th><th>STOP7</th><th>+100% Rate</th></tr>{dec}</table></div></div><div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note','Diagnostic only; no filter adopted.'))}<br><b>特征：</b>{e(r.get('features_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v625/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;border-radius:24px;padding:28px;margin:18px 0}}.note{{background:#eff6ff;border:1px solid #93c5fd;border-radius:16px;padding:18px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:16px;padding:18px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #dbe3ef;text-align:left;white-space:nowrap}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:700}}h1{{font-size:38px}}h2{{font-size:26px}}</style></head><body><div class="w"><a href="/v624/30y-rebaseline">← V6.24 30-Year Rebaseline</a><div class="c"><h1>🔎 V6.25 Point-in-Time Universe Quality Audit</h1><div class="note"><b>先找 15K 稀释来自哪里，不先发明过滤器。</b><br>固定主区间 1996–2026；只读取买入当日或之前已经存在的数据。0 Tiingo，不重建股票池。</div></div><div class="c"><h2>状态：{e(s.get('status','idle'))}</h2><p>{e(s.get('message',''))}</p><p>阶段：{e(s.get('phase',''))} · {int(s.get('processed',0))}/{int(s.get('total',0))} · {float(s.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn} {stop}</div><div class="c"><div class="warn"><b>V6.59B 修正：</b>上一版把整份 App 的诊断文字也当成策略代码扫描，所以 MARKET_SUBJECTIVE_EXIT_VETO 可能是假阳性。本版只检查诊断分支之前的可执行代码；旧结论作废。</div></div><div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Featured candidates: {int(r.get('featured_candidates',0)):,}</p></div><div class="c"><h2>1. LEGACY vs OUTSIDE 买入当日特征差异</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>LEGACY Median</th><th>OUTSIDE Median</th><th>Relative Gap</th></tr>{sep}</table></div></div><div class="c"><h2>2. 全30年候选按特征十分位表现</h2><div style="overflow:auto"><table><tr><th>Feature</th><th>Decile</th><th>N</th><th>Win Rate</th><th>PF*</th><th>STOP7</th><th>+100% Rate</th></tr>{dec}</table></div></div><div class="c"><div class="warn"><b>规则：</b>{e(r.get('rule_note','Diagnostic only; no filter adopted.'))}<br><b>特征：</b>{e(r.get('features_note',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v625/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></div></body></html>'''
 
 
 # ========================= V6.26 Overheat / Late-Stage Failure Attribution =========================
@@ -29254,7 +29254,7 @@ if _v658d_home_base is not None:
         if vf is _v658d_home_base:APP.view_functions[ep]=_v658d_home_wrap
 
 
-# ========================= V6.59 Winner Management Source-vs-Code Reconciliation =========================
+# ========================= V6.59B Winner Management Source-vs-Code Reconciliation =========================
 V659_DIR=DATA_DIR/'v659_winner_management_source_vs_code'
 V659_STATUS=V659_DIR/'status.json'; V659_RESULT=V659_DIR/'result.json'
 v659_thread=None
@@ -29286,49 +29286,91 @@ def _v659_find_code_text():
         return ''
 
 def _v659_detect_current_exit_engine(code):
-    low=code.lower()
-    items=[]
-    def add(name,present,evidence,source_support,status):
-        items.append({'component':name,'present':bool(present),'code_evidence':evidence,
-                      'source_support':source_support,'status':status})
+    """
+    V6.59B FIX:
+    Do NOT keyword-scan the whole app. That self-contaminates the audit because
+    diagnostic HTML / source notes themselves contain words such as market_exit,
+    partial_profit, hold, etc.
+
+    Inspect only pre-V6.58D executable Python lines, excluding strings/comments/routes/UI.
+    This is still a static audit; any ambiguous item must be marked NEEDS_TARGETED_CODE_TRACE.
+    """
+    # Restrict to code that existed before the golden-case diagnostic branch.
+    cut = code.find("# ========================= V6.58D")
+    base = code[:cut] if cut >= 0 else code
+
+    executable=[]
+    for line in base.splitlines():
+        z=line.strip()
+        if not z or z.startswith("#"):
+            continue
+        # Remove route/UI/template-heavy lines and obvious prose literals.
+        if ("<" in z and ">" in z) or "render_template" in z or "return f\"\"\"" in z:
+            continue
+        executable.append(z.lower())
+    low="\n".join(executable)
+
+    rows=[]
+    def add(name,status,evidence,source_support,confidence):
+        rows.append({
+            'component':name,'status':status,'code_evidence':evidence,
+            'source_support':source_support,'confidence':confidence
+        })
+
+    stop_hits=[x for x in executable if re.search(r'\bstop7\b|stop_loss|stop_pct|stop_price',x)]
     add('STOP_EXIT',
-        ('stop7' in low or '-7%' in low or '7% stop' in low),
-        'Current code repeatedly references -7% / STOP7.',
-        'Strong: V6.58D source cases show predefined-stop exits immediately.',
-        'ALIGNED' if ('stop7' in low or '-7%' in low or '7% stop' in low) else 'MISSING')
+        'ALIGNED' if stop_hits else 'NEEDS_TARGETED_CODE_TRACE',
+        ("Executable stop logic references found: "+ " | ".join(stop_hits[:3])) if stop_hits else
+        "No reliable executable stop assignment/condition isolated by static audit.",
+        'Strong source support: predefined stop hit -> exit immediately.',
+        'HIGH' if stop_hits else 'LOW')
+
+    hold_hits=[x for x in executable if re.search(r'hold1260|max_hold|holding_days|days_held',x)]
     add('HOLD_WINNER',
-        ('hold1260' in low or 'hold' in low),
-        'Current baseline includes HOLD1260 / long holding window.',
-        'Strong: source says do not sell strong names merely because market is correcting; keep holding if stop survives.',
-        'PARTIAL_ALIGNMENT')
+        'PARTIAL_ALIGNMENT' if hold_hits else 'NEEDS_TARGETED_CODE_TRACE',
+        ("Holding-window logic found: "+" | ".join(hold_hits[:3])) if hold_hits else
+        "No reliable executable winner-hold condition isolated.",
+        'Strong source support: keep strong survivors when stop is not hit; market correction alone is not an exit.',
+        'MEDIUM' if hold_hits else 'LOW')
+
+    partial_hits=[x for x in executable if re.search(r'partial[_ ]?(profit|exit|sell)|scale[_ ]?out|trim[_ ]?(position|qty|shares)',x)]
     add('PARTIAL_PROFIT',
-        any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']),
-        'Detected partial-profit/trim/scale-out wording in current code.' if any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']) else 'No explicit partial-profit / scale-out component detected.',
-        'Supported by Great Wall Motor golden case: sold some near ~9.7 and some again near ~10.',
-        'PRESENT_NEEDS_AUDIT' if any(x in low for x in ['partial profit','partial_profit','trim','scale out','scale_out','partial sell']) else 'MISSING')
+        'PRESENT_NEEDS_AUDIT' if partial_hits else 'MISSING_IN_EXECUTABLE_CODE',
+        ("Executable scale-out references found: "+" | ".join(partial_hits[:3])) if partial_hits else
+        "No executable partial-profit / scale-out rule found in the pre-diagnostic strategy code.",
+        'Supported behavior by golden case; exact ~9.7/~10 prices are NOT universal thresholds.',
+        'HIGH')
+
+    final_hits=[x for x in executable if re.search(r'exit_reason|sell_signal|final_exit|exit_signal',x)]
     add('FINAL_EXIT_SIGNAL',
-        any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']),
-        'Exit engine contains generic exit/sell-signal hooks.' if any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']) else 'No explicit final sell-signal hook detected.',
-        'Supported: sell on actual sell signal/stop; extended profitable holdings may be sold deliberately to lock profit.',
-        'PRESENT_NEEDS_AUDIT' if any(x in low for x in ['sell_signal','sell signal','final_exit','exit_reason']) else 'MISSING')
+        'PRESENT_NEEDS_AUDIT' if final_hits else 'NEEDS_TARGETED_CODE_TRACE',
+        ("Executable final-exit references found: "+" | ".join(final_hits[:3])) if final_hits else
+        "Generic sell/final-exit semantics not reliably isolated by static audit.",
+        'Source supports exit on actual sell signal/stop and deliberate profit locking.',
+        'MEDIUM' if final_hits else 'LOW')
+
+    # Important correction: never infer this veto from prose/diagnostic keywords.
+    market_hits=[x for x in executable if re.search(r'(market|regime|spy).*(exit|sell)|(?:exit|sell).*(market|regime|spy)',x)]
     add('MARKET_SUBJECTIVE_EXIT_VETO',
-        any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']),
-        'Possible market-regime driven exit logic detected.' if any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']) else 'No obvious market-regime forced exit logic detected.',
+        'RISK_OF_DRIFT' if market_hits else 'NO_EXECUTABLE_EVIDENCE',
+        ("Executable market-driven exit references found: "+" | ".join(market_hits[:3])) if market_hits else
+        "No executable market/regime-driven forced-exit rule found. Previous V6.59 flag was self-contaminated by diagnostic text and is withdrawn.",
         'Source says market correction alone is NOT a reason to dump strong holdings.',
-        'RISK_OF_DRIFT' if any(x in low for x in ['market_exit','bear_exit','defensive_exit','regime_exit']) else 'ALIGNED')
-    return items
+        'HIGH')
+    return rows
 
 def _v659_gap_score(row):
-    # Simple diagnostic priority, not a trading score.
-    if row['status']=='MISSING':
-        return 100
-    if row['status']=='RISK_OF_DRIFT':
-        return 90
-    if row['status']=='PARTIAL_ALIGNMENT':
-        return 60
-    if row['status']=='PRESENT_NEEDS_AUDIT':
-        return 50
-    return 10
+    # Diagnostic priority only. Confirmed executable evidence outranks ambiguous static inference.
+    m={
+      'MISSING_IN_EXECUTABLE_CODE':100,
+      'RISK_OF_DRIFT':90,
+      'PARTIAL_ALIGNMENT':60,
+      'PRESENT_NEEDS_AUDIT':50,
+      'NEEDS_TARGETED_CODE_TRACE':30,
+      'NO_EXECUTABLE_EVIDENCE':10,
+      'ALIGNED':10,
+    }
+    return m.get(row.get('status'),20)
 
 def _v659_run():
     global v659_thread
@@ -29353,7 +29395,7 @@ def _v659_run():
         }
 
         res={
-          'version':'V6.59 Winner Management Source-vs-Code Reconciliation',
+          'version':'V6.59B Winner Management Source-vs-Code Reconciliation',
           'verdict':verdict,
           'source_verdict':r58d.get('verdict',''),
           'source_cases':source_cases,
@@ -29369,7 +29411,7 @@ def _v659_run():
         }
         V659_DIR.mkdir(parents=True,exist_ok=True)
         V659_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v659_write(status='done',message=f"V6.59 完成：{verdict} · Biggest gap: {biggest.get('component','—')}",
+        _v659_write(status='done',message=f"V6.59B 完成：{verdict} · Biggest gap: {biggest.get('component','—')}",
                     elapsed_sec=round(time.time()-t0,1),error=None)
     except Exception as ex:
         traceback.print_exc()
@@ -29396,7 +29438,7 @@ def v659_page():
         try:r=json.loads(V659_RESULT.read_text(encoding='utf-8'))
         except Exception:pass
     running=_v659_alive() or st.get('status') in ('starting','running')
-    btn='' if running else '<a href="/v659/run"><button>▶ 开始 V6.59 Source-vs-Code Reconciliation</button></a>'
+    btn='' if running else '<a href="/v659/run"><button>▶ 开始 V6.59B Corrected Reconciliation</button></a>'
     rows=''
     for x in r.get('reconciliation',[]):
         rows+=f"<tr><td><b>{e(x.get('component'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('code_evidence'))}</td><td>{e(x.get('source_support'))}</td><td>{int(x.get('priority_score',0))}</td></tr>"
@@ -29404,7 +29446,7 @@ def v659_page():
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}.gap{{background:#fef2f2;border-left:6px solid #dc2626;padding:16px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}</style></head><body><div class="w">
 <a href="/v658d/golden-case-winner-management">← V6.58D</a>
-<div class="c"><h1>🔎 V6.59 Winner Management Source-vs-Code Reconciliation</h1><div class="info"><b>不回测、不调参数。</b><br>把 V6.58D 的 STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT 与当前冻结 Exit Engine 逐项对账，只找最大 mismatch。</div></div>
+<div class="c"><h1>🔎 V6.59B Winner Management Source-vs-Code Reconciliation</h1><div class="info"><b>不回测、不调参数。</b><br>把 V6.58D 的 STOP EXIT / HOLD WINNER / PARTIAL PROFIT / FINAL EXIT 与当前冻结 Exit Engine 逐项对账，只找最大 mismatch。</div></div>
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="gap"><b>Biggest gap：</b>{e(bg.get('component','—'))}<br><b>Status：</b>{e(bg.get('status','—'))}<br><b>Why：</b>{e(bg.get('source_support',''))}</div></div>
 <div class="c"><h2>Source vs Current Code Ledger</h2><table><tr><th>Component</th><th>Status</th><th>Current Code</th><th>JLaw Source</th><th>Priority</th></tr>{rows or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
@@ -29416,7 +29458,7 @@ _v659_home_base = APP.view_functions.get('home') or APP.view_functions.get('inde
 if _v659_home_base is not None:
     def _v659_home_wrap(*args,**kwargs):
         resp=_v659_home_base(*args,**kwargs)
-        card="""<div id="v659-winner-exit-reconciliation" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🔎 V6.59 Winner Management Source-vs-Code</h2><p>V6.58D Golden Cases × 当前冻结 Exit Engine · 只找最大 mismatch · 不回测</p><a href="/v659/winner-exit-reconciliation"><button>打开 V6.59</button></a></div>"""
+        card="""<div id="v659-winner-exit-reconciliation" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🛠️ V6.59B Corrected Winner Management Source-vs-Code</h2><p>V6.58D Golden Cases × 当前冻结 Exit Engine · 只找最大 mismatch · 不回测</p><a href="/v659/winner-exit-reconciliation"><button>打开 V6.59</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('V6.58D');d=body.rfind('<div',0,p) if p>=0 else -1
             pos=d if d>=0 else body.find('<body')
