@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v642-shortcut" style="border:4px solid #eab308;background:#fefce8"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">⚡ V6.42 Source-Event Re-Strength A/B</h2><div class="muted">只换 Re-strength · Current Triple Gate vs Source Event · Stateful Pullback / Stop / HOLD1260 全冻结</div></div><a href="/v642/source-event-ab"><button type="button">打开 V6.42</button></a></div></div>
+
 <div class="card" id="v641-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.41 Re-Strength Gate Source Reconstruction</h2><div class="muted">只查 ARMED_BUT_NO_RE_STRENGTH · 对照 JLaw 原始 Trigger · 不回测 · 不碰 Exit</div></div><a href="/v641/restrength-source"><button type="button">打开 V6.41</button></a></div></div>
 
 <div class="card" id="v640-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.40 Trigger Bottleneck / Missed-Winner</h2><div class="muted">不改策略 · 查未触发候选卡在哪一关 · 找出错杀 +100/+200/+500 Winner 最多的 Gate</div></div><a href="/v640/trigger-bottleneck"><button type="button">打开 V6.40</button></a></div></div>
@@ -24592,4 +24594,378 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px;ma
 <div class="c"><h2>Source-Faithful Re-strength Reconstruction</h2><table><tr><th>项目</th><th>当前问题</th><th>重建原则</th><th>下一版 A/B</th></tr>{prows}</table></div>
 <div class="c"><div class="warn"><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v641/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+
+# ========================= V6.42 Source-Event Re-Strength A/B =========================
+V642_DIR=DATA_DIR/'v642_source_event_restrength_ab'
+V642_STATUS=V642_DIR/'status.json'; V642_RESULT=V642_DIR/'result.json'; V642_STOP=V642_DIR/'STOP'
+V642_TRADE_CACHE=V642_DIR/'v642_trade_cache.csv.gz'
+v642_thread=None
+
+def _v642_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V642_STATUS.exists():
+        try:x.update(json.loads(V642_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v642_write(**kw):
+    V642_DIR.mkdir(parents=True,exist_ok=True);x=_v642_status();x.update(kw)
+    V642_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v642_alive(): return v642_thread is not None and v642_thread.is_alive()
+
+V642_VARIANTS=['CURRENT_TRIPLE_GATE','SOURCE_EVENT_TRIGGER']
+
+def _v642_stateful_prepare(r,d):
+    """
+    Shared frozen V6.39 Stateful Pullback-Area setup.
+    Returns context frame + breakout index. No trigger decision here.
+    """
+    ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize()
+    pre=d[d.date<ed].tail(30).copy()
+    post=d[(d.date>=ed)&(d.date<=xd)].copy()
+    x=pd.concat([pre,post],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    if len(post)<3 or x.empty:return None,None,None
+    x['ma10']=pd.to_numeric(x.close,errors='coerce').rolling(10,min_periods=10).mean()
+    x['ma20']=pd.to_numeric(x.close,errors='coerce').rolling(20,min_periods=20).mean()
+    x['vmed20']=pd.to_numeric(x.volume,errors='coerce').rolling(20,min_periods=10).median()
+    idxs=x.index[x.date.eq(ed)].tolist()
+    if not idxs:return None,None,None
+    start_i=int(idxs[0])
+    if start_i>=len(x)-2:return None,None,None
+    return x,start_i,float(r.entry_px)
+
+def _v642_entry_current(r,d):
+    # Control = V6.39 stateful pullback-area with the existing triple Re-strength gate.
+    return _v639_entry_stateful(r,d)
+
+def _v642_entry_source_event(r,d):
+    """
+    V6.42 changes ONLY the Re-strength event after the V6.39 stateful pullback area is armed.
+
+    Source-language operationalization from V6.41:
+      - preserve the stateful pullback-area setup exactly;
+      - do NOT require the three simultaneous gates:
+            close > prior high
+            AND close > open
+            AND close > entire support-area high
+      - source-event trigger = first "turn-up / reclaim" event after the pullback is armed:
+            close > prior close
+            AND close >= one relevant support anchor (Pivot / 10MA / 20MA) that is currently available.
+      - next-session open remains ONLY the backtest execution model.
+
+    This is a source-faithful operationalization, NOT a claim that JLaw stated this exact formula.
+    No numeric grid search, no new percentage threshold.
+    """
+    x,start_i,pivot=_v642_stateful_prepare(r,d)
+    if x is None:return None
+
+    breakout_vol=float(x.loc[start_i,'volume']) if pd.notna(x.loc[start_i,'volume']) else np.nan
+    state=None;quiet_seen=False;hold_ok=True
+
+    for j in range(start_i+1,len(x)-1):
+        rr=x.iloc[j]
+        o,h,l,c,v=map(float,[rr.open,rr.high,rr.low,rr.close,rr.volume])
+        ma10=float(rr.ma10) if pd.notna(rr.ma10) else np.nan
+        ma20=float(rr.ma20) if pd.notna(rr.ma20) else np.nan
+        vm=float(rr.vmed20) if pd.notna(rr.vmed20) else np.nan
+
+        anchors=[('PIVOT',pivot)]
+        if np.isfinite(ma10) and ma10>0:anchors.append(('10MA',ma10))
+        if np.isfinite(ma20) and ma20>0:anchors.append(('20MA',ma20))
+        vals=[a[1] for a in anchors if np.isfinite(a[1]) and a[1]>0]
+        if not vals:continue
+        area_low=min(vals);area_high=max(vals)
+        interacts=(l<=area_high and h>=area_low) or (area_low<=c<=area_high)
+
+        if state is None:
+            if not interacts:continue
+            state={'start_i':j,'area_low':area_low,'area_high':area_high,
+                   'supports':' + '.join(a[0] for a in anchors)}
+            quiet_seen=False;hold_ok=True
+
+        # Preserve the V6.39 stateful area evolution.
+        state['area_low']=min(state['area_low'],area_low)
+        state['area_high']=max(state['area_high'],area_high)
+
+        q_break=(not np.isfinite(breakout_vol)) or (np.isfinite(v) and v<breakout_vol)
+        q_ctx=(not np.isfinite(vm)) or (np.isfinite(v) and v<vm)
+        if q_break or q_ctx: quiet_seen=True
+
+        if c<state['area_low']:
+            state=None;quiet_seen=False;hold_ok=True
+            continue
+
+        armed=quiet_seen and hold_ok
+        if armed and j>state['start_i']:
+            prev=x.iloc[j-1]
+
+            # SOURCE EVENT: "turn up / reclaim relevant anchor"
+            available=[('PIVOT',pivot)]
+            if np.isfinite(ma10) and ma10>0:available.append(('10MA',ma10))
+            if np.isfinite(ma20) and ma20>0:available.append(('20MA',ma20))
+
+            reclaimed=[(name,val) for name,val in available if c>=val]
+            turn_up=(c>float(prev.close))
+            if turn_up and reclaimed:
+                nxt=x.iloc[j+1]
+                entry=float(nxt.open)
+                if not np.isfinite(entry) or entry<=0:return None
+                return {
+                    'entry_date':pd.Timestamp(nxt.date).normalize(),
+                    'entry_px':entry,
+                    'signal_date':pd.Timestamp(rr.date).normalize(),
+                    'delay_sessions':int(j+1-start_i),
+                    'supports':state['supports'],
+                    'trigger_anchor':' + '.join(name for name,_ in reclaimed),
+                    'pullback_date':pd.Timestamp(x.iloc[int(state['start_i'])].date).normalize(),
+                    'trigger_mode':'SOURCE_EVENT_TURN_UP_RECLAIM'
+                }
+    return None
+
+def _v642_build(t0):
+    T=_v622_load_trades().copy()
+    T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+    if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    rows=[];price={};date_set=set();total=len(M)
+
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V642_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close','volume']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            for variant,fn in [('CURRENT_TRIPLE_GATE',_v642_entry_current),
+                               ('SOURCE_EVENT_TRIGGER',_v642_entry_source_event)]:
+                se=fn(r,d)
+                if se is None:continue
+                ex=_v636_exit_from_entry(d,se['entry_date'],se['entry_px'],1260)
+                if ex is None:continue
+                xd,xp,reason,hold=ex
+                rows.append({'variant':variant,'listing_id':lid,'ticker':str(r.ticker),
+                             'entry_date':se['entry_date'],'entry_px':float(se['entry_px']),
+                             'exit_date':xd,'exit_px':float(xp),'exit_reason':reason,
+                             'delay_sessions':int(se.get('delay_sessions',0)),
+                             'supports':str(se.get('supports','')),
+                             'trigger_anchor':str(se.get('trigger_anchor',''))})
+
+        if n==1 or n%50==0 or n==total:
+            _v642_write(status='running',message='Phase 1/3 · 重建 Current Triple Gate vs Source Event',
+                        phase='trigger_build',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('V6.42 没有生成 trigger trades')
+    try:X.to_csv(V642_TRADE_CACHE,index=False,compression='gzip')
+    except OSError:pass
+    return T,X,price,sorted(date_set)
+
+def _v642_replay(X,price,cal,label,t0,vi,vn):
+    Z=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        if V642_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                           'exit_date':dt,'delay':float(rec[i].get('delay_sessions',0))})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep;admitted+=1
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v642_write(status='running',message=f'Phase 2/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=label,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stoprate=float(L.reason.astype(str).str.startswith('STOP7').mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+        avgdelay=float(L.delay.mean());meddelay=float(L.delay.median())
+        avghold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+    else:
+        pf=wr=avgw=avgl=stoprate=avgdelay=meddelay=avghold=np.nan;w100=w200=w500=0
+
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+            'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,
+            'stop_rate':stoprate,'winner100':w100,'winner200':w200,'winner500':w500,
+            'avg_delay_sessions':avgdelay,'median_delay_sessions':meddelay,'avg_hold_days':avghold,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),
+            'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v642_run():
+    global v642_thread
+    t0=time.time()
+    try:
+        V642_DIR.mkdir(parents=True,exist_ok=True)
+        if V642_STOP.exists():V642_STOP.unlink()
+
+        _v642_write(status='running',message='V6.42 Source-Event Re-strength A/B 启动',
+                    phase='build',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T,X,price,cal=_v642_build(t0)
+        rows=[_v642_replay(X,price,cal,v,t0,i,len(V642_VARIANTS)) for i,v in enumerate(V642_VARIANTS,1)]
+        O=pd.DataFrame(rows)
+        B=O[O.strategy.eq('CURRENT_TRIPLE_GATE')].iloc[0]
+
+        for c in ['cagr','maxdd','profit_factor','win_rate','stop_rate',
+                  'winner100','winner200','winner500','avg_delay_sessions','median_delay_sessions']:
+            O['delta_'+c]=O[c]-float(B[c])
+
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['candidate_pass']=(
+            O.strategy.eq('SOURCE_EVENT_TRIGGER') &
+            (O.win_rate>float(B.win_rate)) &
+            (O.avg_delay_sessions<float(B.avg_delay_sessions)) &
+            (O.cagr>=float(B.cagr)) &
+            (O.maxdd>=float(B.maxdd)) &
+            (O.profit_factor>=2.0) &
+            (O.winner100_retention>=.80)
+        )
+
+        ctrl=int((X.variant=='CURRENT_TRIPLE_GATE').sum())
+        src=int((X.variant=='SOURCE_EVENT_TRIGGER').sum())
+        verdict='SOURCE_EVENT_TRIGGER_CANDIDATE' if bool(O.candidate_pass.any()) else 'SOURCE_EVENT_TRIGGER_NOT_YET_PASS'
+
+        res={
+            'version':'V6.42 Source-Event Re-strength A/B',
+            'verdict':verdict,
+            'opportunity_summary':{
+                'current_triple_gate_trades':ctrl,
+                'source_event_trigger_trades':src,
+                'source_vs_current_coverage':float(src/max(1,ctrl))
+            },
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'changed_only':'Only Re-strength trigger changes. CURRENT = close>prior high AND close>open AND close>entire support-area high. SOURCE EVENT = first turn-up/reclaim event after stateful pullback is armed: close>prior close AND close>=at least one relevant anchor. Next-session open remains the execution model.',
+            'source_note':'V6.41 supports re-strength / reclaim / trigger language but did NOT verify the current triple conjunction. The SOURCE EVENT formula is an operationalization of those source concepts, not a claim of an exact JLaw quotation.',
+            'frozen':'V6.39 Stateful Pullback Area, candidate stream/universe, -7% terminal stop, HOLD1260, 10-slot portfolio, 1996–2026 benchmark. No exit change, no factor search, no grid search.',
+            'acceptance':'Candidate only if Win Rate improves, average delay decreases, CAGR >= control, MaxDD >= control, PF >=2.0, and +100% winner retention >=80%.',
+            'next_step':'PASS -> yearly/stress validation. FAIL -> stop trigger formula tuning and inspect example-level JLaw chart cases for exact buy trigger timing.',
+            'cache_note':'Reuses V6.17 Stage-2 + Historical Cache; saves V6.42 trigger cache; 0 Tiingo; no universe rebuild.'
+        }
+        V642_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V642_DIR/'v642_results.csv',index=False)
+        except OSError:pass
+
+        _v642_write(status='done',message=f'V6.42 完成：{verdict}',phase='done',
+                    processed=3,total=3,current='A/B complete',elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v642_write(status='paused',message='V6.42 已安全暂停',phase='paused',
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v642_write(status='error',message='V6.42 失败',phase='error',
+                error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v642_write(status='error',message='V6.42 失败',phase='error',
+            error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v642_thread=None
+
+def _v642_start():
+    global v642_thread
+    if _v642_alive():return False
+    _v642_write(status='starting',message='V6.42 正在启动',phase='startup',
+                processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v642_thread=threading.Thread(target=_v642_run,daemon=True);v642_thread.start();return True
+
+@APP.route('/v642/run',methods=['GET','POST'])
+def v642_run():_v642_start();return redirect('/v642/source-event-ab')
+@APP.get('/v642')
+def v642_alias():return redirect('/v642/source-event-ab')
+@APP.get('/v642/stop')
+def v642_stop():
+    V642_DIR.mkdir(parents=True,exist_ok=True);V642_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v642/source-event-ab')
+@APP.get('/api/v642/status')
+def v642_status_api():return jsonify(_v642_status())
+
+@APP.get('/v642/source-event-ab')
+def v642_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v642_status();r={};op={}
+    if V642_RESULT.exists():
+        try:r=json.loads(V642_RESULT.read_text(encoding='utf-8'));op=r.get('opportunity_summary',{})
+        except Exception:pass
+
+    running=_v642_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v642/run"><button>▶ 开始 V6.42 Source-Event A/B</button></a>'
+    stop='<a href="/v642/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ CANDIDATE' if x.get('candidate_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('delta_win_rate',0) or 0):+.1%}</td><td>{float(x.get('stop_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('avg_delay_sessions',0) or 0):.1f}</td><td>{float(x.get('median_delay_sessions',0) or 0):.1f}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1800px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fefce8;border:1px solid #fde047;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v641/restrength-source">← V6.41 Re-strength Source</a>
+<div class="c"><h1>⚡ V6.42 Source-Event Re-Strength A/B</h1><div class="info"><b>这轮只换 Re-strength Trigger。</b><br>Control = V6.39 三重 gate；Source Event = pullback 已 armed 后，第一次 turn-up / reclaim relevant anchor。Selection / Stateful Pullback / -7% Stop / HOLD1260 全冻结。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Current Triple Gate：{int(op.get('current_triple_gate_trades',0)):,} · Source Event：{int(op.get('source_event_trigger_trades',0)):,} · 相对覆盖：{float(op.get('source_vs_current_coverage',0) or 0):.1%}</p></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><div class="warn"><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>Source Note：</b>{e(r.get('source_note',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v642/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
