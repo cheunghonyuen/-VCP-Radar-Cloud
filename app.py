@@ -29736,3 +29736,223 @@ if _v660_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v660_home_base:APP.view_functions[ep]=_v660_home_wrap
+
+
+# ========================= V6.61 HOLD1260 Post-Exit Tail Audit =========================
+V661_DIR=DATA_DIR/'v661_hold1260_post_exit_tail_audit'
+V661_STATUS=V661_DIR/'status.json'; V661_RESULT=V661_DIR/'result.json'
+v661_thread=None
+
+def _v661_status():
+    x={'status':'idle','message':'尚未运行','phase':'idle','processed':0,'total':0,'elapsed_sec':0,'error':None}
+    if V661_STATUS.exists():
+        try:x.update(json.loads(V661_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v661_write(**kw):
+    V661_DIR.mkdir(parents=True,exist_ok=True);x=_v661_status();x.update(kw)
+    V661_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v661_alive(): return v661_thread is not None and v661_thread.is_alive()
+
+def _v661_manifest():
+    M=_v615b_read_manifest()
+    if M is None or M.empty: raise RuntimeError('找不到 V6.17 Historical Cache manifest')
+    return M.copy()
+
+def _v661_run():
+    global v661_thread
+    t0=time.time()
+    try:
+        _v661_write(status='running',phase='load',message='读取 V6.44 trades + V6.17 Historical Cache；不下载、不重建…',
+                    processed=0,total=0,elapsed_sec=0,error=None)
+        _,T=_v660_load_trade_cache()
+        vcol=_v660_pick_col(T,['variant','strategy','scheme'])
+        if vcol is not None:
+            m=T[vcol].astype(str).str.contains('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',case=False,na=False)
+            if m.any():T=T[m].copy()
+
+        reason=_v660_pick_col(T,['exit_reason','reason'])
+        lidcol=_v660_pick_col(T,['listing_id','listingid'])
+        tickcol=_v660_pick_col(T,['ticker','symbol'])
+        edcol=_v660_pick_col(T,['exit_date','sell_date'])
+        xpcol=_v660_pick_col(T,['exit_px','exit_price','sell_px','sell_price'])
+        epcol=_v660_pick_col(T,['entry_px','entry_price','buy_px','buy_price'])
+        retcol=_v660_pick_col(T,['return_pct','final_return','return','ret','pnl_pct'])
+        if None in (reason,lidcol,edcol,xpcol):
+            raise RuntimeError('V6.44 trade cache 缺少 exit_reason/listing_id/exit_date/exit_px，无法做 HOLD1260 post-exit audit')
+
+        H=T[T[reason].astype(str).str.contains('HOLD1260',case=False,na=False)].copy()
+        if H.empty:raise RuntimeError('V6.44 trade cache 没有 HOLD1260 trades')
+        H['_exit_date']=pd.to_datetime(H[edcol],errors='coerce').dt.normalize()
+        H['_exit_px']=pd.to_numeric(H[xpcol],errors='coerce')
+        if retcol is not None:
+            rr=pd.to_numeric(H[retcol],errors='coerce')
+            med=rr.abs().median()
+            if pd.notna(med) and med>3:rr=rr/100.0
+            H['_base_ret']=rr
+        elif epcol is not None:
+            H['_base_ret']=H['_exit_px']/pd.to_numeric(H[epcol],errors='coerce')-1
+        else:H['_base_ret']=np.nan
+        H=H.dropna(subset=['_exit_date','_exit_px'])
+        H=H[H['_exit_px']>0].copy()
+
+        M=_v661_manifest()
+        M['_lid']=M.listing_id.astype(str)
+        needed=set(H[lidcol].astype(str))
+        M=M[M['_lid'].isin(needed)].copy()
+        mm={str(r.listing_id):r for _,r in M.iterrows()}
+        total=len(H); rows=[]
+
+        horizons=[63,126,252,504]
+        for n,(_,r) in enumerate(H.iterrows(),1):
+            lid=str(r[lidcol]); mr=mm.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+            d['close']=pd.to_numeric(d.close,errors='coerce')
+            if 'high' in d.columns:d['high']=pd.to_numeric(d.high,errors='coerce')
+            else:d['high']=d['close']
+            if 'low' in d.columns:d['low']=pd.to_numeric(d.low,errors='coerce')
+            else:d['low']=d['close']
+            d=d.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last')
+            post=d[d.date>r['_exit_date']].head(max(horizons)).copy()
+            if post.empty:continue
+            z={'listing_id':lid,'ticker':str(r[tickcol]) if tickcol else '',
+               'exit_date':str(r['_exit_date'].date()),'exit_px':float(r['_exit_px']),
+               'base_return':None if pd.isna(r['_base_ret']) else float(r['_base_ret']),
+               'post_sessions_available':int(len(post))}
+            for hz in horizons:
+                q=post.head(hz)
+                if q.empty:
+                    z[f'max_after_{hz}']=None;z[f'end_after_{hz}']=None;z[f'min_after_{hz}']=None
+                else:
+                    z[f'max_after_{hz}']=float(q['high'].max()/r['_exit_px']-1)
+                    z[f'end_after_{hz}']=float(q['close'].iloc[-1]/r['_exit_px']-1)
+                    z[f'min_after_{hz}']=float(q['low'].min()/r['_exit_px']-1)
+            rows.append(z)
+            if n==1 or n%100==0 or n==total:
+                _v661_write(status='running',phase='tail_audit',
+                    message=f'追踪 HOLD1260 后续价格路径 {n}/{total}（Historical Cache only）',
+                    processed=n,total=total,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('Historical Cache 没有可用的 HOLD1260 post-exit price path')
+        V661_DIR.mkdir(parents=True,exist_ok=True)
+        A.to_csv(V661_DIR/'hold1260_post_exit_paths.csv.gz',index=False,compression='gzip')
+
+        # Cohorts prevent a winner-only conclusion.
+        cohorts={
+          'ALL_HOLD1260':pd.Series(True,index=A.index),
+          'BASE_100_PLUS':A.base_return>=1.0,
+          'BASE_200_PLUS':A.base_return>=2.0,
+          'BASE_500_PLUS':A.base_return>=5.0
+        }
+        summary=[]
+        for name,mask in cohorts.items():
+            g=A[mask.fillna(False)].copy()
+            if g.empty:continue
+            x={'cohort':name,'n':int(len(g))}
+            for hz in horizons:
+                c=f'max_after_{hz}';e=f'end_after_{hz}';mn=f'min_after_{hz}'
+                x[f'pct_new_high_{hz}']=float((g[c]>0).mean())
+                x[f'pct_plus25_{hz}']=float((g[c]>=.25).mean())
+                x[f'pct_plus50_{hz}']=float((g[c]>=.50).mean())
+                x[f'pct_plus100_{hz}']=float((g[c]>=1.0).mean())
+                x[f'median_max_{hz}']=float(g[c].median())
+                x[f'median_end_{hz}']=float(g[e].median())
+                x[f'median_min_{hz}']=float(g[mn].median())
+            summary.append(x)
+
+        S=pd.DataFrame(summary);S.to_csv(V661_DIR/'cohort_summary.csv',index=False)
+
+        allrow=next((x for x in summary if x['cohort']=='ALL_HOLD1260'),{})
+        w100=next((x for x in summary if x['cohort']=='BASE_100_PLUS'),{})
+        # Evidence threshold is diagnostic, not a tuned trading rule.
+        # Strong truncation = at least half of +100 winners subsequently make another +50% within 252 sessions.
+        trunc=bool(w100 and w100.get('n',0)>=100 and w100.get('pct_plus50_252',0)>=0.50)
+        if trunc: verdict='HOLD1260_STRONGLY_TRUNCATES_WINNER_TAIL'
+        elif w100 and w100.get('pct_plus25_252',0)>=0.35:
+            verdict='HOLD1260_POST_EXIT_UPSIDE_MATERIAL_NEEDS_CONTROLLED_AB'
+        else:
+            verdict='HOLD1260_POST_EXIT_UPSIDE_NOT_STRONG_ENOUGH_TO_CHANGE_EXIT'
+
+        res={
+          'version':'V6.61 HOLD1260 Post-Exit Tail Audit','verdict':verdict,
+          'hold1260_trades':int(len(H)),'paths_found':int(len(A)),
+          'coverage':float(len(A)/len(H)) if len(H) else 0.0,
+          'summary':summary,
+          'critical_question':'After the real HOLD1260 exit, how much additional upside was actually available in the existing point-in-time historical price cache?',
+          'anti_bias':'Reports ALL HOLD1260 plus +100/+200/+500 cohorts; it does not inspect winners only.',
+          'acceptance':'Do not change HOLD1260 merely because some stocks rose later. Advance only if post-exit upside is broad/material among big winners with adequate cache coverage; then V6.62 may run one controlled exit A/B.',
+          'important_negative':'V6.61 is diagnostic only. It does not change entry, trigger, selection, -7% stop, HOLD1260, sizing or portfolio replay.',
+          'next_step':('V6.62: one controlled A/B replacing only the mechanical HOLD1260 terminal exit with a minimal winner-continuation rule; preserve -7% stop and all V6.44 entry/selection logic.'
+                       if verdict!='HOLD1260_POST_EXIT_UPSIDE_NOT_STRONG_ENOUGH_TO_CHANGE_EXIT'
+                       else 'Keep HOLD1260 frozen and stop this exit branch; do not tune exit thresholds.'),
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR; -7% stop; 10-slot; universe; trigger/selection frozen.',
+          'cache_note':'V6.44 trade cache + V6.17 Historical Cache only; 0 Tiingo; no universe rebuild; no trigger rebuild; no full historical rescan.'
+        }
+        V661_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v661_write(status='done',phase='done',message=f"V6.61 完成：{verdict} · coverage {res['coverage']*100:.1f}%",
+                    processed=total,total=total,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v661_write(status='error',phase='error',message='V6.61 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:v661_thread=None
+
+def _v661_start():
+    global v661_thread
+    if _v661_alive():return False
+    _v661_write(status='starting',phase='starting',message='V6.61 正在启动',processed=0,total=0,elapsed_sec=0,error=None)
+    v661_thread=threading.Thread(target=_v661_run,daemon=True);v661_thread.start();return True
+
+@APP.route('/v661/run',methods=['GET','POST'])
+def v661_run():_v661_start();return redirect('/v661/hold1260-post-exit-tail-audit')
+
+@APP.get('/api/v661/status')
+def v661_status_api():return jsonify(_v661_status())
+
+@APP.get('/v661/hold1260-post-exit-tail-audit')
+def v661_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v661_status();r={}
+    if V661_RESULT.exists():
+        try:r=json.loads(V661_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v661_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v661/run"><button>▶ 开始 V6.61 HOLD1260 Tail Audit</button></a>'
+    rows=''
+    for x in r.get('summary',[]):
+        rows+=f"""<tr><td><b>{e(x.get('cohort'))}</b></td><td>{int(x.get('n',0))}</td>
+<td>{float(x.get('pct_plus25_252',0))*100:.1f}%</td><td>{float(x.get('pct_plus50_252',0))*100:.1f}%</td>
+<td>{float(x.get('pct_plus100_252',0))*100:.1f}%</td><td>{float(x.get('median_max_252',0))*100:.1f}%</td>
+<td>{float(x.get('median_end_252',0))*100:.1f}%</td><td>{float(x.get('median_min_252',0))*100:.1f}%</td></tr>"""
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #34d399;border-radius:14px;padding:16px}}.hero{{background:#fef2f2;border-left:6px solid #dc2626;padding:16px;border-radius:12px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v660/winner-exit-path-attribution">← V6.60</a>
+<div class="c"><h1>🧬 V6.61 HOLD1260 Post-Exit Tail Audit</h1><div class="info"><b>只回答一个问题：</b><br>HOLD1260 真正卖出以后，Winner 后面还有多少真实上涨空间？直接读 V6.17 Historical Cache，不改策略、不调参数。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{int(st.get('processed',0) or 0)} / {int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="hero"><b>HOLD1260 paths：</b>{int(r.get('paths_found',0) or 0)} / {int(r.get('hold1260_trades',0) or 0)}<br><b>Coverage：</b>{float(r.get('coverage',0) or 0)*100:.1f}%</div></div>
+<div class="c"><h2>252 Sessions After HOLD1260</h2><table><tr><th>Cohort</th><th>N</th><th>后来+25%</th><th>后来+50%</th><th>后来+100%</th><th>Median Max</th><th>Median End</th><th>Median Worst</th></tr>{rows or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>防偏差：</b>{e(r.get('anti_bias',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v661_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v661_home_base is not None:
+    def _v661_home_wrap(*args,**kwargs):
+        resp=_v661_home_base(*args,**kwargs)
+        card="""<div id="v661-hold1260-tail" style="background:#ecfdf5;border:5px solid #10b981;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V6.61 HOLD1260 Post-Exit Tail Audit</h2><p>追踪 HOLD1260 卖出后的真实 Winner tail · V6.17 Historical Cache only</p><a href="/v661/hold1260-post-exit-tail-audit"><button>打开 V6.61</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('v660-winner-exit-path');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v661_home_base:APP.view_functions[ep]=_v661_home_wrap
