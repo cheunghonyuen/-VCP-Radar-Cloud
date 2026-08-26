@@ -30498,3 +30498,236 @@ if _v664_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v664_home_base:APP.view_functions[ep]=_v664_home_wrap
+
+
+# ========================= V6.65 Feature-Store Enriched Actual-Buy Attribution =========================
+V665_DIR=DATA_DIR/'v665_feature_store_enriched_actual_buy_attribution'
+V665_STATUS=V665_DIR/'status.json'; V665_RESULT=V665_DIR/'result.json'
+v665_thread=None
+
+def _v665_status():
+    x={'status':'idle','message':'尚未运行','phase':'idle','processed':0,'total':0,'elapsed_sec':0,'error':None}
+    if V665_STATUS.exists():
+        try:x.update(json.loads(V665_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v665_write(**kw):
+    V665_DIR.mkdir(parents=True,exist_ok=True);x=_v665_status();x.update(kw)
+    V665_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v665_alive(): return v665_thread is not None and v665_thread.is_alive()
+
+def _v665_load_feature_store():
+    # Existing V6.17 Feature Store only. Never rebuild here.
+    if not V617FV1_YEAR_DIR.exists():
+        raise RuntimeError('V6.17 Feature Store 目录不存在；本轮禁止重建')
+    files=sorted(V617FV1_YEAR_DIR.glob('*.csv.gz'))
+    if not files:
+        raise RuntimeError('V6.17 Feature Store 没有 year_features；本轮禁止从头重建')
+    parts=[]
+    for i,p in enumerate(files,1):
+        try:
+            z=pd.read_csv(p,compression='gzip')
+            if not z.empty:parts.append(z)
+        except Exception:continue
+        if i==1 or i%10==0 or i==len(files):
+            _v665_write(status='running',phase='load_feature_store',
+                        message=f'读取现有 V6.17 Feature Store {i}/{len(files)}',
+                        processed=i,total=len(files))
+    if not parts:raise RuntimeError('V6.17 Feature Store 无法读取')
+    F=pd.concat(parts,ignore_index=True)
+    if 'listing_id' not in F.columns or 'obs_date' not in F.columns:
+        raise RuntimeError('V6.17 Feature Store 缺 listing_id/obs_date')
+    F['listing_id']=F['listing_id'].astype(str)
+    F['obs_date']=pd.to_datetime(F['obs_date'],errors='coerce').dt.normalize()
+    return F.dropna(subset=['obs_date']).sort_values(['listing_id','obs_date'])
+
+def _v665_join(T,F):
+    T=T.copy()
+    T['listing_id']=T['listing_id'].astype(str)
+    T['_entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+    T=T.dropna(subset=['_entry_date'])
+    outs=[];groups=list(T.groupby('listing_id'));total=len(groups)
+    for n,(lid,g) in enumerate(groups,1):
+        ff=F[F.listing_id.eq(lid)].copy()
+        if ff.empty:
+            q=g.copy()
+            for c in ['ret60','ret120','ret252','vol_vs20','feature_obs_date','feature_age_days']:q[c]=np.nan
+        else:
+            keep=[c for c in ['obs_date','ret60','ret120','ret252','vol_vs20'] if c in ff.columns]
+            q=pd.merge_asof(g.sort_values('_entry_date'),ff[keep].sort_values('obs_date'),
+                            left_on='_entry_date',right_on='obs_date',direction='backward',
+                            tolerance=pd.Timedelta(days=35))
+            q['feature_obs_date']=q['obs_date']
+            q['feature_age_days']=(q['_entry_date']-q['obs_date']).dt.days
+        outs.append(q)
+        if n==1 or n%250==0 or n==total:
+            _v665_write(status='running',phase='point_in_time_join',
+                        message=f'V6.44 Entry × V6.17 Feature Store {n}/{total}',
+                        processed=n,total=total)
+    return pd.concat(outs,ignore_index=True)
+
+def _v665_smd(a,b):
+    a=pd.to_numeric(a,errors='coerce').dropna();b=pd.to_numeric(b,errors='coerce').dropna()
+    if len(a)<50 or len(b)<50:return None
+    den=((float(a.var(ddof=1))+float(b.var(ddof=1)))/2.0)**0.5
+    return float((a.mean()-b.mean())/den) if den>0 else 0.0
+
+def _v665_run():
+    global v665_thread
+    t0=time.time()
+    try:
+        _v665_write(status='running',phase='load',message='读取 V6.44 Trigger Cache + V6.17 Feature Store…',
+                    processed=0,total=0,elapsed_sec=0,error=None)
+        if not V644_TRADE_CACHE.exists():
+            raise RuntimeError('V6.44 Trigger Cache 不存在；本轮禁止重跑历史扫描')
+        T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        if T.empty:raise RuntimeError('V6.44 Trigger Cache 没有冻结 Breakout variant')
+
+        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+        T['_ret']=T.exit_px/T.entry_px-1
+        T['_reason']=T.exit_reason.astype(str)
+        T['_year']=T.entry_date.dt.year
+
+        F=_v665_load_feature_store()
+        Z=_v665_join(T,F)
+        Z['delay_sessions']=pd.to_numeric(Z.get('delay_sessions'),errors='coerce')
+
+        features=[c for c in ['ret60','ret120','ret252','vol_vs20','delay_sessions'] if c in Z.columns]
+        winner=Z[Z['_ret']>=1.0].copy()
+        stop7=Z[Z['_reason'].str.fullmatch('STOP7',case=False,na=False)].copy()
+        if winner.empty or stop7.empty:raise RuntimeError('Winner 或 STOP7 cohort 为空')
+
+        eras=[('1996-2005',1996,2005),('2006-2015',2006,2015),('2016-2026',2016,2026)]
+        rows=[];era_rows=[]
+        for c in features:
+            w=pd.to_numeric(winner[c],errors='coerce');l=pd.to_numeric(stop7[c],errors='coerce')
+            smd=_v665_smd(w,l)
+            if smd is None:continue
+            cov=float(pd.to_numeric(Z[c],errors='coerce').notna().mean())
+            signs=[];era_n=0
+            for en,lo,hi in eras:
+                W=winner[(winner._year>=lo)&(winner._year<=hi)]
+                L=stop7[(stop7._year>=lo)&(stop7._year<=hi)]
+                es=_v665_smd(W[c],L[c])
+                if es is None:continue
+                era_n+=1;signs.append(1 if es>0 else -1 if es<0 else 0)
+                era_rows.append({'feature':c,'era':en,'smd':float(es)})
+            target=1 if smd>0 else -1
+            same=sum(1 for x in signs if x==target)
+            rows.append({
+                'feature':c,'coverage':cov,'winner_median':float(w.median()),'stop7_median':float(l.median()),
+                'smd':float(smd),'abs_smd':abs(float(smd)),
+                'direction':'HIGHER_IN_WINNERS' if smd>0 else 'LOWER_IN_WINNERS',
+                'eras_available':era_n,'era_consistency':float(same/era_n) if era_n else None
+            })
+        rows=sorted(rows,key=lambda x:-x['abs_smd'])
+
+        fscols=[c for c in ['ret60','ret120','ret252','vol_vs20'] if c in Z.columns]
+        fs_any=Z[fscols].notna().any(axis=1) if fscols else pd.Series(False,index=Z.index)
+        fs_cov=float(fs_any.mean()) if len(Z) else 0.0
+        age=pd.to_numeric(Z.get('feature_age_days'),errors='coerce')
+        robust=[x for x in rows if x['coverage']>=.50 and x['abs_smd']>=.20 and
+                x['eras_available']>=2 and (x['era_consistency'] or 0)>=.67]
+
+        if fs_cov<.50:verdict='FEATURE_STORE_COVERAGE_INSUFFICIENT_DO_NOT_INFER'
+        elif robust:verdict='ROBUST_ENTRY_SEPARATION_FOUND_NEEDS_JLAW_SOURCE_CHECK'
+        else:verdict='FEATURE_STORE_ENRICHED_NO_ROBUST_SEPARATOR'
+
+        res={
+            'version':'V6.65 Feature-Store Enriched Actual-Buy Attribution','verdict':verdict,
+            'trades':int(len(Z)),'winner100_n':int(len(winner)),'stop7_n':int(len(stop7)),
+            'feature_store_coverage':{
+                'feature_store_any':fs_cov,
+                'median_feature_age_days':float(age.dropna().median()) if age.notna().any() else None,
+                'pct_age_le_25':float((age<=25).mean()) if age.notna().any() else None
+            },
+            'features_tested':len(rows),'feature_ledger':rows,'era_ledger':era_rows,
+            'robust_candidates':robust[:8],
+            'critical_question':'After enriching each actual V6.44 entry with the most recent pre-entry V6.17 Feature Store observation, do +100% winners separate from ordinary STOP7 losers?',
+            'point_in_time_rule':'Feature observation must be on or before actual entry date. Existing ~20-session Feature Store cadence is reused; no rebuild.',
+            'anti_leakage':'Only cached pre-entry ret60/ret120/ret252/vol_vs20 plus exact trigger delay are tested. MFE/MAE/future/exit/hold fields are excluded.',
+            'acceptance':'Attribution only. Candidate needs material SMD, >=50% coverage and stable direction across eras; source check is required before any A/B.',
+            'important_negative':'Do not grid-search cutoffs or combine features into a score. Do not rebuild the Feature Store.',
+            'next_step':('V6.66 source-check only the surviving robust direction(s) against existing JLaw Actual-Buy transcript cache; no replay yet.'
+                         if robust and fs_cov>=.50 else
+                         'Close cached-feature selection tuning if no robust feature survives. Do not fabricate new factors.'),
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR; -7% stop; HOLD1260; 10-slot; exits/winner management/universe frozen.',
+            'cache_note':'V6.44 Trigger Cache + existing V6.17 Feature Store only; 0 Tiingo; no universe rebuild; no historical rescan; no Feature Store rebuild.'
+        }
+        V665_DIR.mkdir(parents=True,exist_ok=True)
+        V665_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:
+            pd.DataFrame(rows).to_csv(V665_DIR/'feature_separation.csv',index=False)
+            pd.DataFrame(era_rows).to_csv(V665_DIR/'era_stability.csv',index=False)
+        except Exception:pass
+        _v665_write(status='done',phase='done',
+                    message=f'V6.65 完成：{verdict} · Feature Store coverage {fs_cov*100:.1f}% · robust {len(robust)}',
+                    processed=len(Z),total=len(Z),elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v665_write(status='error',phase='error',message='V6.65 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v665_thread=None
+
+def _v665_start():
+    global v665_thread
+    if _v665_alive():return False
+    _v665_write(status='starting',phase='starting',message='V6.65 正在启动',
+                processed=0,total=0,elapsed_sec=0,error=None)
+    v665_thread=threading.Thread(target=_v665_run,daemon=True);v665_thread.start();return True
+
+@APP.route('/v665/run',methods=['GET','POST'])
+def v665_run():_v665_start();return redirect('/v665/feature-store-entry-attribution')
+
+@APP.get('/api/v665/status')
+def v665_status_api():return jsonify(_v665_status())
+
+@APP.get('/v665/feature-store-entry-attribution')
+def v665_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v665_status();r={}
+    if V665_RESULT.exists():
+        try:r=json.loads(V665_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v665_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v665/run"><button>▶ 开始 V6.65 Feature-Store Attribution</button></a>'
+    rows=''
+    for x in r.get('feature_ledger',[])[:12]:
+        ec='—' if x.get('era_consistency') is None else f"{float(x.get('era_consistency'))*100:.0f}%"
+        rows+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('coverage',0))*100:.1f}%</td><td>{float(x.get('winner_median',0)):.3f}</td><td>{float(x.get('stop7_median',0)):.3f}</td><td>{float(x.get('smd',0)):+.3f}</td><td>{e(x.get('direction'))}</td><td>{ec}</td></tr>"
+    cand=''
+    for x in r.get('robust_candidates',[]):
+        cand+=f"<div class='hero'><b>{e(x.get('feature'))}</b> · SMD {float(x.get('smd',0)):+.3f} · coverage {float(x.get('coverage',0))*100:.1f}%</div>"
+    d=r.get('feature_store_coverage',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #818cf8;border-radius:14px;padding:16px}}.hero{{background:#ecfdf5;border-left:6px solid #059669;padding:14px;border-radius:12px;margin:8px 0}}.warn{{background:#fff7ed;border:1px solid #f59e0b;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v664/actual-buy-entry-attribution">← V6.64</a>
+<div class="c"><h1>🧠 V6.65 Feature-Store Enriched Actual-Buy Attribution</h1><div class="info"><b>修正 V6.64 数据不足。</b><br>每笔 V6.44 Entry 对齐到“入场日前最后一个”V6.17 Feature Store observation。只复用已有 Cache，不重建 Feature Store。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Trades：{int(r.get('trades',0) or 0)} · +100 Winner：{int(r.get('winner100_n',0) or 0)} · STOP7：{int(r.get('stop7_n',0) or 0)}</p>
+<p><b>Feature Store coverage：</b>{float(d.get('feature_store_any',0) or 0)*100:.1f}% · <b>Median age：</b>{'—' if d.get('median_feature_age_days') is None else f"{float(d.get('median_feature_age_days')):.0f}d"}</p>{cand or '<p>没有达到 robust 标准的候选。</p>'}</div>
+<div class="c"><h2>Winner vs STOP7 · Enriched Features</h2><table><tr><th>Feature</th><th>Coverage</th><th>Winner Median</th><th>STOP7 Median</th><th>SMD</th><th>Direction</th><th>Era Consistency</th></tr>{rows or '<tr><td colspan="7">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>Point-in-time：</b>{e(r.get('point_in_time_rule',''))}<br><b>防泄漏：</b>{e(r.get('anti_leakage',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v665_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v665_home_base is not None:
+    def _v665_home_wrap(*args,**kwargs):
+        resp=_v665_home_base(*args,**kwargs)
+        card="""<div id="v665-feature-store-attribution" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🧠 V6.65 Feature-Store Enriched Actual-Buy Attribution</h2><p>V6.44 Entry × V6.17 Feature Store · point-in-time join · 不重建 Feature Store</p><a href="/v665/feature-store-entry-attribution"><button>打开 V6.65</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('v664-entry-attribution');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v665_home_base:APP.view_functions[ep]=_v665_home_wrap
