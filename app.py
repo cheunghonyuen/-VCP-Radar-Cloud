@@ -26791,3 +26791,158 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v650/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
+
+
+# ========================= V6.51 Extended Case Validation =========================
+V651_DIR=DATA_DIR/'v651_extended_case_validation'
+V651_STATUS=V651_DIR/'status.json'; V651_RESULT=V651_DIR/'result.json'
+v651_thread=None
+
+def _v651_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V651_STATUS.exists():
+        try:x.update(json.loads(V651_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v651_write(**kw):
+    V651_DIR.mkdir(parents=True,exist_ok=True);x=_v651_status();x.update(kw)
+    V651_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v651_alive(): return v651_thread is not None and v651_thread.is_alive()
+
+def _v651_load_v650():
+    if not V650_RESULT.exists(): raise RuntimeError('找不到 V6.50 result.json')
+    return json.loads(V650_RESULT.read_text(encoding='utf-8'))
+
+def _v651_context_score(sn,decision):
+    low=sn.lower()
+    # Evidence-only tags, no trading score.
+    tags=[]
+    if 'extended' in low or '延伸' in sn: tags.append('EXTENDED')
+    if 'chase' in low or '追高' in sn: tags.append('CHASE')
+    if 'pivot' in low or '樞紐' in sn: tags.append('PIVOT')
+    if 'breakout' in low or '突破' in sn: tags.append('BREAKOUT')
+    if 'market' in low or '市場' in sn: tags.append('MARKET')
+    if 'tight' in low or 'vcp' in low or '收窄' in sn: tags.append('TIGHT')
+    # mark whether context explicitly frames bad/good location
+    bad_loc = any(t in low for t in ['too extended','not buy','would not buy','skip','avoid','too late']) or '不應該買' in sn or '略過' in sn
+    good_loc = any(t in low for t in ['buy point','i would buy','i will buy','buy it']) or '買點' in sn
+    return {'tags':tags,'bad_location_language':bad_loc,'good_location_language':good_loc,'decision':decision}
+
+def _v651_run():
+    global v651_thread
+    t0=time.time()
+    try:
+        _v651_write(status='running',message='逐案例验证 Extended 候选定义…',elapsed_sec=0,error=None)
+        r50=_v651_load_v650()
+
+        # Pull explicit examples from V6.50 result
+        cases=[]
+        for dec,z in r50.get('decision_summary',{}).items():
+            for x in z.get('examples',[]):
+                sn=str(x.get('snippet',''))
+                meta=_v651_context_score(sn,dec)
+                cases.append({**x,**meta})
+
+        # Validate numeric candidates conservatively.
+        validations=[]
+        for cand in r50.get('candidate_definitions',[]):
+            kind=cand.get('kind'); value=float(cand.get('value',0) or 0)
+            support=[]
+            for c in cases:
+                sn=str(c.get('snippet',''))
+                hit=False
+                if kind=='percentages':
+                    hit = re.search(rf'(?<!\d){re.escape(str(int(value) if value.is_integer() else value))}\s*%',sn) is not None
+                elif kind=='days':
+                    hit = re.search(rf'(?<!\d){re.escape(str(int(value) if value.is_integer() else value))}\s*(?:day|days|天)',sn,re.I) is not None
+                elif kind=='minutes':
+                    hit = re.search(rf'(?<!\d){re.escape(str(int(value) if value.is_integer() else value))}\s*(?:minute|minutes|分鐘)',sn,re.I) is not None
+                elif kind=='hours':
+                    hit = re.search(rf'(?<!\d){re.escape(str(int(value) if value.is_integer() else value))}\s*(?:hour|hours|小時)',sn,re.I) is not None
+                if hit:
+                    support.append(c)
+
+            vids=set(x.get('video_id') for x in support)
+            buy=sum(1 for x in support if x.get('decision')=='BUY')
+            watch=sum(1 for x in support if x.get('decision')=='WATCH')
+            pas=sum(1 for x in support if x.get('decision')=='PASS')
+            bad=sum(1 for x in support if x.get('bad_location_language'))
+            good=sum(1 for x in support if x.get('good_location_language'))
+
+            # A valid EXTENDED veto needs: >=2 videos, explicit PASS/bad-location support,
+            # and should not be simultaneously common in BUY/good-location contexts.
+            valid = len(vids)>=2 and pas>=2 and bad>=2 and buy==0 and good==0
+            validations.append({
+                'kind':kind,'value':value,'support_cases':len(support),'videos':len(vids),
+                'BUY':buy,'WATCH':watch,'PASS':pas,'bad_location':bad,'good_location':good,
+                'source_valid_extended_veto':valid,
+                'examples':support[:8]
+            })
+
+        passing=[x for x in validations if x['source_valid_extended_veto']]
+        verdict='SOURCE_DEFINED_EXTENDED_VETO_READY' if len(passing)==1 else (
+            'MULTIPLE_EXTENDED_DEFINITIONS_CONFLICT' if len(passing)>1 else
+            'NO_EXECUTABLE_EXTENDED_RULE_IN_SOURCE'
+        )
+
+        res={
+            'version':'V6.51 Extended Case Validation',
+            'verdict':verdict,
+            'validated_candidates':validations,
+            'passing_candidates':passing,
+            'critical_point':'V6.51 validates whether any repeated number from V6.50 is truly an Extended/Chase veto in explicit decision cases. A number does not pass merely because it repeats; it must recur across videos in PASS/bad-location contexts and not simultaneously appear in BUY/good-location cases.',
+            'frozen':'V6.44 28.25% CAGR benchmark, trigger, -7% stop, HOLD1260, 10-slot, exits/winner management and universe remain unchanged.',
+            'next_step':'If exactly one source-defined veto passes, V6.52 will A/B exactly that rule against V6.44 using the existing trigger cache. If none passes, permanently stop the Extended-threshold branch and move to the next Actual-Buy distinction.',
+            'cache_note':'Reads V6.50 result only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V651_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v651_write(status='done',message=f'V6.51 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v651_write(status='error',message='V6.51 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v651_thread=None
+
+def _v651_start():
+    global v651_thread
+    if _v651_alive(): return False
+    _v651_write(status='starting',message='V6.51 正在启动',elapsed_sec=0,error=None)
+    v651_thread=threading.Thread(target=_v651_run,daemon=True);v651_thread.start();return True
+
+@APP.route('/v651/run',methods=['GET','POST'])
+def v651_run(): _v651_start(); return redirect('/v651/extended-case-validation')
+
+@APP.get('/v651')
+def v651_alias(): return redirect('/v651/extended-case-validation')
+
+@APP.get('/api/v651/status')
+def v651_status_api(): return jsonify(_v651_status())
+
+@APP.get('/v651/extended-case-validation')
+def v651_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v651_status();r={}
+    if V651_RESULT.exists():
+        try:r=json.loads(V651_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v651_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v651/run"><button>▶ 开始 V6.51 Extended Case Validation</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    rows=''
+    for x in r.get('validated_candidates',[]):
+        rows+=f"<tr><td>{e(x.get('kind'))}</td><td>{e(x.get('value'))}</td><td>{int(x.get('support_cases',0))}</td><td>{int(x.get('videos',0))}</td><td>{int(x.get('BUY',0))}</td><td>{int(x.get('WATCH',0))}</td><td>{int(x.get('PASS',0))}</td><td>{int(x.get('bad_location',0))}</td><td>{int(x.get('good_location',0))}</td><td>{'✅' if x.get('source_valid_extended_veto') else '—'}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fffbeb;border:1px solid #fcd34d;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v650/extended-chase-examples">← V6.50 Extended / Chase Examples</a>
+<div class="c"><h1>🧪 V6.51 Extended Case Validation</h1><div class="info"><b>这轮不回测、不调阈值。</b><br>只验证 V6.50 里重复出现的数字，究竟是不是明确出现在 PASS / bad-location 的 Extended/Chase 语境，而且不能同时大量出现在 BUY / good-location 语境。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Candidate Validation</h2><table><tr><th>Type</th><th>Value</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>Bad Location</th><th>Good Location</th><th>Valid</th></tr>{rows or '<tr><td colspan="10">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v651/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
