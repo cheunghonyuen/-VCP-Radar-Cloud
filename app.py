@@ -28839,3 +28839,208 @@ if _v658b_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v658b_home_base:APP.view_functions[ep]=_v658b_home_wrap
+
+
+# ========================= V6.58C First-Person Real-Trade Winner Management Reconstruction =========================
+V658C_DIR=DATA_DIR/'v658c_first_person_real_trade_winner_management'
+V658C_STATUS=V658C_DIR/'status.json'; V658C_RESULT=V658C_DIR/'result.json'
+v658c_thread=None
+
+def _v658c_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V658C_STATUS.exists():
+        try:x.update(json.loads(V658C_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v658c_write(**kw):
+    V658C_DIR.mkdir(parents=True,exist_ok=True);x=_v658c_status();x.update(kw)
+    V658C_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v658c_alive(): return v658c_thread is not None and v658c_thread.is_alive()
+
+def _v658c_corpus():
+    if '_v658b_corpus' in globals(): return _v658b_corpus()
+    if '_v658a_corpus' in globals(): return _v658a_corpus()
+    return []
+
+# Only explicit first-person / actual-operation language survives.
+V658C_SELF=[
+ 'i bought','i sold','i sell','i hold','i am holding','i added','i add','i reduced','i trimmed',
+ 'my position','my holdings','my stock','i was holding','i locked profit','i tighten','i tightened',
+ '我買入','我买入','我賣出','我卖出','我持有','我加倉','我加仓','我減倉','我减仓',
+ '我的倉位','我的仓位','我的持倉','我的持仓','我鎖定利潤','我锁定利润','我收緊','我收紧',
+ '我降低投資比重','我降低投资比重','我降低曝險','我降低曝险','我繼續減倉','我继续减仓'
+]
+V658C_EXCLUDE=[
+ 'if you','you should','you would','suppose','assume','for example','investors','people','retail investors',
+ '如果你','假設','假设','舉個例子','举个例子','投資者','投资者','散戶','散户','他們','他们'
+]
+V658C_ACTIONS={
+ 'REDUCE_EXPOSURE':['reduce exposure','lower exposure','reduce investment weight','reduce allocation',
+                    '減低投資比重','降低投資比重','降低投资比重','減低曝險','降低曝險','降低曝险'],
+ 'TIGHTEN_STOP':['tighten stop','tighten my stop','raise stop','收緊止損','收紧止损','將我持有股票的止損收緊','将我持有股票的止损收紧'],
+ 'PROFIT_LOCK_SELL':['lock profit','lock in profit','sell those stocks','鎖定我的利潤','锁定我的利润','我會賣出那些股票','我会卖出那些股票'],
+ 'REDUCE_TRIM':['trim','reduce position','partial sell','繼續減倉','继续减仓','減倉','减仓'],
+ 'SELL_EXIT':['i sold','i sell','exit','離場','离场','賣出','卖出'],
+ 'HOLD':['i hold','i am holding','continue to hold','我持有','繼續持有','继续持有'],
+ 'ADD':['i added','i add','add position','我加倉','我加仓']
+}
+
+def _v658c_action(sn):
+    low=sn.lower()
+    order=['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL','REDUCE_TRIM','SELL_EXIT','HOLD','ADD']
+    for lab in order:
+        for t in V658C_ACTIONS[lab]:
+            if t.lower() in low:
+                return lab,t
+    return 'NO_ACTION',''
+
+def _v658c_is_self(sn):
+    low=sn.lower()
+    return any(t.lower() in low for t in V658C_SELF)
+
+def _v658c_is_hypothetical(sn):
+    low=sn.lower()
+    return any(t.lower() in low for t in V658C_EXCLUDE)
+
+def _v658c_extract(corpus,max_cases=220):
+    rows=[];seen=set()
+    anchors=list(dict.fromkeys(V658C_SELF+[x for v in V658C_ACTIONS.values() for x in v]))
+    for row in corpus:
+        text=str(row.get('text',''));low=text.lower();hits=[]
+        for a in anchors:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            lo=max(0,p-320);hi=min(len(text),p+len(a)+520)
+            sn=text[lo:hi].strip()
+            self_ok=_v658c_is_self(sn)
+            hypo=_v658c_is_hypothetical(sn)
+            lab,term=_v658c_action(sn)
+            if self_ok and not hypo and lab!='NO_ACTION':
+                sem=lab
+            else:
+                sem='REJECTED_NON_SELF_OR_HYPOTHETICAL'
+            key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:420]),sem,lab)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({'video_id':row.get('video_id',''),'title':row.get('title',''),'anchor':a,
+                         'semantic':sem,'candidate_action':lab,'action_term':term,
+                         'self_ok':self_ok,'hypothetical':hypo,'snippet':sn})
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v658c_run():
+    global v658c_thread
+    t0=time.time()
+    try:
+        _v658c_write(status='running',message='只保留 JLaw 第一人称真实仓位操作：Reduce / Tighten Stop / Profit Lock / Sell…',elapsed_sec=0,error=None)
+        corpus=_v658c_corpus();cases=_v658c_extract(corpus,220)
+
+        labels=['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL','REDUCE_TRIM','SELL_EXIT','HOLD','ADD',
+                'REJECTED_NON_SELF_OR_HYPOTHETICAL']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={'cases':len(arr),
+                          'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+                          'examples':arr[:12]}
+
+        ready=[]
+        for lab in ['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL','REDUCE_TRIM','SELL_EXIT','HOLD','ADD']:
+            z=summary[lab]
+            if z['cases']>=2 and z['videos']>=1:
+                ready.append(lab)
+
+        accepted=sum(summary[x]['cases'] for x in labels[:-1])
+        rejected=summary['REJECTED_NON_SELF_OR_HYPOTHETICAL']['cases']
+
+        # We are looking for an explicit chain, not breadth of generic sell mentions.
+        chain = [x for x in ['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL'] if summary[x]['cases']>0]
+        verdict='FIRST_PERSON_WINNER_MANAGEMENT_CHAIN_READY' if len(chain)>=2 else 'FIRST_PERSON_WINNER_MANAGEMENT_EVIDENCE_LIMITED'
+
+        res={
+          'version':'V6.58C First-Person Real-Trade Winner Management Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),'source_cases':len(cases),
+          'accepted_cases':accepted,'rejected_cases':rejected,
+          'semantic_summary':summary,'ready_semantics':ready,'core_chain':chain,
+          'critical_point':'This version discards hypothetical teaching examples and other-investor behavior. Only JLaw first-person / actual-operation language is accepted.',
+          'source_chain_hypothesis':'When market breadth/divergence deteriorates, JLaw reduces exposure, tightens stops on current holdings, and sells extended profitable holdings to lock profit. This is a portfolio-risk / winner-management chain, not a generic fixed take-profit rule.',
+          'acceptance':'At least two links of the Reduce Exposure -> Tighten Stop -> Profit Lock chain must be present in explicit first-person actual-operation language.',
+          'important_negative':'Do not use ADD/HOLD counts unless they are similarly first-person and non-hypothetical. Do not infer fixed percentages from teaching examples.',
+          'next_step':'If the chain is confirmed, V6.59 should reconcile these exact semantics against the frozen current exit engine and identify the single largest code mismatch before any replay.',
+          'frozen':'V6.44 benchmark 28.25% CAGR; -7% stop; HOLD1260; 10-slot; universe; no trigger changes.',
+          'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V658C_DIR.mkdir(parents=True,exist_ok=True)
+        V658C_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v658c_write(status='done',message=f'V6.58C 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v658c_write(status='error',message='V6.58C 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v658c_thread=None
+
+def _v658c_start():
+    global v658c_thread
+    if _v658c_alive():return False
+    _v658c_write(status='starting',message='V6.58C 正在启动',elapsed_sec=0,error=None)
+    v658c_thread=threading.Thread(target=_v658c_run,daemon=True);v658c_thread.start();return True
+
+@APP.route('/v658c/run',methods=['GET','POST'])
+def v658c_run():_v658c_start();return redirect('/v658c/first-person-winner-management')
+
+@APP.get('/api/v658c/status')
+def v658c_status_api():return jsonify(_v658c_status())
+
+@APP.get('/v658c/first-person-winner-management')
+def v658c_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v658c_status();r={}
+    if V658C_RESULT.exists():
+        try:r=json.loads(V658C_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v658c_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v658c/run"><button>▶ 开始 V6.58C First-Person Reconstruction</button></a>'
+    rows=''
+    for lab in ['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL','REDUCE_TRIM','SELL_EXIT','HOLD','ADD','REJECTED_NON_SELF_OR_HYPOTHETICAL']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{'✅' if lab in r.get('ready_semantics',[]) else '—'}</td></tr>"
+    ex=''
+    for lab in ['REDUCE_EXPOSURE','TIGHTEN_STOP','PROFIT_LOCK_SELL','REDUCE_TRIM','SELL_EXIT','HOLD','ADD']:
+        arr=r.get('semantic_summary',{}).get(lab,{}).get('examples',[])[:4]
+        if arr:
+            ex+=f"<h3>{e(lab)}</h3>"
+            for x in arr:
+                sn=re.sub(r'\s+',' ',str(x.get('snippet',''))).strip()
+                ex+=f"<div class='quote'><b>{e(x.get('title',''))}</b> · action={e(x.get('action_term',''))}<br>{e(sn[:800])}</div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px}}.warn{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #9a3412;padding:12px;margin:10px 0;line-height:1.5}}</style></head><body><div class="w">
+<a href="/v658b/local-window-winner-management">← V6.58B</a>
+<div class="c"><h1>🧠 V6.58C First-Person Real-Trade Winner Management</h1><div class="info"><b>只认 JLaw 自己真实操作。</b><br>剔除“如果你… / 假设… / 其他投资者…”；专门寻找 Reduce Exposure → Tighten Stop → Profit Lock / Sell 的真实链条。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Accepted：{int(r.get('accepted_cases',0) or 0)} · Rejected：{int(r.get('rejected_cases',0) or 0)}</p><p>{e(r.get('source_chain_hypothesis',''))}</p></div>
+<div class="c"><h2>First-Person Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th><th>Ready</th></tr>{rows}</table></div>
+<div class="c"><h2>Accepted Source Examples</h2>{ex or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v658c_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v658c_home_base is not None:
+    def _v658c_home_wrap(*args,**kwargs):
+        resp=_v658c_home_base(*args,**kwargs)
+        card="""<div id="v658c-first-person-winner" style="background:#fff7ed;border:5px solid #9a3412;border-radius:24px;padding:28px;margin:22px 0"><h2>🧠 V6.58C First-Person Winner Management</h2><p>只认 JLaw 自己真实操作 · Reduce Exposure → Tighten Stop → Profit Lock / Sell</p><a href="/v658c/first-person-winner-management"><button>打开 V6.58C</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.58B');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v658c_home_base:APP.view_functions[ep]=_v658c_home_wrap
