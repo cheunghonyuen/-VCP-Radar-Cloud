@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v648-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.48 Actual-Buy Decision Reconstruction</h2><div class="muted">冻结 V6.44 Breakout 基线 · 只重建“突破后为什么真正买 / 为什么只观察或放弃” · 不做新阈值 tuning</div></div><a href="/v648/actual-buy-reconstruction"><button type="button">打开 V6.48</button></a></div></div>
+
 <div class="card" id="v647-shortcut" style="border:4px solid #0f766e;background:#f0fdfa"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🏁 V6.47 Source-Supported Selection / Ranking A/B</h2><div class="muted">不再硬删 Breakout · 同日机会按 RS/Leadership + Price Quality 横向排序 · 10-slot 只优先录取更强候选</div></div><a href="/v647/ranking-ab"><button type="button">打开 V6.47</button></a></div></div>
 
 <div class="card" id="v646-shortcut" style="border:4px solid #16a34a;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.46 Source-Supported Review Layer A/B</h2><div class="muted">冻结 V6.44 breakout · Actual Buy review A/B · RS line / source numeric quality · 0 Tiingo / 不重扫 universe</div></div><a href="/v646/review-layer-ab"><button type="button">打开 V6.46</button></a></div></div>
@@ -26214,4 +26216,174 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot Ranking A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Contested Days</th><th>Ranking Changed</th><th>Admit RS↑</th><th>Admit RS?</th><th>Admit RS↓</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
 <div class="c"><h2>Ranking 规则</h2><div class="warn"><b>FIFO：</b>{e(rules.get('BREAKOUT_FIFO',''))}<br><br><b>RS Priority：</b>{e(rules.get('RS_PRIORITY',''))}<br><br><b>Composite：</b>{e(rules.get('SOURCE_COMPOSITE_PRIORITY',''))}<br><br><b>Source Basis：</b>{e(r.get('source_basis',''))}<br><b>关键测试：</b>{e(r.get('critical_test',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v647/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.48 Actual-Buy Decision Reconstruction =========================
+V648_DIR=DATA_DIR/'v648_actual_buy_decision_reconstruction'
+V648_STATUS=V648_DIR/'status.json'; V648_RESULT=V648_DIR/'result.json'
+v648_thread=None
+
+def _v648_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V648_STATUS.exists():
+        try:x.update(json.loads(V648_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v648_write(**kw):
+    V648_DIR.mkdir(parents=True,exist_ok=True);x=_v648_status();x.update(kw)
+    V648_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v648_alive(): return v648_thread is not None and v648_thread.is_alive()
+
+def _v648_corpus():
+    if '_v645_corpus' in globals(): return _v645_corpus()
+    if '_v643_corpus' in globals(): return _v643_corpus()
+    rows=[];idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid);text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'));text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:rows.append({'video_id':vid,'title':str(r.get('title','')),
+                             'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+V648_DECISION_TOPICS={
+    'ACTUAL_BUY':['i would buy','i will buy','buy it','buy this','buy point','entry','enter','actual buy','purchase'],
+    'WATCH_ONLY':['watch list','watchlist','observe','monitor','wait','alert','set an alert','come back','look again'],
+    'PASS_SKIP':['skip','pass','not buy','would not buy','avoid','too extended','extended','chase','too late'],
+    'RS_LEADERSHIP':['rs line','relative strength','rs rating','leader','leadership','strongest','outperform'],
+    'FUNDAMENTALS':['sales acceleration','earnings growth','sales growth','revenue growth','fundamentals','forecast growth','margin'],
+    'MARKET_CONTEXT':['market condition','market environment','general market','uptrend','correction','distribution','exposure'],
+    'VOLUME_PRICE_ACTION':['volume','breakout','pivot','tight','contraction','vcp','support','reclaim'],
+    'RISK_REWARD':['risk reward','risk/reward','stop loss','stop-loss','extended','extension','too far','chase']
+}
+
+def _v648_extract_cases(corpus,max_per_topic=40):
+    out=[]
+    for topic,terms in V648_DECISION_TOPICS.items():
+        n=0;seen=set()
+        for row in corpus:
+            low=row['text'].lower();hits=[]
+            for term in terms:
+                start=0
+                while True:
+                    p=low.find(term,start)
+                    if p<0:break
+                    hits.append((p,term));start=p+max(1,len(term))
+            for p,term in sorted(hits):
+                a=max(0,p-900);b=min(len(row['text']),p+len(term)+1500)
+                sn=row['text'][a:b].strip();key=(row['video_id'],sn[:360])
+                if key in seen:continue
+                seen.add(key);out.append({'topic':topic,'video_id':row['video_id'],
+                    'title':row.get('title',''),'anchor':term,'snippet':sn});n+=1
+                if n>=max_per_topic:break
+            if n>=max_per_topic:break
+    return out
+
+def _v648_classify_case(sn):
+    low=sn.lower();decision='UNCLEAR'
+    buy=['i would buy','i will buy','buy it','buy this','buy point','entry','enter']
+    watch=['watch list','watchlist','set an alert','alert','come back','look again','wait']
+    pas=['skip','pass','would not buy','not buy','avoid','too extended','extended','chase']
+    if any(t in low for t in pas):decision='PASS_SKIP'
+    elif any(t in low for t in buy):decision='ACTUAL_BUY'
+    elif any(t in low for t in watch):decision='WATCH_ONLY'
+    tags=[];rules=[
+      ('rs line','RS_LINE'),('relative strength','RELATIVE_STRENGTH'),('rs rating','RS_RATING'),
+      ('sales acceleration','SALES_ACCELERATION'),('sales growth','SALES_GROWTH'),
+      ('earnings','EARNINGS'),('forecast','FORECAST'),('market','MARKET_CONTEXT'),
+      ('volume','VOLUME'),('pivot','PIVOT'),('breakout','BREAKOUT'),('tight','TIGHT'),
+      ('vcp','VCP'),('extended','EXTENDED'),('risk reward','RISK_REWARD'),('stop loss','STOP')]
+    for k,t in rules:
+        if k in low and t not in tags:tags.append(t)
+    return decision,tags
+
+def _v648_run():
+    global v648_thread
+    t0=time.time()
+    try:
+        _v648_write(status='running',message='读取 JLaw 字幕，重建 Breakout 后 Actual-Buy 决策案例…',elapsed_sec=0,error=None)
+        corpus=_v648_corpus();cases=_v648_extract_cases(corpus,40)
+        classified=[];decision_counts={};feature_by_decision={}
+        for c in cases:
+            dec,tags=_v648_classify_case(c['snippet']);row={**c,'decision':dec,'tags':tags}
+            classified.append(row);decision_counts[dec]=decision_counts.get(dec,0)+1
+            dd=feature_by_decision.setdefault(dec,{})
+            for t in tags:dd[t]=dd.get(t,0)+1
+        exemplars={}
+        for dec in ['ACTUAL_BUY','WATCH_ONLY','PASS_SKIP','UNCLEAR']:
+            arr=[x for x in classified if x['decision']==dec];chosen=[];used=set()
+            for x in arr:
+                if x['video_id'] not in used or len(chosen)<4:
+                    chosen.append(x);used.add(x['video_id'])
+                if len(chosen)>=10:break
+            exemplars[dec]=chosen
+        dims={}
+        for dim in ['RS_LINE','RELATIVE_STRENGTH','RS_RATING','SALES_ACCELERATION','SALES_GROWTH',
+                    'EARNINGS','FORECAST','MARKET_CONTEXT','VOLUME','PIVOT','BREAKOUT','TIGHT',
+                    'VCP','EXTENDED','RISK_REWARD','STOP']:
+            vids=set();n=0;bydec={}
+            for x in classified:
+                if dim in x['tags']:
+                    n+=1;vids.add(x['video_id']);bydec[x['decision']]=bydec.get(x['decision'],0)+1
+            dims[dim]={'cases':n,'videos':len(vids),'decision_mix':bydec,'source_usable':len(vids)>=2}
+        strong=[k for k,v in dims.items() if v['source_usable'] and sum(v['decision_mix'].get(d,0) for d in ['ACTUAL_BUY','WATCH_ONLY','PASS_SKIP'])>=3]
+        verdict='ACTUAL_BUY_DECISION_EVIDENCE_READY' if strong else 'ACTUAL_BUY_DECISION_EVIDENCE_INSUFFICIENT'
+        res={'version':'V6.48 Actual-Buy Decision Reconstruction','verdict':verdict,
+             'transcript_videos':len(corpus),'source_cases':len(classified),'decision_counts':decision_counts,
+             'feature_by_decision':feature_by_decision,'decision_dimensions':dims,'strong_dimensions':strong,
+             'exemplars':exemplars,
+             'critical_point':'V6.47 proved that mechanical RS/Price Quality ranking hurts performance. V6.48 reconstructs explicit BUY vs WATCH vs PASS source cases.',
+             'method':'Case-level reconstruction only; no trading-rule tuning.',
+             'frozen':'V6.44 breakout benchmark, -7% stop, HOLD1260, exit/winner management, 10-slot, universe.',
+             'next_step':'Only build V6.49 from a repeatable point-in-time decision distinction supported by source cases. One rule at a time; no weighted score/grid.',
+             'cache_note':'Existing JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'}
+        V648_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v648_write(status='done',message=f'V6.48 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v648_write(status='error',message='V6.48 失败',elapsed_sec=round(time.time()-t0,1),
+                                          error=f'{type(ex).__name__}: {ex}')
+    finally:v648_thread=None
+
+def _v648_start():
+    global v648_thread
+    if _v648_alive():return False
+    _v648_write(status='starting',message='V6.48 正在启动',elapsed_sec=0,error=None)
+    v648_thread=threading.Thread(target=_v648_run,daemon=True);v648_thread.start();return True
+
+@APP.route('/v648/run',methods=['GET','POST'])
+def v648_run():_v648_start();return redirect('/v648/actual-buy-reconstruction')
+@APP.get('/v648')
+def v648_alias():return redirect('/v648/actual-buy-reconstruction')
+@APP.get('/api/v648/status')
+def v648_status_api():return jsonify(_v648_status())
+
+@APP.get('/v648/actual-buy-reconstruction')
+def v648_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v648_status();r={}
+    if V648_RESULT.exists():
+        try:r=json.loads(V648_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v648_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v648/run"><button>▶ 开始 V6.48 Actual-Buy Reconstruction</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    dc=r.get('decision_counts',{});dimrows=''
+    for k,v in r.get('decision_dimensions',{}).items():
+        mix=v.get('decision_mix',{})
+        dimrows+=f"<tr><td><b>{e(k)}</b></td><td>{int(v.get('cases',0))}</td><td>{int(v.get('videos',0))}</td><td>{int(mix.get('ACTUAL_BUY',0))}</td><td>{int(mix.get('WATCH_ONLY',0))}</td><td>{int(mix.get('PASS_SKIP',0))}</td><td>{'✅' if v.get('source_usable') else '—'}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v647/ranking-ab">← V6.47 Ranking A/B</a>
+<div class="c"><h1>🧭 V6.48 Actual-Buy Decision Reconstruction</h1><div class="info"><b>这轮不跑新策略回测。</b><br>冻结 V6.44 Breakout 基线，直接重建 BUY / WATCH / PASS 决策案例。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)}</p><p>BUY：{int(dc.get('ACTUAL_BUY',0) or 0)} · WATCH：{int(dc.get('WATCH_ONLY',0) or 0)} · PASS：{int(dc.get('PASS_SKIP',0) or 0)} · UNCLEAR：{int(dc.get('UNCLEAR',0) or 0)}</p><p><b>可进入下一步：</b>{e(', '.join(r.get('strong_dimensions',[])) or '—')}</p></div>
+<div class="c"><h2>Decision Evidence Ledger</h2><table><tr><th>Dimension</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>Cross-video</th></tr>{dimrows}</table></div>
 </div></body></html>"""
