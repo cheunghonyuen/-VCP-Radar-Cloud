@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v641-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.41 Re-Strength Gate Source Reconstruction</h2><div class="muted">只查 ARMED_BUT_NO_RE_STRENGTH · 对照 JLaw 原始 Trigger · 不回测 · 不碰 Exit</div></div><a href="/v641/restrength-source"><button type="button">打开 V6.41</button></a></div></div>
+
 <div class="card" id="v640-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.40 Trigger Bottleneck / Missed-Winner</h2><div class="muted">不改策略 · 查未触发候选卡在哪一关 · 找出错杀 +100/+200/+500 Winner 最多的 Gate</div></div><a href="/v640/trigger-bottleneck"><button type="button">打开 V6.40</button></a></div></div>
 
 <div class="card" id="v639-shortcut" style="border:4px solid #16a34a;background:#f0fdf4"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧠 V6.39 Stateful Pullback-Area Arm A/B</h2><div class="muted">只换 Arm · Same-Day conjunction vs Stateful pullback area · Re-strength/Stop/HOLD1260 全冻结</div></div><a href="/v639/stateful-arm-ab"><button type="button">打开 V6.39</button></a></div></div>
@@ -24432,4 +24434,162 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c" style="overflow:auto"><h2>成功触发者 Latency</h2><table><tr><th>阶段</th><th>N</th><th>Mean</th><th>Median</th><th>P90</th></tr>{lrows}</table></div>
 <div class="c"><div class="warn"><b>定义：</b>{e(r.get('definition',''))}<br><b>冻结：</b>{e(r.get('rules_frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v640/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+
+# ========================= V6.41 Re-Strength Gate Source Reconstruction =========================
+V641_DIR=DATA_DIR/'v641_restrength_source_reconstruction'
+V641_STATUS=V641_DIR/'status.json'; V641_RESULT=V641_DIR/'result.json'
+v641_thread=None
+
+def _v641_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V641_STATUS.exists():
+        try:x.update(json.loads(V641_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v641_write(**kw):
+    V641_DIR.mkdir(parents=True,exist_ok=True);x=_v641_status();x.update(kw)
+    V641_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v641_alive(): return v641_thread is not None and v641_thread.is_alive()
+
+def _v641_corpus():
+    rows=[]
+    idx=_yt_read_index() if '_yt_read_index' in globals() else []
+    for r in idx:
+        vid=str(r.get('video_id','')).strip()
+        if not vid:continue
+        jp,tp=_yt_paths(vid);text=''
+        try:
+            if tp.exists():text=tp.read_text(encoding='utf-8',errors='ignore')
+            elif jp.exists():
+                q=json.loads(jp.read_text(encoding='utf-8'));text=str(q.get('transcript',''))
+        except Exception:pass
+        if text:rows.append({'video_id':vid,'text':re.sub(r'\s+',' ',text).strip()})
+    return rows
+
+def _v641_hits(corpus,terms,max_hits=60):
+    out=[];seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        for term in terms:
+            t=term.lower();start=0
+            while True:
+                p=low.find(t,start)
+                if p<0:break
+                a=max(0,p-320);b=min(len(row['text']),p+len(term)+520);sn=row['text'][a:b].strip()
+                k=(row['video_id'],sn[:220])
+                if k not in seen:
+                    seen.add(k);out.append({'video_id':row['video_id'],'term':term,'snippet':sn})
+                    if len(out)>=max_hits:return out
+                start=p+max(1,len(t))
+    return out
+
+def _v641_labels(sn):
+    low=sn.lower();m=[('turn up','TURN_UP'),('reclaim','RECLAIM'),('take out the high','TAKE_OUT_HIGH'),
+      ('break the high','BREAK_HIGH'),('higher high','HIGHER_HIGH'),('higher low','HIGHER_LOW'),
+      ('close above','CLOSE_ABOVE'),('trigger','TRIGGER'),('confirmation','CONFIRMATION'),
+      ('strength','STRENGTH'),('pivot','PIVOT'),('support','SUPPORT'),('buy','BUY'),('entry','ENTRY')]
+    return [lab for k,lab in m if k in low]
+
+def _v641_run():
+    global v641_thread
+    t0=time.time()
+    try:
+        _v641_write(status='running',message='读取 JLaw 字幕，专查 Re-strength / Trigger 定义…',elapsed_sec=0,error=None)
+        corpus=_v641_corpus()
+        specs=[
+          ('What exactly counts as re-strength?',['turn up','reclaim','strength','trigger','confirmation','higher high','higher low'],
+           'JLaw 对 pullback 后“重新转强”的最小可交易定义是什么？',
+           'V6.39 = close > prior high AND close > open AND close > entire support-area high。'),
+          ('Does trigger require prior-high breakout?',['take out the high','break the high','prior high','previous high','higher high','trigger'],
+           '是否明确要求收盘价必须突破前一根 high？','当前使用 close > prior high。'),
+          ('Does trigger require bullish candle?',['close higher','close up','green day','bullish','turn up','strength'],
+           '是否明确要求 trigger bar 必须 close > open？','当前要求 close > open。'),
+          ('Does trigger require clearing entire support area?',['reclaim','support','pivot','10 day','20 day','back above','close above'],
+           '是否必须站到整个 support-area 上沿以上？','当前要求 close > state.area_high。'),
+          ('Execution timing after trigger',['buy','entry','enter','trigger','next day','open','same day'],
+           '确认转强后是当日买、突破点买、还是次日执行？','当前回测 trigger 后下一交易日 open 入场。')
+        ]
+        topics=[]
+        for topic,terms,q,proxy in specs:
+            hits=_v641_hits(corpus,terms,60);labels={};nums=[]
+            for h in hits:
+                for lab in _v641_labels(h['snippet']):labels[lab]=labels.get(lab,0)+1
+                for x in re.findall(r'(?<![A-Za-z])(?:\d+(?:\.\d+)?\s*%|\d+(?:\.\d+)?\s*(?:day|days|session|sessions|week|weeks))',h['snippet']):
+                    if x not in nums:nums.append(x)
+            ev=[];used=set()
+            for h in hits:
+                if h['video_id'] not in used or len(ev)<6:ev.append(h);used.add(h['video_id'])
+                if len(ev)>=12:break
+            topics.append({'topic':topic,'question':q,'current_proxy':proxy,'hit_count':len(hits),
+                'assessment':'CONCEPT_SUPPORTED_EXACT_TRIGGER_UNVERIFIED' if hits else 'NO_DIRECT_SOURCE',
+                'conclusion':'字幕支持 re-strength / trigger / reclaim 等概念，但当前三重条件组合仍未被原文逐条验证。' if hits else '没有足够直接证据，当前 Re-strength 不能视为 JLaw 原规则。',
+                'language_signals':labels,'numeric_mentions':nums[:20],'evidence_hits':ev})
+
+        principles=[
+          {'name':'Trigger event','problem':'当前叠加 close>prior high + bullish close + clear entire support area。',
+           'reconstruction':'只保留字幕原文明确支持的 trigger event，不额外叠加未证实 gate。','ab':'CURRENT_TRIPLE_GATE vs SOURCE_EVENT_TRIGGER'},
+          {'name':'Support reclaim','problem':'当前必须清掉整个动态 support envelope。',
+           'reconstruction':'若原文只要求 reclaim 相关 anchor/pivot，则测试该 anchor，而不是整个 envelope。','ab':'CLEAR_FULL_AREA vs RECLAIM_RELEVANT_ANCHOR'},
+          {'name':'Prior-high condition','problem':'当前要求 close above prior high。',
+           'reconstruction':'只有原文明确把 prior-high breakout 当 trigger 时才保留。','ab':'PRIOR_HIGH_GATE vs SOURCE_TRIGGER'},
+          {'name':'Execution','problem':'next-open 是回测执行模型。',
+           'reconstruction':'把 source signal 与 execution model 分开。','ab':'SOURCE_SIGNAL + NEXT_OPEN_MODEL'}
+        ]
+        res={'version':'V6.41 Re-Strength Gate Source Reconstruction','verdict':'RE_STRENGTH_SPEC_DRIFT_CONFIRMED',
+             'transcript_videos':len(corpus),'topics':topics,'principles':principles,
+             'v640_context':{'dominant_gate':'ARMED_BUT_NO_RE_STRENGTH','missed_plus100':12193,'share_all_missed_plus100':0.58,'missed_plus200':7031,'missed_plus500':2418},
+             'critical_point':'V6.40 已定位 ARMED_BUT_NO_RE_STRENGTH 是最大错杀 Gate；V6.41 只审计这一层。当前三重 Re-strength 条件若无原文直接支持，只能视为 implementation proxy。',
+             'next_step':'Build V6.42 as ONE controlled A/B: keep V6.39 stateful pullback-area / selection / stop / holding frozen; replace only the current triple Re-strength gate with a source-event trigger. No grid search, no exit tuning.',
+             'cache_note':'Reads existing Railway JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'}
+        V641_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v641_write(status='done',message='V6.41 完成：RE_STRENGTH_SPEC_DRIFT_CONFIRMED',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v641_write(status='error',message='V6.41 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v641_thread=None
+
+def _v641_start():
+    global v641_thread
+    if _v641_alive():return False
+    _v641_write(status='starting',message='V6.41 正在启动',elapsed_sec=0,error=None)
+    v641_thread=threading.Thread(target=_v641_run,daemon=True);v641_thread.start();return True
+
+@APP.route('/v641/run',methods=['GET','POST'])
+def v641_run():_v641_start();return redirect('/v641/restrength-source')
+@APP.get('/v641')
+def v641_alias():return redirect('/v641/restrength-source')
+@APP.get('/api/v641/status')
+def v641_status_api():return jsonify(_v641_status())
+
+@APP.get('/v641/restrength-source')
+def v641_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v641_status();r={}
+    if V641_RESULT.exists():
+        try:r=json.loads(V641_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v641_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v641/run"><button>▶ 开始 V6.41 Re-strength Source Audit</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    cards=''
+    for t in r.get('topics',[]):
+        sig=', '.join(f"{k}:{v}" for k,v in t.get('language_signals',{}).items()) or '—'
+        nums=', '.join(t.get('numeric_mentions',[])) or '—'
+        ev=''.join(f"<div class='ev'><b>{e(h.get('video_id'))}</b> · {e(h.get('term'))}<br>{e(h.get('snippet'))}</div>" for h in t.get('evidence_hits',[]))
+        cards+=f"<div class='c'><h2>{e(t.get('topic'))}</h2><p><b>问题：</b>{e(t.get('question'))}</p><p><b>当前 Proxy：</b>{e(t.get('current_proxy'))}</p><p><b>判断：</b>{e(t.get('assessment'))} · hits {int(t.get('hit_count',0))}</p><p>{e(t.get('conclusion'))}</p><p><b>Language signals：</b>{e(sig)}</p><p><b>字幕数字：</b>{e(nums)}</p><details><summary>展开原文证据</summary>{ev or '<p>无直接证据</p>'}</details></div>"
+    prows=''.join(f"<tr><td><b>{e(p.get('name'))}</b></td><td>{e(p.get('problem'))}</td><td>{e(p.get('reconstruction'))}</td><td>{e(p.get('ab'))}</td></tr>" for p in r.get('principles',[]))
+    ctx=r.get('v640_context',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f5f3ff;border:1px solid #c4b5fd;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}.ev{{margin:8px 0;padding:10px;background:#f8fafc;border-radius:10px}}summary{{font-weight:800;cursor:pointer}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;vertical-align:top;text-align:left}}</style></head><body><div class="w">
+<a href="/v640/trigger-bottleneck">← V6.40 Trigger Bottleneck</a>
+<div class="c"><h1>🎯 V6.41 Re-Strength Gate Source Reconstruction</h1><div class="info"><b>只查 ARMED_BUT_NO_RE_STRENGTH。</b><br>V6.40 显示这一 Gate 单独漏掉 12,193 个后来 +100%、7,031 个 +200%、2,418 个 +500% 候选，占全部漏掉 +100% Winner 的 58%。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point','等待运行'))}</p><p>字幕视频：{int(r.get('transcript_videos',0))}</p></div>
+{cards}
+<div class="c"><h2>Source-Faithful Re-strength Reconstruction</h2><table><tr><th>项目</th><th>当前问题</th><th>重建原则</th><th>下一版 A/B</th></tr>{prows}</table></div>
+<div class="c"><div class="warn"><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v641/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
