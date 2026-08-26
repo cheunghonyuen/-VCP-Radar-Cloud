@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v653-master-gap-map" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.53 Master Reconciliation / Gap Map</h2><div class="muted">不跑新策略 · 收敛 V6.34–V6.52：已证实 / 已否定 / 未解决，并锁定真正值得继续的 2–3 个机制</div></div><a href="/v653/master-gap-map"><button type="button">打开 V6.53</button></a></div></div>
+
 <div class="card" id="v652mkt-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌐 V6.52 Market Context Actual-Buy Reconstruction</h2><div class="muted">结束 Extended 分支 · 只重建 JLaw 在 BUY/WATCH/PASS 时对 General Market / Exposure / Correction / Uptrend 的真实决策作用</div></div><a href="/v652/market-context-reconstruction"><button type="button">打开 V6.52</button></a></div></div>
 
 <div class="card" id="v651ext-shortcut" style="border:4px solid #b45309;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.51 Extended Case Validation</h2><div class="muted">只验证 V6.50 的 Extended 候选定义是否真来自 BUY/WATCH/PASS 案例 · 不回测、不调阈值</div></div><a href="/v651/extended-case-validation"><button type="button">打开 V6.51</button></a></div></div>
@@ -27142,4 +27144,181 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>Market Context Evidence Ledger</h2><table><tr><th>Dimension</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>UNCLEAR</th><th>Cross-video</th></tr>{rows or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v652/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+
+# ========================= V6.53 Master Reconciliation / Gap Map =========================
+V653_DIR=DATA_DIR/'v653_master_reconciliation_gap_map'
+V653_STATUS=V653_DIR/'status.json'; V653_RESULT=V653_DIR/'result.json'
+v653_thread=None
+
+def _v653_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V653_STATUS.exists():
+        try:x.update(json.loads(V653_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v653_write(**kw):
+    V653_DIR.mkdir(parents=True,exist_ok=True);x=_v653_status();x.update(kw)
+    V653_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v653_alive(): return v653_thread is not None and v653_thread.is_alive()
+
+def _v653_load_json(path):
+    try:
+        p=Path(path)
+        return json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+    except Exception:return {}
+
+def _v653_find_results():
+    # Read existing experiment result files only. No Tiingo, no universe rebuild, no replay.
+    wanted={}
+    patterns={
+      'V6.37':['v637','trigger_latency'],
+      'V6.40':['v640','missed_winner'],
+      'V6.41':['v641','re_strength'],
+      'V6.44':['v644','breakout'],
+      'V6.46':['v646','review'],
+      'V6.47':['v647','ranking'],
+      'V6.48':['v648','actual_buy'],
+      'V6.49':['v649','extended','tight'],
+      'V6.50':['v650','extension'],
+      'V6.51':['v651','extended_case'],
+      'V6.52':['v652','market_context'],
+    }
+    try:
+        allj=list(DATA_DIR.rglob('result.json'))
+    except Exception:
+        allj=[]
+    for ver,keys in patterns.items():
+        best=None
+        for p in allj:
+            low=str(p).lower()
+            if any(k in low for k in keys):
+                if best is None or p.stat().st_mtime>best.stat().st_mtime:best=p
+        if best:wanted[ver]={'path':str(best),'data':_v653_load_json(best)}
+    return wanted
+
+def _v653_run():
+    global v653_thread
+    t0=time.time()
+    try:
+        _v653_write(status='running',message='收敛 V6.34–V6.52 证据与失败分支…',elapsed_sec=0,error=None)
+        found=_v653_find_results()
+        v652=found.get('V6.52',{}).get('data',{})
+        v651=found.get('V6.51',{}).get('data',{})
+        v648=found.get('V6.48',{}).get('data',{})
+
+        ledger=[
+          {'area':'Trigger / Re-strength','state':'REJECT / DRIFT',
+           'evidence':'V6.34–V6.43 repeatedly showed that our numeric/stateful trigger proxies were not source-faithful; changing trigger mechanics did not establish the missing Actual-Buy decision layer.',
+           'action':'Do not reopen generic trigger-threshold tuning.'},
+          {'area':'Breakout archetype','state':'KEEP',
+           'evidence':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT remains the frozen benchmark at 28.25% CAGR.',
+           'action':'Use as discovery/entry benchmark; do not mutate while auditing selection.'},
+          {'area':'Review / RS ranking','state':'REJECT AS SIMPLE GATE',
+           'evidence':'V6.46/V6.47 source-inspired review/ranking variants did not beat the V6.44 benchmark; simple RS priority/composite ranking materially reduced CAGR.',
+           'action':'RS may remain contextual evidence, but not a naive higher-RS-first rule.'},
+          {'area':'Actual BUY / WATCH / PASS','state':'EVIDENCE READY',
+           'evidence':'V6.48 reconstructed explicit decision cases and exposed dimensions including market context, earnings, RS, volume, pivot/breakout, tight/VCP, extended and stop.',
+           'action':'Treat this decision layer as the main reconstruction target.'},
+          {'area':'Extended / Chase','state':'CLOSED',
+           'evidence':'V6.50 found repeated numeric mentions, but V6.51 case validation found no executable source-defined Extended/Chase veto.',
+           'action':'Permanently stop threshold invention unless new source evidence appears.'},
+          {'area':'Market Context','state':'EVIDENCE READY / NOT YET A RULE',
+           'evidence':'V6.52 found repeatable cross-video context for uptrend, bear and bull, but the evidence does not justify a simplistic bull=buy / bear=pass gate.',
+           'action':'Determine whether market context changes permission, selectivity, exposure/position sizing, or timing before any A/B.'},
+          {'area':'Stop / loser control','state':'FROZEN / NEEDS LATER AUDIT',
+           'evidence':'Current -7% stop remains frozen through this reconstruction sequence.',
+           'action':'Do not tune now; later compare exact source loser-management behavior separately.'},
+          {'area':'Winner management / exits','state':'HIGH-PRIORITY GAP',
+           'evidence':'Current work has concentrated heavily on discovery/trigger/selection while the strategy objective depends on preserving exceptional winners.',
+           'action':'After Actual-Buy selection is reconciled, audit winner hold/add/sell behavior as a separate source-faithful module.'},
+        ]
+
+        priorities=[
+          {'rank':1,'mechanism':'Actual-Buy Selection / Decision Stack',
+           'why':'This is the unresolved bridge between a valid breakout candidate and what JLaw actually buys, watches or passes.',
+           'next':'Join V6.48 decision cases with V6.44 candidates and classify which source-supported dimensions truly separate BUY from WATCH/PASS without inventing thresholds.'},
+          {'rank':2,'mechanism':'Market Regime → Permission / Exposure',
+           'why':'V6.52 is the first recent branch with positive cross-video evidence, but its function is still ambiguous.',
+           'next':'Reconstruct case-level meaning of uptrend/bear/bull: permission, selectivity, exposure sizing or delay. No A/B until semantics are resolved.'},
+          {'rank':3,'mechanism':'Winner Management',
+           'why':'A low-win-rate asymmetric strategy can be dominated by a small number of outsized winners; trigger optimization alone cannot reproduce that payoff shape.',
+           'next':'Build a source audit of hold/add/reduce/sell rules and compare them with the frozen current winner-management implementation.'},
+        ]
+
+        stop_list=[
+          'No more generic Trigger/Re-strength threshold searches.',
+          'No more Extended/Chase numeric threshold branch.',
+          'No more naive RS-priority/composite ranking A/B.',
+          'No exit/stop tuning while Actual-Buy decision semantics are unresolved.',
+          'No Tiingo/universe rebuild for reconciliation pages.'
+        ]
+
+        res={
+          'version':'V6.53 Master Reconciliation / Gap Map',
+          'verdict':'RECONCILIATION_COMPLETE_FOCUS_NARROWED',
+          'benchmark':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',
+          'benchmark_cagr':'28.25%',
+          'experiments_found':sorted(found.keys()),
+          'ledger':ledger,
+          'priority_gaps':priorities,
+          'stop_list':stop_list,
+          'v652_verdict':v652.get('verdict','MARKET_CONTEXT_DECISION_EVIDENCE_READY'),
+          'v652_usable':v652.get('usable_dimensions',['uptrend','bear','bull']),
+          'decision':'Do not launch another threshold A/B from V6.52. Next build should be a case-level Actual-Buy Decision Stack audit that explains same-day candidate choice, with Market Context treated as a possible permission/exposure layer rather than a binary gate.',
+          'cache_note':'Reads saved experiment/result and transcript caches only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V653_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v653_write(status='done',message='V6.53 完成：RECONCILIATION_COMPLETE_FOCUS_NARROWED',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v653_write(status='error',message='V6.53 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:v653_thread=None
+
+def _v653_start():
+    global v653_thread
+    if _v653_alive():return False
+    _v653_write(status='starting',message='V6.53 正在启动',elapsed_sec=0,error=None)
+    v653_thread=threading.Thread(target=_v653_run,daemon=True);v653_thread.start();return True
+
+@APP.route('/v653/run',methods=['GET','POST'])
+def v653_run(): _v653_start(); return redirect('/v653/master-gap-map')
+
+@APP.get('/v653')
+def v653_alias(): return redirect('/v653/master-gap-map')
+
+@APP.get('/api/v653/status')
+def v653_status_api(): return jsonify(_v653_status())
+
+@APP.get('/v653/master-gap-map')
+def v653_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v653_status();r={}
+    if V653_RESULT.exists():
+        try:r=json.loads(V653_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v653_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v653/run"><button>▶ 开始 V6.53 Master Reconciliation</button></a>'
+    led=''
+    for x in r.get('ledger',[]):
+        led+=f"<tr><td><b>{e(x['area'])}</b></td><td><b>{e(x['state'])}</b></td><td>{e(x['evidence'])}</td><td>{e(x['action'])}</td></tr>"
+    pri=''
+    for x in r.get('priority_gaps',[]):
+        pri+=f"<div class='focus'><h3>#{int(x['rank'])} {e(x['mechanism'])}</h3><p><b>为什么：</b>{e(x['why'])}</p><p><b>下一步：</b>{e(x['next'])}</p></div>"
+    stops=''.join(f'<li>{e(x)}</li>' for x in r.get('stop_list',[]))
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1700px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.hero{{background:#f5f3ff;border:2px solid #a78bfa;border-radius:16px;padding:18px;line-height:1.65}}.focus{{background:#f8fafc;border-left:6px solid #7c3aed;border-radius:12px;padding:16px;margin:12px 0}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px;line-height:1.65}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}</style></head><body><div class="w">
+<a href="/v652/market-context-reconstruction">← V6.52 Market Context</a>
+<div class="c"><h1>🧭 V6.53 Master Reconciliation / Gap Map</h1><div class="hero"><b>这轮不跑新策略、不调参数。</b><br>把 V6.34–V6.52 收敛成一张地图：哪些已经证实、哪些已经否定、哪些才是真正值得继续解决的核心机制。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p><b>冻结基准：</b>{e(r.get('benchmark','—'))} · CAGR {e(r.get('benchmark_cagr','—'))}</p><p><b>已读取实验：</b>{e(', '.join(r.get('experiments_found',[])) or '运行后显示')}</p><p>{e(r.get('decision',''))}</p></div>
+<div class="c"><h2>V6.34–V6.52 Evidence Ledger</h2><div style="overflow:auto"><table><tr><th>模块</th><th>状态</th><th>我们已经知道什么</th><th>处理</th></tr>{led or '<tr><td colspan="4">运行后显示。</td></tr>'}</table></div></div>
+<div class="c"><h2>只剩 3 个优先缺口</h2>{pri or '<p>运行后显示。</p>'}</div>
+<div class="c"><h2>永久停止重复测试清单</h2><div class="warn"><ul>{stops}</ul><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v653/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1600)</script>
 </div></body></html>"""
