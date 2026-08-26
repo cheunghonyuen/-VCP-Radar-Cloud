@@ -30276,3 +30276,225 @@ if _v663_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v663_home_base:APP.view_functions[ep]=_v663_home_wrap
+
+
+# ========================= V6.64 Actual-Buy Winner-vs-STOP7 Entry Attribution =========================
+V664_DIR=DATA_DIR/'v664_actual_buy_winner_vs_stop7_entry_attribution'
+V664_STATUS=V664_DIR/'status.json'; V664_RESULT=V664_DIR/'result.json'
+v664_thread=None
+
+def _v664_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V664_STATUS.exists():
+        try:x.update(json.loads(V664_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v664_write(**kw):
+    V664_DIR.mkdir(parents=True,exist_ok=True);x=_v664_status();x.update(kw)
+    V664_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v664_alive(): return v664_thread is not None and v664_thread.is_alive()
+
+def _v664_smd(a,b):
+    a=pd.to_numeric(a,errors='coerce').dropna(); b=pd.to_numeric(b,errors='coerce').dropna()
+    if len(a)<20 or len(b)<20:return None
+    va=float(a.var(ddof=1));vb=float(b.var(ddof=1))
+    den=((va+vb)/2.0)**0.5
+    return float((a.mean()-b.mean())/den) if den>0 else 0.0
+
+def _v664_run():
+    global v664_thread
+    t0=time.time()
+    try:
+        _v664_write(status='running',message='比较 +100 Winner 与 STOP7 losers 的买入当日 point-in-time 特征…',elapsed_sec=0,error=None)
+        _,T=_v660_load_trade_cache()
+
+        vcol=_v660_pick_col(T,['variant','strategy','scheme'])
+        if vcol is not None:
+            m=T[vcol].astype(str).str.contains('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',case=False,na=False)
+            if m.any():T=T[m].copy()
+
+        reason=_v660_pick_col(T,['exit_reason','reason'])
+        retcol=_v660_pick_col(T,['return_pct','final_return','return','ret','pnl_pct'])
+        entry_px=_v660_pick_col(T,['entry_px','entry_price','buy_px','buy_price'])
+        exit_px=_v660_pick_col(T,['exit_px','exit_price','sell_px','sell_price'])
+        entry_date=_v660_pick_col(T,['entry_date','buy_date','date'])
+        if reason is None:raise RuntimeError('trade cache 没有 exit_reason/reason')
+
+        if retcol is not None:
+            rr=pd.to_numeric(T[retcol],errors='coerce')
+            med=rr.abs().median()
+            if pd.notna(med) and med>3:rr=rr/100.0
+            T['_ret']=rr
+        elif entry_px is not None and exit_px is not None:
+            T['_ret']=pd.to_numeric(T[exit_px],errors='coerce')/pd.to_numeric(T[entry_px],errors='coerce')-1
+        else:
+            raise RuntimeError('trade cache 无法计算 final return')
+        T['_reason']=T[reason].astype(str).fillna('UNKNOWN')
+        if entry_date is not None:
+            T['_entry_date']=pd.to_datetime(T[entry_date],errors='coerce')
+            T['_year']=T['_entry_date'].dt.year
+        else:
+            T['_year']=np.nan
+
+        winner=T[T['_ret']>=1.0].copy()
+        stop7=T[T['_reason'].str.fullmatch('STOP7',case=False,na=False)].copy()
+        gap=T[T['_reason'].str.contains('STOP7_GAP',case=False,na=False)].copy()
+        if winner.empty or stop7.empty:raise RuntimeError('Winner 或 STOP7 cohort 为空')
+
+        # Strict point-in-time whitelist only. No MFE/MAE/hold/exit fields.
+        preferred=[
+          'volratio','quality','vcp_quality','rs','rs_raw','supply_score','sector_score','leader_score',
+          'group_breadth','extension','pivot_tight','v46_score','v6_rank','atr_pct','atr_display',
+          'price','entry','entry_px'
+        ]
+        feature_cols=[]
+        lower={str(c).lower():c for c in T.columns}
+        for n in preferred:
+            if n.lower() in lower:
+                c=lower[n.lower()]
+                if c not in feature_cols:feature_cols.append(c)
+
+        # Reject obvious leakage even if a similarly named field sneaks into whitelist.
+        bad_tokens=['return','mfe','mae','exit','hold','pnl','winner','future','forward']
+        feature_cols=[c for c in feature_cols if not any(t in str(c).lower() for t in bad_tokens)]
+
+        rows=[]
+        era_rows=[]
+        era_defs=[('1996-2005',1996,2005),('2006-2015',2006,2015),('2016-2026',2016,2026)]
+
+        for c in feature_cols:
+            allx=pd.to_numeric(T[c],errors='coerce')
+            cov=float(allx.notna().mean())
+            if cov<0.25:continue
+            w=pd.to_numeric(winner[c],errors='coerce');l=pd.to_numeric(stop7[c],errors='coerce')
+            smd=_v664_smd(w,l)
+            if smd is None:continue
+            direction='HIGHER_IN_WINNERS' if smd>0 else 'LOWER_IN_WINNERS'
+            row={
+              'feature':str(c),'coverage':cov,
+              'winner_n':int(w.notna().sum()),'stop7_n':int(l.notna().sum()),
+              'winner_mean':float(w.mean()),'stop7_mean':float(l.mean()),
+              'winner_median':float(w.median()),'stop7_median':float(l.median()),
+              'smd':float(smd),'abs_smd':abs(float(smd)),'direction':direction
+            }
+
+            # Era consistency: same sign in available eras.
+            signs=[]; available=0
+            if T['_year'].notna().any():
+                for en,lo,hi in era_defs:
+                    W=winner[(winner['_year']>=lo)&(winner['_year']<=hi)]
+                    L=stop7[(stop7['_year']>=lo)&(stop7['_year']<=hi)]
+                    es=_v664_smd(W[c],L[c])
+                    if es is None:continue
+                    available+=1; signs.append(1 if es>0 else (-1 if es<0 else 0))
+                    era_rows.append({'feature':str(c),'era':en,'winner_n':int(pd.to_numeric(W[c],errors='coerce').notna().sum()),
+                                     'stop7_n':int(pd.to_numeric(L[c],errors='coerce').notna().sum()),
+                                     'smd':float(es)})
+            row['eras_available']=available
+            row['same_sign_eras']=int(sum(1 for x in signs if x==(1 if smd>0 else -1)))
+            row['era_consistency']=float(row['same_sign_eras']/available) if available else None
+            rows.append(row)
+
+        rows=sorted(rows,key=lambda x:-x['abs_smd'])
+
+        # Separate GAP cohort comparison for context only, never a prevention rule.
+        gap_rows=[]
+        for c in feature_cols:
+            w=pd.to_numeric(winner[c],errors='coerce');g=pd.to_numeric(gap[c],errors='coerce')
+            smd=_v664_smd(w,g)
+            if smd is not None:
+                gap_rows.append({'feature':str(c),'smd_winner_vs_gap':float(smd),'abs_smd':abs(float(smd))})
+        gap_rows=sorted(gap_rows,key=lambda x:-x['abs_smd'])
+
+        # Promote only robust descriptive separation, not a threshold.
+        robust=[x for x in rows if x['coverage']>=0.50 and x['abs_smd']>=0.35 and
+                (x['eras_available']==0 or (x['eras_available']>=2 and x['era_consistency']>=0.67))]
+        if robust:
+            verdict='POINT_IN_TIME_ENTRY_SEPARATION_FOUND_NEEDS_SOURCE_RECONCILIATION'
+        else:
+            verdict='NO_ROBUST_POINT_IN_TIME_ENTRY_SEPARATOR_FOUND'
+
+        res={
+          'version':'V6.64 Actual-Buy Winner-vs-STOP7 Entry Attribution','verdict':verdict,
+          'trades':int(len(T)),'winner_100_n':int(len(winner)),'stop7_n':int(len(stop7)),'stop7_gap_n':int(len(gap)),
+          'features_tested':len(rows),'feature_ledger':rows,'era_ledger':era_rows,
+          'gap_context':gap_rows[:10],'robust_candidates':robust[:8],
+          'critical_question':'At the actual buy date, do existing point-in-time cached features materially distinguish final +100% winners from ordinary STOP7 losers?',
+          'anti_leakage':'Only an explicit entry-time whitelist is audited. MFE, MAE, hold days, exit fields, final return and future information are excluded.',
+          'acceptance':'This is attribution, not a ranking rule. A feature only advances if separation is material, has adequate coverage, and is directionally stable across eras; even then V6.65 must reconcile it with JLaw source evidence before any A/B.',
+          'important_negative':'Do not invent thresholds from medians or SMD. Do not combine several features into a score. V6.46/V6.47 already showed naive hard gating/ranking can destroy payoff shape.',
+          'next_step':('V6.65 should inspect only the strongest robust candidate(s) against JLaw Actual-Buy source cases and determine whether the observed direction is source-supported. No replay yet.'
+                       if robust else
+                       'Close this cached-feature selection branch. Do not grid-search thresholds or rebuild factors; return to unresolved source-supported Actual-Buy semantics only.'),
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR; -7% stop; HOLD1260; 10-slot; exits/winner management/universe frozen.',
+          'cache_note':'Saved V6.44 trade/feature cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V664_DIR.mkdir(parents=True,exist_ok=True)
+        V664_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:
+            pd.DataFrame(rows).to_csv(V664_DIR/'feature_separation.csv',index=False)
+            pd.DataFrame(era_rows).to_csv(V664_DIR/'era_stability.csv',index=False)
+        except Exception:pass
+        _v664_write(status='done',message=f"V6.64 完成：{verdict} · robust candidates {len(robust)}",
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v664_write(status='error',message='V6.64 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:v664_thread=None
+
+def _v664_start():
+    global v664_thread
+    if _v664_alive():return False
+    _v664_write(status='starting',message='V6.64 正在启动',elapsed_sec=0,error=None)
+    v664_thread=threading.Thread(target=_v664_run,daemon=True);v664_thread.start();return True
+
+@APP.route('/v664/run',methods=['GET','POST'])
+def v664_run():_v664_start();return redirect('/v664/actual-buy-entry-attribution')
+
+@APP.get('/api/v664/status')
+def v664_status_api():return jsonify(_v664_status())
+
+@APP.get('/v664/actual-buy-entry-attribution')
+def v664_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v664_status();r={}
+    if V664_RESULT.exists():
+        try:r=json.loads(V664_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v664_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v664/run"><button>▶ 开始 V6.64 Entry Attribution</button></a>'
+    rows=''
+    for x in r.get('feature_ledger',[])[:15]:
+        ec='—' if x.get('era_consistency') is None else f"{float(x.get('era_consistency'))*100:.0f}%"
+        rows+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('coverage',0))*100:.1f}%</td><td>{float(x.get('winner_median',0)):.3f}</td><td>{float(x.get('stop7_median',0)):.3f}</td><td>{float(x.get('smd',0)):+.3f}</td><td>{e(x.get('direction'))}</td><td>{ec}</td></tr>"
+    cand=''
+    for x in r.get('robust_candidates',[]):
+        cand+=f"<div class='hero'><b>{e(x.get('feature'))}</b> · SMD {float(x.get('smd',0)):+.3f} · coverage {float(x.get('coverage',0))*100:.1f}% · era consistency {'—' if x.get('era_consistency') is None else f'{float(x.get('era_consistency'))*100:.0f}%'} </div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #a5b4fc;border-radius:14px;padding:16px}}.hero{{background:#ecfdf5;border-left:6px solid #059669;padding:14px;border-radius:12px;margin:8px 0}}.warn{{background:#fff7ed;border:1px solid #f59e0b;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v663/stop7-gap-cause-attribution">← V6.63</a>
+<div class="c"><h1>🎯 V6.64 Actual-Buy Winner-vs-STOP7 Entry Attribution</h1><div class="info"><b>不调阈值、不做排名。</b><br>只比较买入当日已有 point-in-time features：最终 +100% Winner 与普通 STOP7 loser 到底有没有稳定差异。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Trades：{int(r.get('trades',0) or 0)} · +100 Winner：{int(r.get('winner_100_n',0) or 0)} · STOP7：{int(r.get('stop7_n',0) or 0)} · Features：{int(r.get('features_tested',0) or 0)}</p>{cand or '<p>没有达到 robust 标准的候选。</p>'}</div>
+<div class="c"><h2>Point-in-Time Feature Separation</h2><table><tr><th>Feature</th><th>Coverage</th><th>Winner Median</th><th>STOP7 Median</th><th>SMD</th><th>Direction</th><th>Era Consistency</th></tr>{rows or '<tr><td colspan="7">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>防泄漏：</b>{e(r.get('anti_leakage',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v664_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v664_home_base is not None:
+    def _v664_home_wrap(*args,**kwargs):
+        resp=_v664_home_base(*args,**kwargs)
+        card="""<div id="v664-entry-attribution" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🎯 V6.64 Actual-Buy Entry Attribution</h2><p>+100 Winner vs STOP7 · 买入当日 point-in-time feature attribution · 不调阈值</p><a href="/v664/actual-buy-entry-attribution"><button>打开 V6.64</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('v663-stop7-gap');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v664_home_base:APP.view_functions[ep]=_v664_home_wrap
