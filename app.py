@@ -28369,3 +28369,243 @@ if _v658_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v658_home_base:APP.view_functions[ep]=_v658_home_wrap
+
+
+# ========================= V6.58A Position-Aware Winner Management Reconstruction =========================
+V658A_DIR=DATA_DIR/'v658a_position_aware_winner_management'
+V658A_STATUS=V658A_DIR/'status.json'; V658A_RESULT=V658A_DIR/'result.json'
+v658a_thread=None
+
+def _v658a_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V658A_STATUS.exists():
+        try:x.update(json.loads(V658A_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v658a_write(**kw):
+    V658A_DIR.mkdir(parents=True,exist_ok=True);x=_v658a_status();x.update(kw)
+    V658A_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v658a_alive(): return v658a_thread is not None and v658a_thread.is_alive()
+
+def _v658a_corpus():
+    if '_v658_corpus' in globals(): return _v658_corpus()
+    if '_v656_corpus' in globals(): return _v656_corpus()
+    if '_v655_corpus' in globals(): return _v655_corpus()
+    return []
+
+# Position-state language is mandatory. This prevents pre-buy screening / generic "sell supply"
+# discussion from being misclassified as actual winner-management evidence.
+V658A_POSITION_TERMS=[
+ 'my position','our position','position','holding','holdings','i hold','we hold','currently holding',
+ 'after buying','after i bought','after we bought','once bought','after entry','from my entry',
+ 'profit','gain','up ','down ','cost basis',
+ '持倉','持仓','倉位','仓位','持有','買入後','买入后','入場後','入场后','買了之後','买了之后',
+ '我的股票','持股','盈利','獲利','获利','成本價','成本价'
+]
+V658A_EXIT_TERMS=[
+ 'sell','exit','take profit','profit taking','stop out','cut loss','trim','reduce',
+ 'failed breakout','breakout failure','abnormal action','climax','break below',
+ '賣出','卖出','離場','离场','止盈','止損','止损','減倉','减仓','部分賣出','部分卖出',
+ '突破失敗','突破失败','異常','异常','高潮','跌破'
+]
+V658A_HOLD_TERMS=[
+ 'hold','continue to hold','keep holding','let it run','ride the winner','sit tight',
+ '持有','繼續持有','继续持有','讓利潤奔跑','让利润奔跑'
+]
+V658A_ADD_TERMS=['add position','add to position','scale in','pyramid','加倉','加仓','加碼','加码']
+
+def _v658a_has_position_context(sn):
+    low=sn.lower()
+    return any(t.lower() in low for t in V658A_POSITION_TERMS)
+
+def _v658a_has_prebuy_context(sn):
+    low=sn.lower()
+    prebuy=[
+      'screen','screening','watchlist','watch list','candidate','buy point','pivot','breakout alert',
+      'selection','filter','before buying','prior to buying','set alert',
+      '篩選','筛选','觀察名單','观察名单','候選','候选','買入點','买入点','突破提醒','選股','选股'
+    ]
+    return any(t.lower() in low for t in prebuy)
+
+def _v658a_semantic(sn):
+    low=sn.lower()
+    # Require actual position-state language to call something winner management.
+    if not _v658a_has_position_context(sn):
+        return 'NOT_POSITION_MANAGEMENT'
+    if any(t.lower() in low for t in ['failed breakout','breakout failure']) or any(t in sn for t in ['突破失敗','突破失败']):
+        return 'FAILED_BREAKOUT_EXIT'
+    if 'abnormal action' in low or any(t in sn for t in ['異常','异常']):
+        return 'ABNORMAL_ACTION_EXIT'
+    if 'climax' in low or '高潮' in sn:
+        return 'CLIMAX_EXIT'
+    if any(t.lower() in low for t in ['trim','reduce','partial sell','take partial']) or any(t in sn for t in ['減倉','减仓','部分賣出','部分卖出']):
+        return 'REDUCE_TRIM'
+    if any(t.lower() in low for t in V658A_ADD_TERMS):
+        return 'ADD'
+    if any(t.lower() in low for t in ['sell','exit','take profit','profit taking','stop out','cut loss']) or any(t in sn for t in ['賣出','卖出','離場','离场','止盈','止損','止损']):
+        return 'SELL_EXIT'
+    if any(t.lower() in low for t in V658A_HOLD_TERMS):
+        return 'HOLD'
+    return 'POSITION_CONTEXT_UNCLEAR'
+
+def _v658a_trigger_tags(sn):
+    low=sn.lower();tags=[]
+    rules=[
+      ('MA10',['10 day','10-day','10dma','10 ema','10ema','10天','10日']),
+      ('MA20',['20 day','20-day','20dma','20 ema','20ema','20天','20日']),
+      ('MA50',['50 day','50-day','50dma','50 ema','50ema','50天','50日']),
+      ('ENTRY_PIVOT',['pivot','buy point','entry','樞紐','枢纽','買入點','买入点']),
+      ('PROFIT_20',['20%','+20%']),
+      ('PROFIT_50',['50%','+50%']),
+      ('PROFIT_100',['100%','+100%','double','翻倍']),
+      ('VOLUME',['volume','成交量']),
+      ('EARNINGS',['earnings','earning','盈餘','盈利']),
+      ('MARKET_CONTEXT',['market','市場','大市']),
+      ('STOP_LOSS',['stop loss','stop out','止損','止损'])
+    ]
+    for tag,terms in rules:
+        if any(t.lower() in low or t in sn for t in terms):tags.append(tag)
+    return tags
+
+def _v658a_extract(corpus,max_cases=420):
+    rows=[];seen=set()
+    anchors=list(dict.fromkeys(V658A_POSITION_TERMS+V658A_EXIT_TERMS+V658A_HOLD_TERMS+V658A_ADD_TERMS))
+    for row in corpus:
+        text=str(row.get('text',''));low=text.lower();hits=[]
+        for a in anchors:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            lo=max(0,p-1200);hi=min(len(text),p+len(a)+1800)
+            sn=text[lo:hi].strip()
+            sem=_v658a_semantic(sn)
+            key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:600]),sem)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({
+              'video_id':row.get('video_id',''),'title':row.get('title',''),'anchor':a,
+              'semantic':sem,'position_context':_v658a_has_position_context(sn),
+              'prebuy_context':_v658a_has_prebuy_context(sn),
+              'tags':_v658a_trigger_tags(sn),'snippet':sn
+            })
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v658a_run():
+    global v658a_thread
+    t0=time.time()
+    try:
+        _v658a_write(status='running',message='只保留真正“已持仓之后”的 Winner Management 证据…',elapsed_sec=0,error=None)
+        corpus=_v658a_corpus();cases=_v658a_extract(corpus,420)
+
+        labels=['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT',
+                'ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','POSITION_CONTEXT_UNCLEAR','NOT_POSITION_MANAGEMENT']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={
+              'cases':len(arr),
+              'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+              'prebuy_contaminated':sum(1 for x in arr if x.get('prebuy_context')),
+              'examples':arr[:15]
+            }
+
+        # Only actual-position semantics can advance.
+        ready=[]
+        for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+            z=summary[lab]
+            if z['cases']>=3 and z['videos']>=2:
+                ready.append(lab)
+
+        contamination=sum(1 for x in cases if x['semantic']=='NOT_POSITION_MANAGEMENT' or x.get('prebuy_context'))
+        position_cases=sum(1 for x in cases if x['semantic']!='NOT_POSITION_MANAGEMENT')
+        verdict='POSITION_AWARE_WINNER_MANAGEMENT_EVIDENCE_READY' if len(ready)>=2 else 'POSITION_AWARE_WINNER_MANAGEMENT_EVIDENCE_LIMITED'
+
+        res={
+          'version':'V6.58A Position-Aware Winner Management Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),
+          'source_cases':len(cases),
+          'position_cases':position_cases,
+          'contamination_cases':contamination,
+          'semantic_summary':summary,
+          'ready_semantics':ready,
+          'critical_point':'Unlike V6.58, this reconstruction requires explicit evidence that a position is already owned. Pre-buy screening, generic supply/demand discussion, and ordinary use of the word sell are excluded from winner-management evidence.',
+          'acceptance':'A winner-management semantic advances only when position-state is explicit, the action is explicit, and the pattern repeats across at least 2 distinct videos.',
+          'important_negative':'Do not treat generic SELL words, screening examples, liquidity discussions, or supply/demand explanations as exit rules.',
+          'next_step':'If at least two position-aware semantics survive, V6.59 will compare only those semantics with the frozen current exit engine and identify the single biggest source-vs-code mismatch. If not, inspect the exact source examples manually before any replay.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; universe; Market Context gate branch closed.',
+          'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V658A_DIR.mkdir(parents=True,exist_ok=True)
+        V658A_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v658a_write(status='done',message=f'V6.58A 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v658a_write(status='error',message='V6.58A 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v658a_thread=None
+
+def _v658a_start():
+    global v658a_thread
+    if _v658a_alive():return False
+    _v658a_write(status='starting',message='V6.58A 正在启动',elapsed_sec=0,error=None)
+    v658a_thread=threading.Thread(target=_v658a_run,daemon=True);v658a_thread.start();return True
+
+@APP.route('/v658a/run',methods=['GET','POST'])
+def v658a_run():_v658a_start();return redirect('/v658a/position-aware-winner-management')
+
+@APP.get('/api/v658a/status')
+def v658a_status_api():return jsonify(_v658a_status())
+
+@APP.get('/v658a/position-aware-winner-management')
+def v658a_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v658a_status();r={}
+    if V658A_RESULT.exists():
+        try:r=json.loads(V658A_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v658a_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v658a/run"><button>▶ 开始 V6.58A Position-Aware Reconstruction</button></a>'
+    rows=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','POSITION_CONTEXT_UNCLEAR','NOT_POSITION_MANAGEMENT']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{int(z.get('prebuy_contaminated',0))}</td><td>{'✅' if lab in r.get('ready_semantics',[]) else '—'}</td></tr>"
+    ex=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+        arr=r.get('semantic_summary',{}).get(lab,{}).get('examples',[])[:4]
+        if arr:
+            ex+=f"<h3>{e(lab)}</h3>"
+            for x in arr:
+                sn=re.sub(r'\s+',' ',str(x.get('snippet',''))).strip()
+                ex+=f"<div class='quote'><b>{e(x.get('title',''))}</b> · {e(x.get('anchor',''))}<br>{e(sn[:1100])}</div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px}}.warn{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #ea580c;padding:12px;margin:10px 0;line-height:1.5}}</style></head><body><div class="w">
+<a href="/v658/winner-management-source">← V6.58</a>
+<div class="c"><h1>🧪 V6.58A Position-Aware Winner Management Reconstruction</h1><div class="info"><b>修正 V6.58 的污染。</b><br>只有明确“已经持仓之后”的 HOLD / ADD / REDUCE / SELL / failure exit 才算 Winner Management 证据。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)} · Position-aware：{int(r.get('position_cases',0) or 0)}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Position-Aware Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th><th>Pre-buy contamination</th><th>Ready</th></tr>{rows}</table></div>
+<div class="c"><h2>Source Examples</h2>{ex or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v658a_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v658a_home_base is not None:
+    def _v658a_home_wrap(*args,**kwargs):
+        resp=_v658a_home_base(*args,**kwargs)
+        card="""<div id="v658a-position-aware-winner" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0"><h2>🧪 V6.58A Position-Aware Winner Management</h2><p>修正 V6.58 语义污染 · 只认“已持仓之后”的 HOLD / ADD / REDUCE / SELL / failure exits</p><a href="/v658a/position-aware-winner-management"><button>打开 V6.58A</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.58 Winner');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v658a_home_base:APP.view_functions[ep]=_v658a_home_wrap
