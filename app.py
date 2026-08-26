@@ -26,7 +26,7 @@ GITHUB_OWNER = os.environ.get("GITHUB_OWNER","cheunghonyuen")
 GITHUB_REPO = os.environ.get("GITHUB_REPO","-VCP-Radar-Cloud")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH","main")
 PUBLISH_SECRET = os.environ.get("PUBLISH_SECRET","")
-PUBLISH_MAX_BYTES = int(os.environ.get("PUBLISH_MAX_BYTES","1500000"))
+PUBLISH_MAX_BYTES = int(os.environ.get("PUBLISH_MAX_BYTES","5242880"))
 
 def _publisher_auth_ok(req):
     got = req.headers.get("X-Publish-Secret","")
@@ -6974,6 +6974,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
   </div>
 </div>
 
+
+<div class="card" id="v644-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🚀 V6.44 Source-Supported Breakout A/B</h2><div class="muted">Pivot breakout / Pivot+Volume context · 只测 V6.43 原文支持 archetype · 不猜 reclaim 阈值</div></div><a href="/v644/source-breakout-ab"><button type="button">打开 V6.44</button></a></div></div>
 
 <div class="card" id="v643-shortcut" style="border:4px solid #0891b2;background:#ecfeff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.43 Example-Level Re-Strength Reconstruction</h2><div class="muted">停止猜 Trigger 公式 · 回到 JLaw 字幕案例上下文 · 区分 Setup 与真正 Execution Trigger</div></div><a href="/v643/example-reconstruction"><button type="button">打开 V6.43</button></a></div></div>
 
@@ -17219,7 +17221,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;b
 <p>以后不用去 GitHub 改名上传。这里选我给你的 Python 文件，系统会自动发布到 GitHub，Railway 再自动 Deploy。</p>
 <div class="warn">
 <b>安全：</b>只允许 <code>app.py / app_v*.py / app-*.py / jlaw_*.py</code>。<br>
-发布前会检查 UTF-8 和 Python 语法。
+发布前会检查 UTF-8 和 Python 语法；单个 Python 文件上限 5 MB。
 </div>
 
 <form id="f">
@@ -17474,7 +17476,7 @@ def publisher_upload():
 
     data=f.read()
     if len(data) > PUBLISH_MAX_BYTES:
-        return jsonify({"ok":False,"error":f"文件过大：{len(data)} bytes"}), 400
+        return jsonify({"ok":False,"error":f"文件过大（上限 5 MB）：{len(data)} bytes"}), 400
 
     try:
         source=data.decode("utf-8")
@@ -25162,4 +25164,335 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 {cards}
 <div class="c"><div class="warn"><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v643/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+
+# ========================= V6.44 Source-Supported Breakout Archetype A/B =========================
+V644_DIR=DATA_DIR/'v644_source_supported_breakout_ab'
+V644_STATUS=V644_DIR/'status.json'; V644_RESULT=V644_DIR/'result.json'; V644_STOP=V644_DIR/'STOP'
+V644_TRADE_CACHE=V644_DIR/'v644_trade_cache.csv.gz'
+v644_thread=None
+
+def _v644_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V644_STATUS.exists():
+        try:x.update(json.loads(V644_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v644_write(**kw):
+    V644_DIR.mkdir(parents=True,exist_ok=True);x=_v644_status();x.update(kw)
+    V644_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v644_alive(): return v644_thread is not None and v644_thread.is_alive()
+
+V644_VARIANTS=['CURRENT_TRIPLE_GATE','PIVOT_BREAKOUT_ALERT','TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT']
+
+def _v644_prepare(r,d):
+    ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize()
+    pre=d[d.date<ed].tail(60).copy()
+    post=d[(d.date>=ed)&(d.date<=xd)].copy()
+    x=pd.concat([pre,post],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    if len(post)<3 or x.empty:return None,None,None
+    x['vavg50']=pd.to_numeric(x.volume,errors='coerce').rolling(50,min_periods=20).mean()
+    idxs=x.index[x.date.eq(ed)].tolist()
+    if not idxs:return None,None,None
+    return x,int(idxs[0]),float(r.entry_px)
+
+def _v644_current(r,d):
+    return _v639_entry_stateful(r,d)
+
+def _v644_pivot_breakout_alert(r,d):
+    """
+    Source-supported archetype from V6.43 transcript examples:
+      - identify the right-side pivot / resistance high from the frozen Stage-2 opportunity;
+      - wait for price to trade above that pivot;
+      - treat that as an alert / candidate trigger;
+      - enter next session open as the backtest execution model.
+    This mirrors the source distinction: breakout -> immediately review current conditions -> decide whether to buy.
+    The backtest cannot reproduce discretionary same-day review, so it models the breakout event only.
+    """
+    x,start_i,pivot=_v644_prepare(r,d)
+    if x is None:return None
+
+    for j in range(start_i,len(x)-1):
+        rr=x.iloc[j]
+        h=float(rr.high);c=float(rr.close)
+        if np.isfinite(h) and h>pivot:
+            nxt=x.iloc[j+1];entry=float(nxt.open)
+            if not np.isfinite(entry) or entry<=0:return None
+            return {'entry_date':pd.Timestamp(nxt.date).normalize(),'entry_px':entry,
+                    'signal_date':pd.Timestamp(rr.date).normalize(),
+                    'delay_sessions':int(j+1-start_i),'supports':'PIVOT',
+                    'trigger_anchor':'PIVOT_BREAKOUT','trigger_mode':'PIVOT_BREAKOUT_ALERT'}
+    return None
+
+def _v644_tight_breakout_volume(r,d):
+    """
+    Second source-supported archetype:
+      - VCP / right-side contraction context already comes from the frozen Stage-2 candidate stream;
+      - breakout above pivot/right-side resistance is required;
+      - breakout bar volume must be stronger than its recent 50-session average context.
+    IMPORTANT: no fixed +7% / +114% threshold is imposed. The transcript gives examples, not a universal threshold.
+    """
+    x,start_i,pivot=_v644_prepare(r,d)
+    if x is None:return None
+
+    for j in range(start_i,len(x)-1):
+        rr=x.iloc[j]
+        h=float(rr.high);c=float(rr.close);v=float(rr.volume)
+        va=float(rr.vavg50) if pd.notna(rr.vavg50) else np.nan
+        broke=np.isfinite(h) and h>pivot
+        vol_ok=(not np.isfinite(va)) or (np.isfinite(v) and v>va)
+        if broke and vol_ok:
+            nxt=x.iloc[j+1];entry=float(nxt.open)
+            if not np.isfinite(entry) or entry<=0:return None
+            return {'entry_date':pd.Timestamp(nxt.date).normalize(),'entry_px':entry,
+                    'signal_date':pd.Timestamp(rr.date).normalize(),
+                    'delay_sessions':int(j+1-start_i),'supports':'PIVOT',
+                    'trigger_anchor':'PIVOT_BREAKOUT+VOLUME_CONTEXT',
+                    'trigger_mode':'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT'}
+    return None
+
+def _v644_build(t0):
+    T=_v622_load_trades().copy()
+    T=T[(T.entry_date>=V624_START)&(T.entry_date<=V624_END)].copy()
+    if T.empty:raise RuntimeError('1996–2026 没有 Stage-2 trades')
+
+    M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(T.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in T.groupby(T.listing_id.astype(str))}
+    rows=[];price={};date_set=set();total=len(M)
+
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        if V644_STOP.exists():raise RuntimeError('__STOPPED__')
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close','volume']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):
+            price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+
+        for _,r in g.iterrows():
+            for variant,fn in [
+                ('CURRENT_TRIPLE_GATE',_v644_current),
+                ('PIVOT_BREAKOUT_ALERT',_v644_pivot_breakout_alert),
+                ('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',_v644_tight_breakout_volume)
+            ]:
+                se=fn(r,d)
+                if se is None:continue
+                ex=_v636_exit_from_entry(d,se['entry_date'],se['entry_px'],1260)
+                if ex is None:continue
+                xd,xp,reason,hold=ex
+                rows.append({'variant':variant,'listing_id':lid,'ticker':str(r.ticker),
+                             'entry_date':se['entry_date'],'entry_px':float(se['entry_px']),
+                             'exit_date':xd,'exit_px':float(xp),'exit_reason':reason,
+                             'delay_sessions':int(se.get('delay_sessions',0)),
+                             'supports':str(se.get('supports','')),
+                             'trigger_anchor':str(se.get('trigger_anchor',''))})
+
+        if n==1 or n%50==0 or n==total:
+            _v644_write(status='running',message='Phase 1/3 · 构建 Source-supported breakout archetypes',
+                        phase='trigger_build',processed=n,total=total,current=str(mr.get('ticker','')),
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('V6.44 没有生成 trigger trades')
+    try:X.to_csv(V644_TRADE_CACHE,index=False,compression='gzip')
+    except OSError:pass
+    return T,X,price,sorted(date_set)
+
+def _v644_replay(X,price,cal,label,t0,vi,vn):
+    Z=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        if V644_STOP.exists():raise RuntimeError('__STOPPED__')
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                           'exit_date':dt,'delay':float(rec[i].get('delay_sessions',0))})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep;admitted+=1
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v644_write(status='running',message=f'Phase 2/3 · 30Y Replay {label} {int(round(di/len(cal)*100))}%',
+                        phase='account_replay',processed=vi,total=vn,current=label,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stoprate=float(L.reason.astype(str).str.startswith('STOP7').mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+        avgdelay=float(L.delay.mean());meddelay=float(L.delay.median())
+        avghold=float((pd.to_datetime(L.exit_date)-pd.to_datetime(L.entry_date)).dt.days.mean())
+    else:
+        pf=wr=avgw=avgl=stoprate=avgdelay=meddelay=avghold=np.nan;w100=w200=w500=0
+
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+            'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,
+            'stop_rate':stoprate,'winner100':w100,'winner200':w200,'winner500':w500,
+            'avg_delay_sessions':avgdelay,'median_delay_sessions':meddelay,'avg_hold_days':avghold,
+            'admitted_positions':int(admitted),'skipped_capacity':int(skipped),
+            'avg_exposure':float(C.exposure.mean()),'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v644_run():
+    global v644_thread
+    t0=time.time()
+    try:
+        V644_DIR.mkdir(parents=True,exist_ok=True)
+        if V644_STOP.exists():V644_STOP.unlink()
+        _v644_write(status='running',message='V6.44 Source-Supported Breakout Archetype A/B 启动',
+                    phase='build',processed=0,total=3,current='',elapsed_sec=0,error=None)
+
+        T,X,price,cal=_v644_build(t0)
+        rows=[_v644_replay(X,price,cal,v,t0,i,len(V644_VARIANTS)) for i,v in enumerate(V644_VARIANTS,1)]
+        O=pd.DataFrame(rows)
+        B=O[O.strategy.eq('CURRENT_TRIPLE_GATE')].iloc[0]
+
+        for c in ['cagr','maxdd','profit_factor','win_rate','stop_rate',
+                  'winner100','winner200','winner500','avg_delay_sessions','median_delay_sessions']:
+            O['delta_'+c]=O[c]-float(B[c])
+
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100))
+        O['candidate_pass']=(
+            O.strategy.ne('CURRENT_TRIPLE_GATE') &
+            (O.win_rate>=float(B.win_rate)) &
+            (O.cagr>=float(B.cagr)) &
+            (O.maxdd>=float(B.maxdd)) &
+            (O.profit_factor>=2.0) &
+            (O.winner100_retention>=.80)
+        )
+
+        opp={v:int((X.variant==v).sum()) for v in V644_VARIANTS}
+        verdict='SOURCE_SUPPORTED_BREAKOUT_CANDIDATE' if bool(O.candidate_pass.any()) else 'SOURCE_SUPPORTED_BREAKOUT_NOT_YET_PASS'
+
+        res={
+            'version':'V6.44 Source-Supported Breakout Archetype A/B',
+            'verdict':verdict,
+            'opportunity_summary':opp,
+            'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'source_basis':'V6.43 case-level transcript evidence: (1) pivot high is watched with an alert; when price rises through the pivot, the stock is reviewed immediately for a buy decision; (2) multiple examples state that once the right-side pivot/high is broken it becomes a buy point; (3) another example describes a VCP breakout with stronger volume versus the 50-day average as a valid powerful breakout.',
+            'changed_only':'Only execution trigger archetype changes. Candidate stream / V6.39 stateful pullback context / -7% stop / HOLD1260 / 10-slot are frozen.',
+            'archetypes':{
+                'PIVOT_BREAKOUT_ALERT':'First historical bar trading above the frozen pivot; next-session open models execution.',
+                'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT':'Same pivot breakout, but breakout volume must be above its rolling 50-session average context. No fixed +7%/+114% threshold.'
+            },
+            'acceptance':'Candidate only if CAGR >= current, Win Rate >= current, MaxDD no worse, PF >=2.0, and +100% winner retention >=80%.',
+            'next_step':'If neither archetype passes, do not invent another breakout threshold. Audit the missing discretionary “review current conditions” step from source examples (RS/ranking/fundamentals/market context) before more trigger work.',
+            'cache_note':'Reuses V6.17 Stage-2 + Historical Cache; saves V6.44 trigger cache; 0 Tiingo; no universe rebuild.'
+        }
+        V644_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V644_DIR/'v644_results.csv',index=False)
+        except OSError:pass
+
+        _v644_write(status='done',message=f'V6.44 完成：{verdict}',phase='done',
+                    processed=3,total=3,current='A/B complete',elapsed_sec=round(time.time()-t0,1),error=None)
+
+    except RuntimeError as ex:
+        if str(ex)=='__STOPPED__':
+            _v644_write(status='paused',message='V6.44 已安全暂停',phase='paused',elapsed_sec=round(time.time()-t0,1),error=None)
+        else:
+            traceback.print_exc();_v644_write(status='error',message='V6.44 失败',phase='error',
+                error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    except Exception as ex:
+        traceback.print_exc();_v644_write(status='error',message='V6.44 失败',phase='error',
+            error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v644_thread=None
+
+def _v644_start():
+    global v644_thread
+    if _v644_alive():return False
+    _v644_write(status='starting',message='V6.44 正在启动',phase='startup',
+                processed=0,total=3,current='',elapsed_sec=0,error=None)
+    v644_thread=threading.Thread(target=_v644_run,daemon=True);v644_thread.start();return True
+
+@APP.route('/v644/run',methods=['GET','POST'])
+def v644_run():_v644_start();return redirect('/v644/source-breakout-ab')
+@APP.get('/v644')
+def v644_alias():return redirect('/v644/source-breakout-ab')
+@APP.get('/v644/stop')
+def v644_stop():
+    V644_DIR.mkdir(parents=True,exist_ok=True);V644_STOP.write_text('stop',encoding='utf-8')
+    return redirect('/v644/source-breakout-ab')
+@APP.get('/api/v644/status')
+def v644_status_api():return jsonify(_v644_status())
+
+@APP.get('/v644/source-breakout-ab')
+def v644_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v644_status();r={};op={}
+    if V644_RESULT.exists():
+        try:r=json.loads(V644_RESULT.read_text(encoding='utf-8'));op=r.get('opportunity_summary',{})
+        except Exception:pass
+
+    running=_v644_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v644/run"><button>▶ 开始 V6.44 Source Breakout A/B</button></a>'
+    stop='<a href="/v644/stop"><button style="background:#991b1b">安全暂停</button></a>' if running else ''
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ CANDIDATE' if x.get('candidate_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('delta_maxdd',0) or 0):+.2%}</td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('delta_win_rate',0) or 0):+.1%}</td><td>{float(x.get('stop_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{float(x.get('avg_delay_sessions',0) or 0):.1f}</td><td>{float(x.get('median_delay_sessions',0) or 0):.1f}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1800px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:16px;line-height:1.6}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.6}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v643/example-reconstruction">← V6.43 Example Reconstruction</a>
+<div class="c"><h1>🚀 V6.44 Source-Supported Breakout Archetype A/B</h1><div class="info"><b>这轮只测 V6.43 原文明确支持的 Breakout archetype。</b><br>一条是 Pivot/Resistance high breakout；另一条是在 Pivot breakout 上加“相对最近50日均量更强”的 volume context。没有再猜 reclaim / turn-up 阈值。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn} {stop}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Current Triple Gate：{int(op.get('CURRENT_TRIPLE_GATE',0)):,} · Pivot Breakout：{int(op.get('PIVOT_BREAKOUT_ALERT',0)):,} · Pivot+Volume：{int(op.get('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',0)):,}</p></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>ΔDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>Avg Delay</th><th>Median Delay</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><div class="warn"><b>Source Basis：</b>{e(r.get('source_basis',''))}<br><b>只改变：</b>{e(r.get('changed_only',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v644/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
