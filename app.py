@@ -6975,6 +6975,7 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v646-shortcut" style="border:4px solid #16a34a;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🎯 V6.46 Source-Supported Review Layer A/B</h2><div class="muted">冻结 V6.44 breakout · Actual Buy review A/B · RS line / source numeric quality · 0 Tiingo / 不重扫 universe</div></div><a href="/v646/review-layer-ab"><button type="button">打开 V6.46</button></a></div></div>
 <div class="card" id="v645-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🔎 V6.45 Breakout → Review → Actual Buy Source Audit</h2><div class="muted">冻结 V6.44 breakout · 只重建 JLaw 突破后的 review current conditions 决策层 · 0 Tiingo / 不重扫 universe</div></div><a href="/v645/review-buy-audit"><button type="button">打开 V6.45</button></a></div></div>
 <div class="card" id="v644-shortcut" style="border:4px solid #10b981;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🚀 V6.44 Source-Supported Breakout A/B</h2><div class="muted">Pivot breakout / Pivot+Volume context · 只测 V6.43 原文支持 archetype · 不猜 reclaim 阈值</div></div><a href="/v644/source-breakout-ab"><button type="button">打开 V6.44</button></a></div></div>
 
@@ -25699,3 +25700,188 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>方法：</b>{e(r.get('method',''))}<br><b>关键：</b>{e(r.get('critical_point',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v645/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2200)</script>
 </div></body></html>"""
+
+# ========================= V6.46 Source-Supported Review Layer A/B =========================
+V646_DIR=DATA_DIR/'v646_source_supported_review_layer_ab'
+V646_STATUS=V646_DIR/'status.json'; V646_RESULT=V646_DIR/'result.json'
+v646_thread=None
+V646_VARIANTS=['BREAKOUT_ONLY','SOURCE_PRICE_QUALITY_REVIEW','SOURCE_RS_LINE_REVIEW','SOURCE_COMBINED_REVIEW']
+
+def _v646_status():
+    x={'status':'idle','message':'尚未运行','phase':'idle','processed':0,'total':0,'elapsed_sec':0,'error':None}
+    if V646_STATUS.exists():
+        try:x.update(json.loads(V646_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v646_write(**kw):
+    V646_DIR.mkdir(parents=True,exist_ok=True);x=_v646_status();x.update(kw)
+    V646_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v646_alive(): return v646_thread is not None and v646_thread.is_alive()
+
+def _v646_load_base():
+    if not V644_TRADE_CACHE.exists():
+        raise RuntimeError('找不到 V6.44 trigger cache；请先运行 V6.44。')
+    X=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+    for c in ['entry_date','exit_date','signal_date']:
+        if c in X.columns:X[c]=pd.to_datetime(X[c],errors='coerce').dt.normalize()
+    X=X[X.variant.eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+    if X.empty:raise RuntimeError('V6.44 cache 没有 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')
+    X['variant']='BREAKOUT_ONLY'
+    return X
+
+def _v646_cached_spy():
+    # Historical benchmark must come from an existing cache. Never download here.
+    try:
+        s=load_cached('SPY')
+        if s is not None and len(s):
+            z=s.reset_index().copy();z.columns=[str(c).lower() for c in z.columns]
+            dc='date' if 'date' in z.columns else z.columns[0]
+            cc='close' if 'close' in z.columns else ('adjclose' if 'adjclose' in z.columns else None)
+            if cc:
+                z['date']=pd.to_datetime(z[dc],errors='coerce').dt.normalize();z['close']=pd.to_numeric(z[cc],errors='coerce')
+                return z[['date','close']].dropna().sort_values('date').drop_duplicates('date',keep='last')
+    except Exception:pass
+    # Also try Historical Cache manifest if SPY is explicitly present.
+    try:
+        M=_v615b_read_manifest()
+        if M is not None and len(M):
+            q=M[(M.get('ticker','').astype(str).str.upper()=='SPY')] if 'ticker' in M.columns else pd.DataFrame()
+            if len(q):
+                d=_v617fv1_read_price(q.iloc[0]).copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize();d['close']=pd.to_numeric(d.close,errors='coerce')
+                return d[['date','close']].dropna().sort_values('date').drop_duplicates('date',keep='last')
+    except Exception:pass
+    return None
+
+def _v646_review_features(d,signal_date,spy=None):
+    sd=pd.Timestamp(signal_date).normalize();z=d[d.date<=sd].tail(320).copy()
+    if len(z)<200:return None
+    c=pd.to_numeric(z.close,errors='coerce');h=pd.to_numeric(z.high,errors='coerce')
+    px=float(c.iloc[-1]);ma50=float(c.rolling(50).mean().iloc[-1]);ma150=float(c.rolling(150).mean().iloc[-1]);ma200=float(c.rolling(200).mean().iloc[-1])
+    hi52=float(h.tail(252).max()) if len(h.tail(252)) else np.nan
+    price_quality=bool(np.isfinite(px) and px>=12 and np.isfinite(hi52) and px>=.85*hi52 and px>ma50>ma150>ma200)
+    rs_ok=False;rs_available=False;rs_slope=np.nan
+    if spy is not None and len(spy):
+        s=spy[spy.date<=sd].tail(80).copy()
+        if len(s)>=25 and len(z)>=25:
+            # Source-supported RS line concept: stock price / broad-market benchmark.
+            # We test whether that relative-strength line is rising over the last 20 sessions.
+            a=z[['date','close']].tail(80).rename(columns={'close':'stock'})
+            b=s[['date','close']].rename(columns={'close':'bench'})
+            m=a.merge(b,on='date',how='inner').dropna()
+            if len(m)>=21:
+                line=m.stock/m.bench;rs_slope=float(line.iloc[-1]/line.iloc[-21]-1)
+                rs_available=True;rs_ok=bool(rs_slope>0)
+    return {'price_quality':price_quality,'rs_available':rs_available,'rs_ok':rs_ok,'rs_slope20':rs_slope,
+            'px':px,'dist52':(px/hi52-1 if np.isfinite(hi52) and hi52>0 else np.nan)}
+
+def _v646_build(t0):
+    B=_v646_load_base();M=_v615b_read_manifest()
+    if M is None or M.empty:raise RuntimeError('找不到 Historical Cache manifest')
+    needed=set(B.listing_id.astype(str));M=M[M.listing_id.astype(str).isin(needed)].copy()
+    groups={str(k):g.copy() for k,g in B.groupby(B.listing_id.astype(str))}
+    spy=_v646_cached_spy();rows=[];price={};date_set=set();total=len(M);feat=[]
+    for n,(_,mr) in enumerate(M.iterrows(),1):
+        lid=str(mr.listing_id);g=groups.get(lid)
+        if g is None or g.empty:continue
+        try:d=_v617fv1_read_price(mr)
+        except Exception:d=None
+        if d is None or d.empty:continue
+        d=d.copy();d['date']=pd.to_datetime(d.date,errors='coerce').dt.normalize()
+        for c in ['open','high','low','close','volume']:
+            if c not in d.columns:d[c]=np.nan
+            d[c]=pd.to_numeric(d[c],errors='coerce')
+        d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+        dz=d[(d.date>=V624_START)&(d.date<=V624_END)]
+        if len(dz):price[lid]=dict(zip(dz.date,dz.close.astype(float)));date_set.update(dz.date.tolist())
+        for _,r in g.iterrows():
+            base=r.to_dict();base['variant']='BREAKOUT_ONLY';rows.append(base)
+            sd=r.get('signal_date',pd.Timestamp(r.entry_date)-pd.Timedelta(days=1))
+            f=_v646_review_features(d,sd,spy);feat.append({'listing_id':lid,'ticker':str(r.ticker),'signal_date':str(sd),'features':f})
+            if not f:continue
+            if f['price_quality']:
+                q=base.copy();q['variant']='SOURCE_PRICE_QUALITY_REVIEW';rows.append(q)
+            if f['rs_available'] and f['rs_ok']:
+                q=base.copy();q['variant']='SOURCE_RS_LINE_REVIEW';rows.append(q)
+            if f['price_quality'] and f['rs_available'] and f['rs_ok']:
+                q=base.copy();q['variant']='SOURCE_COMBINED_REVIEW';rows.append(q)
+        if n==1 or n%50==0 or n==total:
+            _v646_write(status='running',message='Phase 1/2 · 用既有 Historical Cache 构建 source-supported review flags',phase='review_build',processed=n,total=total,elapsed_sec=round(time.time()-t0,1),error=None)
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('V6.46 没有生成 review trades')
+    V646_DIR.mkdir(parents=True,exist_ok=True)
+    try:X.to_csv(V646_DIR/'v646_review_trades.csv.gz',index=False,compression='gzip')
+    except OSError:pass
+    return X,price,sorted(date_set),spy,feat
+
+def _v646_run():
+    global v646_thread
+    t0=time.time()
+    try:
+        _v646_write(status='running',message='V6.46 Source-Supported Review Layer A/B 启动',phase='startup',processed=0,total=4,elapsed_sec=0,error=None)
+        X,price,cal,spy,feat=_v646_build(t0)
+        present=[v for v in V646_VARIANTS if bool((X.variant==v).any())]
+        rows=[_v644_replay(X,price,cal,v,t0,i,len(present)) for i,v in enumerate(present,1)]
+        O=pd.DataFrame(rows);B=O[O.strategy.eq('BREAKOUT_ONLY')].iloc[0]
+        for c in ['cagr','maxdd','profit_factor','win_rate','stop_rate','winner100','winner200','winner500']:
+            O['delta_'+c]=O[c]-float(B[c])
+        O['winner100_retention']=O.winner100/max(1,float(B.winner100));O['winner200_retention']=O.winner200/max(1,float(B.winner200));O['winner500_retention']=O.winner500/max(1,float(B.winner500))
+        O['candidate_pass']=(O.strategy.ne('BREAKOUT_ONLY')&(O.cagr>=float(B.cagr))&(O.win_rate>=float(B.win_rate))&(O.maxdd>=float(B.maxdd))&(O.profit_factor>=2.0)&(O.winner100_retention>=.80))
+        opp={v:int((X.variant==v).sum()) for v in V646_VARIANTS}
+        rs_cov=sum(1 for z in feat if z.get('features') and z['features'].get('rs_available'))/max(1,len(feat))
+        verdict='SOURCE_REVIEW_LAYER_CANDIDATE' if bool(O.candidate_pass.any()) else 'SOURCE_REVIEW_LAYER_NOT_YET_PASS'
+        if rs_cov<.80: verdict += '_RS_COVERAGE_LIMITED'
+        res={'version':'V6.46 Source-Supported Review Layer A/B','verdict':verdict,'opportunity_summary':opp,'rs_benchmark_cache_available':bool(spy is not None and len(spy)),'rs_feature_coverage':rs_cov,
+             'overall':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+             'source_rules':{'PRICE_QUALITY':'At review date: price >= $12; within 15% of 52-week high; Stage-2 moving-average stack close > 50DMA > 150DMA > 200DMA. These are explicit numeric source rules.','RS_LINE':'Relative-strength line is stock price divided by broad-market benchmark; source example rejects/defers a stock when RS line is falling and ranks another higher as RS starts rising. V6.46 tests only rising-vs-not-rising over 20 sessions; it does NOT claim to reproduce proprietary IBD RS Rating.','FUNDAMENTALS':'NOT TESTED in V6.46 unless point-in-time quarterly sales acceleration data already exists. No synthetic fundamental proxy is invented.','MARKET_CONTEXT':'NOT converted into a new numeric gate here because V6.45 source excerpts do not provide a universal historical threshold for actual-buy permission.'},
+             'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT entries, -7% stop, HOLD1260, 10-slot replay, exits/winner management.','acceptance':'Candidate must not reduce CAGR or Win Rate, MaxDD must be no worse, PF >=2.0, and +100% winner retention >=80%.','next_step':'If a review variant passes, inspect year/era stability and rejected-winner attribution before promotion. If none passes, do not tune thresholds; next reconstruct point-in-time fundamentals / market-context evidence from source and existing data only.','cache_note':'Uses V6.44 trigger cache + V6.17 Historical Cache only. No Tiingo, no universe rebuild, no factor search.'}
+        V646_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:O.to_csv(V646_DIR/'v646_results.csv',index=False)
+        except OSError:pass
+        _v646_write(status='done',message=f'V6.46 完成：{verdict}',phase='done',processed=len(present),total=len(present),elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v646_write(status='error',message='V6.46 失败',phase='error',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v646_thread=None
+
+def _v646_start():
+    global v646_thread
+    if _v646_alive():return False
+    _v646_write(status='starting',message='V6.46 正在启动',phase='startup',processed=0,total=4,elapsed_sec=0,error=None)
+    v646_thread=threading.Thread(target=_v646_run,daemon=True);v646_thread.start();return True
+
+@APP.route('/v646/run',methods=['GET','POST'])
+def v646_run():_v646_start();return redirect('/v646/review-layer-ab')
+
+@APP.get('/v646')
+def v646_alias():return redirect('/v646/review-layer-ab')
+
+@APP.get('/api/v646/status')
+def v646_status_api():return jsonify(_v646_status())
+
+@APP.get('/v646/review-layer-ab')
+def v646_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v646_status();r={}
+    if V646_RESULT.exists():
+        try:r=json.loads(V646_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v646_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v646/run"><button>▶ 开始 V6.46 Review Layer A/B</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+    trs=''
+    for x in r.get('overall',[]):
+        p='✅ CANDIDATE' if x.get('candidate_pass') else '—'
+        trs+=f"<tr><td><b>{e(x.get('strategy',''))}</b></td><td>{float(x.get('cagr',0) or 0):.2%}</td><td>{float(x.get('delta_cagr',0) or 0):+.2%}</td><td><b>{float(x.get('maxdd',0) or 0):.2%}</b></td><td>{float(x.get('profit_factor',0) or 0):.2f}</td><td>{float(x.get('win_rate',0) or 0):.1%}</td><td>{float(x.get('delta_win_rate',0) or 0):+.1%}</td><td>{float(x.get('stop_rate',0) or 0):.1%}</td><td>{float(x.get('avg_win',0) or 0):.1%}</td><td>{float(x.get('avg_loss',0) or 0):.1%}</td><td>{int(x.get('winner100',0) or 0)}</td><td>{float(x.get('winner100_retention',0) or 0):.1%}</td><td>{int(x.get('winner200',0) or 0)}</td><td>{int(x.get('winner500',0) or 0)}</td><td>{float(x.get('final_multiple',0) or 0):.2f}x</td><td>{p}</td></tr>"
+    op=r.get('opportunity_summary',{});rules=r.get('source_rules',{})
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1800px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}</style></head><body><div class="w">
+<a href="/v645/review-buy-audit">← V6.45 Review Source Audit</a>
+<div class="c"><h1>🎯 V6.46 Source-Supported Review Layer A/B</h1><div class="info"><b>这轮开始真正回测 Actual Buy Review Layer。</b><br>冻结 V6.44 最佳 Breakout。只加入原文有明确依据、而历史缓存能够无前视实现的 review 条件；没有数据的 Fundamentals / Market Context 不造 proxy。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0)):,}/{int(st.get('total',0)):,} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Breakout-only：{int(op.get('BREAKOUT_ONLY',0) or 0):,} · Price Quality：{int(op.get('SOURCE_PRICE_QUALITY_REVIEW',0) or 0):,} · RS Line：{int(op.get('SOURCE_RS_LINE_REVIEW',0) or 0):,} · Combined：{int(op.get('SOURCE_COMBINED_REVIEW',0) or 0):,}</p><p>RS benchmark cache：{'YES' if r.get('rs_benchmark_cache_available') else 'NO'} · RS coverage：{float(r.get('rs_feature_coverage',0) or 0):.1%}</p></div>
+<div class="c" style="overflow:auto"><h2>1996–2026 · 10-slot A/B</h2><table><tr><th>方案</th><th>CAGR</th><th>ΔCAGR</th><th>MaxDD</th><th>PF</th><th>Win Rate</th><th>ΔWR</th><th>STOP率</th><th>Avg Win</th><th>Avg Loss</th><th>+100%</th><th>+100%保留</th><th>+200%</th><th>+500%</th><th>Final</th><th>Pass</th></tr>{trs}</table></div>
+<div class="c"><h2>这轮到底测什么</h2><div class="warn"><b>Price Quality：</b>{e(rules.get('PRICE_QUALITY',''))}<br><br><b>RS Line：</b>{e(rules.get('RS_LINE',''))}<br><br><b>Fundamentals：</b>{e(rules.get('FUNDAMENTALS',''))}<br><br><b>Market Context：</b>{e(rules.get('MARKET_CONTEXT',''))}</div></div>
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v646/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2200)</script>
+</div></body></html>'''
