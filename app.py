@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v649-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛑 V6.49 Extended / Tight Actual-Buy Rule Reconstruction</h2><div class="muted">锁死 V6.44 28.25% 基线 · 只核对 EXTENDED=PASS 与 TIGHT/VOLUME=BUY 的可执行定义 · 不发明阈值</div></div><a href="/v649/decision-rule-reconstruction"><button type="button">打开 V6.49</button></a></div></div>
+
 <div class="card" id="v648-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.48 Actual-Buy Decision Reconstruction</h2><div class="muted">冻结 V6.44 Breakout 基线 · 只重建“突破后为什么真正买 / 为什么只观察或放弃” · 不做新阈值 tuning</div></div><a href="/v648/actual-buy-reconstruction"><button type="button">打开 V6.48</button></a></div></div>
 
 <div class="card" id="v647-shortcut" style="border:4px solid #0f766e;background:#f0fdfa"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🏁 V6.47 Source-Supported Selection / Ranking A/B</h2><div class="muted">不再硬删 Breakout · 同日机会按 RS/Leadership + Price Quality 横向排序 · 10-slot 只优先录取更强候选</div></div><a href="/v647/ranking-ab"><button type="button">打开 V6.47</button></a></div></div>
@@ -26386,4 +26388,170 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px;ma
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)}</p><p>BUY：{int(dc.get('ACTUAL_BUY',0) or 0)} · WATCH：{int(dc.get('WATCH_ONLY',0) or 0)} · PASS：{int(dc.get('PASS_SKIP',0) or 0)} · UNCLEAR：{int(dc.get('UNCLEAR',0) or 0)}</p><p><b>可进入下一步：</b>{e(', '.join(r.get('strong_dimensions',[])) or '—')}</p></div>
 <div class="c"><h2>Decision Evidence Ledger</h2><table><tr><th>Dimension</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>Cross-video</th></tr>{dimrows}</table></div>
+</div></body></html>"""
+
+
+# ========================= V6.49 Extended / Tight Actual-Buy Rule Reconstruction =========================
+V649_DIR=DATA_DIR/'v649_extended_tight_rule_reconstruction'
+V649_STATUS=V649_DIR/'status.json'; V649_RESULT=V649_DIR/'result.json'
+v649_thread=None
+
+def _v649_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V649_STATUS.exists():
+        try:x.update(json.loads(V649_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v649_write(**kw):
+    V649_DIR.mkdir(parents=True,exist_ok=True);x=_v649_status();x.update(kw)
+    V649_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v649_alive(): return v649_thread is not None and v649_thread.is_alive()
+
+def _v649_corpus():
+    if '_v648_corpus' in globals(): return _v648_corpus()
+    if '_v645_corpus' in globals(): return _v645_corpus()
+    return []
+
+def _v649_context_hits(corpus,terms,max_hits=80):
+    out=[];seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        for term in terms:
+            start=0
+            while True:
+                p=low.find(term.lower(),start)
+                if p<0:break
+                a=max(0,p-1100);b=min(len(row['text']),p+len(term)+1800)
+                sn=row['text'][a:b].strip();key=(row['video_id'],sn[:420])
+                if key not in seen:
+                    seen.add(key);out.append({'video_id':row['video_id'],'title':row.get('title',''),
+                                              'anchor':term,'snippet':sn})
+                    if len(out)>=max_hits:return out
+                start=p+max(1,len(term))
+    return out
+
+def _v649_numbers(sn):
+    vals=[]
+    for x in re.findall(r'(?<![A-Za-z])(?:\d+(?:\.\d+)?\s*%|\$?\d+(?:\.\d+)?\s*(?:day|days|week|weeks|session|sessions|dollars?)?)',sn):
+        z=x.strip()
+        if z and z not in vals:vals.append(z)
+    return vals[:30]
+
+def _v649_run():
+    global v649_thread
+    t0=time.time()
+    try:
+        _v649_write(status='running',message='核对 EXTENDED / TIGHT / VOLUME 的原文可执行定义…',elapsed_sec=0,error=None)
+        corpus=_v649_corpus()
+
+        ext_hits=_v649_context_hits(corpus,['extended','extension','too extended','chase','chasing','too far'],80)
+        tight_hits=_v649_context_hits(corpus,['tight','tightness','contraction','vcp','dry up','volume contraction'],80)
+        vol_hits=_v649_context_hits(corpus,['breakout volume','volume breakout','volume','50 day average','50-day average'],80)
+
+        def summarize(hits):
+            vids=sorted(set(x['video_id'] for x in hits))
+            nums=[]
+            for h in hits:
+                for n in _v649_numbers(h['snippet']):
+                    if n not in nums:nums.append(n)
+            return {'cases':len(hits),'videos':len(vids),'video_ids':vids,'numeric_mentions':nums[:40],
+                    'examples':hits[:12]}
+
+        ext=summarize(ext_hits);tight=summarize(tight_hits);vol=summarize(vol_hits)
+
+        # Source-safe decision:
+        # Do not fabricate an Extended numeric veto if the transcript does not give a repeatable threshold.
+        ext_numeric_repeatable=False
+        ext_rule_note='No universal numeric Extended threshold may be assumed from V6.48 alone.'
+        if ext['videos']>=2 and ext['numeric_mentions']:
+            ext_rule_note='Numeric mentions exist around Extended contexts, but V6.49 still treats them as evidence to review, not automatically as a universal threshold.'
+
+        # Tight/volume rule is already embodied by V6.44 best archetype; do not duplicate it under a new name.
+        tight_is_v644_redundant=True
+
+        v648={}
+        try:
+            if V648_RESULT.exists():v648=json.loads(V648_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+        v644={}
+        try:
+            if V644_RESULT.exists():v644=json.loads(V644_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+        verdict='EXTENDED_RULE_NEEDS_EXACT_SOURCE_DEFINITION'
+        if ext_numeric_repeatable:
+            verdict='EXTENDED_RULE_SOURCE_NUMERIC_EVIDENCE_FOUND'
+
+        res={
+          'version':'V6.49 Extended / Tight Actual-Buy Rule Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),
+          'extended':ext,
+          'tight':tight,
+          'volume':vol,
+          'extended_rule_note':ext_rule_note,
+          'tight_rule_note':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT is already the source-supported Tight/Volume execution archetype and is the locked 28.25% CAGR benchmark; V6.49 will not relabel or retune the same rule.',
+          'v648_context':v648,
+          'v644_context':v644,
+          'critical_point':'V6.48 gives strong categorical separation: EXTENDED appears in PASS cases, while BREAKOUT/TIGHT/VOLUME appear repeatedly in BUY cases. But categorical source evidence is not permission to invent a numeric Extended threshold.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT benchmark (28.25% CAGR), -7% stop, HOLD1260, 10-slot replay, exits/winner management, universe. V6.46/V6.47 remain negative experiments.',
+          'next_step':'If V6.49 finds an explicit, repeatable source definition of Extended, V6.50 will test exactly one EXTENDED_VETO against V6.44 using the existing V6.44 trigger cache. If not, keep V6.44 unchanged and audit actual chart examples for extension distance/timing instead of tuning.',
+          'cache_note':'Reads existing JLaw transcript cache + V6.44/V6.48 results only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V649_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v649_write(status='done',message=f'V6.49 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v649_write(status='error',message='V6.49 失败',elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v649_thread=None
+
+def _v649_start():
+    global v649_thread
+    if _v649_alive():return False
+    _v649_write(status='starting',message='V6.49 正在启动',elapsed_sec=0,error=None)
+    v649_thread=threading.Thread(target=_v649_run,daemon=True);v649_thread.start();return True
+
+@APP.route('/v649/run',methods=['GET','POST'])
+def v649_run(): _v649_start(); return redirect('/v649/decision-rule-reconstruction')
+
+@APP.get('/v649')
+def v649_alias(): return redirect('/v649/decision-rule-reconstruction')
+
+@APP.get('/api/v649/status')
+def v649_status_api(): return jsonify(_v649_status())
+
+@APP.get('/v649/decision-rule-reconstruction')
+def v649_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v649_status();r={}
+    if V649_RESULT.exists():
+        try:r=json.loads(V649_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v649_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v649/run"><button>▶ 开始 V6.49 Extended / Tight Reconstruction</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    def evcards(key,title):
+        z=r.get(key,{})
+        nums=', '.join(z.get('numeric_mentions',[])) or '—'
+        ev=''
+        for x in z.get('examples',[])[:8]:
+            ev+=f"<div class='quote'><b>{e(x.get('video_id'))}</b> · {e(x.get('anchor'))}<br>{e(str(x.get('snippet',''))[:1600])}</div>"
+        return f"<div class='c'><h2>{e(title)}</h2><p>Cases：{int(z.get('cases',0) or 0)} · Videos：{int(z.get('videos',0) or 0)}</p><p><b>原文附近数字：</b>{e(nums)}</p>{ev or '<p>暂无案例。</p>'}</div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}.quote{{background:#f8fafc;border-left:4px solid #dc2626;padding:14px;margin:12px 0;line-height:1.55}}</style></head><body><div class="w">
+<a href="/v648/actual-buy-reconstruction">← V6.48 Actual-Buy Reconstruction</a>
+<div class="c"><h1>🛑 V6.49 Extended / Tight Actual-Buy Rule Reconstruction</h1><div class="info"><b>不再发明规则。</b><br>V6.48 看到 EXTENDED→PASS 很干净，但还不知道 JLaw 是否给过可重复执行的“Extended”定义。TIGHT/VOLUME 则已经由 V6.44 最佳 Breakout 体现，所以不重复调。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>{e(r.get('critical_point','等待运行'))}</p><p><b>Extended：</b>{e(r.get('extended_rule_note',''))}</p><p><b>Tight/Volume：</b>{e(r.get('tight_rule_note',''))}</p></div>
+{evcards('extended','EXTENDED / CHASE / TOO FAR')}
+{evcards('tight','TIGHT / VCP / CONTRACTION')}
+{evcards('volume','BREAKOUT VOLUME CONTEXT')}
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v649/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
