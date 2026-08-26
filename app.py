@@ -27995,3 +27995,167 @@ if _v656_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v656_home_base: APP.view_functions[ep]=_v656_home_wrap
+
+
+# ========================= V6.57 Point-in-Time Market Permission Mapping =========================
+V657_DIR=DATA_DIR/'v657_market_permission_point_in_time_mapping'
+V657_STATUS=V657_DIR/'status.json'; V657_RESULT=V657_DIR/'result.json'
+v657_thread=None
+
+def _v657_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V657_STATUS.exists():
+        try:x.update(json.loads(V657_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v657_write(**kw):
+    V657_DIR.mkdir(parents=True,exist_ok=True);x=_v657_status();x.update(kw)
+    V657_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v657_alive(): return v657_thread is not None and v657_thread.is_alive()
+
+def _v657_pf(ret):
+    r=pd.to_numeric(ret,errors='coerce').dropna()
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    return gp/gl if gl>0 else (999.0 if gp>0 else 0.0)
+
+def _v657_run():
+    global v657_thread
+    t0=time.time()
+    try:
+        _v657_write(status='running',message='把 V6.56 Cash/Observe 语义映射到 point-in-time SPY regime…',elapsed_sec=0,error=None)
+
+        if not V644_TRADE_CACHE.exists():
+            raise RuntimeError('找不到 V6.44 trade cache；请先确认 V6.44 cache 仍在。')
+        X=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        X=X[X.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        if X.empty: raise RuntimeError('V6.44 cache 没有 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')
+
+        for c in ['entry_date','exit_date']:
+            X[c]=pd.to_datetime(X[c],errors='coerce').dt.normalize()
+        for c in ['entry_px','exit_px']:
+            X[c]=pd.to_numeric(X[c],errors='coerce')
+        X=X.dropna(subset=['entry_date','entry_px','exit_px']).copy()
+        X['ret']=X.exit_px/X.entry_px-1
+        X['win']=X.ret>0
+        X['stop7']=X.exit_reason.astype(str).str.contains('STOP7',case=False,na=False)
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty: raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.sort_values('date')
+        Z=pd.merge_asof(X.sort_values('entry_date'),
+                        R.rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+
+        rows=[]
+        for regime in ['STRONG_BULL','BULL','TRANSITION','DEFENSIVE','UNKNOWN']:
+            g=Z[Z.regime.eq(regime)].copy()
+            if g.empty:continue
+            rows.append({
+              'regime':regime,'trades':int(len(g)),
+              'share':float(len(g)/len(Z)),
+              'win_rate':float(g.win.mean()),
+              'pf':float(_v657_pf(g.ret)),
+              'avg_return':float(g.ret.mean()),
+              'median_return':float(g.ret.median()),
+              'stop7_rate':float(g.stop7.mean()),
+              'avg_spy_ret20':float(pd.to_numeric(g.spy_ret20,errors='coerce').mean()) if 'spy_ret20' in g else None,
+              'avg_spy_ret60':float(pd.to_numeric(g.spy_ret60,errors='coerce').mean()) if 'spy_ret60' in g else None
+            })
+
+        # Diagnostic grouping only; not a trading rule.
+        favorable=Z[Z.regime.isin(['STRONG_BULL','BULL'])]
+        cautious=Z[Z.regime.isin(['TRANSITION','DEFENSIVE'])]
+        def metrics(g):
+            if g.empty:return {}
+            return {'trades':int(len(g)),'win_rate':float(g.win.mean()),'pf':float(_v657_pf(g.ret)),
+                    'avg_return':float(g.ret.mean()),'stop7_rate':float(g.stop7.mean())}
+        fav=metrics(favorable);cau=metrics(cautious)
+
+        # Do not promote if separation is weak.
+        separation = (
+            fav and cau and
+            (fav.get('pf',0) > cau.get('pf',0)*1.15 or
+             fav.get('win_rate',0) > cau.get('win_rate',0)+0.03 or
+             fav.get('stop7_rate',1) < cau.get('stop7_rate',1)-0.03)
+        )
+        verdict='POINT_IN_TIME_MARKET_PERMISSION_MAP_READY' if separation else 'MARKET_REGIME_SEPARATION_WEAK_DO_NOT_GATE'
+
+        res={
+          'version':'V6.57 Point-in-Time Market Permission Mapping',
+          'verdict':verdict,
+          'trades':int(len(Z)),
+          'regime_metrics':rows,
+          'favorable_metrics':fav,
+          'cautious_metrics':cau,
+          'source_semantic':'V6.56 supports Cash/Observe / reduced aggressiveness as a market-permission semantic. This version maps that semantic to already-existing point-in-time SPY regime data; it does not create a new bull/bear rule.',
+          'diagnostic_question':'Do V6.44 breakout candidates historically behave materially differently when SPY is STRONG_BULL/BULL versus TRANSITION/DEFENSIVE, using only information available on each entry date?',
+          'important_negative':'This page is diagnostic only. It does NOT yet skip trades, resize positions, change exits, or create a BULL=BUY / BEAR=PASS gate.',
+          'next_step':'If separation is material, V6.58 will run one controlled admission-strictness A/B using the existing V6.44 trigger cache: baseline vs cautious-regime selective admission. If separation is weak, close Market Context as a trading-rule branch and move to Winner Management.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; exits/winner management; universe.',
+          'cache_note':'V6.44 trade cache + existing point-in-time SPY cache only; 0 Tiingo; no universe rebuild; no trigger rebuild.'
+        }
+        V657_DIR.mkdir(parents=True,exist_ok=True)
+        V657_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:pd.DataFrame(rows).to_csv(V657_DIR/'regime_metrics.csv',index=False)
+        except Exception:pass
+        _v657_write(status='done',message=f'V6.57 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v657_write(status='error',message='V6.57 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v657_thread=None
+
+def _v657_start():
+    global v657_thread
+    if _v657_alive():return False
+    _v657_write(status='starting',message='V6.57 正在启动',elapsed_sec=0,error=None)
+    v657_thread=threading.Thread(target=_v657_run,daemon=True);v657_thread.start();return True
+
+@APP.route('/v657/run',methods=['GET','POST'])
+def v657_run():_v657_start();return redirect('/v657/market-permission-map')
+
+@APP.get('/api/v657/status')
+def v657_status_api():return jsonify(_v657_status())
+
+@APP.get('/v657/market-permission-map')
+def v657_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v657_status();r={}
+    if V657_RESULT.exists():
+        try:r=json.loads(V657_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v657_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v657/run"><button>▶ 开始 V6.57 Point-in-Time Mapping</button></a>'
+    rows=''
+    for x in r.get('regime_metrics',[]):
+        rows+=f"<tr><td><b>{e(x.get('regime'))}</b></td><td>{int(x.get('trades',0))}</td><td>{float(x.get('share',0))*100:.1f}%</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('pf',0)):.2f}</td><td>{float(x.get('avg_return',0))*100:.1f}%</td><td>{float(x.get('stop7_rate',0))*100:.1f}%</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #a5b4fc;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v656/market-selectivity-permission">← V6.56</a>
+<div class="c"><h1>🗺️ V6.57 Point-in-Time Market Permission Mapping</h1><div class="info"><b>不改策略。</b><br>把 V6.56 的 Cash/Observe / reduced-aggressiveness 语义，映射到既有 SPY point-in-time regime，只看 V6.44 Breakout 在不同市场状态下的真实表现。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Trades：{int(r.get('trades',0) or 0)}</p><p>{e(r.get('diagnostic_question',''))}</p></div>
+<div class="c"><h2>V6.44 by Point-in-Time SPY Regime</h2><table><tr><th>Regime</th><th>Trades</th><th>Share</th><th>Win Rate</th><th>PF</th><th>Avg Return</th><th>STOP7</th></tr>{rows or '<tr><td colspan="7">运行后显示</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v657_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v657_home_base is not None:
+    def _v657_home_wrap(*args,**kwargs):
+        resp=_v657_home_base(*args,**kwargs)
+        card="""<div id="v657-market-permission-map" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🗺️ V6.57 Point-in-Time Market Permission Mapping</h2><p>V6.44 Breakout × SPY point-in-time regime · 只做诊断 · 不改策略</p><a href="/v657/market-permission-map"><button>打开 V6.57</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.56');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v657_home_base:APP.view_functions[ep]=_v657_home_wrap
