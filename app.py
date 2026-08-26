@@ -27840,3 +27840,158 @@ if _v655_original_home_view is not None:
         if _vf is _v655_original_home_view:
             APP.view_functions[_ep] = _v655_home_with_card
 # ======================= END V6.55 HOME CARD PATCH =======================
+
+
+# ========================= V6.56 Market Selectivity / Permission Semantics =========================
+V656_DIR=DATA_DIR/'v656_market_selectivity_permission'
+V656_STATUS=V656_DIR/'status.json'; V656_RESULT=V656_DIR/'result.json'
+v656_thread=None
+
+def _v656_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V656_STATUS.exists():
+        try:x.update(json.loads(V656_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v656_write(**kw):
+    V656_DIR.mkdir(parents=True,exist_ok=True);x=_v656_status();x.update(kw)
+    V656_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v656_alive(): return v656_thread is not None and v656_thread.is_alive()
+
+def _v656_corpus():
+    if '_v655_corpus' in globals(): return _v655_corpus()
+    if '_v652_corpus' in globals(): return _v652_corpus()
+    return []
+
+V656_ANCHORS=['aggressive','cash','hold cash','observe','watch','wait','low risk buy point','low-risk buy point',
+'best opportunities','highest probability','not participate','participate','不可以aggressive','持有現金','持有现金',
+'空⼿','空手','觀察','观察','低⾵險買⼊點','低風險買入點','勝算最⾼','胜算最高','不參與','不参与']
+
+def _v656_label(sn):
+    low=sn.lower()
+    if any(t in low for t in ['hold cash','stay in cash','in cash']) or any(t in sn for t in ['持有現金','持有现金','空⼿','空手']):
+        return 'CASH_OBSERVE'
+    if any(t in low for t in ['not aggressive','cannot be aggressive','do not be aggressive']) or '不可以aggressive' in low:
+        return 'SELECTIVE_ONLY'
+    if any(t in low for t in ['only participate','highest probability','best opportunities','not participate']) or any(t in sn for t in ['勝算最⾼','胜算最高','不參與','不参与']):
+        return 'SELECTIVE_ONLY'
+    if 'aggressive' in low:
+        return 'AGGRESSIVE_ALLOWED'
+    if any(t in low for t in ['observe','watch','wait']) or any(t in sn for t in ['觀察','观察','等待']):
+        return 'WATCH_OBSERVE'
+    return 'UNCLEAR'
+
+def _v656_states(sn):
+    low=sn.lower();tags=[]
+    rules=[('MARKET_DOWNTREND',['down trend','downtrend','breakdown','跌穿','向下突破']),
+           ('MARKET_UNFAVORABLE',['not optimistic','difficult to make money','hard to make money','不樂觀','不乐观','賺錢是比較難','赚钱是比较难']),
+           ('BROAD_LOW_RISK_ABSENT',['no broad','not broad','few low risk','小數','少數','沒有看到有廣泛','没有看到有广泛']),
+           ('STRONG_STOCK_EXCEPTIONS',['strong stocks','strong stock','強勢股','强势股']),
+           ('UPTREND',['uptrend','上升趨勢','上升趋势']),('BULL',['bull market','牛市']),('BEAR',['bear market','熊市'])]
+    for tag,terms in rules:
+        if any(t in low or t in sn for t in terms):tags.append(tag)
+    return tags
+
+def _v656_extract(corpus,max_cases=260):
+    rows=[];seen=set()
+    for row in corpus:
+        text=str(row.get('text',''));low=text.lower();hits=[]
+        for a in V656_ANCHORS:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            lo=max(0,p-1500);hi=min(len(text),p+len(a)+2200);sn=text[lo:hi].strip()
+            lab=_v656_label(sn);key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:600]),lab)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({'video_id':row.get('video_id',''),'title':row.get('title',''),'anchor':a,'semantic':lab,'states':_v656_states(sn),'snippet':sn})
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v656_run():
+    global v656_thread
+    t0=time.time()
+    try:
+        _v656_write(status='running',message='验证 Market Context 是否实际控制 Aggressive / Selective / Cash-observe…',elapsed_sec=0,error=None)
+        corpus=_v656_corpus();cases=_v656_extract(corpus,260)
+        labels=['AGGRESSIVE_ALLOWED','SELECTIVE_ONLY','CASH_OBSERVE','WATCH_OBSERVE','UNCLEAR']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={'cases':len(arr),'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),'examples':arr[:12]}
+        states={}
+        for st in ['MARKET_DOWNTREND','MARKET_UNFAVORABLE','BROAD_LOW_RISK_ABSENT','STRONG_STOCK_EXCEPTIONS','UPTREND','BULL','BEAR']:
+            arr=[x for x in cases if st in x['states']]
+            states[st]={'cases':len(arr),'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+                        'mix':{lab:sum(1 for x in arr if x['semantic']==lab) for lab in labels}}
+        selective_cross=summary['SELECTIVE_ONLY']['videos']>=2 and summary['SELECTIVE_ONLY']['cases']>=3
+        cash_cross=summary['CASH_OBSERVE']['videos']>=2 and summary['CASH_OBSERVE']['cases']>=2
+        verdict='MARKET_CONTEXT_IS_SELECTIVITY_PERMISSION_LAYER' if selective_cross else ('MARKET_CONTEXT_SUPPORTS_CASH_OBSERVE_PERMISSION' if cash_cross else 'MARKET_SELECTIVITY_SEMANTICS_INSUFFICIENT')
+        res={'version':'V6.56 Market Selectivity / Permission Semantics','verdict':verdict,
+             'transcript_videos':len(corpus),'source_cases':len(cases),'semantic_summary':summary,'state_ledger':states,
+             'source_conclusion':'Market context is being tested as a participation/selectivity layer, not a bull/bear hard gate. Unfavorable source examples explicitly discuss not being aggressive, holding cash/observing, scarcity of broad low-risk buy points, and skipping some opportunities.',
+             'important_negative':'No numeric exposure-sizing formula is inferred. V6.55 found REDUCE_EXPOSURE=0.',
+             'next_step':'If this semantic is confirmed, map it to existing point-in-time market breadth/index cache before any controlled A/B. Admission strictness may change; do not create a bull/bear veto.',
+             'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; exits/winner management; universe.',
+             'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'}
+        V656_DIR.mkdir(parents=True,exist_ok=True);V656_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v656_write(status='done',message=f'V6.56 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v656_write(status='error',message='V6.56 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v656_thread=None
+
+def _v656_start():
+    global v656_thread
+    if _v656_alive():return False
+    _v656_write(status='starting',message='V6.56 正在启动',elapsed_sec=0,error=None)
+    v656_thread=threading.Thread(target=_v656_run,daemon=True);v656_thread.start();return True
+
+@APP.route('/v656/run',methods=['GET','POST'])
+def v656_run():_v656_start();return redirect('/v656/market-selectivity-permission')
+
+@APP.get('/api/v656/status')
+def v656_status_api():return jsonify(_v656_status())
+
+@APP.get('/v656/market-selectivity-permission')
+def v656_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v656_status();r={}
+    if V656_RESULT.exists():
+        try:r=json.loads(V656_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v656_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v656/run"><button>▶ 开始 V6.56 Market Selectivity Semantics</button></a>'
+    rows=''
+    for lab in ['AGGRESSIVE_ALLOWED','SELECTIVE_ONLY','CASH_OBSERVE','WATCH_OBSERVE','UNCLEAR']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdfa;border:1px solid #5eead4;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v655/market-permission-exposure">← V6.55</a><div class="c"><h1>🎯 V6.56 Market Selectivity / Permission Semantics</h1><div class="info">不做 Bull/Bear Gate；只验证 Aggressive / Selective-only / Cash-observe。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)}</p><p>{e(r.get('source_conclusion',''))}</p></div>
+<div class="c"><h2>Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th></tr>{rows}</table></div>
+<div class="c"><p><b>重要负结论：</b>{e(r.get('important_negative',''))}</p><p><b>下一步：</b>{e(r.get('next_step',''))}</p><p><b>冻结：</b>{e(r.get('frozen',''))}</p><p><b>Cache：</b>{e(r.get('cache_note',''))}</p></div>
+</div></body></html>"""
+
+
+_v656_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v656_home_base is not None:
+    def _v656_home_wrap(*args,**kwargs):
+        resp=_v656_home_base(*args,**kwargs)
+        card='<div id="v656-market-selectivity" style="background:#f0fdfa;border:5px solid #0f766e;border-radius:24px;padding:28px;margin:22px 0">\n<h2>🎯 V6.56 Market Selectivity / Permission Semantics</h2>\n<p>不做 Bull/Bear Gate · 验证 Aggressive / Selective-only / Cash-observe · 直接读原始 JLaw 字幕</p>\n<a href="/v656/market-selectivity-permission"><button>打开 V6.56</button></a>\n</div>\n'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('V6.55'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0: body=body[:pos]+card+body[pos:]
+            else: body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v656_home_base: APP.view_functions[ep]=_v656_home_wrap
