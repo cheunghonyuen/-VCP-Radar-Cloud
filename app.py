@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v652mkt-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌐 V6.52 Market Context Actual-Buy Reconstruction</h2><div class="muted">结束 Extended 分支 · 只重建 JLaw 在 BUY/WATCH/PASS 时对 General Market / Exposure / Correction / Uptrend 的真实决策作用</div></div><a href="/v652/market-context-reconstruction"><button type="button">打开 V6.52</button></a></div></div>
+
 <div class="card" id="v651ext-shortcut" style="border:4px solid #b45309;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.51 Extended Case Validation</h2><div class="muted">只验证 V6.50 的 Extended 候选定义是否真来自 BUY/WATCH/PASS 案例 · 不回测、不调阈值</div></div><a href="/v651/extended-case-validation"><button type="button">打开 V6.51</button></a></div></div>
 
 <div class="card" id="v650-shortcut" style="border:4px solid #ea580c;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">📐 V6.50 Extended / Chase Actual-Buy Example Reconstruction</h2><div class="muted">冻结 V6.44 28.25% 基线 · 拆 BUY/WATCH/PASS 案例的 Pivot→Entry 距离、突破后时序、Chase/Too Far 与 Market Context</div></div><a href="/v650/extended-chase-examples"><button type="button">打开 V6.50</button></a></div></div>
@@ -26947,4 +26949,197 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>Candidate Validation</h2><table><tr><th>Type</th><th>Value</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>Bad Location</th><th>Good Location</th><th>Valid</th></tr>{rows or '<tr><td colspan="10">运行后显示。</td></tr>'}</table></div>
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v651/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+
+# ========================= V6.52 Market Context Actual-Buy Reconstruction =========================
+V652_DIR=DATA_DIR/'v652_market_context_actual_buy_reconstruction'
+V652_STATUS=V652_DIR/'status.json'; V652_RESULT=V652_DIR/'result.json'
+v652_thread=None
+
+def _v652_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V652_STATUS.exists():
+        try:x.update(json.loads(V652_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v652_write(**kw):
+    V652_DIR.mkdir(parents=True,exist_ok=True);x=_v652_status();x.update(kw)
+    V652_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v652_alive(): return v652_thread is not None and v652_thread.is_alive()
+
+def _v652_corpus():
+    if '_v650_corpus' in globals(): return _v650_corpus()
+    if '_v649_corpus' in globals(): return _v649_corpus()
+    if '_v648_corpus' in globals(): return _v648_corpus()
+    return []
+
+V652_DECISION_TERMS={
+    'BUY':['i would buy','i will buy','buy it','buy this','buy point','entry','enter','買入','買點'],
+    'WATCH':['watch list','watchlist','alert','set alert','wait','monitor','留意','觀察','提示'],
+    'PASS':['skip','pass','not buy','would not buy','avoid','略過','不買']
+}
+V652_MARKET_TERMS=[
+    'market condition','market environment','general market','market','uptrend','correction',
+    'distribution','follow through','follow-through','exposure','bull market','bear market',
+    '市場','大市','牛市','熊市','回調','修正','分配日','曝險','倉位','持倉'
+]
+
+def _v652_extract(corpus,max_cases=220):
+    out=[];seen=set()
+    for row in corpus:
+        text=row['text'];low=text.lower()
+        # anchor on market context first
+        mh=[]
+        for mt in V652_MARKET_TERMS:
+            start=0
+            while True:
+                p=low.find(mt.lower(),start)
+                if p<0:break
+                mh.append((p,mt));start=p+max(1,len(mt))
+        for p,mt in sorted(mh):
+            a=max(0,p-1500);b=min(len(text),p+len(mt)+2200)
+            sn=text[a:b].strip();ls=sn.lower()
+            decision='UNCLEAR'
+            for dec,terms in V652_DECISION_TERMS.items():
+                if any(t.lower() in ls for t in terms):
+                    decision=dec
+                    break
+            # Prefer explicit decision-linked cases, but keep some unclear for context audit.
+            key=(row['video_id'],sn[:520],decision)
+            if key in seen:continue
+            seen.add(key)
+            tags=[]
+            checks=[
+                ('uptrend',['uptrend','牛市','上升趨勢']),
+                ('correction',['correction','回調','修正']),
+                ('distribution',['distribution','分配日']),
+                ('exposure',['exposure','曝險','倉位','持倉']),
+                ('bear',['bear market','熊市']),
+                ('bull',['bull market','牛市']),
+                ('follow_through',['follow through','follow-through']),
+            ]
+            for tag,terms in checks:
+                if any(t in ls or t in sn for t in terms):tags.append(tag)
+            out.append({'video_id':row['video_id'],'title':row.get('title',''),
+                        'anchor':mt,'decision':decision,'tags':tags,'snippet':sn})
+            if len(out)>=max_cases:return out
+    return out
+
+def _v652_numbers(sn):
+    vals=[]
+    for m in re.findall(r'(?<!\d)(\d+(?:\.\d+)?)\s*%',sn):
+        try:
+            v=float(m)
+            if 0<=v<=100 and v not in vals:vals.append(v)
+        except Exception:pass
+    return vals[:20]
+
+def _v652_run():
+    global v652_thread
+    t0=time.time()
+    try:
+        _v652_write(status='running',message='重建 Market Context 在 BUY / WATCH / PASS 中的真实作用…',
+                    elapsed_sec=0,error=None)
+        corpus=_v652_corpus()
+        cases=_v652_extract(corpus,220)
+
+        by_dec={}
+        for dec in ['BUY','WATCH','PASS','UNCLEAR']:
+            arr=[x for x in cases if x['decision']==dec]
+            vids=sorted(set(x['video_id'] for x in arr))
+            tag_counts={}
+            for x in arr:
+                for t in x['tags']:tag_counts[t]=tag_counts.get(t,0)+1
+            by_dec[dec]={'cases':len(arr),'videos':len(vids),'tag_counts':tag_counts,'examples':arr[:12]}
+
+        # Evidence ledger for recurring contextual states.
+        dims={}
+        for dim in ['uptrend','correction','distribution','exposure','bear','bull','follow_through']:
+            arr=[x for x in cases if dim in x['tags']]
+            vids=sorted(set(x['video_id'] for x in arr))
+            mix={d:sum(1 for x in arr if x['decision']==d) for d in ['BUY','WATCH','PASS','UNCLEAR']}
+            nums=[]
+            for x in arr:
+                for n in _v652_numbers(x['snippet']):
+                    if n not in nums: nums.append(n)
+            dims[dim]={'cases':len(arr),'videos':len(vids),'decision_mix':mix,
+                       'numeric_mentions':nums[:20],'source_usable':len(vids)>=2}
+
+        # We only mark "decision-useful" if a dimension has cross-video support AND
+        # at least 3 explicit decision cases with non-trivial separation.
+        usable=[]
+        for k,v in dims.items():
+            mix=v['decision_mix'];explicit=mix['BUY']+mix['WATCH']+mix['PASS']
+            if v['source_usable'] and explicit>=3:
+                usable.append(k)
+
+        verdict='MARKET_CONTEXT_DECISION_EVIDENCE_READY' if usable else 'MARKET_CONTEXT_EVIDENCE_TOO_AMBIGUOUS'
+
+        res={
+            'version':'V6.52 Market Context Actual-Buy Reconstruction',
+            'verdict':verdict,
+            'transcript_videos':len(corpus),
+            'source_cases':len(cases),
+            'decision_summary':by_dec,
+            'dimensions':dims,
+            'usable_dimensions':usable,
+            'critical_point':'Extended branch is closed after V6.51. V6.52 asks a different question: does JLaw use general-market state to permit, defer or reduce actual buys, and is that decision language repeatable enough to test without inventing a proxy?',
+            'method':'Source reconstruction only. Market words are used to locate context; no new numeric market threshold is created here.',
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT remains the 28.25% CAGR benchmark. Trigger, -7% stop, HOLD1260, 10-slot, exits/winner management and universe remain frozen. Extended-threshold branch is permanently closed unless new source evidence appears.',
+            'next_step':'If one market-context dimension shows clear cross-video BUY/WATCH/PASS separation and can be represented point-in-time from existing cached index data, V6.53 will test exactly one rule against V6.44. Otherwise stop this branch and move to Earnings / Fundamentals actual-buy distinction.',
+            'cache_note':'Existing JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V652_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v652_write(status='done',message=f'V6.52 完成：{verdict}',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v652_write(status='error',message='V6.52 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v652_thread=None
+
+def _v652_start():
+    global v652_thread
+    if _v652_alive():return False
+    _v652_write(status='starting',message='V6.52 正在启动',elapsed_sec=0,error=None)
+    v652_thread=threading.Thread(target=_v652_run,daemon=True);v652_thread.start();return True
+
+@APP.route('/v652/run',methods=['GET','POST'])
+def v652_run(): _v652_start(); return redirect('/v652/market-context-reconstruction')
+
+@APP.get('/v652')
+def v652_alias(): return redirect('/v652/market-context-reconstruction')
+
+@APP.get('/api/v652/status')
+def v652_status_api(): return jsonify(_v652_status())
+
+@APP.get('/v652/market-context-reconstruction')
+def v652_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v652_status();r={}
+    if V652_RESULT.exists():
+        try:r=json.loads(V652_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v652_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v652/run"><button>▶ 开始 V6.52 Market Context Reconstruction</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    rows=''
+    for k,v in r.get('dimensions',{}).items():
+        mix=v.get('decision_mix',{})
+        rows+=f"<tr><td><b>{e(k)}</b></td><td>{int(v.get('cases',0))}</td><td>{int(v.get('videos',0))}</td><td>{int(mix.get('BUY',0))}</td><td>{int(mix.get('WATCH',0))}</td><td>{int(mix.get('PASS',0))}</td><td>{int(mix.get('UNCLEAR',0))}</td><td>{'✅' if v.get('source_usable') else '—'}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #93c5fd;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v651/extended-case-validation">← V6.51 Extended Case Validation</a>
+<div class="c"><h1>🌐 V6.52 Market Context Actual-Buy Reconstruction</h1><div class="info"><b>Extended 分支正式结束。</b><br>这轮只查 General Market / Uptrend / Correction / Distribution / Exposure 等语境，是否真的改变 BUY / WATCH / PASS 决策。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Source cases：{int(r.get('source_cases',0) or 0)}</p><p><b>可进入下一步：</b>{e(', '.join(r.get('usable_dimensions',[])) or '—')}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Market Context Evidence Ledger</h2><table><tr><th>Dimension</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>UNCLEAR</th><th>Cross-video</th></tr>{rows or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v652/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1800)</script>
 </div></body></html>"""
