@@ -30167,3 +30167,112 @@ if _v662_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v662_home_base:APP.view_functions[ep]=_v662_home_wrap
+
+# ========================= V6.63 STOP7_GAP Cause Attribution =========================
+V663_DIR=DATA_DIR/'v663_stop7_gap_cause_attribution'; V663_STATUS=V663_DIR/'status.json'; V663_RESULT=V663_DIR/'result.json'; v663_thread=None
+
+def _v663_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V663_STATUS.exists():
+        try:x.update(json.loads(V663_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v663_write(**kw):
+    V663_DIR.mkdir(parents=True,exist_ok=True);x=_v663_status();x.update(kw);V663_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v663_alive():return v663_thread is not None and v663_thread.is_alive()
+
+def _v663_run():
+    global v663_thread
+    t0=time.time()
+    try:
+        _v663_write(status='running',message='拆解 STOP7_GAP 的 point-in-time 可解释来源…',elapsed_sec=0,error=None)
+        _,T=_v660_load_trade_cache()
+        vcol=_v660_pick_col(T,['variant','strategy','scheme'])
+        if vcol is not None:
+            m=T[vcol].astype(str).str.contains('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT',case=False,na=False)
+            if m.any():T=T[m].copy()
+        reason=_v660_pick_col(T,['exit_reason','reason']); retcol=_v660_pick_col(T,['return_pct','final_return','return','ret','pnl_pct'])
+        entry_px=_v660_pick_col(T,['entry_px','entry_price','buy_px','buy_price']); exit_px=_v660_pick_col(T,['exit_px','exit_price','sell_px','sell_price'])
+        ed=_v660_pick_col(T,['entry_date','buy_date']); xd=_v660_pick_col(T,['exit_date','sell_date']); hc=_v660_pick_col(T,['hold_days','holding_days','days_held'])
+        if reason is None:raise RuntimeError('trade cache 没有 exit_reason/reason')
+        if retcol is not None:
+            rr=pd.to_numeric(T[retcol],errors='coerce'); med=rr.abs().median(); T['_ret']=rr/100.0 if pd.notna(med) and med>3 else rr
+        elif entry_px and exit_px:T['_ret']=pd.to_numeric(T[exit_px],errors='coerce')/pd.to_numeric(T[entry_px],errors='coerce')-1
+        else:raise RuntimeError('trade cache 没有 return 字段')
+        T['_reason']=T[reason].astype(str); G=T[T['_reason'].str.contains('STOP7_GAP',case=False,na=False)].copy()
+        if hc is not None:G['_hold']=pd.to_numeric(G[hc],errors='coerce')
+        elif ed and xd:G['_hold']=(pd.to_datetime(G[xd],errors='coerce')-pd.to_datetime(G[ed],errors='coerce')).dt.days
+        else:G['_hold']=np.nan
+        if xd:G['_exit_date']=pd.to_datetime(G[xd],errors='coerce')
+        elif ed:G['_exit_date']=pd.to_datetime(G[ed],errors='coerce')+pd.to_timedelta(G['_hold'],unit='D')
+        else:G['_exit_date']=pd.NaT
+
+        bins=[-1,0,1,2,3,5,10,20,40,80,160,10**9]; labels=['0','1','2','3','4-5','6-10','11-20','21-40','41-80','81-160','161+']
+        G['_hold_bucket']=pd.cut(G['_hold'],bins=bins,labels=labels)
+        hold=[]
+        for k,g in G.groupby('_hold_bucket',observed=True):
+            hold.append({'bucket':str(k),'n':len(g),'share':len(g)/len(G) if len(G) else 0,'avg_return':float(g['_ret'].mean()),'pct_le15':float((g['_ret']<=-.15).mean()),'pct_le20':float((g['_ret']<=-.20).mean())})
+        cal=[]
+        if G['_exit_date'].notna().any():
+            G['_dow']=G['_exit_date'].dt.day_name(); G['_month']=G['_exit_date'].dt.month
+            for k,g in G.groupby('_dow'):
+                cal.append({'day':str(k),'n':len(g),'share':len(g)/len(G),'avg_return':float(g['_ret'].mean())})
+        # Only inspect genuinely existing event-like fields; never synthesize earnings/news proxies.
+        event_tokens=('earn','event','report','news','gap','overnight','calendar','announcement')
+        event_cols=[c for c in G.columns if not str(c).startswith('_') and any(t in str(c).lower() for t in event_tokens)]
+        event_summary=[]
+        for c in event_cols[:20]:
+            s=G[c]
+            nonnull=int(s.notna().sum())
+            if nonnull:
+                event_summary.append({'field':str(c),'coverage':nonnull/len(G) if len(G) else 0,'examples':[str(x)[:80] for x in s.dropna().astype(str).value_counts().head(5).index]})
+        early=sum(x['n'] for x in hold if x['bucket'] in ('0','1','2','3','4-5'))
+        early_share=early/len(G) if len(G) else 0
+        if event_summary: verdict='STOP7_GAP_CONTEXT_FIELDS_AVAILABLE_NEEDS_SOURCE_MATCH'
+        elif early_share>=.50: verdict='STOP7_GAP_CONCENTRATED_EARLY_NO_EVENT_CAUSE_IN_CACHE'
+        else: verdict='STOP7_GAP_NO_EXECUTABLE_PREVENTION_CAUSE_FOUND'
+        res={'version':'V6.63 STOP7_GAP Cause Attribution','verdict':verdict,'gap_trades':len(G),'available_columns':[str(c) for c in T.columns],
+             'hold_buckets':hold,'calendar':cal,'event_fields':event_summary,'early_0_5_share':early_share,
+             'interpretation':'This audit attributes STOP7_GAP using only information already present in the saved trade cache. Concentration is evidence of where the loss occurs, not permission to invent a veto.',
+             'acceptance':'Advance only if an existing point-in-time field identifies a repeatable pre-entry or pre-gap condition and can be tied to source-supported behavior. Holding age or calendar concentration alone is not an executable rule.',
+             'next_step':('Audit the existing event/context fields against source evidence before any controlled A/B.' if event_summary else 'No source-faithful prevention rule is currently executable from cached fields. Freeze the -7% stop and do not invent earnings/overnight/calendar filters; return to the remaining Actual-Buy/selection gap.'),
+             'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR; -7% stop; HOLD1260; 10-slot; trigger/selection/universe frozen.',
+             'cache_note':'Saved V6.44 trade cache only; 0 Tiingo; no universe rebuild; no historical replay; no stop tuning.'}
+        V663_DIR.mkdir(parents=True,exist_ok=True);V663_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v663_write(status='done',message=f"V6.63 完成：{verdict} · STOP7_GAP {len(G)} 笔",elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc();_v663_write(status='error',message='V6.63 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v663_thread=None
+
+def _v663_start():
+    global v663_thread
+    if _v663_alive():return False
+    _v663_write(status='starting',message='V6.63 正在启动',elapsed_sec=0,error=None);v663_thread=threading.Thread(target=_v663_run,daemon=True);v663_thread.start();return True
+
+@APP.route('/v663/run',methods=['GET','POST'])
+def v663_run():_v663_start();return redirect('/v663/stop7-gap-cause-attribution')
+@APP.get('/api/v663/status')
+def v663_status_api():return jsonify(_v663_status())
+@APP.get('/v663/stop7-gap-cause-attribution')
+def v663_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v663_status();r={}
+    if V663_RESULT.exists():
+        try:r=json.loads(V663_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    btn='' if _v663_alive() else '<a href="/v663/run"><button>▶ 开始 V6.63 Cause Attribution</button></a>'
+    hr=''.join(f"<tr><td><b>{e(x['bucket'])}</b></td><td>{x['n']}</td><td>{x['share']*100:.1f}%</td><td>{x['avg_return']*100:.1f}%</td><td>{x['pct_le15']*100:.1f}%</td><td>{x['pct_le20']*100:.1f}%</td></tr>" for x in r.get('hold_buckets',[]))
+    er=''.join(f"<tr><td><b>{e(x['field'])}</b></td><td>{x['coverage']*100:.1f}%</td><td>{e(', '.join(x['examples']))}</td></tr>" for x in r.get('event_fields',[]))
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #60a5fa;border-radius:14px;padding:16px}}.hero{{background:#fff7ed;border-left:6px solid #ea580c;padding:16px;border-radius:12px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w"><a href="/v662/stop7-gap-loser-control">← V6.62</a><div class="c"><h1>🔬 V6.63 STOP7_GAP Cause Attribution</h1><div class="info"><b>不调止损，不造过滤器。</b><br>只拆 V6.62 的 9,324 类 STOP7_GAP：持仓年龄、日期，以及 cache 里真正存在的 point-in-time event/context 字段。</div></div><div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div><div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><div class="hero"><b>STOP7_GAP：</b>{int(r.get('gap_trades',0))}<br><b>0–5 day share：</b>{float(r.get('early_0_5_share',0))*100:.1f}%<br><b>Existing event/context fields：</b>{len(r.get('event_fields',[]))}</div></div><div class="c"><h2>Holding-Age Attribution</h2><table><tr><th>Hold Days</th><th>N</th><th>Share</th><th>Avg</th><th>≤-15%</th><th>≤-20%</th></tr>{hr or '<tr><td colspan="6">运行后显示。</td></tr>'}</table></div><div class="c"><h2>Existing Point-in-Time Event / Context Fields</h2><table><tr><th>Field</th><th>Coverage</th><th>Observed values</th></tr>{er or '<tr><td colspan="3">没有可用字段，或尚未运行。</td></tr>'}</table></div><div class="c"><div class="warn"><b>解释：</b>{e(r.get('interpretation',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div></div></body></html>'''
+
+_v663_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v663_home_base is not None:
+    def _v663_home_wrap(*args,**kwargs):
+        resp=_v663_home_base(*args,**kwargs);card='''<div id="v663-gap-cause" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🔬 V6.63 STOP7_GAP Cause Attribution</h2><p>拆 9,324 类 Gap Loss 来源 · Point-in-Time Cache only · 不调 -7%</p><a href="/v663/stop7-gap-cause-attribution"><button>打开 V6.63</button></a></div>'''
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('v662-stop7-gap-audit');d=body.rfind('<div',0,p) if p>=0 else -1;pos=d if d>=0 else body.find('<body');body=body[:pos]+card+body[pos:] if pos>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v663_home_base:APP.view_functions[ep]=_v663_home_wrap
