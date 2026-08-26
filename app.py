@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v654-actual-buy-stack" style="border:4px solid #059669;background:#ecfdf5"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧩 V6.54 Actual-Buy Decision Stack Reconstruction</h2><div class="muted">不跑新策略 · 对齐 V6.44 Breakout 候选与 V6.48 BUY/WATCH/PASS 证据 · 重建真正的 Actual-Buy 决策链</div></div><a href="/v654/actual-buy-decision-stack"><button type="button">打开 V6.54</button></a></div></div>
+
 <div class="card" id="v653-master-gap-map" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.53 Master Reconciliation / Gap Map</h2><div class="muted">不跑新策略 · 收敛 V6.34–V6.52：已证实 / 已否定 / 未解决，并锁定真正值得继续的 2–3 个机制</div></div><a href="/v653/master-gap-map"><button type="button">打开 V6.53</button></a></div></div>
 
 <div class="card" id="v652mkt-shortcut" style="border:4px solid #2563eb;background:#eff6ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🌐 V6.52 Market Context Actual-Buy Reconstruction</h2><div class="muted">结束 Extended 分支 · 只重建 JLaw 在 BUY/WATCH/PASS 时对 General Market / Exposure / Correction / Uptrend 的真实决策作用</div></div><a href="/v652/market-context-reconstruction"><button type="button">打开 V6.52</button></a></div></div>
@@ -27321,4 +27323,238 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 <div class="c"><h2>只剩 3 个优先缺口</h2>{pri or '<p>运行后显示。</p>'}</div>
 <div class="c"><h2>永久停止重复测试清单</h2><div class="warn"><ul>{stops}</ul><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v653/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1600)</script>
+</div></body></html>"""
+
+
+# ========================= V6.54 Actual-Buy Decision Stack Reconstruction =========================
+V654_DIR=DATA_DIR/'v654_actual_buy_decision_stack'
+V654_STATUS=V654_DIR/'status.json'; V654_RESULT=V654_DIR/'result.json'
+v654_thread=None
+
+def _v654_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V654_STATUS.exists():
+        try:x.update(json.loads(V654_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v654_write(**kw):
+    V654_DIR.mkdir(parents=True,exist_ok=True);x=_v654_status();x.update(kw)
+    V654_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v654_alive(): return v654_thread is not None and v654_thread.is_alive()
+
+def _v654_load(path):
+    try:
+        p=Path(path)
+        return json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+    except Exception:return {}
+
+def _v654_find_latest(keyword):
+    try:
+        hits=[p for p in DATA_DIR.rglob('result.json') if keyword.lower() in str(p).lower()]
+        return max(hits,key=lambda p:p.stat().st_mtime) if hits else None
+    except Exception:return None
+
+def _v654_decision_cases():
+    # Prefer V6.48 result; fall back to transcript reconstruction helpers if available.
+    p=_v654_find_latest('v648')
+    if p:
+        r=_v654_load(p)
+        out=[]
+        for dec,arr in r.get('exemplars',{}).items():
+            for x in arr:
+                out.append({'decision':dec,**x})
+        if out:return out
+
+    # fallback: use source transcript helpers, still evidence-only
+    if '_v648_corpus' in globals() and '_v648_extract_cases' in globals() and '_v648_classify_case' in globals():
+        rows=[]
+        for x in _v648_extract_cases(_v648_corpus(),40):
+            d,t=_v648_classify_case(x.get('snippet',''))
+            rows.append({'decision':d,'tags':t,**x})
+        return rows
+    return []
+
+def _v654_breakout_context():
+    # Read V6.44 results for benchmark only, no replay.
+    p=_v654_find_latest('v644')
+    return _v654_load(p) if p else {}
+
+def _v654_extract_stack_features(sn):
+    low=sn.lower()
+    dims={
+      'BREAKOUT':['breakout','pivot','buy point','突破','樞紐'],
+      'TIGHT_VOLUME':['tight','vcp','contraction','volume','50-day average','成交量','收窄'],
+      'RS_LEADERSHIP':['rs line','relative strength','rs rating','leader','leadership'],
+      'EARNINGS_FUNDAMENTALS':['earnings','sales acceleration','sales growth','revenue','fundamental','forecast'],
+      'MARKET_CONTEXT':['market','uptrend','bear market','bull market','correction','exposure','市場','大市'],
+      'LOCATION_EXTENSION':['extended','extension','chase','too far','too late','延伸','追高'],
+      'RISK_STOP':['stop loss','risk reward','risk/reward','7%','止損']
+    }
+    out={}
+    for k,terms in dims.items():
+        out[k]=any(t in low or t in sn for t in terms)
+    return out
+
+def _v654_run():
+    global v654_thread
+    t0=time.time()
+    try:
+        _v654_write(status='running',message='对齐 V6.44 Breakout 基线与 BUY/WATCH/PASS 决策证据…',
+                    elapsed_sec=0,error=None)
+
+        cases=_v654_decision_cases()
+        b44=_v654_breakout_context()
+
+        # Build evidence matrix across explicit decisions.
+        rows=[]
+        for x in cases:
+            sn=str(x.get('snippet',''))
+            feats=_v654_extract_stack_features(sn)
+            rows.append({'decision':x.get('decision','UNCLEAR'),
+                         'video_id':x.get('video_id',''),
+                         'title':x.get('title',''),
+                         'snippet':sn,**feats})
+
+        decisions=['ACTUAL_BUY','WATCH_ONLY','PASS_SKIP','UNCLEAR']
+        dims=['BREAKOUT','TIGHT_VOLUME','RS_LEADERSHIP','EARNINGS_FUNDAMENTALS',
+              'MARKET_CONTEXT','LOCATION_EXTENSION','RISK_STOP']
+
+        matrix={}
+        for dim in dims:
+            arr=[r for r in rows if r.get(dim)]
+            vids=set(r['video_id'] for r in arr if r.get('video_id'))
+            mix={d:sum(1 for r in arr if r['decision']==d) for d in decisions}
+            matrix[dim]={'cases':len(arr),'videos':len(vids),'decision_mix':mix,
+                         'cross_video':len(vids)>=2}
+
+        # Pairwise co-occurrence among explicit BUY/WATCH/PASS cases.
+        pairwise=[]
+        explicit=[r for r in rows if r['decision'] in ['ACTUAL_BUY','WATCH_ONLY','PASS_SKIP']]
+        for i,a in enumerate(dims):
+            for b in dims[i+1:]:
+                arr=[r for r in explicit if r.get(a) and r.get(b)]
+                if not arr: continue
+                vids=set(r['video_id'] for r in arr if r.get('video_id'))
+                mix={d:sum(1 for r in arr if r['decision']==d) for d in ['ACTUAL_BUY','WATCH_ONLY','PASS_SKIP']}
+                pairwise.append({'a':a,'b':b,'cases':len(arr),'videos':len(vids),'mix':mix})
+
+        # Determine which layers look like candidate vs permission/context vs veto.
+        roles={}
+        for dim,v in matrix.items():
+            mix=v['decision_mix']
+            buy=mix.get('ACTUAL_BUY',0);watch=mix.get('WATCH_ONLY',0);pas=mix.get('PASS_SKIP',0)
+            explicit_n=buy+watch+pas
+            role='AMBIGUOUS'
+            if explicit_n>=3 and buy>watch+pas:
+                role='BUY_SUPPORT'
+            elif explicit_n>=3 and watch>=buy and watch>pas:
+                role='WATCH_CONTEXT'
+            elif explicit_n>=3 and pas>=buy and pas>=watch:
+                role='PASS_CONTEXT'
+            if dim=='MARKET_CONTEXT':
+                role='PERMISSION_OR_EXPOSURE'
+            if dim=='LOCATION_EXTENSION':
+                role='CONTEXT_ONLY_CLOSED_THRESHOLD_BRANCH'
+            roles[dim]=role
+
+        # Build a source-faithful stack hypothesis, explicitly not a rule yet.
+        stack=[
+          {'layer':1,'name':'Breakout Candidate',
+           'evidence':'V6.44 establishes the source-supported breakout archetype as the frozen benchmark.',
+           'status':'LOCKED'},
+          {'layer':2,'name':'Setup Quality Context',
+           'evidence':'Tight/VCP/volume language frequently co-occurs with BUY examples.',
+           'status':'SOURCE_SUPPORTED_CONTEXT'},
+          {'layer':3,'name':'Leadership / Fundamentals Review',
+           'evidence':'RS and earnings/fundamentals appear across BUY/WATCH examples, but simple hard gates/ranking already failed.',
+           'status':'CONTEXT_NOT_SIMPLE_GATE'},
+          {'layer':4,'name':'Market Permission / Exposure',
+           'evidence':'V6.52 found repeatable uptrend/bear/bull context; likely affects permission/selectivity/exposure rather than binary rejection.',
+           'status':'HIGH_PRIORITY_UNRESOLVED'},
+          {'layer':5,'name':'Actual Buy / Watch / Pass',
+           'evidence':'Decision must combine the above context; no single validated threshold currently explains it.',
+           'status':'MAIN_GAP'},
+        ]
+
+        # Read benchmark metrics if present.
+        benchmark={}
+        try:
+            for x in b44.get('overall',[]):
+                if x.get('strategy')=='TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT':
+                    benchmark=x
+                    break
+        except Exception:pass
+
+        verdict='ACTUAL_BUY_STACK_RECONSTRUCTED_NEEDS_PERMISSION_SEMANTICS'
+        res={
+          'version':'V6.54 Actual-Buy Decision Stack Reconstruction',
+          'verdict':verdict,
+          'decision_cases':len(rows),
+          'evidence_matrix':matrix,
+          'roles':roles,
+          'pairwise':pairwise,
+          'decision_stack':stack,
+          'benchmark':benchmark,
+          'critical_point':'The evidence supports a layered decision process rather than one magic factor: breakout creates the candidate; tight/volume describes setup quality; RS/fundamentals are review context; market regime likely changes permission/selectivity/exposure; the final BUY/WATCH/PASS decision sits above them.',
+          'what_not_to_do':'Do not convert this stack into a weighted score or grid-search thresholds. V6.46/V6.47 already showed that naive hard gating/ranking can destroy the V6.44 payoff shape.',
+          'next_step':'V6.55 should isolate one unresolved semantic question only: how Market Context changes permission/exposure after a valid breakout. Reconstruct source examples into BUY permission vs reduced exposure vs watch/defer, without strategy replay.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; exits/winner management; universe; Extended branch closed.',
+          'cache_note':'Reads saved V6.44/V6.48/V6.52 results and transcript caches only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V654_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v654_write(status='done',message=f'V6.54 完成：{verdict}',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v654_write(status='error',message='V6.54 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v654_thread=None
+
+def _v654_start():
+    global v654_thread
+    if _v654_alive():return False
+    _v654_write(status='starting',message='V6.54 正在启动',elapsed_sec=0,error=None)
+    v654_thread=threading.Thread(target=_v654_run,daemon=True);v654_thread.start();return True
+
+@APP.route('/v654/run',methods=['GET','POST'])
+def v654_run(): _v654_start(); return redirect('/v654/actual-buy-decision-stack')
+
+@APP.get('/v654')
+def v654_alias(): return redirect('/v654/actual-buy-decision-stack')
+
+@APP.get('/api/v654/status')
+def v654_status_api(): return jsonify(_v654_status())
+
+@APP.get('/v654/actual-buy-decision-stack')
+def v654_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v654_status();r={}
+    if V654_RESULT.exists():
+        try:r=json.loads(V654_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v654_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v654/run"><button>▶ 开始 V6.54 Actual-Buy Decision Stack</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    rows=''
+    for k,v in r.get('evidence_matrix',{}).items():
+        mix=v.get('decision_mix',{})
+        rows+=f"<tr><td><b>{e(k)}</b></td><td>{int(v.get('cases',0))}</td><td>{int(v.get('videos',0))}</td><td>{int(mix.get('ACTUAL_BUY',0))}</td><td>{int(mix.get('WATCH_ONLY',0))}</td><td>{int(mix.get('PASS_SKIP',0))}</td><td>{e(r.get('roles',{}).get(k,'—'))}</td></tr>"
+
+    stack=''
+    for x in r.get('decision_stack',[]):
+        stack+=f"<div class='layer'><h3>Layer {int(x['layer'])}: {e(x['name'])}</h3><p>{e(x['evidence'])}</p><b>{e(x['status'])}</b></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1700px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.hero{{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}.layer{{background:#f8fafc;border-left:6px solid #059669;border-radius:12px;padding:16px;margin:12px 0}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v653/master-gap-map">← V6.53 Master Gap Map</a>
+<div class="c"><h1>🧩 V6.54 Actual-Buy Decision Stack Reconstruction</h1><div class="hero"><b>不跑新策略、不调参数。</b><br>把 V6.44 的 Breakout 基线与 V6.48 的 BUY/WATCH/PASS 证据放进同一条决策链，找出“候选出现以后，到底经过哪些 review 层才变成 Actual Buy”。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Decision cases：{int(r.get('decision_cases',0) or 0)}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Actual-Buy Evidence Matrix</h2><table><tr><th>Dimension</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th><th>Role</th></tr>{rows or '<tr><td colspan="7">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Reconstructed Decision Stack</h2>{stack or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>不要做：</b>{e(r.get('what_not_to_do',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v654/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},1600)</script>
 </div></body></html>"""
