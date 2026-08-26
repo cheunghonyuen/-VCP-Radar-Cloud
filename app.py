@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v651ext-shortcut" style="border:4px solid #b45309;background:#fffbeb"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧪 V6.51 Extended Case Validation</h2><div class="muted">只验证 V6.50 的 Extended 候选定义是否真来自 BUY/WATCH/PASS 案例 · 不回测、不调阈值</div></div><a href="/v651/extended-case-validation"><button type="button">打开 V6.51</button></a></div></div>
+
 <div class="card" id="v650-shortcut" style="border:4px solid #ea580c;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">📐 V6.50 Extended / Chase Actual-Buy Example Reconstruction</h2><div class="muted">冻结 V6.44 28.25% 基线 · 拆 BUY/WATCH/PASS 案例的 Pivot→Entry 距离、突破后时序、Chase/Too Far 与 Market Context</div></div><a href="/v650/extended-chase-examples"><button type="button">打开 V6.50</button></a></div></div>
 
 <div class="card" id="v649-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛑 V6.49 Extended / Tight Actual-Buy Rule Reconstruction</h2><div class="muted">锁死 V6.44 28.25% 基线 · 只核对 EXTENDED=PASS 与 TIGHT/VOLUME=BUY 的可执行定义 · 不发明阈值</div></div><a href="/v649/decision-rule-reconstruction"><button type="button">打开 V6.49</button></a></div></div>
