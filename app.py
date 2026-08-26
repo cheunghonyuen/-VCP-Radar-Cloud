@@ -6975,6 +6975,8 @@ BASE=原始量比≥1.2/-7%/+30%；VOL15/VOL18=提高突破量门槛；BE8/BE10=
 </div>
 
 
+<div class="card" id="v650-shortcut" style="border:4px solid #ea580c;background:#fff7ed"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">📐 V6.50 Extended / Chase Actual-Buy Example Reconstruction</h2><div class="muted">冻结 V6.44 28.25% 基线 · 拆 BUY/WATCH/PASS 案例的 Pivot→Entry 距离、突破后时序、Chase/Too Far 与 Market Context</div></div><a href="/v650/extended-chase-examples"><button type="button">打开 V6.50</button></a></div></div>
+
 <div class="card" id="v649-shortcut" style="border:4px solid #dc2626;background:#fef2f2"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🛑 V6.49 Extended / Tight Actual-Buy Rule Reconstruction</h2><div class="muted">锁死 V6.44 28.25% 基线 · 只核对 EXTENDED=PASS 与 TIGHT/VOLUME=BUY 的可执行定义 · 不发明阈值</div></div><a href="/v649/decision-rule-reconstruction"><button type="button">打开 V6.49</button></a></div></div>
 
 <div class="card" id="v648-shortcut" style="border:4px solid #7c3aed;background:#f5f3ff"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">🧭 V6.48 Actual-Buy Decision Reconstruction</h2><div class="muted">冻结 V6.44 Breakout 基线 · 只重建“突破后为什么真正买 / 为什么只观察或放弃” · 不做新阈值 tuning</div></div><a href="/v648/actual-buy-reconstruction"><button type="button">打开 V6.48</button></a></div></div>
@@ -26554,4 +26556,238 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 {evcards('volume','BREAKOUT VOLUME CONTEXT')}
 <div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v649/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
+</div></body></html>"""
+
+
+# ========================= V6.50 Extended / Chase Actual-Buy Example Reconstruction =========================
+V650_DIR=DATA_DIR/'v650_extended_chase_example_reconstruction'
+V650_STATUS=V650_DIR/'status.json'; V650_RESULT=V650_DIR/'result.json'
+v650_thread=None
+
+def _v650_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V650_STATUS.exists():
+        try:x.update(json.loads(V650_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v650_write(**kw):
+    V650_DIR.mkdir(parents=True,exist_ok=True);x=_v650_status();x.update(kw)
+    V650_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v650_alive(): return v650_thread is not None and v650_thread.is_alive()
+
+def _v650_corpus():
+    if '_v649_corpus' in globals(): return _v649_corpus()
+    if '_v648_corpus' in globals(): return _v648_corpus()
+    return []
+
+V650_DECISION_TERMS = {
+    'BUY':['i would buy','i will buy','buy it','buy this','buy point','entry','enter','買入','買點','買'],
+    'WATCH':['watch list','watchlist','alert','set alert','wait','monitor','留意','觀察','提示'],
+    'PASS':['skip','pass','not buy','would not buy','avoid','too extended','extended','chase','略過','不買','延伸']
+}
+
+V650_STRUCTURE_TERMS = [
+    'pivot','breakout','high','resistance','tight','vcp','contraction','volume',
+    'extended','extension','chase','too far','market','market condition','market environment',
+    '樞紐','突破','高位','阻力','收窄','成交量','延伸','市場'
+]
+
+def _v650_extract_examples(corpus,max_examples=220):
+    out=[];seen=set()
+    for row in corpus:
+        low=row['text'].lower()
+        anchors=[]
+        for dec,terms in V650_DECISION_TERMS.items():
+            for t in terms:
+                start=0
+                while True:
+                    p=low.find(t.lower(),start)
+                    if p<0:break
+                    anchors.append((p,dec,t));start=p+max(1,len(t))
+        for p,dec,t in sorted(anchors):
+            a=max(0,p-1400);b=min(len(row['text']),p+len(t)+2200)
+            sn=row['text'][a:b].strip()
+            # Require at least one structure word nearby so we focus on actual trade-decision examples.
+            low_sn=sn.lower()
+            if not any(k.lower() in low_sn for k in V650_STRUCTURE_TERMS):
+                continue
+            key=(row['video_id'],sn[:520],dec)
+            if key in seen:continue
+            seen.add(key)
+            out.append({'video_id':row['video_id'],'title':row.get('title',''),
+                        'decision':dec,'anchor':t,'snippet':sn})
+            if len(out)>=max_examples:return out
+    return out
+
+def _v650_extract_metrics(sn):
+    low=sn.lower()
+    out={'pivot_prices':[],'percentages':[],'days':[],'hours':[],'minutes':[],
+         'has_extended':False,'has_chase':False,'has_market':False,'has_volume':False,
+         'has_tight':False,'has_breakout':False}
+    for m in re.findall(r'(?<!\d)(\d+(?:\.\d+)?)\s*%',sn):
+        try:
+            v=float(m)
+            if 0<=v<=500 and v not in out['percentages']:out['percentages'].append(v)
+        except Exception:pass
+    for m in re.findall(r'(?<!\d)(\d+(?:\.\d+)?)\s*(?:day|days|天)',sn,re.I):
+        try:
+            v=float(m)
+            if v not in out['days']:out['days'].append(v)
+        except Exception:pass
+    for m in re.findall(r'(?<!\d)(\d+(?:\.\d+)?)\s*(?:hour|hours|小時)',sn,re.I):
+        try:
+            v=float(m)
+            if v not in out['hours']:out['hours'].append(v)
+        except Exception:pass
+    for m in re.findall(r'(?<!\d)(\d+(?:\.\d+)?)\s*(?:minute|minutes|分鐘)',sn,re.I):
+        try:
+            v=float(m)
+            if v not in out['minutes']:out['minutes'].append(v)
+        except Exception:pass
+    # Price-like numbers near pivot/high/breakout contexts; evidence only, not formula.
+    for mm in re.finditer(r'(?:pivot|樞紐|高位|high|breakout|突破)[^0-9]{0,40}(\d{1,5}(?:\.\d+)?)',sn,re.I):
+        try:
+            v=float(mm.group(1))
+            if v not in out['pivot_prices']:out['pivot_prices'].append(v)
+        except Exception:pass
+    out['has_extended']=('extended' in low or 'extension' in low or '延伸' in sn)
+    out['has_chase']=('chase' in low or '追高' in sn or 'too far' in low)
+    out['has_market']=('market' in low or '市場' in sn)
+    out['has_volume']=('volume' in low or '成交量' in sn)
+    out['has_tight']=('tight' in low or 'vcp' in low or '收窄' in sn or 'contraction' in low)
+    out['has_breakout']=('breakout' in low or '突破' in sn)
+    return out
+
+def _v650_run():
+    global v650_thread
+    t0=time.time()
+    try:
+        _v650_write(status='running',message='重建 BUY / WATCH / PASS 的 Extended / Chase 实例与时序证据…',
+                    elapsed_sec=0,error=None)
+        corpus=_v650_corpus()
+        examples=_v650_extract_examples(corpus,220)
+
+        rows=[]
+        for x in examples:
+            rows.append({**x,**_v650_extract_metrics(x['snippet'])})
+
+        by_dec={}
+        for dec in ['BUY','WATCH','PASS']:
+            arr=[x for x in rows if x['decision']==dec]
+            vids=sorted(set(x['video_id'] for x in arr))
+            by_dec[dec]={
+                'cases':len(arr),'videos':len(vids),
+                'extended_cases':sum(1 for x in arr if x['has_extended']),
+                'chase_cases':sum(1 for x in arr if x['has_chase']),
+                'market_cases':sum(1 for x in arr if x['has_market']),
+                'volume_cases':sum(1 for x in arr if x['has_volume']),
+                'tight_cases':sum(1 for x in arr if x['has_tight']),
+                'breakout_cases':sum(1 for x in arr if x['has_breakout']),
+                'examples':arr[:14]
+            }
+
+        # Search for repeated numeric candidate definitions, but require support across >=2 videos
+        # and at least one explicit decision case on each side before considering executable.
+        numeric_evidence={}
+        for kind in ['percentages','days','hours','minutes']:
+            bucket={}
+            for x in rows:
+                for v in x.get(kind,[]):
+                    key=str(v)
+                    z=bucket.setdefault(key,{'cases':0,'videos':set(),'BUY':0,'WATCH':0,'PASS':0})
+                    z['cases']+=1;z['videos'].add(x['video_id']);z[x['decision']]+=1
+            clean=[]
+            for k,z in bucket.items():
+                clean.append({'value':float(k),'cases':z['cases'],'videos':len(z['videos']),
+                              'BUY':z['BUY'],'WATCH':z['WATCH'],'PASS':z['PASS']})
+            clean=sorted(clean,key=lambda q:(-q['videos'],-q['cases'],q['value']))
+            numeric_evidence[kind]=clean[:40]
+
+        executable=[]
+        for kind,arr in numeric_evidence.items():
+            for z in arr:
+                # conservative: repeated across videos AND linked to PASS and non-PASS decisions
+                if z['videos']>=2 and z['PASS']>=1 and (z['BUY']+z['WATCH'])>=1:
+                    executable.append({'kind':kind,**z})
+
+        # Do not automatically convert these to a rule; mark whether source gives any candidate
+        # worth a dedicated exact-case audit.
+        verdict='CONTEXTUAL_EXTENSION_EVIDENCE_ONLY'
+        if executable:
+            verdict='CANDIDATE_EXTENSION_DEFINITION_NEEDS_CASE_VALIDATION'
+
+        res={
+            'version':'V6.50 Extended / Chase Actual-Buy Example Reconstruction',
+            'verdict':verdict,
+            'transcript_videos':len(corpus),
+            'example_cases':len(rows),
+            'decision_summary':by_dec,
+            'numeric_evidence':numeric_evidence,
+            'candidate_definitions':executable[:20],
+            'critical_point':'The purpose is to measure source support for extension/chase timing and distance, not to optimize a threshold. Numeric mentions are only candidates when repeated across distinct videos and tied to explicit BUY/WATCH/PASS contexts.',
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT remains the 28.25% CAGR benchmark. -7% stop, HOLD1260, 10-slot sizing, exits/winner management, universe and V6.44 trigger cache remain unchanged.',
+            'next_step':'If a candidate definition survives case validation, V6.51 will test exactly one source-defined EXTENDED_VETO against V6.44 using the existing trigger cache. If not, stop the Extended branch and move to the next explicit Actual-Buy distinction.',
+            'cache_note':'Existing JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay.'
+        }
+        V650_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:
+            pd.DataFrame([{k:v for k,v in x.items() if k!='snippet'} for x in rows]).to_csv(V650_DIR/'v650_example_ledger.csv',index=False)
+        except Exception:pass
+        _v650_write(status='done',message=f'V6.50 完成：{verdict}',
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v650_write(status='error',message='V6.50 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v650_thread=None
+
+def _v650_start():
+    global v650_thread
+    if _v650_alive():return False
+    _v650_write(status='starting',message='V6.50 正在启动',elapsed_sec=0,error=None)
+    v650_thread=threading.Thread(target=_v650_run,daemon=True);v650_thread.start();return True
+
+@APP.route('/v650/run',methods=['GET','POST'])
+def v650_run(): _v650_start(); return redirect('/v650/extended-chase-examples')
+
+@APP.get('/v650')
+def v650_alias(): return redirect('/v650/extended-chase-examples')
+
+@APP.get('/api/v650/status')
+def v650_status_api(): return jsonify(_v650_status())
+
+@APP.get('/v650/extended-chase-examples')
+def v650_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v650_status();r={}
+    if V650_RESULT.exists():
+        try:r=json.loads(V650_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v650_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v650/run"><button>▶ 开始 V6.50 Extended / Chase Example Reconstruction</button></a>'
+    err=f"<div class='err'><b>Error:</b> {e(st.get('error'))}</div>" if st.get('error') else ''
+
+    ds=r.get('decision_summary',{})
+    summ=''
+    for dec in ['BUY','WATCH','PASS']:
+        z=ds.get(dec,{})
+        summ+=f"<tr><td><b>{dec}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{int(z.get('extended_cases',0))}</td><td>{int(z.get('chase_cases',0))}</td><td>{int(z.get('tight_cases',0))}</td><td>{int(z.get('volume_cases',0))}</td><td>{int(z.get('market_cases',0))}</td></tr>"
+
+    cand=''
+    for z in r.get('candidate_definitions',[])[:20]:
+        cand+=f"<tr><td>{e(z.get('kind'))}</td><td>{e(z.get('value'))}</td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{int(z.get('BUY',0))}</td><td>{int(z.get('WATCH',0))}</td><td>{int(z.get('PASS',0))}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1650px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px;line-height:1.65}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px;line-height:1.65}}.err{{padding:14px;background:#fef2f2;border:1px solid #ef4444;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v649/decision-rule-reconstruction">← V6.49 Extended / Tight Reconstruction</a>
+<div class="c"><h1>📐 V6.50 Extended / Chase Actual-Buy Example Reconstruction</h1><div class="info"><b>只查实际案例，不调参数。</b><br>拆 BUY / WATCH / PASS 附近的 Pivot/Breakout、Extended/Chase、Tight/Volume、Market Context 与时间/百分比数字，看看是否存在跨视频、可重复的真正定义。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))} · {float(st.get('elapsed_sec',0) or 0):.1f} 秒</p>{err}{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>字幕视频：{int(r.get('transcript_videos',0) or 0)} · Example cases：{int(r.get('example_cases',0) or 0)}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>BUY / WATCH / PASS Context</h2><table><tr><th>Decision</th><th>Cases</th><th>Videos</th><th>Extended</th><th>Chase</th><th>Tight/VCP</th><th>Volume</th><th>Market</th></tr>{summ}</table></div>
+<div class="c"><h2>Possible repeated numeric definitions</h2><table><tr><th>Type</th><th>Value</th><th>Cases</th><th>Videos</th><th>BUY</th><th>WATCH</th><th>PASS</th></tr>{cand or '<tr><td colspan="7">暂无达到保守证据门槛的数字定义。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>冻结：</b>{e(r.get('frozen',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v650/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2000)</script>
 </div></body></html>"""
