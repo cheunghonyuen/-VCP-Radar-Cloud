@@ -28609,3 +28609,233 @@ if _v658a_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v658a_home_base:APP.view_functions[ep]=_v658a_home_wrap
+
+
+# ========================= V6.58B Local-Window Actor/Action Winner Management Reconstruction =========================
+V658B_DIR=DATA_DIR/'v658b_local_window_actor_action_winner_management'
+V658B_STATUS=V658B_DIR/'status.json'; V658B_RESULT=V658B_DIR/'result.json'
+v658b_thread=None
+
+def _v658b_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V658B_STATUS.exists():
+        try:x.update(json.loads(V658B_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v658b_write(**kw):
+    V658B_DIR.mkdir(parents=True,exist_ok=True);x=_v658b_status();x.update(kw)
+    V658B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v658b_alive(): return v658b_thread is not None and v658b_thread.is_alive()
+
+def _v658b_corpus():
+    if '_v658a_corpus' in globals(): return _v658a_corpus()
+    if '_v658_corpus' in globals(): return _v658_corpus()
+    return []
+
+V658B_ACTOR_SELF=[
+ 'i bought','i buy','i hold','i am holding','i sold','i sell','i add','i added','my position','my stock',
+ 'we bought','we hold','we sold','our position','after i bought','after we bought',
+ '我買入','我买入','我買了','我买了','我持有','我賣出','我卖出','我離場','我离场','我加倉','我加仓',
+ '我的倉位','我的仓位','我持倉','我持仓','買了之後','买了之后'
+]
+V658B_POSITION_GENERIC=[
+ 'position','holding','holdings','after entry','from entry','after buying','after bought',
+ '倉位','仓位','持倉','持仓','持有','買入後','买入后','入場後','入场后','買了之後','买了之后'
+]
+V658B_ACTIONS={
+ 'HOLD':['continue to hold','keep holding','hold on','let it run','ride the winner','持有','繼續持有','继续持有'],
+ 'ADD':['add position','add to position','scale in','pyramid','加倉','加仓','加碼','加码'],
+ 'REDUCE_TRIM':['trim','reduce position','partial sell','take partial','減倉','减仓','部分賣出','部分卖出'],
+ 'SELL_EXIT':['sell','sold','exit','take profit','profit taking','stop out','cut loss','賣出','卖出','離場','离场','止盈','止損','止损'],
+ 'FAILED_BREAKOUT_EXIT':['failed breakout','breakout failure','突破失敗','突破失败'],
+ 'ABNORMAL_ACTION_EXIT':['abnormal action','異常','异常'],
+ 'CLIMAX_EXIT':['climax','climax top','高潮']
+}
+V658B_PREBUY=[
+ 'screen','screening','watchlist','watch list','candidate','buy point','pivot','breakout alert',
+ 'selection','filter','before buying','set alert','篩選','筛选','觀察名單','观察名单','候選','候选',
+ '買入點','买入点','突破提醒','選股','选股'
+]
+V658B_GENERIC_MARKET=[
+ 'investors','market participants','smart money','public','retail investors',
+ '投資者','投资者','散戶','散户','聰明錢','聪明钱','市場參與者','市场参与者'
+]
+
+def _v658b_actor_score(sn):
+    low=sn.lower()
+    self_hits=sum(1 for t in V658B_ACTOR_SELF if t.lower() in low)
+    generic_hits=sum(1 for t in V658B_GENERIC_MARKET if t.lower() in low)
+    position_hits=sum(1 for t in V658B_POSITION_GENERIC if t.lower() in low)
+    prebuy_hits=sum(1 for t in V658B_PREBUY if t.lower() in low)
+    # Strongest evidence: explicit first-person trade management language.
+    return {'self':self_hits,'generic':generic_hits,'position':position_hits,'prebuy':prebuy_hits}
+
+def _v658b_action(sn):
+    low=sn.lower()
+    # More specific exit/action categories first.
+    order=['FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','REDUCE_TRIM','ADD','SELL_EXIT','HOLD']
+    hits=[]
+    for lab in order:
+        for term in V658B_ACTIONS[lab]:
+            p=low.find(term.lower())
+            if p>=0:hits.append((p,lab,term))
+    if not hits:return 'NO_ACTION',''
+    hits.sort(key=lambda z:z[0])
+    # prefer specific category if same local window has it
+    for lab in order:
+        z=[h for h in hits if h[1]==lab]
+        if z:return lab,z[0][2]
+    return hits[0][1],hits[0][2]
+
+def _v658b_extract(corpus,max_cases=500):
+    rows=[];seen=set()
+    anchors=list(dict.fromkeys(V658B_ACTOR_SELF+V658B_POSITION_GENERIC+[x for v in V658B_ACTIONS.values() for x in v]))
+    for row in corpus:
+        text=str(row.get('text',''));low=text.lower();hits=[]
+        for a in anchors:
+            st=0;aa=a.lower()
+            while True:
+                p=low.find(aa,st)
+                if p<0:break
+                hits.append((p,a));st=p+max(1,len(aa))
+        for p,a in sorted(hits):
+            # Much tighter local window than V6.58A to bind actor + action + reason.
+            lo=max(0,p-420);hi=min(len(text),p+len(a)+700)
+            sn=text[lo:hi].strip()
+            sc=_v658b_actor_score(sn);lab,action_term=_v658b_action(sn)
+
+            # Classification rules:
+            # 1) action must exist
+            # 2) explicit self actor OR strong position context
+            # 3) pre-buy/generic-market contamination cannot dominate
+            if lab=='NO_ACTION':
+                sem='NO_ACTION'
+            elif sc['self']>=1:
+                sem=lab
+            elif sc['position']>=1 and sc['prebuy']==0 and sc['generic']<=1:
+                sem=lab
+            else:
+                sem='REJECTED_CONTAMINATION'
+
+            key=(row.get('video_id',''),re.sub(r'\s+',' ',sn[:500]),sem,lab)
+            if key in seen:continue
+            seen.add(key)
+            rows.append({
+              'video_id':row.get('video_id',''),'title':row.get('title',''),'anchor':a,
+              'semantic':sem,'candidate_action':lab,'action_term':action_term,
+              'actor_score':sc,'snippet':sn
+            })
+            if len(rows)>=max_cases:return rows
+    return rows
+
+def _v658b_run():
+    global v658b_thread
+    t0=time.time()
+    try:
+        _v658b_write(status='running',message='用局部窗口绑定 Actor + Position + Action，清理 V6.58A 残余污染…',elapsed_sec=0,error=None)
+        corpus=_v658b_corpus();cases=_v658b_extract(corpus,500)
+
+        labels=['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT',
+                'ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','REJECTED_CONTAMINATION','NO_ACTION']
+        summary={}
+        for lab in labels:
+            arr=[x for x in cases if x['semantic']==lab]
+            summary[lab]={
+              'cases':len(arr),
+              'videos':len(set(x['video_id'] for x in arr if x.get('video_id'))),
+              'examples':arr[:15]
+            }
+
+        ready=[]
+        for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+            z=summary[lab]
+            if z['cases']>=3 and z['videos']>=2:
+                ready.append(lab)
+
+        accepted=sum(summary[x]['cases'] for x in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT'])
+        rejected=summary['REJECTED_CONTAMINATION']['cases']
+        verdict='LOCAL_WINDOW_WINNER_MANAGEMENT_EVIDENCE_READY' if len(ready)>=2 else 'LOCAL_WINDOW_WINNER_MANAGEMENT_EVIDENCE_LIMITED'
+
+        res={
+          'version':'V6.58B Local-Window Actor/Action Winner Management Reconstruction',
+          'verdict':verdict,
+          'transcript_videos':len(corpus),'source_cases':len(cases),
+          'accepted_cases':accepted,'rejected_contamination':rejected,
+          'semantic_summary':summary,'ready_semantics':ready,
+          'critical_point':'This version fixes the remaining V6.58A problem by using a much tighter local window and requiring the position actor plus the management action to occur together. Generic market participants, screening language, and distant mentions no longer qualify.',
+          'acceptance':'Advance only semantics with explicit local actor/action binding, at least 3 accepted cases, and support from at least 2 distinct videos.',
+          'important_negative':'SELL_EXIT count must collapse materially versus V6.58A if the contamination filter is working. A large SELL count with weak self-actor evidence is a failure, not a pass.',
+          'next_step':'If at least two semantics survive cleanly, V6.59 will reconcile only those with the frozen exit engine and locate the single largest source-vs-code mismatch. No replay before that reconciliation.',
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; -7% stop; HOLD1260; 10-slot; universe; Market Context gate branch closed.',
+          'cache_note':'Original JLaw transcript cache only; 0 Tiingo; no universe rebuild; no historical replay; no parameter tuning.'
+        }
+        V658B_DIR.mkdir(parents=True,exist_ok=True)
+        V658B_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v658b_write(status='done',message=f'V6.58B 完成：{verdict}',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v658b_write(status='error',message='V6.58B 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v658b_thread=None
+
+def _v658b_start():
+    global v658b_thread
+    if _v658b_alive():return False
+    _v658b_write(status='starting',message='V6.58B 正在启动',elapsed_sec=0,error=None)
+    v658b_thread=threading.Thread(target=_v658b_run,daemon=True);v658b_thread.start();return True
+
+@APP.route('/v658b/run',methods=['GET','POST'])
+def v658b_run():_v658b_start();return redirect('/v658b/local-window-winner-management')
+
+@APP.get('/api/v658b/status')
+def v658b_status_api():return jsonify(_v658b_status())
+
+@APP.get('/v658b/local-window-winner-management')
+def v658b_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v658b_status();r={}
+    if V658B_RESULT.exists():
+        try:r=json.loads(V658B_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v658b_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v658b/run"><button>▶ 开始 V6.58B Local-Window Reconstruction</button></a>'
+    rows=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT','REJECTED_CONTAMINATION','NO_ACTION']:
+        z=r.get('semantic_summary',{}).get(lab,{})
+        rows+=f"<tr><td><b>{e(lab)}</b></td><td>{int(z.get('cases',0))}</td><td>{int(z.get('videos',0))}</td><td>{'✅' if lab in r.get('ready_semantics',[]) else '—'}</td></tr>"
+    ex=''
+    for lab in ['HOLD','ADD','REDUCE_TRIM','SELL_EXIT','FAILED_BREAKOUT_EXIT','ABNORMAL_ACTION_EXIT','CLIMAX_EXIT']:
+        arr=r.get('semantic_summary',{}).get(lab,{}).get('examples',[])[:4]
+        if arr:
+            ex+=f"<h3>{e(lab)}</h3>"
+            for x in arr:
+                sc=x.get('actor_score',{})
+                sn=re.sub(r'\s+',' ',str(x.get('snippet',''))).strip()
+                ex+=f"<div class='quote'><b>{e(x.get('title',''))}</b> · action={e(x.get('action_term',''))} · self={int(sc.get('self',0))} · position={int(sc.get('position',0))} · prebuy={int(sc.get('prebuy',0))}<br>{e(sn[:900])}</div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fdba74;border-radius:14px;padding:16px}}.warn{{background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.quote{{background:#f8fafc;border-left:4px solid #c2410c;padding:12px;margin:10px 0;line-height:1.5}}</style></head><body><div class="w">
+<a href="/v658a/position-aware-winner-management">← V6.58A</a>
+<div class="c"><h1>🔬 V6.58B Local-Window Actor/Action Winner Management</h1><div class="info"><b>继续清污染。</b><br>只有同一个局部窗口里同时出现“持仓主体 + 管理动作”才算证据，避免远距离词语误拼。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Source cases：{int(r.get('source_cases',0) or 0)} · Accepted：{int(r.get('accepted_cases',0) or 0)} · Rejected contamination：{int(r.get('rejected_contamination',0) or 0)}</p><p>{e(r.get('critical_point',''))}</p></div>
+<div class="c"><h2>Local-Window Semantic Ledger</h2><table><tr><th>Semantic</th><th>Cases</th><th>Videos</th><th>Ready</th></tr>{rows}</table></div>
+<div class="c"><h2>Accepted Source Examples</h2>{ex or '<p>运行后显示。</p>'}</div>
+<div class="c"><div class="warn"><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要负结论：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v658b_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v658b_home_base is not None:
+    def _v658b_home_wrap(*args,**kwargs):
+        resp=_v658b_home_base(*args,**kwargs)
+        card="""<div id="v658b-local-window-winner" style="background:#fff7ed;border:5px solid #c2410c;border-radius:24px;padding:28px;margin:22px 0"><h2>🔬 V6.58B Local-Window Winner Management</h2><p>Actor + Position + Action 局部绑定 · 继续清理 SELL / HOLD / ADD / REDUCE 语义污染</p><a href="/v658b/local-window-winner-management"><button>打开 V6.58B</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('V6.58A');d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v658b_home_base:APP.view_functions[ep]=_v658b_home_wrap
