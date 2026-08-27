@@ -30731,3 +30731,210 @@ if _v665_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v665_home_base:APP.view_functions[ep]=_v665_home_wrap
+
+
+# ========================= V6.66 JLaw Execution Data Readiness Audit =========================
+V666_DIR=DATA_DIR/'v666_jlaw_execution_data_readiness'
+V666_STATUS=V666_DIR/'status.json'; V666_RESULT=V666_DIR/'result.json'
+v666_thread=None
+
+def _v666_status():
+    x={'status':'idle','message':'尚未运行','elapsed_sec':0,'error':None}
+    if V666_STATUS.exists():
+        try:x.update(json.loads(V666_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v666_write(**kw):
+    V666_DIR.mkdir(parents=True,exist_ok=True); x=_v666_status(); x.update(kw)
+    V666_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v666_alive(): return v666_thread is not None and v666_thread.is_alive()
+
+def _v666_run():
+    global v666_thread
+    t0=time.time()
+    try:
+        _v666_write(status='running',message='检查现有 V6.44 Trade Cache / V6.17 Historical OHLCV / Feature Store；不下载、不重建…',
+                    elapsed_sec=0,error=None)
+
+        rows=[]
+        def add(module,status,evidence,missing,next_action):
+            rows.append({'module':module,'status':status,'evidence':evidence,'missing':missing,'next_action':next_action})
+
+        # 1) Frozen trade cache
+        trade_ok=V644_TRADE_CACHE.exists()
+        trade_cols=[]
+        trade_rows=0
+        if trade_ok:
+            try:
+                T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+                trade_cols=list(T.columns); trade_rows=len(T)
+            except Exception as ex:
+                trade_ok=False; trade_cols=[]; trade_rows=0
+
+        # 2) Historical cache / manifest / OHLCV sample
+        M=_v615b_read_manifest()
+        hist_manifest_ok=M is not None and not M.empty
+        sample_ohlcv=False; sample_volume=False; sample_files=0
+        if hist_manifest_ok:
+            for _,mr in M.head(80).iterrows():
+                try:d=_v617fv1_read_price(mr)
+                except Exception:d=None
+                if d is None or d.empty:continue
+                sample_files+=1
+                lc={str(c).lower() for c in d.columns}
+                if {'date','open','high','low','close'}.issubset(lc): sample_ohlcv=True
+                if 'volume' in lc and pd.to_numeric(d['volume'],errors='coerce').notna().any(): sample_volume=True
+                if sample_ohlcv and sample_volume and sample_files>=3:break
+
+        # 3) Feature Store
+        fs_files=sorted(V617FV1_YEAR_DIR.glob('*.csv.gz')) if V617FV1_YEAR_DIR.exists() else []
+        fs_ok=bool(fs_files)
+        fs_cols=[]
+        if fs_ok:
+            try:fs_cols=list(pd.read_csv(fs_files[0],compression='gzip',nrows=5).columns)
+            except Exception:fs_ok=False
+
+        # 4) Earnings/event field evidence in executable caches
+        event_tokens=['earnings_date','next_earnings','report_date','event_date','earnings_datetime','earnings_ts']
+        all_cache_cols=[str(c).lower() for c in trade_cols+fs_cols]
+        earnings_cols=[c for c in all_cache_cols if any(t in c for t in event_tokens)]
+
+        # Post-breakout confirmation
+        if trade_ok and hist_manifest_ok and sample_ohlcv:
+            add('POST_BREAKOUT_CONFIRMATION','READY',
+                'V6.44 has listing_id + entry_date; V6.17 Historical Cache exposes point-in-time daily Open/High/Low/Close. 1–5 session behavior can be derived locally.',
+                'No missing market data. Exact source-faithful confirmation definition still needs final rule lock from JLaw evidence.',
+                'Can run controlled local attribution/replay later without Tiingo or universe rebuild.')
+        else:
+            add('POST_BREAKOUT_CONFIRMATION','MISSING',
+                f'trade_ok={trade_ok}; historical_manifest={hist_manifest_ok}; sample_ohlcv={sample_ohlcv}',
+                'Need usable entry linkage and OHLC history.',
+                'Do not test until cache issue is repaired.')
+
+        # Technical stop
+        if trade_ok and hist_manifest_ok and sample_ohlcv:
+            add('TECHNICAL_STOP','DERIVABLE',
+                'Historical OHLC allows pre-entry support/pivot/low structure and actual gap-through-stop execution to be reconstructed around each V6.44 entry.',
+                'V6.44 trade cache does not persist the exact pivot/support geometry used by JLaw; technical-stop semantics must be source-locked before replay.',
+                'Build diagnostic support candidates from existing OHLC only; no stop % tuning.')
+        else:
+            add('TECHNICAL_STOP','MISSING','Required V6.44 entry + OHLC linkage unavailable.',
+                'Historical OHLC or entry linkage missing.','Repair cache only; no strategy tuning.')
+
+        # Dynamic position size
+        if trade_ok and hist_manifest_ok and sample_ohlcv:
+            add('RISK_BASED_POSITION_SIZE','DERIVABLE',
+                'Entry price exists in V6.44; once a technical stop price is source-defined, stop distance is computable and the existing portfolio replay can size capital by per-trade risk.',
+                'Need source-locked account-risk convention and interaction with portfolio exposure; current V6.44 uses equal 10-slot sizing.',
+                'Do not implement until Technical Stop rule is validated.')
+        else:
+            add('RISK_BASED_POSITION_SIZE','MISSING','Cannot compute stable stop distance from current cache state.',
+                'Entry/OHLC missing.','Wait.')
+
+        # ADD / secondary pivot
+        if trade_ok and hist_manifest_ok and sample_ohlcv and sample_volume:
+            add('ADD_PYRAMID_SECONDARY_PIVOT','DERIVABLE',
+                'Post-entry OHLCV paths are present, so healthy pullback, contraction, low-volume reset and secondary breakout can be reconstructed statefully.',
+                'No explicit ADD event is stored in V6.44; exact JLaw add-state definitions still need source confirmation and should not be guessed from thresholds.',
+                'Ready for event attribution after source rule map is finalized; no historical rescan.')
+        else:
+            add('ADD_PYRAMID_SECONDARY_PIVOT','MISSING',
+                f'OHLCV readiness: ohlc={sample_ohlcv}, volume={sample_volume}.',
+                'Need post-entry OHLCV.','Repair cache only.')
+
+        # Earnings
+        if earnings_cols:
+            add('EARNINGS_RISK','READY',
+                'Existing executable cache contains event-like fields: '+', '.join(sorted(set(earnings_cols))[:8]),
+                'Need coverage audit and point-in-time semantics.',
+                'Can map JLaw earnings-risk behavior to cached event field after source lock.')
+        else:
+            add('EARNINGS_RISK','MISSING',
+                'No earnings/report-date field found in V6.44 trade cache or V6.17 Feature Store.',
+                'Point-in-time earnings calendar is absent from the current executable cache.',
+                'Do NOT invent a proxy. If later source evidence makes this high priority, add one dedicated point-in-time earnings cache once.')
+
+        # Market exposure
+        add('MARKET_EXPOSURE_LAYER','READY_WITH_EXISTING_CONTEXT',
+            'Earlier V6.56/V6.57 already mapped cached point-in-time market-regime context and showed it should affect aggressiveness/exposure rather than a hard bull/bear gate.',
+            'Need source-faithful exposure sizing semantics, not a new market admission gate.',
+            'Reuse existing SPY regime cache only; never reopen hard market gate experiments.')
+
+        summary={
+            'READY':sum(r['status']=='READY' for r in rows),
+            'READY_WITH_EXISTING_CONTEXT':sum(r['status']=='READY_WITH_EXISTING_CONTEXT' for r in rows),
+            'DERIVABLE':sum(r['status']=='DERIVABLE' for r in rows),
+            'MISSING':sum(r['status']=='MISSING' for r in rows)
+        }
+        verdict='EXECUTION_MODEL_DATA_MOSTLY_READY_EARNINGS_MISSING' if summary['MISSING']<=1 else 'EXECUTION_MODEL_DATA_GAPS_REMAIN'
+        res={
+            'version':'V6.66 JLaw Execution Data Readiness Audit','verdict':verdict,
+            'summary':summary,'rows':rows,
+            'trade_cache':{'exists':trade_ok,'rows':trade_rows,'columns':trade_cols},
+            'historical_cache':{'manifest_ok':hist_manifest_ok,'sample_files_checked':sample_files,'ohlc_ready':sample_ohlcv,'volume_ready':sample_volume},
+            'feature_store':{'exists':fs_ok,'files':len(fs_files),'columns':fs_cols},
+            'important':'Diagnostic only. No entries, stops, exits, sizing, ADD logic, portfolio behavior or benchmark metrics are changed.',
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT benchmark; existing Fast Cache / Feature Store / Historical Cache / Replay architecture.',
+            'cache_note':'0 Tiingo; no universe rebuild; no historical rescan; no Feature Store rebuild.',
+            'recommended_order':'Finish JLaw source digestion first. Then test: (1) post-breakout confirmation attribution, (2) technical-stop reconstruction, (3) risk-based sizing, (4) ADD state machine, (5) earnings only after a real point-in-time event cache exists.'
+        }
+        V666_DIR.mkdir(parents=True,exist_ok=True)
+        V666_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v666_write(status='done',message=f"V6.66 完成：{verdict}",elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v666_write(status='error',message='V6.66 失败',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v666_thread=None
+
+def _v666_start():
+    global v666_thread
+    if _v666_alive():return False
+    _v666_write(status='starting',message='V6.66 正在启动',elapsed_sec=0,error=None)
+    v666_thread=threading.Thread(target=_v666_run,daemon=True);v666_thread.start();return True
+
+@APP.route('/v666/run',methods=['GET','POST'])
+def v666_run():_v666_start();return redirect('/v666/jlaw-execution-data-readiness')
+
+@APP.get('/api/v666/status')
+def v666_status_api():return jsonify(_v666_status())
+
+@APP.get('/v666/jlaw-execution-data-readiness')
+def v666_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v666_status(); r={}
+    if V666_RESULT.exists():
+        try:r=json.loads(V666_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v666_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v666/run"><button>▶ 开始 V6.66 Data Readiness Audit</button></a>'
+    trs=''
+    for x in r.get('rows',[]):
+        trs+=f"<tr><td><b>{e(x.get('module'))}</b></td><td><b>{e(x.get('status'))}</b></td><td>{e(x.get('evidence'))}</td><td>{e(x.get('missing'))}</td><td>{e(x.get('next_action'))}</td></tr>"
+    sm=r.get('summary',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #22d3ee;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}</style></head><body><div class="w">
+<a href="/v665/feature-store-entry-attribution">← V6.65</a>
+<div class="c"><h1>🧰 V6.66 JLaw Execution Data Readiness Audit</h1><div class="info"><b>只查“现有 Cache 能不能测”。</b><br>不改策略、不调参数、不重跑历史。检查 Technical Stop / Post-Breakout Confirmation / Risk-based Position Size / ADD / Earnings Risk。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>READY {int(sm.get('READY',0) or 0)} · READY_WITH_CONTEXT {int(sm.get('READY_WITH_EXISTING_CONTEXT',0) or 0)} · DERIVABLE {int(sm.get('DERIVABLE',0) or 0)} · MISSING {int(sm.get('MISSING',0) or 0)}</p></div>
+<div class="c"><h2>Readiness Matrix</h2><table><tr><th>Module</th><th>Status</th><th>Evidence</th><th>Missing</th><th>Next</th></tr>{trs or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>重要：</b>{e(r.get('important',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}<br><b>建议顺序：</b>{e(r.get('recommended_order',''))}</div></div>
+</div></body></html>"""
+
+
+_v666_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v666_home_base is not None:
+    def _v666_home_wrap(*args,**kwargs):
+        resp=_v666_home_base(*args,**kwargs)
+        card="""<div id="v666-data-readiness" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0"><h2>🧰 V6.66 JLaw Execution Data Readiness Audit</h2><p>Technical Stop / Post-Breakout / Position Size / ADD / Earnings · 只查现有 Cache 能不能测</p><a href="/v666/jlaw-execution-data-readiness"><button>打开 V6.66</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True); p=body.find('v665-feature-store-attribution'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0: body=body[:pos]+card+body[pos:]
+            else: body=card+body
+            resp.set_data(body); return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v666_home_base: APP.view_functions[ep]=_v666_home_wrap
