@@ -31994,3 +31994,224 @@ if _v670_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v670_home_base: APP.view_functions[ep]=_v670_home_wrap
+
+
+# ========================= V6.70B Benchmark-Reconciled Exposure A/B =========================
+V670B_DIR=DATA_DIR/'v670b_benchmark_reconciled_exposure_ab'
+V670B_STATUS=V670B_DIR/'status.json'; V670B_RESULT=V670B_DIR/'result.json'
+v670b_thread=None
+
+def _v670b_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V670B_STATUS.exists():
+        try:x.update(json.loads(V670B_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v670b_write(**kw):
+    V670B_DIR.mkdir(parents=True,exist_ok=True);x=_v670b_status();x.update(kw)
+    V670B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v670b_alive(): return v670b_thread is not None and v670b_thread.is_alive()
+
+def _v670b_run():
+    global v670b_thread
+    t0=time.time()
+    try:
+        _v670b_write(status='running',phase='build_control',
+                     message='先重建与 V6.69 完全一致的 CONTROL_STOP7；未对齐 28.25% 前禁止判断 Exposure…',
+                     processed=0,total=0,current='',elapsed_sec=0,error=None)
+
+        if not V644_TRADE_CACHE.exists():raise RuntimeError('V6.44 Trigger Cache 不存在')
+        T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        # regime map copied from V6.57 point-in-time semantics
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.sort_values('date')
+
+        rows=[];price={};date_set=set();total=len(T)
+        for n,(_,tr) in enumerate(T.iterrows(),1):
+            lid=str(tr['listing_id']);mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+            }).dropna().sort_values('date').drop_duplicates('date').reset_index(drop=True)
+
+            ed=pd.Timestamp(tr.entry_date).normalize();ep=float(tr.entry_px)
+            ctrl=_v636_exit_from_entry(q,ed,ep,1260)
+            if ctrl is None:continue
+            cd,cp,cr,ch=ctrl
+
+            dz=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if len(dz):
+                price.setdefault(lid,{})
+                price[lid].update(dict(zip(dz.date,dz.close.astype(float))))
+                date_set.update(dz.date.tolist())
+
+            rows.append({'variant':'CONTROL_STOP7','listing_id':lid,'ticker':str(tr.get('ticker','')),
+                         'entry_date':ed,'entry_px':ep,'exit_date':cd,'exit_px':float(cp),
+                         'exit_reason':cr,'hold_sessions':int(ch)})
+            if n==1 or n%250==0 or n==total:
+                _v670b_write(status='running',phase='build_control',
+                             message=f'CONTROL_STOP7 exits {n}/{total}',
+                             processed=n,total=total,current=lid,
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+
+        Z=pd.DataFrame(rows)
+        if Z.empty:raise RuntimeError('无法重建 CONTROL_STOP7')
+
+        # Attach point-in-time regime AFTER reconstructing the exact frozen control exit stream.
+        Z=pd.merge_asof(
+            Z.sort_values('entry_date'),
+            R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+            on='entry_date',direction='backward'
+        )
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('没有可用交易日历')
+
+        # Use the V6.70 replay function; first produce exact control admission IDs.
+        B,whitelist,BC,BL,bs=_v670_replay(Z,price,cal,'CONTROL_STOP7_RECONCILED',t0,whitelist=None,half_cautious=False)
+
+        benchmark_target=0.2825
+        benchmark_gap=float(B['cagr']-benchmark_target)
+        benchmark_ok=abs(benchmark_gap)<=0.0015  # +/-0.15pp tolerance only
+
+        if not benchmark_ok:
+            res={
+              'version':'V6.70B Benchmark-Reconciled Exposure A/B',
+              'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+              'control':B,'target_cagr':benchmark_target,'benchmark_gap':benchmark_gap,
+              'important':'Exposure challenger was NOT evaluated because the frozen control failed benchmark reconciliation.',
+              'next_step':'Repair replay parity only. Do not interpret V6.70 PASS/FAIL until control reproduces V6.44/V6.69.'
+            }
+            V670B_DIR.mkdir(parents=True,exist_ok=True)
+            V670B_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v670b_write(status='done',phase='blocked',
+                         message=f'V6.70B 阻断：Control CAGR {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=len(cal),total=len(cal),current='CONTROL',
+                         elapsed_sec=round(time.time()-t0,1),error=None)
+            return
+
+        # Challenger: exact same admitted trade IDs; only cautious-regime entry sizing changes.
+        C,wadm,CC,CL,cs=_v670_replay(Z,price,cal,'HALF_SIZE_CAUTION_RECONCILED',t0,
+                                     whitelist=whitelist,half_cautious=True)
+        if whitelist!=wadm:
+            raise RuntimeError(f'Admission identity failed: {len(whitelist)} vs {len(wadm)}')
+
+        cagr_ret=float(C['cagr']/B['cagr']) if B['cagr']>0 else np.nan
+        pf_ret=float(C['profit_factor']/B['profit_factor']) if np.isfinite(B['profit_factor']) and B['profit_factor']>0 else np.nan
+        passes=bool(
+            C['maxdd'] >= B['maxdd'] + 0.05 and
+            C['calmar'] > B['calmar'] and
+            (not np.isfinite(cagr_ret) or cagr_ret >= 0.95) and
+            (not np.isfinite(pf_ret) or pf_ret >= 0.80)
+        )
+        verdict='HALF_CAUTION_EXPOSURE_PASSES_RECONCILED_AB' if passes else 'HALF_CAUTION_EXPOSURE_FAILS_RECONCILED_AB'
+
+        res={
+          'version':'V6.70B Benchmark-Reconciled Exposure A/B','verdict':verdict,
+          'benchmark_ok':True,'target_cagr':benchmark_target,'benchmark_gap':benchmark_gap,
+          'same_admissions':True,'account':[B,C],
+          'delta':{
+            'cagr':float(C['cagr']-B['cagr']),
+            'maxdd':float(C['maxdd']-B['maxdd']),
+            'calmar':float(C['calmar']-B['calmar']),
+            'avg_exposure':float(C['avg_exposure']-B['avg_exposure']),
+            'cagr_retention':cagr_ret,'pf_retention':pf_ret
+          },
+          'changed_only':'Same admitted trade IDs and same reconstructed V6.44/V6.69 exits. Only TRANSITION/DEFENSIVE entry size is 50% of normal slot.',
+          'important':'V6.70 original result is superseded because its control did not reproduce the frozen 28.25% benchmark.',
+          'acceptance':'Control must first reproduce 28.25% within +/-0.15pp. Only then is the exposure A/B eligible for interpretation.',
+          'next_step':('If PASS: era-stability audit. If FAIL: reject 50% cautious sizing without testing neighboring ratios.'),
+          'cache_note':'V6.44 Trigger Cache + V6.17 Historical Cache + existing V6.57 point-in-time SPY regime; 0 Tiingo; no universe rebuild.'
+        }
+        V670B_DIR.mkdir(parents=True,exist_ok=True)
+        V670B_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v670b_write(status='done',phase='done',message=f'V6.70B 完成：{verdict}',
+                     processed=len(cal),total=len(cal),current='',
+                     elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v670b_write(status='error',phase='error',message='V6.70B 失败',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v670b_thread=None
+
+def _v670b_start():
+    global v670b_thread
+    if _v670b_alive():return False
+    _v670b_write(status='starting',phase='starting',message='V6.70B 正在启动',
+                 processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v670b_thread=threading.Thread(target=_v670b_run,daemon=True);v670b_thread.start();return True
+
+@APP.route('/v670b/run',methods=['GET','POST'])
+def v670b_run(): _v670b_start(); return redirect('/v670b/benchmark-reconciled-exposure-ab')
+
+@APP.get('/api/v670b/status')
+def v670b_status_api(): return jsonify(_v670b_status())
+
+@APP.get('/v670b/benchmark-reconciled-exposure-ab')
+def v670b_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v670b_status();r={}
+    if V670B_RESULT.exists():
+        try:r=json.loads(V670B_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v670b_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v670b/run"><button>▶ 开始 V6.70B Benchmark Reconciliation</button></a>'
+    trs=''
+    for x in r.get('account',[]):
+        trs+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('calmar',0)):.3f}</td><td>{float(x.get('profit_factor',0)):.2f}</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('avg_exposure',0))*100:.1f}%</td><td>{int(x.get('admitted_positions',0))}</td></tr>"
+    d=r.get('delta',{})
+    ctrl=r.get('control',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.bad{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}.info{{background:#eff6ff;border:1px solid #60a5fa;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v670/market-exposure-half-cautious-ab">← V6.70</a>
+<div class="c"><h1>🧪 V6.70B Benchmark-Reconciled Exposure A/B</h1><div class="bad"><b>先修 Control。</b><br>V6.70 显示的 Control CAGR 22.17%，没有复现冻结基准 28.25%，所以原 PASS 暂时无效。V6.70B 先强制重建与 V6.69 相同的 CONTROL_STOP7；未对齐前不允许解释 Exposure。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Benchmark target：28.25% CAGR · Benchmark OK：<b>{e(r.get('benchmark_ok','—'))}</b></p></div>
+<div class="c"><h2>Reconciled A/B</h2><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Exposure</th><th>Admitted</th></tr>{trs or (f'<tr><td>CONTROL</td><td>{float(ctrl.get("cagr",0))*100:.2f}%</td><td colspan="6">Exposure test blocked until benchmark matches.</td></tr>' if ctrl else '<tr><td colspan="8">运行后显示。</td></tr>')}</table></div>
+<div class="c"><div class="info"><b>关键原则：</b>{e(r.get('important','Control first.'))}<br><b>验收：</b>{e(r.get('acceptance','Control must reproduce frozen benchmark before any A/B conclusion.'))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+</div></body></html>"""
+
+
+_v670b_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v670b_home_base is not None:
+    def _v670b_home_wrap(*args,**kwargs):
+        resp=_v670b_home_base(*args,**kwargs)
+        card="""<div id="v670b-benchmark-reconcile" style="background:#fff1f2;border:5px solid #e11d48;border-radius:24px;padding:28px;margin:22px 0"><h2>🧪 V6.70B Benchmark-Reconciled Exposure A/B</h2><p>先把 Control 重新对齐 28.25%，原 V6.70 PASS 暂不采纳</p><a href="/v670b/benchmark-reconciled-exposure-ab"><button>打开 V6.70B</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('v670-exposure-ab'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v670b_home_base: APP.view_functions[ep]=_v670b_home_wrap
