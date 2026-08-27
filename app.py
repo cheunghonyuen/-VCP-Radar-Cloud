@@ -30938,3 +30938,240 @@ if _v666_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v666_home_base: APP.view_functions[ep]=_v666_home_wrap
+
+
+# ========================= V6.67 Post-Breakout Defense Attribution =========================
+V667_DIR=DATA_DIR/'v667_post_breakout_defense_attribution'
+V667_STATUS=V667_DIR/'status.json'; V667_RESULT=V667_DIR/'result.json'
+V667_DETAIL=V667_DIR/'post_breakout_paths.csv.gz'
+v667_thread=None
+
+def _v667_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V667_STATUS.exists():
+        try:x.update(json.loads(V667_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v667_write(**kw):
+    V667_DIR.mkdir(parents=True,exist_ok=True);x=_v667_status();x.update(kw)
+    V667_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v667_alive(): return v667_thread is not None and v667_thread.is_alive()
+
+def _v667_smd(a,b):
+    a=pd.to_numeric(a,errors='coerce').dropna(); b=pd.to_numeric(b,errors='coerce').dropna()
+    if len(a)<50 or len(b)<50:return None
+    den=((float(a.var(ddof=1))+float(b.var(ddof=1)))/2.0)**0.5
+    return float((a.mean()-b.mean())/den) if den>0 else 0.0
+
+def _v667_run():
+    global v667_thread
+    t0=time.time()
+    try:
+        _v667_write(status='running',phase='load',message='读取 V6.44 Entry + V6.17 Historical Cache；只做突破后行为归因…',
+                    processed=0,total=0,current='',elapsed_sec=0,error=None)
+        if not V644_TRADE_CACHE.exists():
+            raise RuntimeError('V6.44 Trigger Cache 不存在；本轮禁止重建历史扫描')
+        T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        if T.empty:raise RuntimeError('V6.44 cache 没有冻结 Breakout variant')
+        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+        T['_ret']=T.exit_px/T.entry_px-1
+        T['_reason']=T.exit_reason.astype(str)
+        T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty: raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None: raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        rows=[]; total=len(T)
+        for n,(_,tr) in enumerate(T.iterrows(),1):
+            lid=str(tr['listing_id'])
+            mr=mmap.get(lid)
+            if mr is None: continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty: continue
+
+            # Normalize column names without assuming exact cache casing.
+            lc={str(c).lower():c for c in d.columns}
+            need=['date','open','high','low','close']
+            if not all(k in lc for k in need):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').reset_index(drop=True)
+
+            ed=tr['entry_date']
+            ix=q.index[q.date.eq(ed)]
+            if len(ix)==0:
+                ix=q.index[q.date>=ed]
+                if len(ix)==0:continue
+            ei=int(ix[0]); ep=float(tr['entry_px'])
+            if ei+1>=len(q):continue
+
+            rec={'listing_id':lid,'entry_date':str(pd.Timestamp(ed).date()),
+                 'entry_px':ep,'final_return':float(tr['_ret']) if pd.notna(tr['_ret']) else np.nan,
+                 'exit_reason':str(tr['_reason'])}
+            # prior session low / close are known at entry close and are diagnostic references only.
+            if ei>=1:
+                rec['entry_day_low_vs_prior_low']=float(q.low.iloc[ei]/q.low.iloc[ei-1]-1) if q.low.iloc[ei-1] else np.nan
+                rec['prior_low']=float(q.low.iloc[ei-1])
+                rec['prior_close']=float(q.close.iloc[ei-1])
+
+            for hz in [1,2,3,5]:
+                end=min(len(q)-1,ei+hz)
+                seg=q.iloc[ei+1:end+1]
+                if seg.empty:continue
+                rec[f'close_ret_d{hz}']=float(q.close.iloc[end]/ep-1)
+                rec[f'min_low_ret_d{hz}']=float(seg.low.min()/ep-1)
+                rec[f'max_high_ret_d{hz}']=float(seg.high.max()/ep-1)
+                rec[f'green_close_d{hz}']=bool(q.close.iloc[end]>ep)
+                if ei>=1:
+                    pl=float(q.low.iloc[ei-1])
+                    rec[f'any_low_below_prior_low_d{hz}']=bool((seg.low<pl).any())
+                # normalized path-quality measures, no rule mutation
+                rec[f'upside_minus_drawdown_d{hz}']=float((seg.high.max()-ep)/ep - (ep-seg.low.min())/ep)
+            # first-session behavior
+            d1=q.iloc[ei+1]
+            rec['d1_close_ret']=float(d1.close/ep-1)
+            rec['d1_low_ret']=float(d1.low/ep-1)
+            rec['d1_high_ret']=float(d1.high/ep-1)
+            rec['d1_close_above_entry']=bool(d1.close>ep)
+            if ei>=1:
+                rec['d1_low_below_prior_low']=bool(d1.low<q.low.iloc[ei-1])
+
+            rows.append(rec)
+            if n==1 or n%250==0 or n==total:
+                _v667_write(status='running',phase='historical_join',
+                    message=f'Post-Breakout path {n}/{total}',processed=n,total=total,current=lid,
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('没有可用 Post-Breakout Historical paths')
+        V667_DIR.mkdir(parents=True,exist_ok=True)
+        A.to_csv(V667_DETAIL,index=False,compression='gzip')
+
+        winner=A[A.final_return>=1.0].copy()
+        stop=A[A.exit_reason.astype(str).str.fullmatch('STOP7',case=False,na=False)].copy()
+        if winner.empty or stop.empty: raise RuntimeError('+100% Winner 或 ordinary STOP7 cohort 为空')
+
+        features=[c for c in A.columns if c.startswith(('d1_','close_ret_d','min_low_ret_d','max_high_ret_d','upside_minus_drawdown_d')) and
+                  not c.endswith(('above_entry','below_prior_low'))]
+        ledger=[]
+        for c in features:
+            smd=_v667_smd(winner[c],stop[c])
+            if smd is None:continue
+            ledger.append({
+              'feature':c,'winner_median':float(pd.to_numeric(winner[c],errors='coerce').median()),
+              'stop7_median':float(pd.to_numeric(stop[c],errors='coerce').median()),
+              'smd':float(smd),'abs_smd':abs(float(smd)),
+              'direction':'HIGHER_IN_WINNERS' if smd>0 else 'LOWER_IN_WINNERS'
+            })
+        ledger=sorted(ledger,key=lambda x:-x['abs_smd'])
+
+        bools=[c for c in A.columns if c.startswith(('d1_close_above_entry','d1_low_below_prior_low','green_close_d','any_low_below_prior_low_d'))]
+        bool_ledger=[]
+        for c in bools:
+            w=float(winner[c].fillna(False).astype(bool).mean())
+            l=float(stop[c].fillna(False).astype(bool).mean())
+            bool_ledger.append({'feature':c,'winner_rate':w,'stop7_rate':l,'gap':w-l,'abs_gap':abs(w-l)})
+        bool_ledger=sorted(bool_ledger,key=lambda x:-x['abs_gap'])
+
+        robust_num=[x for x in ledger if x['abs_smd']>=.35]
+        robust_bool=[x for x in bool_ledger if x['abs_gap']>=.12]
+        if robust_num or robust_bool:
+            verdict='POST_BREAKOUT_BEHAVIOR_SEPARATION_FOUND'
+        else:
+            verdict='POST_BREAKOUT_BEHAVIOR_WEAK_SEPARATOR_DO_NOT_FORCE_RULE'
+
+        res={
+          'version':'V6.67 Post-Breakout Defense Attribution','verdict':verdict,
+          'paths':int(len(A)),'winner100_n':int(len(winner)),'stop7_n':int(len(stop)),
+          'numeric_ledger':ledger,'boolean_ledger':bool_ledger,
+          'robust_numeric':robust_num[:10],'robust_boolean':robust_bool[:10],
+          'critical_question':'Do early 1–5 session post-breakout price behaviors distinguish eventual +100% winners from ordinary STOP7 losers, before we invent any defensive exit rule?',
+          'source_alignment':'JLaw source material separates setup/actual buy from post-entry management and repeatedly emphasizes disciplined stop execution and holding strong positions while their predefined stop remains intact. V6.67 therefore measures early behavior first; it does not declare a rule from one teaching phrase.',
+          'anti_overfit':'No threshold grid, no optimized exit, no new gate, no factor score. Reports continuous effect sizes and simple event-rate gaps only.',
+          'acceptance':'Advance to ONE controlled defensive A/B only if early behavior shows a material cohort separation. The A/B must use one source-supported semantic and preserve big-winner retention.',
+          'important_negative':'This run does NOT change Technical Stop, Position Size, ADD, Winner Exit, Market Exposure, Entry or the V6.44 benchmark.',
+          'next_step':('V6.68: one controlled Post-Breakout Defense A/B using the single strongest source-supported early-failure semantic; compare CAGR, WR, PF, MaxDD, Avg Loss and +100% winner retention.'
+                       if verdict=='POST_BREAKOUT_BEHAVIOR_SEPARATION_FOUND'
+                       else 'Do not force Post-Breakout Defense. Move next to structural Technical Stop reconstruction from existing OHLC and source cases.'),
+          'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT 28.25% CAGR benchmark; current entry stream, -7% stop, HOLD1260, 10-slot and universe remain unchanged.',
+          'cache_note':'V6.44 Trigger Cache + V6.17 Historical Cache only; 0 Tiingo; no universe rebuild; no historical rescan; no Feature Store rebuild.'
+        }
+        V667_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v667_write(status='done',phase='done',
+            message=f"V6.67 完成：{verdict} · paths {len(A):,}",
+            processed=total,total=total,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v667_write(status='error',phase='error',message='V6.67 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v667_thread=None
+
+def _v667_start():
+    global v667_thread
+    if _v667_alive():return False
+    _v667_write(status='starting',phase='starting',message='V6.67 正在启动',
+                processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v667_thread=threading.Thread(target=_v667_run,daemon=True);v667_thread.start();return True
+
+@APP.route('/v667/run',methods=['GET','POST'])
+def v667_run(): _v667_start(); return redirect('/v667/post-breakout-defense-attribution')
+
+@APP.get('/api/v667/status')
+def v667_status_api(): return jsonify(_v667_status())
+
+@APP.get('/v667/post-breakout-defense-attribution')
+def v667_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v667_status(); r={}
+    if V667_RESULT.exists():
+        try:r=json.loads(V667_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v667_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v667/run"><button>▶ 开始 V6.67 Post-Breakout Attribution</button></a>'
+    nr=''
+    for x in r.get('numeric_ledger',[])[:12]:
+        nr+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('winner_median',0))*100:+.2f}%</td><td>{float(x.get('stop7_median',0))*100:+.2f}%</td><td>{float(x.get('smd',0)):+.3f}</td><td>{e(x.get('direction'))}</td></tr>"
+    br=''
+    for x in r.get('boolean_ledger',[])[:12]:
+        br+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('winner_rate',0))*100:.1f}%</td><td>{float(x.get('stop7_rate',0))*100:.1f}%</td><td>{float(x.get('gap',0))*100:+.1f}pp</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef6ff;border:1px solid #60a5fa;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v666/jlaw-execution-data-readiness">← V6.66</a>
+<div class="c"><h1>🛡️ V6.67 Post-Breakout Defense Attribution</h1><div class="info"><b>第一步不猜防守规则。</b><br>先用现有 OHLC 看突破后 1–5 个交易日，+100% Winner 和 ordinary STOP7 是否真的有明显行为差异。0 Tiingo，不改策略。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Paths：{int(r.get('paths',0) or 0):,} · +100 Winner：{int(r.get('winner100_n',0) or 0):,} · STOP7：{int(r.get('stop7_n',0) or 0):,}</p></div>
+<div class="c"><h2>Continuous Early-Behavior Separation</h2><table><tr><th>Feature</th><th>Winner Median</th><th>STOP7 Median</th><th>SMD</th><th>Direction</th></tr>{nr or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Simple Event-Rate Separation</h2><table><tr><th>Event</th><th>Winner</th><th>STOP7</th><th>Gap</th></tr>{br or '<tr><td colspan="4">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>防过拟合：</b>{e(r.get('anti_overfit',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v667_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v667_home_base is not None:
+    def _v667_home_wrap(*args,**kwargs):
+        resp=_v667_home_base(*args,**kwargs)
+        card="""<div id="v667-post-breakout" style="background:#eef6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🛡️ V6.67 Post-Breakout Defense Attribution</h2><p>突破后1–5日 Winner vs STOP7 · 先归因，不猜 Exit</p><a href="/v667/post-breakout-defense-attribution"><button>打开 V6.67</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('v666-data-readiness'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0: body=body[:pos]+card+body[pos:]
+            else: body=card+body
+            resp.set_data(body); return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v667_home_base: APP.view_functions[ep]=_v667_home_wrap
