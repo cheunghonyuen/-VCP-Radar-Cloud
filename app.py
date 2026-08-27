@@ -32477,25 +32477,25 @@ if _v670d_home_base is not None:
             APP.view_functions[ep]=_v670d_home_wrap
 
 
-# ========================= V6.70E PRECHECKED FAST EXPOSURE A/B =========================
-V670E_DIR=DATA_DIR/'v670e_prechecked_fast_exposure_ab'
-V670E_STATUS=V670E_DIR/'status.json'; V670E_RESULT=V670E_DIR/'result.json'
-v670e_thread=None
+# ========================= V6.70F PRECHECKED FAST EXPOSURE A/B =========================
+V670F_DIR=DATA_DIR/'v670f_fixed_admission_fast_exposure_ab'
+V670F_STATUS=V670F_DIR/'status.json'; V670F_RESULT=V670F_DIR/'result.json'
+v670f_thread=None
 
-def _v670e_status():
+def _v670f_status():
     x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
-    if V670E_STATUS.exists():
-        try:x.update(json.loads(V670E_STATUS.read_text(encoding='utf-8')))
+    if V670F_STATUS.exists():
+        try:x.update(json.loads(V670F_STATUS.read_text(encoding='utf-8')))
         except Exception:pass
     return x
 
-def _v670e_write(**kw):
-    V670E_DIR.mkdir(parents=True,exist_ok=True);x=_v670e_status();x.update(kw)
-    V670E_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+def _v670f_write(**kw):
+    V670F_DIR.mkdir(parents=True,exist_ok=True);x=_v670f_status();x.update(kw)
+    V670F_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
 
-def _v670e_alive(): return v670e_thread is not None and v670e_thread.is_alive()
+def _v670f_alive(): return v670f_thread is not None and v670f_thread.is_alive()
 
-def _v670e_replay_core(Z,price,cal,label,t0,whitelist=None,half_cautious=False,heartbeat=True):
+def _v670f_replay_core(Z,price,cal,label,t0,whitelist=None,half_cautious=False,heartbeat=True):
     Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
     rec=Z.to_dict('index'); entries={}; exits={}
     for i,r in rec.items():
@@ -32526,13 +32526,26 @@ def _v670e_replay_core(Z,price,cal,label,t0,whitelist=None,half_cautious=False,h
 
         for i in entries.get(dt,[]):
             if whitelist is not None and i not in whitelist: continue
-            if len(pos)>=10:
+            # CONTROL decides the 10-slot admission schedule.
+            # Challenger must follow the exact same IDs; otherwise sizing changes
+            # can recursively change later admissions and contaminate the A/B.
+            if whitelist is None and len(pos)>=10:
                 skipcap+=1; continue
             r=rec[i]; ep=float(r['entry_px']); regime=str(r.get('regime','UNKNOWN'))
             mult=0.5 if (half_cautious and regime in ('TRANSITION','DEFENSIVE')) else 1.0
             target=(eq_now/10.0)*mult
-            if not np.isfinite(ep) or ep<=0 or cash+1e-12<target:
+            if not np.isfinite(ep) or ep<=0:
                 skipcash+=1; continue
+            if whitelist is None:
+                if cash+1e-12<target:
+                    skipcash+=1; continue
+            else:
+                # Same-admission, self-financing replay: keep the control-selected
+                # trade but clip its dollars to currently available cash instead
+                # of dropping the trade. No leverage is introduced.
+                target=min(float(target), float(cash))
+                if target<=1e-12:
+                    raise RuntimeError(f'{label}: no cash left for forced control-schedule admission id={i} date={dt}')
             cash-=target; shares=target/ep
             pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,
                     'cost':target,'entry_date':dt,'size_mult':mult}
@@ -32549,7 +32562,7 @@ def _v670e_replay_core(Z,price,cal,label,t0,whitelist=None,half_cautious=False,h
         eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
 
         if heartbeat and (di%step==0 or di==len(cal)):
-            _v670e_write(status='running',phase='account_replay',
+            _v670f_write(status='running',phase='account_replay',
                          message=f'{label} {int(round(di/len(cal)*100))}%',
                          processed=di,total=len(cal),current=label,
                          elapsed_sec=round(time.time()-t0,1),error=None)
@@ -32579,12 +32592,12 @@ def _v670e_replay_core(Z,price,cal,label,t0,whitelist=None,half_cautious=False,h
         'final_multiple':float(end/start) if start>0 else np.nan
     },set(admitted)
 
-def _v670e_run():
-    global v670e_thread
+def _v670f_run():
+    global v670f_thread
     t0=time.time()
     try:
         # ---------- PRECHECK 1: V6.69 cache ----------
-        _v670e_write(status='running',phase='precheck_cache',
+        _v670f_write(status='running',phase='precheck_cache',
                      message='预检1/4：检查 V6.69 cache 与字段…',processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
         if not V669_TRADES.exists():
             raise RuntimeError(f'V6.69 paired cache 不存在: {V669_TRADES}')
@@ -32605,7 +32618,7 @@ def _v670e_run():
         if Z.empty: raise RuntimeError('V6.69 cache 解析后为空')
 
         # ---------- PRECHECK 2: regime ----------
-        _v670e_write(status='running',phase='precheck_regime',
+        _v670f_write(status='running',phase='precheck_regime',
                      message='预检2/4：检查 point-in-time SPY regime…',processed=1,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
         rg=_v42_spy_regimes()
         if rg is None or rg.empty: raise RuntimeError('SPY point-in-time regime cache 不可用')
@@ -32621,7 +32634,7 @@ def _v670e_run():
         Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
 
         # ---------- PRECHECK 3: manifest + tiny real-data smoke ----------
-        _v670e_write(status='running',phase='precheck_smoke',
+        _v670f_write(status='running',phase='precheck_smoke',
                      message='预检3/4：真实缓存小样本 smoke test（先不读全部 7752只）…',
                      processed=2,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
         M=_v615b_read_manifest()
@@ -32648,10 +32661,10 @@ def _v670e_run():
         SZ=Z[Z.listing_id.astype(str).isin(smoke_price.keys())].head(250).copy()
         scal=sorted(smoke_dates)
         if SZ.empty or len(scal)<50: raise RuntimeError(f'smoke data insufficient rows={len(SZ)} dates={len(scal)}')
-        _v670e_replay_core(SZ,smoke_price,scal,'SMOKE_CONTROL',t0,None,False,heartbeat=False)
+        _v670f_replay_core(SZ,smoke_price,scal,'SMOKE_CONTROL',t0,None,False,heartbeat=False)
 
         # ---------- PRECHECK 4: full price cache ----------
-        _v670e_write(status='running',phase='full_price_join',
+        _v670f_write(status='running',phase='full_price_join',
                      message='预检4/4通过；现在才读取完整历史价格缓存…',
                      processed=3,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
 
@@ -32671,7 +32684,7 @@ def _v670e_run():
             if q.empty:continue
             price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
             if n==1 or n%250==0 or n==tot:
-                _v670e_write(status='running',phase='full_price_join',
+                _v670f_write(status='running',phase='full_price_join',
                              message=f'完整历史价格缓存 {n}/{tot}',
                              processed=n,total=tot,current=lid,
                              elapsed_sec=round(time.time()-t0,1),error=None)
@@ -32680,30 +32693,30 @@ def _v670e_run():
         if not cal: raise RuntimeError('完整交易日历为空')
 
         # ---------- CONTROL FIRST ----------
-        _v670e_write(status='running',phase='control_replay',
+        _v670f_write(status='running',phase='control_replay',
                      message='Control replay；未对齐 28.25% 前不会启动 Challenger…',
                      processed=0,total=len(cal),current='CONTROL',
                      elapsed_sec=round(time.time()-t0,1),error=None)
-        B,whitelist=_v670e_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=True)
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=True)
 
         target=0.2825; gap=float(B['cagr']-target); ok=abs(gap)<=0.0015
         if not ok:
-            result={'version':'V6.70E Prechecked Fast Exposure A/B',
+            result={'version':'V6.70F Fixed-Admission Fast Exposure A/B',
                     'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
                     'benchmark_ok':False,'target_cagr':target,'benchmark_gap':gap,
                     'account':[B],
                     'important':'Control 对不上冻结基准，Challenger 未启动。',
                     'next_step':'只修 replay parity，不再重算 64,117 exits。'}
-            V670E_DIR.mkdir(parents=True,exist_ok=True)
-            V670E_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-            _v670e_write(status='done',phase='blocked',
+            V670F_DIR.mkdir(parents=True,exist_ok=True)
+            V670F_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v670f_write(status='done',phase='blocked',
                          message=f'Control {B["cagr"]*100:.2f}% != 28.25%；已阻断 Challenger',
                          processed=len(cal),total=len(cal),current='CONTROL',
                          elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
             return
 
         # ---------- CHALLENGER ----------
-        C,wadm=_v670e_replay_core(Z,price,cal,'HALF_SIZE_CAUTION',t0,whitelist,True,heartbeat=True)
+        C,wadm=_v670f_replay_core(Z,price,cal,'HALF_SIZE_CAUTION',t0,whitelist,True,heartbeat=True)
         if whitelist!=wadm:
             raise RuntimeError(f'Admission identity failed: control={len(whitelist)}, challenger={len(wadm)}')
 
@@ -32712,51 +32725,51 @@ def _v670e_run():
         passes=bool(C['maxdd']>=B['maxdd']+0.05 and C['calmar']>B['calmar'] and cagr_ret>=0.95 and pf_ret>=0.80)
         verdict='HALF_CAUTION_EXPOSURE_PASSES_RECONCILED_AB' if passes else 'HALF_CAUTION_EXPOSURE_FAILS_RECONCILED_AB'
 
-        result={'version':'V6.70E Prechecked Fast Exposure A/B','verdict':verdict,
+        result={'version':'V6.70F Fixed-Admission Fast Exposure A/B','verdict':verdict,
                 'benchmark_ok':True,'target_cagr':target,'benchmark_gap':gap,'same_admissions':True,
                 'account':[B,C],
                 'delta':{'cagr':C['cagr']-B['cagr'],'maxdd':C['maxdd']-B['maxdd'],
                          'calmar':C['calmar']-B['calmar'],'avg_exposure':C['avg_exposure']-B['avg_exposure'],
                          'cagr_retention':cagr_ret,'pf_retention':pf_ret},
-                'important':'V6.69 paired cache reuse + real-cache smoke precheck + benchmark-first.',
+                'important':'V6.69 paired cache reuse + smoke precheck + benchmark-first. Challenger follows the exact CONTROL-selected trade IDs; if its own equity path leaves less cash, the scheduled position is clipped to available cash instead of dropping the trade. No leverage.',
                 'next_step':'PASS -> era stability audit; FAIL -> reject 50% cautious sizing without neighboring ratios.'}
-        V670E_DIR.mkdir(parents=True,exist_ok=True)
-        V670E_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v670e_write(status='done',phase='done',message=f'V6.70E 完成：{verdict}',
+        V670F_DIR.mkdir(parents=True,exist_ok=True)
+        V670F_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v670f_write(status='done',phase='done',message=f'V6.70F 完成：{verdict}',
                      processed=len(cal),total=len(cal),current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
 
     except Exception as ex:
         tb=traceback.format_exc()
         traceback.print_exc()
-        _v670e_write(status='error',phase='error',
-                     message=f'V6.70E 失败：{type(ex).__name__}: {ex}',
+        _v670f_write(status='error',phase='error',
+                     message=f'V6.70F 失败：{type(ex).__name__}: {ex}',
                      elapsed_sec=round(time.time()-t0,1),
                      error=f'{type(ex).__name__}: {ex}',traceback=tb)
     finally:
-        v670e_thread=None
+        v670f_thread=None
 
-def _v670e_start():
-    global v670e_thread
-    if _v670e_alive():return False
-    _v670e_write(status='starting',phase='starting',message='V6.70E 正在启动',
+def _v670f_start():
+    global v670f_thread
+    if _v670f_alive():return False
+    _v670f_write(status='starting',phase='starting',message='V6.70F 正在启动',
                  processed=0,total=0,current='',elapsed_sec=0,error=None,traceback=None)
-    v670e_thread=threading.Thread(target=_v670e_run,daemon=True);v670e_thread.start();return True
+    v670f_thread=threading.Thread(target=_v670f_run,daemon=True);v670f_thread.start();return True
 
-@APP.route('/v670e/run',methods=['GET','POST'])
-def v670e_run():_v670e_start();return redirect('/v670e/prechecked-fast-exposure-ab')
+@APP.route('/v670f/run',methods=['GET','POST'])
+def v670f_run():_v670f_start();return redirect('/v670f/prechecked-fast-exposure-ab')
 
-@APP.get('/api/v670e/status')
-def v670e_status_api():return jsonify(_v670e_status())
+@APP.get('/api/v670f/status')
+def v670f_status_api():return jsonify(_v670f_status())
 
-@APP.get('/v670e/prechecked-fast-exposure-ab')
-def v670e_page():
+@APP.get('/v670f/prechecked-fast-exposure-ab')
+def v670f_page():
     import html
-    e=lambda x:html.escape(str(x));st=_v670e_status();r={}
-    if V670E_RESULT.exists():
-        try:r=json.loads(V670E_RESULT.read_text(encoding='utf-8'))
+    e=lambda x:html.escape(str(x));st=_v670f_status();r={}
+    if V670F_RESULT.exists():
+        try:r=json.loads(V670F_RESULT.read_text(encoding='utf-8'))
         except Exception:pass
-    running=_v670e_alive() or st.get('status') in ('starting','running')
-    btn='' if running else '<a href="/v670e/run"><button>▶ 开始 V6.70E</button></a>'
+    running=_v670f_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v670f/run"><button>▶ 开始 V6.70F</button></a>'
     trs=''
     for x in r.get('account',[]):
         trs+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('calmar',0)):.3f}</td><td>{float(x.get('profit_factor',0)):.2f}</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('avg_exposure',0))*100:.1f}%</td><td>{int(x.get('admitted_positions',0))}</td></tr>"
@@ -32766,18 +32779,18 @@ def v670e_page():
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #22d3ee;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px;white-space:normal}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
 <a href="/">← 首页</a>
-<div class="c"><h1>🧪 V6.70E Prechecked Fast Exposure A/B</h1><div class="info"><b>先小样本真实缓存 smoke test，再读完整 7752只。</b><br>直接复用 V6.69 paired cache，不重算 64,117 exits；Control 不对齐 28.25% 就停止 Challenger。</div></div>
+<div class="c"><h1>🧪 V6.70F Fixed-Admission Fast Exposure A/B</h1><div class="info"><b>先小样本真实缓存 smoke test，再读完整 7752只。</b><br>直接复用 V6.69 paired cache，不重算 64,117 exits；Control 不对齐 28.25% 就停止 Challenger。</div></div>
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
 <div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Benchmark OK：<b>{e(r.get('benchmark_ok','—'))}</b></p></div>
 <div class="c"><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Exposure</th><th>Admitted</th></tr>{trs or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
 </div></body></html>"""
 
 # guaranteed first homepage card
-_v670e_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
-if _v670e_home_base is not None:
-    def _v670e_home_wrap(*args,**kwargs):
-        resp=_v670e_home_base(*args,**kwargs)
-        card="""<div id="v670e-prechecked" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0"><h2>🧪 V6.70E Prechecked Fast Exposure A/B</h2><p>Smoke first · reuse V6.69 cache · benchmark-first · explicit errors</p><a href="/v670e/prechecked-fast-exposure-ab"><button>打开 V6.70E</button></a></div>"""
+_v670f_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v670f_home_base is not None:
+    def _v670f_home_wrap(*args,**kwargs):
+        resp=_v670f_home_base(*args,**kwargs)
+        card="""<div id="v670f-fixed-admission" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0"><h2>🧪 V6.70F Fixed-Admission Fast Exposure A/B</h2><p>Smoke first · reuse V6.69 cache · benchmark-first · explicit errors</p><a href="/v670f/prechecked-fast-exposure-ab"><button>打开 V6.70F</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True); pos=body.find('<body')
             if pos>=0:
@@ -32786,4 +32799,4 @@ if _v670e_home_base is not None:
             resp.set_data(body); return resp
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
-        if vf is _v670e_home_base: APP.view_functions[ep]=_v670e_home_wrap
+        if vf is _v670f_home_base: APP.view_functions[ep]=_v670f_home_wrap
