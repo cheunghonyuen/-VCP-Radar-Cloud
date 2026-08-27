@@ -32215,3 +32215,233 @@ if _v670b_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v670b_home_base: APP.view_functions[ep]=_v670b_home_wrap
+
+
+# ========================= V6.70C FAST Cached Benchmark Reconcile =========================
+V670C_DIR=DATA_DIR/'v670c_fast_cached_exposure_ab'
+V670C_STATUS=V670C_DIR/'status.json'; V670C_RESULT=V670C_DIR/'result.json'
+v670c_thread=None
+
+def _v670c_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V670C_STATUS.exists():
+        try:x.update(json.loads(V670C_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v670c_write(**kw):
+    V670C_DIR.mkdir(parents=True,exist_ok=True);x=_v670c_status();x.update(kw)
+    V670C_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v670c_alive(): return v670c_thread is not None and v670c_thread.is_alive()
+
+def _v670c_replay(Z,price,cal,label,t0,whitelist=None,half_cautious=False):
+    Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index'); entries={}; exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];admitted=[];skipcap=0;skipcash=0
+    step=max(1,len(cal)//20)
+    for di,dt in enumerate(cal,1):
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                           'exit_date':dt,'size_mult':p['size_mult']})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if whitelist is not None and i not in whitelist:continue
+            if len(pos)>=10:skipcap+=1;continue
+            r=rec[i];ep=float(r['entry_px']);regime=str(r.get('regime','UNKNOWN'))
+            mult=0.5 if (half_cautious and regime in ('TRANSITION','DEFENSIVE')) else 1.0
+            target=(eq_now/10.0)*mult
+            if ep<=0 or cash+1e-12<target:skipcash+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,
+                    'cost':target,'entry_date':dt,'size_mult':mult}
+            last[i]=ep;admitted.append(i)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v670c_write(status='running',phase='account_replay',
+                         message=f'{label} {int(round(di/len(cal)*100))}%',
+                         processed=di,total=len(cal),current=label,
+                         elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf;wr=float((L.ret>0).mean())
+    else:pf=wr=np.nan
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+            'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':float(wr),
+            'avg_exposure':float(C.exposure.mean()),
+            'admitted_positions':int(len(admitted)),
+            'skipped_capacity':int(skipcap),'skipped_cash':int(skipcash),
+            'final_multiple':float(end/start) if start>0 else np.nan},set(admitted)
+
+def _v670c_run():
+    global v670c_thread
+    t0=time.time()
+    try:
+        _v670c_write(status='running',phase='load_cached_v669',
+                     message='直接读取 V6.69 已保存 paired cache；不再重算 64,117 笔 exit…',
+                     processed=0,total=0,current='',elapsed_sec=0,error=None)
+
+        if not V669_TRADES.exists():
+            raise RuntimeError('找不到 V6.69 paired_exit_trades.csv.gz；禁止重新跑64,117笔')
+
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P['listing_id'].astype(str),
+            'entry_date':pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P['entry_px'],errors='coerce'),
+            'exit_date':pd.to_datetime(P['control_exit_date'],errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P['control_exit_px'],errors='coerce'),
+            'exit_reason':P['control_reason'].astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v670c_write(status='running',phase='price_join',
+                             message=f'读取历史价格缓存 {n}/{tot}',
+                             processed=n,total=tot,current=lid,
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('没有可用交易日历')
+
+        B,whitelist=_v670c_replay(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False)
+        target=0.2825;gap=float(B['cagr']-target);ok=abs(gap)<=0.0015
+
+        if not ok:
+            result={'version':'V6.70C Fast Cached Exposure A/B',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'target_cagr':target,'benchmark_gap':gap,
+                    'account':[B],
+                    'important':'Stopped after cached-control replay. No exposure conclusion allowed.',
+                    'next_step':'Fix replay parity only; do NOT rerun 64,117 exit reconstruction.'}
+            V670C_DIR.mkdir(parents=True,exist_ok=True)
+            V670C_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v670c_write(status='done',phase='blocked',
+                         message=f'Control {B["cagr"]*100:.2f}% != 28.25%；已阻断',
+                         processed=len(cal),total=len(cal),current='CONTROL',
+                         elapsed_sec=round(time.time()-t0,1),error=None)
+            return
+
+        C,wadm=_v670c_replay(Z,price,cal,'HALF_SIZE_CAUTION',t0,whitelist,True)
+        if whitelist!=wadm:raise RuntimeError(f'Admission identity failed: {len(whitelist)} vs {len(wadm)}')
+        cagr_ret=float(C['cagr']/B['cagr']) if B['cagr']>0 else np.nan
+        pf_ret=float(C['profit_factor']/B['profit_factor']) if np.isfinite(B['profit_factor']) and B['profit_factor']>0 else np.nan
+        passes=bool(C['maxdd']>=B['maxdd']+0.05 and C['calmar']>B['calmar'] and cagr_ret>=0.95 and pf_ret>=0.80)
+        verdict='HALF_CAUTION_EXPOSURE_PASSES_RECONCILED_AB' if passes else 'HALF_CAUTION_EXPOSURE_FAILS_RECONCILED_AB'
+        result={'version':'V6.70C Fast Cached Exposure A/B','verdict':verdict,
+                'benchmark_ok':True,'target_cagr':target,'benchmark_gap':gap,'same_admissions':True,
+                'account':[B,C],
+                'delta':{'cagr':C['cagr']-B['cagr'],'maxdd':C['maxdd']-B['maxdd'],
+                         'calmar':C['calmar']-B['calmar'],'avg_exposure':C['avg_exposure']-B['avg_exposure'],
+                         'cagr_retention':cagr_ret,'pf_retention':pf_ret},
+                'important':'Uses V6.69 saved paired exit cache. No 64,117-trade exit rebuild.',
+                'changed_only':'Same admitted trade IDs; only TRANSITION/DEFENSIVE new-position size is half normal slot.',
+                'next_step':'PASS -> era stability audit; FAIL -> reject 50% cautious sizing without neighboring ratios.'}
+        V670C_DIR.mkdir(parents=True,exist_ok=True)
+        V670C_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v670c_write(status='done',phase='done',message=f'V6.70C 完成：{verdict}',
+                     processed=len(cal),total=len(cal),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v670c_write(status='error',phase='error',message='V6.70C 失败',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v670c_thread=None
+
+def _v670c_start():
+    global v670c_thread
+    if _v670c_alive():return False
+    _v670c_write(status='starting',phase='starting',message='V6.70C 正在启动',
+                 processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v670c_thread=threading.Thread(target=_v670c_run,daemon=True);v670c_thread.start();return True
+
+@APP.route('/v670c/run',methods=['GET','POST'])
+def v670c_run():_v670c_start();return redirect('/v670c/fast-cached-exposure-ab')
+
+@APP.get('/api/v670c/status')
+def v670c_status_api():return jsonify(_v670c_status())
+
+@APP.get('/v670c/fast-cached-exposure-ab')
+def v670c_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v670c_status();r={}
+    if V670C_RESULT.exists():
+        try:r=json.loads(V670C_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v670c_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v670c/run"><button>▶ 开始 V6.70C Fast Cached A/B</button></a>'
+    trs=''
+    for x in r.get('account',[]):
+        trs+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('calmar',0)):.3f}</td><td>{float(x.get('profit_factor',0)):.2f}</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('avg_exposure',0))*100:.1f}%</td><td>{int(x.get('admitted_positions',0))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #22d3ee;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v670b/benchmark-reconciled-exposure-ab">← V6.70B</a>
+<div class="c"><h1>⚡ V6.70C Fast Cached Exposure A/B</h1><div class="info"><b>不再重算 64,117 笔。</b><br>直接复用 V6.69 已保存的 CONTROL_STOP7 paired cache；如果 Control 对不上 28.25%，立即阻断，不再跑 Challenger。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Benchmark OK：<b>{e(r.get('benchmark_ok','—'))}</b> · Target 28.25%</p></div>
+<div class="c"><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Exposure</th><th>Admitted</th></tr>{trs or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>重要：</b>{e(r.get('important','如果 Control 对不上，会立刻阻断。'))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
+</div></body></html>"""
