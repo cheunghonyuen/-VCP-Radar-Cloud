@@ -32445,3 +32445,33 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class="c"><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Exposure</th><th>Admitted</th></tr>{trs or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
 <div class="c"><div class="warn"><b>重要：</b>{e(r.get('important','如果 Control 对不上，会立刻阻断。'))}<br><b>下一步：</b>{e(r.get('next_step',''))}</div></div>
 </div></body></html>"""
+
+
+# ========================= V6.70D Homepage/Route Hotfix =========================
+_v670d_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v670d_home_base is not None:
+    def _v670d_home_wrap(*args,**kwargs):
+        resp=_v670d_home_base(*args,**kwargs)
+        card="""<div id="v670d-fast-cached-exposure" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>⚡ V6.70D Fast Cached Exposure A/B</h2>
+        <p>直接复用 V6.69 cache · Control 先对齐 28.25% · fail-fast</p>
+        <a href="/v670c/fast-cached-exposure-ab"><button>打开 V6.70D</button></a>
+        </div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            # Insert right after <body> so it is definitely the first visible card.
+            pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos)
+                if gt>=0:
+                    body=body[:gt+1]+card+body[gt+1:]
+                else:
+                    body=card+body
+            else:
+                body=card+body
+            resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v670d_home_base:
+            APP.view_functions[ep]=_v670d_home_wrap
