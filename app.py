@@ -31687,3 +31687,310 @@ if _v669_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v669_home_base: APP.view_functions[ep]=_v669_home_wrap
+
+
+# ========================= V6.70 Market Exposure 50% Cautious Controlled A/B =========================
+V670_DIR=DATA_DIR/'v670_market_exposure_half_cautious_ab'
+V670_STATUS=V670_DIR/'status.json'; V670_RESULT=V670_DIR/'result.json'
+V670_LEDGER=V670_DIR/'admission_and_sizing_ledger.csv.gz'
+v670_thread=None
+
+def _v670_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V670_STATUS.exists():
+        try:x.update(json.loads(V670_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v670_write(**kw):
+    V670_DIR.mkdir(parents=True,exist_ok=True);x=_v670_status();x.update(kw)
+    V670_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v670_alive(): return v670_thread is not None and v670_thread.is_alive()
+
+def _v670_metrics(C,L):
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+    else:
+        pf=wr=avgw=avgl=np.nan
+    return {
+        'cagr':float(cagr),'maxdd':maxdd,
+        'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+        'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,
+        'avg_exposure':float(C.exposure.mean()),
+        'median_exposure':float(C.exposure.median()),
+        'max_exposure':float(C.exposure.max()),
+        'final_multiple':float(end/start) if start>0 else np.nan
+    }
+
+def _v670_replay(Z,price,cal,label,t0,whitelist=None,half_cautious=False):
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];admitted=[];skipped_capacity=0;skipped_cash=0
+    sizing_rows=[]; step=max(1,len(cal)//24)
+
+    for di,dt in enumerate(cal,1):
+        # exits first
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']); proceeds=p['shares']*xp; cash+=proceeds
+            ledger.append({
+                'trade_id':i,'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                'exit_date':dt,'entry_regime':p['entry_regime'],'size_mult':p['size_mult']
+            })
+            last.pop(i,None)
+
+        # mark existing positions before sizing new entries
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp; hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if whitelist is not None and i not in whitelist:
+                continue
+            if len(pos)>=10:
+                skipped_capacity+=1; continue
+
+            r=rec[i]; ep=float(r['entry_px'])
+            regime=str(r.get('regime','UNKNOWN'))
+            mult=0.5 if (half_cautious and regime in ('TRANSITION','DEFENSIVE')) else 1.0
+            target=(eq_now/10.0)*mult
+
+            if ep<=0 or cash+1e-12<target:
+                skipped_cash+=1; continue
+
+            cash-=target; shares=target/ep; admitted.append(i)
+            pos[i]={
+                'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,
+                'entry_date':dt,'entry_regime':regime,'size_mult':mult
+            }
+            last[i]=ep
+            sizing_rows.append({
+                'strategy':label,'trade_id':i,'listing_id':str(r['listing_id']),
+                'entry_date':str(pd.Timestamp(dt).date()),'regime':regime,
+                'size_mult':mult,'target_capital':target,'equity_before_entry':eq_now
+            })
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp; hv+=p['shares']*cp
+        eq=cash+hv
+        eqrows.append((dt,eq,hv/eq if eq>0 else np.nan,cash/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v670_write(status='running',phase='account_replay',
+                        message=f'{label} replay {int(round(di/len(cal)*100))}%',
+                        processed=di,total=len(cal),current=label,
+                        elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure','cash_share'])
+    L=pd.DataFrame(ledger)
+    m=_v670_metrics(C,L)
+    m.update({
+        'strategy':label,'admitted_positions':int(len(admitted)),
+        'skipped_capacity':int(skipped_capacity),'skipped_cash':int(skipped_cash),
+        'cautious_entries':int(sum(1 for x in sizing_rows if x['regime'] in ('TRANSITION','DEFENSIVE'))),
+        'half_sized_entries':int(sum(1 for x in sizing_rows if x['size_mult']==0.5)),
+        'avg_entry_size_mult':float(np.mean([x['size_mult'] for x in sizing_rows])) if sizing_rows else np.nan
+    })
+    return m,set(admitted),C,L,sizing_rows
+
+def _v670_run():
+    global v670_thread
+    t0=time.time()
+    try:
+        _v670_write(status='running',phase='load',
+                    message='读取 V6.44 frozen trades + point-in-time SPY regime；不改 BUY/PASS…',
+                    processed=0,total=0,current='',elapsed_sec=0,error=None)
+
+        if not V644_TRADE_CACHE.exists():raise RuntimeError('V6.44 Trigger Cache 不存在')
+        X=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        X=X[X.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        if X.empty:raise RuntimeError('V6.44 frozen variant 不存在')
+        for c in ['entry_date','exit_date']:
+            X[c]=pd.to_datetime(X[c],errors='coerce').dt.normalize()
+        for c in ['entry_px','exit_px']:
+            X[c]=pd.to_numeric(X[c],errors='coerce')
+        X=X.dropna(subset=['listing_id','entry_date','exit_date','entry_px','exit_px']).copy()
+        X=X[(X.entry_date>=V624_START)&(X.entry_date<=V624_END)].copy()
+        X=X.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        # Point-in-time regime mapping reuses V6.57 exactly.
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.sort_values('date')
+        Z=pd.merge_asof(
+            X.sort_values('entry_date'),
+            R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+            on='entry_date',direction='backward'
+        )
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+        Z=Z.reset_index(drop=True)
+
+        # Build close-price map only for mark-to-market; no network / no rescan.
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        needed=sorted(set(Z.listing_id.astype(str)))
+        price={};date_set=set();total=len(needed)
+        for n,lid in enumerate(needed,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%100==0 or n==total:
+                _v670_write(status='running',phase='price_cache_join',
+                            message=f'Historical close map {n}/{total}',
+                            processed=n,total=total,current=lid,
+                            elapsed_sec=round(time.time()-t0,1),error=None)
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('没有可用交易日历')
+
+        # 1) Frozen control decides the exact admitted trade IDs.
+        B,whitelist,BC,BL,bs=_v670_replay(Z,price,cal,'CONTROL_FULL_SIZE',t0,whitelist=None,half_cautious=False)
+
+        # 2) Challenger MUST use the same admitted trade IDs. Only sizing changes.
+        C,wadm,CC,CL,cs=_v670_replay(Z,price,cal,'HALF_SIZE_CAUTION',t0,whitelist=whitelist,half_cautious=True)
+
+        # Exact admission identity is a hard integrity check.
+        same_admissions=(whitelist==wadm)
+        if not same_admissions:
+            raise RuntimeError(f'Admission identity failed: control {len(whitelist)} vs challenger {len(wadm)}')
+
+        d_cagr=float(C['cagr']-B['cagr'])
+        d_dd=float(C['maxdd']-B['maxdd'])
+        d_calmar=float(C['calmar']-B['calmar'])
+        cagr_retention=float(C['cagr']/B['cagr']) if B['cagr']>0 else np.nan
+        pf_retention=float(C['profit_factor']/B['profit_factor']) if np.isfinite(B['profit_factor']) and B['profit_factor']>0 else np.nan
+
+        # Predeclared risk-control acceptance. No threshold search.
+        passes=bool(
+            C['maxdd'] >= B['maxdd'] + 0.05 and
+            C['calmar'] > B['calmar'] and
+            (not np.isfinite(cagr_retention) or cagr_retention >= 0.95) and
+            (not np.isfinite(pf_retention) or pf_retention >= 0.80)
+        )
+        verdict='HALF_CAUTION_EXPOSURE_PASSES_CONTROLLED_AB' if passes else 'HALF_CAUTION_EXPOSURE_FAILS_CONTROLLED_AB'
+
+        sizing=pd.DataFrame(bs+cs)
+        V670_DIR.mkdir(parents=True,exist_ok=True)
+        sizing.to_csv(V670_LEDGER,index=False,compression='gzip')
+
+        regime_counts=Z.regime.value_counts(dropna=False).to_dict()
+        result={
+            'version':'V6.70 Market Exposure 50% Cautious Controlled A/B',
+            'verdict':verdict,
+            'same_admissions':same_admissions,
+            'regime_counts':{str(k):int(v) for k,v in regime_counts.items()},
+            'account':[B,C],
+            'delta':{
+                'cagr':d_cagr,'maxdd':d_dd,'calmar':d_calmar,
+                'avg_exposure':float(C['avg_exposure']-B['avg_exposure']),
+                'cagr_retention':cagr_retention,'pf_retention':pf_retention
+            },
+            'changed_only':'For entries whose point-in-time SPY regime is TRANSITION or DEFENSIVE, target capital is 50% of the normal 10-slot target (5% of equity instead of 10%). Existing positions are NOT forcibly cut. STRONG_BULL/BULL entries remain full size. Control and challenger admit the exact same trade IDs.',
+            'source_basis':'JLaw source explicitly describes reducing investment weight / exposure when warning signals appear, and illustrates the risk effect with a portfolio reduced by half. The 50% number here is treated as a source-anchored test example, NOT claimed as a universal JLaw constant.',
+            'important_negative':'No BULL=BUY / BEAR=PASS gate. No trade is rejected because of market regime. No Entry, Stop, Winner Exit, ADD, Universe or holding rule changes.',
+            'acceptance':'Pass only if MaxDD improves by at least 5 percentage points, Calmar improves, CAGR retains at least 95% of control, and PF retains at least 80%. No sizing grid and no neighboring exposure ratios.',
+            'next_step':('If PASS: audit era stability and whether exposure reduction clusters in the intended warning periods before promotion.'
+                         if passes else
+                         'If FAIL: reject this 50% cautious-regime sizing implementation without testing 40/60/70% neighbors. Keep Market Context as descriptive/risk context and move to the next source-supported execution module.'),
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT entries and exits; fixed -7% stop; HOLD1260; 10-slot admission order; universe; all winner-management logic.',
+            'cache_note':'V6.44 Trigger Cache + V6.17 Historical Cache + existing V6.57 point-in-time SPY regime only; 0 Tiingo; no universe rebuild; no historical rescan.'
+        }
+        V670_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v670_write(status='done',phase='done',message=f'V6.70 完成：{verdict}',
+                    processed=len(cal),total=len(cal),current='',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v670_write(status='error',phase='error',message='V6.70 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:
+        v670_thread=None
+
+def _v670_start():
+    global v670_thread
+    if _v670_alive():return False
+    _v670_write(status='starting',phase='starting',message='V6.70 正在启动',
+                processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v670_thread=threading.Thread(target=_v670_run,daemon=True);v670_thread.start();return True
+
+@APP.route('/v670/run',methods=['GET','POST'])
+def v670_run(): _v670_start(); return redirect('/v670/market-exposure-half-cautious-ab')
+
+@APP.get('/api/v670/status')
+def v670_status_api(): return jsonify(_v670_status())
+
+@APP.get('/v670/market-exposure-half-cautious-ab')
+def v670_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v670_status();r={}
+    if V670_RESULT.exists():
+        try:r=json.loads(V670_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v670_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v670/run"><button>▶ 开始 V6.70 Exposure A/B</button></a>'
+    trs=''
+    for x in r.get('account',[]):
+        trs+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('calmar',0)):.3f}</td><td>{float(x.get('profit_factor',0)):.2f}</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('avg_exposure',0))*100:.1f}%</td><td>{int(x.get('admitted_positions',0))}</td><td>{int(x.get('half_sized_entries',0))}</td><td>{float(x.get('final_multiple',0)):.2f}x</td></tr>"
+    d=r.get('delta',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v669/low10-structural-stop-ab">← V6.69</a>
+<div class="c"><h1>🧯 V6.70 Market Exposure 50% Cautious Controlled A/B</h1><div class="info"><b>不是 Market Gate。</b><br>同一批已获准交易、同一 Entry/Exit；只在 TRANSITION / DEFENSIVE 新开仓时把正常 10% slot 降为 5%。已有 Winner 不强制卖。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Same admissions：<b>{e(r.get('same_admissions','—'))}</b></p></div>
+<div class="c"><h2>1996–2026 · Exact Same Trade IDs</h2><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Exposure</th><th>Admitted</th><th>Half-size</th><th>Final</th></tr>{trs or '<tr><td colspan="10">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Delta</h2><p>CAGR：{float(d.get('cagr',0))*100:+.2f}pp · MaxDD：{float(d.get('maxdd',0))*100:+.2f}pp · Calmar：{float(d.get('calmar',0)):+.3f} · Avg Exposure：{float(d.get('avg_exposure',0))*100:+.1f}pp</p><p>CAGR retention：{float(d.get('cagr_retention',0) or 0)*100:.1f}% · PF retention：{float(d.get('pf_retention',0) or 0)*100:.1f}%</p></div>
+<div class="c"><div class="warn"><b>唯一改动：</b>{e(r.get('changed_only',''))}<br><b>来源边界：</b>{e(r.get('source_basis',''))}<br><b>重要：</b>{e(r.get('important_negative',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v670_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v670_home_base is not None:
+    def _v670_home_wrap(*args,**kwargs):
+        resp=_v670_home_base(*args,**kwargs)
+        card="""<div id="v670-exposure-ab" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🧯 V6.70 Market Exposure 50% Cautious A/B</h2><p>Same trades · cautious new-position size only · no Market Gate</p><a href="/v670/market-exposure-half-cautious-ab"><button>打开 V6.70</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('v669-low10-stop-ab'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v670_home_base: APP.view_functions[ep]=_v670_home_wrap
