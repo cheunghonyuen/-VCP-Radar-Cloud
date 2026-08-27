@@ -31381,3 +31381,309 @@ if _v668_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v668_home_base: APP.view_functions[ep]=_v668_home_wrap
+
+
+# ========================= V6.69 LOW10 Structural Stop Controlled A/B =========================
+V669_DIR=DATA_DIR/'v669_low10_structural_stop_ab'
+V669_STATUS=V669_DIR/'status.json'; V669_RESULT=V669_DIR/'result.json'
+V669_TRADES=V669_DIR/'paired_exit_trades.csv.gz'
+v669_thread=None
+
+def _v669_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V669_STATUS.exists():
+        try:x.update(json.loads(V669_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v669_write(**kw):
+    V669_DIR.mkdir(parents=True,exist_ok=True);x=_v669_status();x.update(kw)
+    V669_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v669_alive(): return v669_thread is not None and v669_thread.is_alive()
+
+def _v669_struct_exit(d,entry_date,entry_px,stop_px,horizon=1260):
+    z=d[d.date>=pd.Timestamp(entry_date).normalize()].copy().head(int(horizon)+1).reset_index(drop=True)
+    if z.empty:return None
+    stop=float(stop_px)
+    if not np.isfinite(stop) or stop<=0 or stop>=float(entry_px):
+        return None
+    for j,r in z.iterrows():
+        if j==0:continue
+        o,h,l,c=map(float,[r.open,r.high,r.low,r.close])
+        if o<=stop:
+            return pd.Timestamp(r.date).normalize(),float(o),'LOW10_GAP',int(j)
+        if l<=stop:
+            return pd.Timestamp(r.date).normalize(),float(stop),'LOW10',int(j)
+    rr=z.iloc[-1]
+    return pd.Timestamp(rr.date).normalize(),float(rr.close),'HOLD1260',int(len(z)-1)
+
+def _v669_account_replay(X,price,cal,label,t0,vi,vn):
+    Z=X[X.variant.eq(label)].sort_values(['entry_date','listing_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'ret':xp/p['entry_px']-1.,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],
+                           'exit_date':dt,'hold_sessions':int(rec[i].get('hold_sessions',0))})
+            last.pop(i,None)
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep
+            pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt}
+            last[i]=ep;admitted+=1
+
+        hv=0.
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan))
+
+        if di%step==0 or di==len(cal):
+            _v669_write(status='running',phase='account_replay',
+                        message=f'30Y 10-slot Replay {label} {int(round(di/len(cal)*100))}%',
+                        processed=vi,total=vn,current=label,elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure']);L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avgw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avgl=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stoprate=float(L.reason.astype(str).str.contains('STOP7|LOW10',regex=True).mean())
+        w100=int((L.ret>=1).sum());w200=int((L.ret>=2).sum());w500=int((L.ret>=5).sum())
+        avghold=float(L.hold_sessions.mean())
+    else:
+        pf=wr=avgw=avgl=stoprate=avghold=np.nan;w100=w200=w500=0
+    return {'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+            'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+            'profit_factor':float(pf),'win_rate':wr,'avg_win':avgw,'avg_loss':avgl,
+            'stop_rate':stoprate,'winner100':w100,'winner200':w200,'winner500':w500,
+            'avg_hold_sessions':avghold,'admitted_positions':int(admitted),
+            'skipped_capacity':int(skipped),'avg_exposure':float(C.exposure.mean()),
+            'final_multiple':float(end/start) if start>0 else np.nan}
+
+def _v669_run():
+    global v669_thread
+    t0=time.time()
+    try:
+        _v669_write(status='running',phase='build',
+                    message='构建同一 Entry Stream 的 -7% vs LOW10 paired exits…',
+                    processed=0,total=0,current='',elapsed_sec=0,error=None)
+
+        if not V644_TRADE_CACHE.exists():raise RuntimeError('V6.44 Trigger Cache 不存在')
+        T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        rows=[];price={};date_set=set();paired=[];invalid=0;total=len(T)
+        for n,(_,tr) in enumerate(T.iterrows(),1):
+            lid=str(tr['listing_id']);mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date').reset_index(drop=True)
+
+            ed=pd.Timestamp(tr.entry_date).normalize(); ep=float(tr.entry_px)
+            ix=q.index[q.date.eq(ed)]
+            if len(ix)==0:continue
+            ei=int(ix[0])
+            if ei<10:continue
+
+            dz=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if len(dz):
+                price.setdefault(lid,{})
+                price[lid].update(dict(zip(dz.date,dz.close.astype(float))))
+                date_set.update(dz.date.tolist())
+
+            low10=float(q.low.iloc[ei-10:ei].min())
+            ctrl=_v636_exit_from_entry(q,ed,ep,1260)
+            chal=_v669_struct_exit(q,ed,ep,low10,1260)
+            if ctrl is None:continue
+            fallback=False
+            if chal is None:
+                invalid+=1;chal=ctrl;fallback=True
+
+            cd,cp,cr,ch=ctrl; sd,sp,sr,sh=chal
+            rows += [
+                {'variant':'CONTROL_STOP7','listing_id':lid,'ticker':str(tr.get('ticker','')),
+                 'entry_date':ed,'entry_px':ep,'exit_date':cd,'exit_px':float(cp),
+                 'exit_reason':cr,'hold_sessions':int(ch),'low10_stop':low10,'low10_dist':low10/ep-1},
+                {'variant':'LOW10_STRUCTURAL','listing_id':lid,'ticker':str(tr.get('ticker','')),
+                 'entry_date':ed,'entry_px':ep,'exit_date':sd,'exit_px':float(sp),
+                 'exit_reason':sr,'hold_sessions':int(sh),'low10_stop':low10,'low10_dist':low10/ep-1}
+            ]
+            paired.append({
+                'listing_id':lid,'entry_date':str(ed.date()),'entry_px':ep,'low10_stop':low10,'low10_dist':low10/ep-1,
+                'control_exit_date':str(pd.Timestamp(cd).date()),'control_exit_px':float(cp),'control_reason':cr,'control_ret':float(cp/ep-1),
+                'low10_exit_date':str(pd.Timestamp(sd).date()),'low10_exit_px':float(sp),'low10_reason':sr,'low10_ret':float(sp/ep-1),
+                'fallback_to_control':fallback
+            })
+            if n==1 or n%250==0 or n==total:
+                _v669_write(status='running',phase='paired_exit_build',
+                            message=f'Paired exits {n}/{total}',processed=n,total=total,current=lid,
+                            elapsed_sec=round(time.time()-t0,1),error=None)
+
+        X=pd.DataFrame(rows);P=pd.DataFrame(paired)
+        if X.empty or P.empty:raise RuntimeError('没有生成 paired exits')
+        V669_DIR.mkdir(parents=True,exist_ok=True);P.to_csv(V669_TRADES,index=False,compression='gzip')
+        cal=sorted(date_set)
+
+        account=[]
+        for i,label in enumerate(['CONTROL_STOP7','LOW10_STRUCTURAL'],1):
+            account.append(_v669_account_replay(X,price,cal,label,t0,i,2))
+        O=pd.DataFrame(account)
+        B=O[O.strategy.eq('CONTROL_STOP7')].iloc[0]
+        C=O[O.strategy.eq('LOW10_STRUCTURAL')].iloc[0]
+
+        # Paired candidate-level big-winner preservation: same entries, isolated exit change only.
+        control100=P.control_ret>=1.0; control200=P.control_ret>=2.0; control500=P.control_ret>=5.0
+        retention100=float((P.loc[control100,'low10_ret']>=1.0).mean()) if control100.any() else np.nan
+        retention200=float((P.loc[control200,'low10_ret']>=2.0).mean()) if control200.any() else np.nan
+        retention500=float((P.loc[control500,'low10_ret']>=5.0).mean()) if control500.any() else np.nan
+
+        stop_early=float((P.low10_exit_date<P.control_exit_date).mean())
+        avg_low10=float(P.low10_dist.mean()); med_low10=float(P.low10_dist.median())
+        avg_loss_ctrl=float(P.loc[P.control_ret<=0,'control_ret'].mean())
+        avg_loss_chal=float(P.loc[P.low10_ret<=0,'low10_ret'].mean())
+
+        passes=bool(
+            float(C.cagr)>=float(B.cagr) and
+            float(C.maxdd)>=float(B.maxdd) and
+            avg_loss_chal>=avg_loss_ctrl and
+            (not np.isfinite(retention100) or retention100>=0.80)
+        )
+        verdict='LOW10_STRUCTURAL_STOP_PASSES_CONTROLLED_AB' if passes else 'LOW10_STRUCTURAL_STOP_FAILS_CONTROLLED_AB'
+
+        res={
+            'version':'V6.69 LOW10 Structural Stop Controlled A/B','verdict':verdict,
+            'paired_trades':int(len(P)),'invalid_fallbacks':int(invalid),
+            'account':O.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'delta':{
+                'cagr':float(C.cagr-B.cagr),'maxdd':float(C.maxdd-B.maxdd),
+                'profit_factor':float(C.profit_factor-B.profit_factor),
+                'win_rate':float(C.win_rate-B.win_rate),
+                'avg_loss_account':float(C.avg_loss-B.avg_loss)
+            },
+            'paired_candidate':{
+                'control_avg_loss':avg_loss_ctrl,'low10_avg_loss':avg_loss_chal,
+                'early_exit_share':stop_early,'low10_mean_distance':avg_low10,'low10_median_distance':med_low10,
+                'control_winner100_n':int(control100.sum()),'winner100_retention':retention100,
+                'control_winner200_n':int(control200.sum()),'winner200_retention':retention200,
+                'control_winner500_n':int(control500.sum()),'winner500_retention':retention500
+            },
+            'changed_only':'Initial terminal stop: fixed Entry×0.93 versus the lowest Low from the 10 completed sessions strictly before entry. Gap-through exits use the worse opening price. Entry day cannot trigger the stop.',
+            'acceptance':'Pass only if CAGR is not lower, MaxDD is not worse, average loss improves, and paired +100% winner retention is at least 80%. No threshold tuning.',
+            'important':'This is ONE predeclared challenger only. No LOW3/5/20, MA10/20/50 grid; no Entry, Winner Exit, Position Size, ADD, Market Exposure or Universe changes.',
+            'next_step':('If PASS: audit era stability and STOP7_GAP tail before promoting LOW10 as the Initial Technical Stop candidate.'
+                         if passes else
+                         'If FAIL: reject LOW10 without tuning neighboring lookbacks. Keep -7% frozen and move to the next source-supported execution gap.'),
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT entry stream; HOLD1260; 10-slot equal sizing; universe and all winner-management logic frozen.',
+            'cache_note':'V6.44 Trigger Cache + V6.17 Historical Cache only; 0 Tiingo; no universe rebuild; no historical rescan.'
+        }
+        V669_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v669_write(status='done',phase='done',message=f"V6.69 完成：{verdict}",
+                    processed=total,total=total,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v669_write(status='error',phase='error',message='V6.69 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v669_thread=None
+
+def _v669_start():
+    global v669_thread
+    if _v669_alive():return False
+    _v669_write(status='starting',phase='starting',message='V6.69 正在启动',
+                processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v669_thread=threading.Thread(target=_v669_run,daemon=True);v669_thread.start();return True
+
+@APP.route('/v669/run',methods=['GET','POST'])
+def v669_run(): _v669_start(); return redirect('/v669/low10-structural-stop-ab')
+
+@APP.get('/api/v669/status')
+def v669_status_api(): return jsonify(_v669_status())
+
+@APP.get('/v669/low10-structural-stop-ab')
+def v669_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v669_status(); r={}
+    if V669_RESULT.exists():
+        try:r=json.loads(V669_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v669_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v669/run"><button>▶ 开始 V6.69 LOW10 Stop A/B</button></a>'
+    trs=''
+    for x in r.get('account',[]):
+        trs+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('profit_factor',0)):.2f}</td><td>{float(x.get('win_rate',0))*100:.1f}%</td><td>{float(x.get('avg_win',0))*100:.1f}%</td><td>{float(x.get('avg_loss',0))*100:.1f}%</td><td>{float(x.get('stop_rate',0))*100:.1f}%</td><td>{int(x.get('winner100',0))}</td><td>{float(x.get('avg_hold_sessions',0)):.1f}</td><td>{float(x.get('final_multiple',0)):.2f}x</td></tr>"
+    p=r.get('paired_candidate',{})
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fefce8;border:1px solid #eab308;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v668/structural-technical-stop">← V6.68</a>
+<div class="c"><h1>⚔️ V6.69 LOW10 Structural Stop Controlled A/B</h1><div class="info"><b>只换一个东西：Initial Stop。</b><br>CONTROL = 固定 -7%；CHALLENGER = 入场前10个已完成交易日的最低 Low。其它全部冻结。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Paired trades：{int(r.get('paired_trades',0) or 0):,} · invalid fallback：{int(r.get('invalid_fallbacks',0) or 0):,}</p></div>
+<div class="c"><h2>1996–2026 · 10-slot Controlled A/B</h2><table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>PF</th><th>WR</th><th>Avg Win</th><th>Avg Loss</th><th>Stop%</th><th>+100</th><th>Avg Hold</th><th>Final</th></tr>{trs or '<tr><td colspan="11">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Paired Big-Winner Preservation</h2>
+<p>Control Avg Loss：{float(p.get('control_avg_loss',0))*100:.2f}% · LOW10 Avg Loss：{float(p.get('low10_avg_loss',0))*100:.2f}% · LOW10 Median Distance：{float(p.get('low10_median_distance',0))*100:.2f}%</p>
+<p>+100 Winner retention：{float(p.get('winner100_retention',0) or 0)*100:.1f}% · +200：{float(p.get('winner200_retention',0) or 0)*100:.1f}% · +500：{float(p.get('winner500_retention',0) or 0)*100:.1f}% · Earlier exit share：{float(p.get('early_exit_share',0))*100:.1f}%</p></div>
+<div class="c"><div class="warn"><b>改动：</b>{e(r.get('changed_only',''))}<br><b>验收：</b>{e(r.get('acceptance',''))}<br><b>重要：</b>{e(r.get('important',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v669_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v669_home_base is not None:
+    def _v669_home_wrap(*args,**kwargs):
+        resp=_v669_home_base(*args,**kwargs)
+        card="""<div id="v669-low10-stop-ab" style="background:#fefce8;border:5px solid #ca8a04;border-radius:24px;padding:28px;margin:22px 0"><h2>⚔️ V6.69 LOW10 Structural Stop A/B</h2><p>固定 -7% vs 入场前10日结构低点 · 30Y 10-slot</p><a href="/v669/low10-structural-stop-ab"><button>打开 V6.69</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('v668-structural-stop'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0:body=body[:pos]+card+body[pos:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v669_home_base: APP.view_functions[ep]=_v669_home_wrap
