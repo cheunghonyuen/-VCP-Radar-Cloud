@@ -33006,3 +33006,291 @@ if _v671_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v671_home_base:APP.view_functions[ep]=_v671_home_wrap
+
+
+# ========================= V6.72 MARKET-REGIME ATTRIBUTION =========================
+V672_DIR=DATA_DIR/'v672_market_regime_attribution'
+V672_STATUS=V672_DIR/'status.json'; V672_RESULT=V672_DIR/'result.json'
+V672_DETAIL=V672_DIR/'regime_attribution_detail.csv.gz'
+v672_thread=None
+
+def _v672_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
+    if V672_STATUS.exists():
+        try:x.update(json.loads(V672_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v672_write(**kw):
+    V672_DIR.mkdir(parents=True,exist_ok=True); x=_v672_status(); x.update(kw)
+    V672_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v672_alive(): return v672_thread is not None and v672_thread.is_alive()
+
+def _v672_safe_mean(s):
+    s=pd.to_numeric(s,errors='coerce').dropna()
+    return float(s.mean()) if len(s) else None
+
+def _v672_safe_median(s):
+    s=pd.to_numeric(s,errors='coerce').dropna()
+    return float(s.median()) if len(s) else None
+
+def _v672_group_stats(g):
+    ret=pd.to_numeric(g['control_ret'],errors='coerce')
+    loss=ret[ret<=0]
+    win=ret[ret>0]
+    out={
+        'n':int(len(g)),
+        'avg_return':_v672_safe_mean(ret),
+        'median_return':_v672_safe_median(ret),
+        'win_rate':float((ret>0).mean()) if len(ret) else None,
+        'avg_win':_v672_safe_mean(win),
+        'avg_loss':_v672_safe_mean(loss),
+        'stop_share':float(g['control_reason'].astype(str).str.contains('STOP7',case=False,regex=False).mean()) if len(g) else None,
+        'gap_stop_share':float(g['control_reason'].astype(str).str.contains('STOP7_GAP',case=False,regex=False).mean()) if len(g) else None,
+        'winner20_share':float((ret>=0.20).mean()) if len(ret) else None,
+        'winner50_share':float((ret>=0.50).mean()) if len(ret) else None,
+        'winner100_share':float((ret>=1.00).mean()) if len(ret) else None,
+        'winner200_share':float((ret>=2.00).mean()) if len(ret) else None,
+        'winner500_share':float((ret>=5.00).mean()) if len(ret) else None,
+    }
+    if 'mfe' in g.columns:
+        out['avg_mfe']=_v672_safe_mean(g['mfe'])
+        out['median_mfe']=_v672_safe_median(g['mfe'])
+    return out
+
+def _v672_run():
+    global v672_thread
+    t0=time.time()
+    try:
+        _v672_write(status='running',phase='load',
+                     message='读取 V6.69 paired cache + V6.57 regime；只做 2006–2015 vs 2016–2026 归因…',
+                     processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():
+            raise RuntimeError('V6.69 paired cache 不存在')
+
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+
+        Z=P[need + [c for c in ['ticker'] if c in P.columns]].copy()
+        Z['listing_id']=Z['listing_id'].astype(str)
+        Z['entry_date']=pd.to_datetime(Z['entry_date'],errors='coerce').dt.normalize()
+        Z['control_exit_date']=pd.to_datetime(Z['control_exit_date'],errors='coerce').dt.normalize()
+        Z['entry_px']=pd.to_numeric(Z['entry_px'],errors='coerce')
+        Z['control_exit_px']=pd.to_numeric(Z['control_exit_px'],errors='coerce')
+        Z['control_ret']=pd.to_numeric(Z['control_ret'],errors='coerce')
+        Z=Z.dropna(subset=['entry_date','control_ret']).copy()
+
+        # Optional MFE join from V6.44 if already cached there. No historical rescan.
+        try:
+            if V644_TRADE_CACHE.exists():
+                T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+                T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+                T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+                mfe_col=next((c for c in ['mfe','MFE','mfe_pct','max_favorable_excursion'] if c in T.columns),None)
+                if mfe_col:
+                    J=T[['listing_id','entry_date',mfe_col]].copy()
+                    J['listing_id']=J['listing_id'].astype(str)
+                    J[mfe_col]=pd.to_numeric(J[mfe_col],errors='coerce')
+                    J=J.drop_duplicates(['listing_id','entry_date'])
+                    Z=Z.merge(J,on=['listing_id','entry_date'],how='left')
+                    Z=Z.rename(columns={mfe_col:'mfe'})
+        except Exception:
+            pass
+
+        _v672_write(status='running',phase='regime_join',
+                     message='连接 point-in-time SPY regime…',processed=1,total=4,current='',
+                     elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty: raise RuntimeError('SPY regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        if 'regime' not in R.columns: raise RuntimeError('SPY regime cache 缺 regime')
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.dropna(subset=['date']).sort_values('date')
+
+        Z=pd.merge_asof(
+            Z.sort_values('entry_date'),
+            R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+            on='entry_date',direction='backward'
+        )
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+        Z['year']=Z['entry_date'].dt.year
+        Z['era']=np.where(Z['year'].between(2006,2015),'ERA2_2006_2015',
+                  np.where(Z['year'].between(2016,2026),'ERA3_2016_2026','OTHER'))
+        Z=Z[Z['era'].isin(['ERA2_2006_2015','ERA3_2016_2026'])].copy()
+        Z['is_cautious']=Z['regime'].isin(['TRANSITION','DEFENSIVE'])
+
+        _v672_write(status='running',phase='attribution',
+                     message='统计 cautious regime 中压掉的 Winner 与规避的 Loser…',
+                     processed=2,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        era_rows=[]
+        regime_rows=[]
+        year_rows=[]
+        for era,g in Z.groupby('era',sort=True):
+            all_stats=_v672_group_stats(g)
+            cg=g[g['is_cautious']].copy()
+            cautious_stats=_v672_group_stats(cg) if len(cg) else {}
+            fg=g[~g['is_cautious']].copy()
+            favorable_stats=_v672_group_stats(fg) if len(fg) else {}
+
+            # "What half sizing protects / suppresses" proxy on the same trade stream:
+            # each cautious trade loses/gains half as much contribution versus full-size.
+            cr=pd.to_numeric(cg['control_ret'],errors='coerce').dropna()
+            protected_loss=float((-0.5*cr[cr<0]).sum()) if len(cr) else 0.0
+            suppressed_gain=float((0.5*cr[cr>0]).sum()) if len(cr) else 0.0
+            net_half_effect=float((-0.5*cr).sum()) if len(cr) else 0.0
+
+            era_rows.append({
+                'era':era,
+                'all':all_stats,
+                'cautious':cautious_stats,
+                'favorable':favorable_stats,
+                'cautious_share':float(g['is_cautious'].mean()),
+                'protected_loss_units':protected_loss,
+                'suppressed_gain_units':suppressed_gain,
+                'net_half_effect_units':net_half_effect,
+                'cautious_winner100_n':int((pd.to_numeric(cg['control_ret'],errors='coerce')>=1.0).sum()),
+                'cautious_stop_n':int(cg['control_reason'].astype(str).str.contains('STOP7',case=False,regex=False).sum())
+            })
+
+            for reg,gr in g.groupby('regime',sort=True):
+                row={'era':era,'regime':str(reg)}
+                row.update(_v672_group_stats(gr))
+                regime_rows.append(row)
+
+            for yr,gy in g.groupby('year',sort=True):
+                row={'era':era,'year':int(yr),'cautious_share':float(gy['is_cautious'].mean())}
+                cgy=gy[gy['is_cautious']]
+                st=_v672_group_stats(cgy) if len(cgy) else {'n':0}
+                row.update({f'cautious_{k}':v for k,v in st.items()})
+                year_rows.append(row)
+
+        E={x['era']:x for x in era_rows}
+        e2=E.get('ERA2_2006_2015',{}); e3=E.get('ERA3_2016_2026',{})
+
+        # Diagnostic interpretation only, no trading rule.
+        findings=[]
+        if e2 and e3:
+            e2c=e2.get('cautious',{}); e3c=e3.get('cautious',{})
+            if e2c.get('winner100_share') is not None and e3c.get('winner100_share') is not None:
+                findings.append({
+                    'name':'Cautious-regime +100 Winner share',
+                    'era2':e2c.get('winner100_share'),'era3':e3c.get('winner100_share'),
+                    'interpretation':'Higher in ERA2 means half-sizing may have suppressed more big winners there; higher in ERA3 would imply the opposite.'
+                })
+            if e2c.get('stop_share') is not None and e3c.get('stop_share') is not None:
+                findings.append({
+                    'name':'Cautious-regime STOP7 share',
+                    'era2':e2c.get('stop_share'),'era3':e3c.get('stop_share'),
+                    'interpretation':'Higher STOP concentration means the regime was more useful for risk reduction.'
+                })
+            findings.append({
+                'name':'Half-size protected-loss vs suppressed-gain balance',
+                'era2':e2.get('protected_loss_units',0)-e2.get('suppressed_gain_units',0),
+                'era3':e3.get('protected_loss_units',0)-e3.get('suppressed_gain_units',0),
+                'interpretation':'Positive = avoided loss dominates forgone gain on cautious entries; negative = half-sizing mostly suppresses winners.'
+            })
+
+        V672_DIR.mkdir(parents=True,exist_ok=True)
+        Z.to_csv(V672_DETAIL,index=False,compression='gzip')
+
+        result={
+            'version':'V6.72 Market-Regime Attribution',
+            'verdict':'ATTRIBUTION_COMPLETE_NO_RULE_CHANGE',
+            'era_summary':era_rows,
+            'regime_summary':regime_rows,
+            'year_summary':year_rows,
+            'findings':findings,
+            'question':'Why does the same TRANSITION/DEFENSIVE half-sizing hurt 2006–2015 but help 2016–2026?',
+            'important':'Diagnostic only. This does NOT create a new regime threshold, sizing ratio, market gate, stop, entry or exit.',
+            'next_step':'Use the attribution to decide whether the difference is caused by regime quality, winner suppression, STOP concentration, or calendar clustering. Only a source-supported distinction may advance to one controlled test.',
+            'cache_note':'V6.69 paired cache + V6.57 SPY regime + optional V6.44 cached MFE only; 0 Tiingo; no historical rescan; no exit reconstruction.'
+        }
+        V672_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v672_write(status='done',phase='done',message='V6.72 完成：ATTRIBUTION_COMPLETE_NO_RULE_CHANGE',
+                     processed=4,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        tb=traceback.format_exc()
+        _v672_write(status='error',phase='error',message=f'V6.72 失败：{type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=tb)
+    finally:
+        v672_thread=None
+
+def _v672_start():
+    global v672_thread
+    if _v672_alive(): return False
+    _v672_write(status='starting',phase='starting',message='V6.72 正在启动',
+                 processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
+    v672_thread=threading.Thread(target=_v672_run,daemon=True);v672_thread.start();return True
+
+@APP.route('/v672/run',methods=['GET','POST'])
+def v672_run():_v672_start();return redirect('/v672/market-regime-attribution')
+
+@APP.get('/api/v672/status')
+def v672_status_api():return jsonify(_v672_status())
+
+@APP.get('/v672/market-regime-attribution')
+def v672_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v672_status();r={}
+    if V672_RESULT.exists():
+        try:r=json.loads(V672_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v672_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v672/run"><button>▶ 开始 V6.72 Attribution</button></a>'
+
+    era_html=''
+    for x in r.get('era_summary',[]):
+        c=x.get('cautious',{})
+        era_html+=f"""<tr><td><b>{e(x.get('era'))}</b></td>
+        <td>{float(x.get('cautious_share',0))*100:.1f}%</td>
+        <td>{int(c.get('n',0) or 0)}</td>
+        <td>{float(c.get('avg_return',0) or 0)*100:.2f}%</td>
+        <td>{float(c.get('win_rate',0) or 0)*100:.1f}%</td>
+        <td>{float(c.get('stop_share',0) or 0)*100:.1f}%</td>
+        <td>{float(c.get('winner100_share',0) or 0)*100:.1f}%</td>
+        <td>{float(x.get('protected_loss_units',0)):.2f}</td>
+        <td>{float(x.get('suppressed_gain_units',0)):.2f}</td></tr>"""
+
+    reg_html=''
+    for x in r.get('regime_summary',[]):
+        reg_html+=f"""<tr><td>{e(x.get('era'))}</td><td><b>{e(x.get('regime'))}</b></td>
+        <td>{int(x.get('n',0) or 0)}</td><td>{float(x.get('avg_return',0) or 0)*100:.2f}%</td>
+        <td>{float(x.get('win_rate',0) or 0)*100:.1f}%</td><td>{float(x.get('stop_share',0) or 0)*100:.1f}%</td>
+        <td>{float(x.get('winner100_share',0) or 0)*100:.1f}%</td></tr>"""
+
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #60a5fa;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
+<a href="/">← 首页</a>
+<div class="c"><h1>🔬 V6.72 Market-Regime Attribution</h1><div class="info">只回答一个问题：为什么同样的 TRANSITION / DEFENSIVE 半仓，在 2006–2015 伤收益，却在 2016–2026 同时提高 CAGR、降低 MaxDD？不改交易规则。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',4) or 4)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>Era · Cautious Regime Attribution</h2><table><tr><th>Era</th><th>Cautious Share</th><th>N</th><th>Avg Return</th><th>WR</th><th>STOP7</th><th>+100 Winner</th><th>Protected Loss Units</th><th>Suppressed Gain Units</th></tr>{era_html or '<tr><td colspan="9">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Regime Breakdown</h2><table><tr><th>Era</th><th>Regime</th><th>N</th><th>Avg Return</th><th>WR</th><th>STOP7</th><th>+100 Winner</th></tr>{reg_html or '<tr><td colspan="7">运行后显示。</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v672_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v672_home_base is not None:
+    def _v672_home_wrap(*args,**kwargs):
+        resp=_v672_home_base(*args,**kwargs)
+        card="""<div id="v672-regime-attribution" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0"><h2>🔬 V6.72 Market-Regime Attribution</h2><p>2006–2015 vs 2016–2026 · why half-sizing flips sign</p><a href="/v672/market-regime-attribution"><button>打开 V6.72</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v672_home_base:APP.view_functions[ep]=_v672_home_wrap
