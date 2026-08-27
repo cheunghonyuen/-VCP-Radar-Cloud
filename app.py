@@ -32800,3 +32800,209 @@ if _v670f_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v670f_home_base: APP.view_functions[ep]=_v670f_home_wrap
+
+
+# ========================= V6.71 ERA STABILITY AUDIT =========================
+V671_DIR=DATA_DIR/'v671_exposure_era_stability'
+V671_STATUS=V671_DIR/'status.json'; V671_RESULT=V671_DIR/'result.json'
+v671_thread=None
+
+def _v671_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
+    if V671_STATUS.exists():
+        try:x.update(json.loads(V671_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v671_write(**kw):
+    V671_DIR.mkdir(parents=True,exist_ok=True);x=_v671_status();x.update(kw)
+    V671_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v671_alive(): return v671_thread is not None and v671_thread.is_alive()
+
+def _v671_slice_metrics(Z,price,cal,start,end,label,t0):
+    start=pd.Timestamp(start).normalize(); end=pd.Timestamp(end).normalize()
+    Ze=Z[(Z.entry_date>=start)&(Z.entry_date<=end)].copy()
+    ce=[d for d in cal if start<=pd.Timestamp(d).normalize()<=end]
+    if Ze.empty or len(ce)<30:
+        return None
+
+    B,whitelist=_v670f_replay_core(Ze,price,ce,f'{label}_CONTROL',t0,None,False,heartbeat=False)
+    C,wadm=_v670f_replay_core(Ze,price,ce,f'{label}_HALF',t0,whitelist,True,heartbeat=False)
+
+    # If a position exits after era end, replay_core naturally keeps it open through era end.
+    # This is intentional: era metrics are calendar-contained and do not borrow future P&L.
+    same=(whitelist==wadm)
+    return {
+        'era':label,'start':str(start.date()),'end':str(end.date()),
+        'same_admissions':same,
+        'control':B,'half':C,
+        'delta_cagr':float(C['cagr']-B['cagr']),
+        'delta_maxdd':float(C['maxdd']-B['maxdd']),
+        'delta_calmar':float(C['calmar']-B['calmar']),
+        'delta_pf':float(C['profit_factor']-B['profit_factor']) if np.isfinite(B['profit_factor']) and np.isfinite(C['profit_factor']) else None,
+        'cagr_retention':float(C['cagr']/B['cagr']) if B['cagr']>0 else None
+    }
+
+def _v671_run():
+    global v671_thread
+    t0=time.time()
+    try:
+        _v671_write(status='running',phase='load_cache',
+                     message='读取 V6.69 paired cache + V6.57 regime；不重算 64,117 exits…',
+                     processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():
+            raise RuntimeError('V6.69 paired cache 不存在')
+
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        Z=pd.DataFrame({
+            'listing_id':P['listing_id'].astype(str),
+            'entry_date':pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P['entry_px'],errors='coerce'),
+            'exit_date':pd.to_datetime(P['control_exit_date'],errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P['control_exit_px'],errors='coerce'),
+            'exit_reason':P['control_reason'].astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty: raise RuntimeError('SPY regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z['regime'].fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty: raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None: raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None: continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception as ex: raise RuntimeError(f'price read failed {lid}: {ex}')
+            if d is None or d.empty: continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%500==0 or n==tot:
+                _v671_write(status='running',phase='price_join',
+                             message=f'历史价格缓存 {n}/{tot}',
+                             processed=0,total=3,current=lid,
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+
+        cal=sorted(date_set)
+        eras=[
+            ('ERA1_1996_2005','1996-01-01','2005-12-31'),
+            ('ERA2_2006_2015','2006-01-01','2015-12-31'),
+            ('ERA3_2016_2026','2016-01-01','2026-12-31')
+        ]
+
+        rows=[]
+        for i,(label,a,b) in enumerate(eras,1):
+            _v671_write(status='running',phase='era_replay',
+                         message=f'{label} controlled replay…',
+                         processed=i-1,total=3,current=label,
+                         elapsed_sec=round(time.time()-t0,1),error=None)
+            r=_v671_slice_metrics(Z,price,cal,a,b,label,t0)
+            if r is not None: rows.append(r)
+
+        if len(rows)!=3: raise RuntimeError(f'era results incomplete: {len(rows)}/3')
+
+        # Predeclared stability rule:
+        # at least 2/3 eras improve MaxDD and Calmar,
+        # no era loses >15% CAGR,
+        # and all eras keep identical admissions.
+        dd_wins=sum(1 for r in rows if r['delta_maxdd']>0)
+        calmar_wins=sum(1 for r in rows if r['delta_calmar']>0)
+        retention_ok=all((r['cagr_retention'] is None) or (r['cagr_retention']>=0.85) for r in rows)
+        same_ok=all(r['same_admissions'] for r in rows)
+        passes=bool(dd_wins>=2 and calmar_wins>=2 and retention_ok and same_ok)
+        verdict='HALF_CAUTION_EXPOSURE_ERA_STABLE' if passes else 'HALF_CAUTION_EXPOSURE_ERA_UNSTABLE'
+
+        result={
+            'version':'V6.71 Exposure Era Stability Audit',
+            'verdict':verdict,'eras':rows,
+            'summary':{'maxdd_improved_eras':dd_wins,'calmar_improved_eras':calmar_wins,
+                       'all_cagr_retention_ge_85pct':retention_ok,'same_admissions_all_eras':same_ok},
+            'acceptance':'PASS if MaxDD and Calmar improve in at least 2 of 3 eras, every era retains >=85% of control CAGR, and admissions remain identical.',
+            'important':'No new sizing ratio, no regime threshold tuning, no new market gate. This only tests whether V6.70F is time-stable.',
+            'next_step':('If PASS: promote 50% cautious exposure to the provisional execution model, then move to the next JLaw execution module (risk-based sizing / ADD / winner management).'
+                         if passes else
+                         'If FAIL: do not promote. Keep V6.44 exposure behavior frozen and move on without tuning 40/60/70% neighbors.'),
+            'cache_note':'V6.69 paired cache + V6.57 SPY regime + V6.17 historical price cache only; 0 Tiingo; no exit reconstruction.'
+        }
+        V671_DIR.mkdir(parents=True,exist_ok=True)
+        V671_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v671_write(status='done',phase='done',message=f'V6.71 完成：{verdict}',
+                     processed=3,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        tb=traceback.format_exc()
+        _v671_write(status='error',phase='error',message=f'V6.71 失败：{type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=tb)
+    finally:v671_thread=None
+
+def _v671_start():
+    global v671_thread
+    if _v671_alive(): return False
+    _v671_write(status='starting',phase='starting',message='V6.71 正在启动',
+                 processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+    v671_thread=threading.Thread(target=_v671_run,daemon=True);v671_thread.start();return True
+
+@APP.route('/v671/run',methods=['GET','POST'])
+def v671_run():_v671_start();return redirect('/v671/exposure-era-stability')
+
+@APP.get('/api/v671/status')
+def v671_status_api():return jsonify(_v671_status())
+
+@APP.get('/v671/exposure-era-stability')
+def v671_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v671_status();r={}
+    if V671_RESULT.exists():
+        try:r=json.loads(V671_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v671_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v671/run"><button>▶ 开始 V6.71 Era Stability</button></a>'
+    trs=''
+    for x in r.get('eras',[]):
+        b=x['control'];c=x['half']
+        trs+=f"<tr><td><b>{e(x['era'])}</b></td><td>{b['cagr']*100:.2f}%</td><td>{c['cagr']*100:.2f}%</td><td>{b['maxdd']*100:.2f}%</td><td>{c['maxdd']*100:.2f}%</td><td>{b['calmar']:.3f}</td><td>{c['calmar']:.3f}</td><td>{(x['cagr_retention'] or 0)*100:.1f}%</td><td>{e(x['same_admissions'])}</td></tr>"
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #4ade80;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
+<a href="/">← 首页</a>
+<div class="c"><h1>📆 V6.71 Exposure Era Stability Audit</h1><div class="info">不再调参数。把 V6.70F 拆成 1996–2005 / 2006–2015 / 2016–2026 三段，验证降低曝险是否跨年代稳定。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',3) or 3)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><table><tr><th>Era</th><th>Control CAGR</th><th>Half CAGR</th><th>Control DD</th><th>Half DD</th><th>Control Calmar</th><th>Half Calmar</th><th>CAGR Retention</th><th>Same IDs</th></tr>{trs or '<tr><td colspan="9">运行后显示。</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v671_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v671_home_base is not None:
+    def _v671_home_wrap(*args,**kwargs):
+        resp=_v671_home_base(*args,**kwargs)
+        card="""<div id="v671-era-stability" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0"><h2>📆 V6.71 Exposure Era Stability</h2><p>1996–2005 / 2006–2015 / 2016–2026 · no tuning</p><a href="/v671/exposure-era-stability"><button>打开 V6.71</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v671_home_base:APP.view_functions[ep]=_v671_home_wrap
