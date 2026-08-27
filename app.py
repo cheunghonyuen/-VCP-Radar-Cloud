@@ -31175,3 +31175,209 @@ if _v667_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v667_home_base: APP.view_functions[ep]=_v667_home_wrap
+
+
+# ========================= V6.68 Structural Technical Stop Reconstruction =========================
+V668_DIR=DATA_DIR/'v668_structural_technical_stop_reconstruction'
+V668_STATUS=V668_DIR/'status.json'; V668_RESULT=V668_DIR/'result.json'
+V668_DETAIL=V668_DIR/'structural_stop_geometry.csv.gz'
+v668_thread=None
+
+def _v668_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None}
+    if V668_STATUS.exists():
+        try:x.update(json.loads(V668_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v668_write(**kw):
+    V668_DIR.mkdir(parents=True,exist_ok=True);x=_v668_status();x.update(kw)
+    V668_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v668_alive(): return v668_thread is not None and v668_thread.is_alive()
+
+def _v668_run():
+    global v668_thread
+    t0=time.time()
+    try:
+        _v668_write(status='running',phase='load',
+                    message='读取 V6.44 Entry + V6.17 Historical Cache；重建入场前结构，不改 Stop…',
+                    processed=0,total=0,current='',elapsed_sec=0,error=None)
+
+        if not V644_TRADE_CACHE.exists():
+            raise RuntimeError('V6.44 Trigger Cache 不存在')
+        T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+        T['_ret']=T.exit_px/T.entry_px-1
+        T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty: raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None: raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        rows=[]; total=len(T)
+        for n,(_,tr) in enumerate(T.iterrows(),1):
+            lid=str(tr['listing_id']); mr=mmap.get(lid)
+            if mr is None: continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').reset_index(drop=True)
+            ed=tr['entry_date']; ix=q.index[q.date.eq(ed)]
+            if len(ix)==0:continue
+            ei=int(ix[0]); ep=float(tr['entry_px'])
+            if ei<20 or ei+1>=len(q):continue
+
+            pre=q.iloc[:ei]  # strictly before entry day
+            rec={'listing_id':lid,'entry_date':str(ed.date()),'entry_px':ep,
+                 'final_return':float(tr['_ret']) if pd.notna(tr['_ret']) else np.nan,
+                 'exit_reason':str(tr.exit_reason)}
+
+            # Source-aligned structural reference candidates; diagnostics only.
+            candidates={
+              'PRIOR_SESSION_LOW': float(q.low.iloc[ei-1]),
+              'LOW_3': float(pre.low.tail(3).min()),
+              'LOW_5': float(pre.low.tail(5).min()),
+              'LOW_10': float(pre.low.tail(10).min()),
+              'LOW_20': float(pre.low.tail(20).min()),
+            }
+            # rolling moving averages are support context, not declared stops
+            for w in [10,20,50]:
+                if ei>=w:
+                    ma=float(q.close.iloc[:ei].tail(w).mean())
+                    candidates[f'MA{w}']=ma
+
+            for k,lv in candidates.items():
+                if np.isfinite(lv) and lv>0:
+                    rec[k+'_DIST']=float(lv/ep-1)
+
+            # How far price actually moved in first 5 days; diagnostic for feasibility
+            seg=q.iloc[ei+1:min(len(q),ei+6)]
+            if not seg.empty:
+                rec['POST5_MIN_LOW_RET']=float(seg.low.min()/ep-1)
+                rec['POST5_MAX_HIGH_RET']=float(seg.high.max()/ep-1)
+
+            rows.append(rec)
+            if n==1 or n%250==0 or n==total:
+                _v668_write(status='running',phase='historical_join',
+                    message=f'Structural geometry {n}/{total}',processed=n,total=total,current=lid,
+                    elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('没有可用 Structural Stop geometry')
+        V668_DIR.mkdir(parents=True,exist_ok=True);A.to_csv(V668_DETAIL,index=False,compression='gzip')
+
+        winner=A[A.final_return>=1.0].copy()
+        stop=A[A.exit_reason.astype(str).str.fullmatch('STOP7',case=False,na=False)].copy()
+        refs=[c[:-5] for c in A.columns if c.endswith('_DIST')]
+
+        ledger=[]
+        for ref in refs:
+            c=ref+'_DIST'
+            w=pd.to_numeric(winner[c],errors='coerce').dropna()
+            l=pd.to_numeric(stop[c],errors='coerce').dropna()
+            if len(w)<100 or len(l)<100:continue
+            ledger.append({
+                'reference':ref,
+                'coverage':float(pd.to_numeric(A[c],errors='coerce').notna().mean()),
+                'winner_median_dist':float(w.median()),
+                'stop7_median_dist':float(l.median()),
+                'all_median_dist':float(pd.to_numeric(A[c],errors='coerce').median()),
+                'within_2_4':float(pd.to_numeric(A[c],errors='coerce').between(-.04,-.02).mean()),
+                'within_5_7':float(pd.to_numeric(A[c],errors='coerce').between(-.07,-.05).mean()),
+                'beyond_7':float((pd.to_numeric(A[c],errors='coerce')<-.07).mean())
+            })
+        ledger=sorted(ledger,key=lambda x:(abs(x['all_median_dist']),x['reference']))
+
+        # Determine whether any structural reference naturally lies near the frozen -7% stop.
+        near7=[x for x in ledger if -0.085 <= x['all_median_dist'] <= -0.045]
+        verdict='STRUCTURAL_STOP_GEOMETRY_READY_FOR_CONTROLLED_AB' if near7 else 'STRUCTURAL_STOP_GEOMETRY_TOO_DISPERSED_DO_NOT_FORCE'
+
+        res={
+            'version':'V6.68 Structural Technical Stop Reconstruction',
+            'verdict':verdict,'rows':int(len(A)),'winner100_n':int(len(winner)),'stop7_n':int(len(stop)),
+            'ledger':ledger,'near7_candidates':near7,
+            'question':'Which pre-entry structural reference is actually available point-in-time and naturally sits at a plausible invalidation distance, without inventing an optimized percentage?',
+            'source_alignment':'JLaw actual-operation examples show that a stop is predefined when the trade is opened, and a strong holding is kept while that stop remains intact. Source evidence does not justify replacing this with an optimized fixed percentage.',
+            'important':'Diagnostic only. PRIOR_SESSION_LOW / LOW_3/5/10/20 / MA10/20/50 are candidate structural references, not declared JLaw stop rules.',
+            'anti_overfit':'No grid search, no stop optimization, no strategy replay, no future information, no entry/exit/size change.',
+            'next_step':('Choose at most ONE source-supported structural reference for V6.69 controlled Stop A/B; benchmark against frozen -7% while preserving +100% winner retention.'
+                         if verdict=='STRUCTURAL_STOP_GEOMETRY_READY_FOR_CONTROLLED_AB'
+                         else 'Do not force a structural stop proxy. Return to source examples / chart geometry before any stop A/B.'),
+            'frozen':'V6.44 TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT benchmark 28.25% CAGR; -7% stop; HOLD1260; 10-slot; universe frozen.',
+            'cache_note':'V6.44 Trigger Cache + V6.17 Historical Cache only; 0 Tiingo; no universe rebuild; no historical rescan.'
+        }
+        V668_RESULT.write_text(json.dumps(res,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v668_write(status='done',phase='done',message=f"V6.68 完成：{verdict}",
+                    processed=total,total=total,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        traceback.print_exc()
+        _v668_write(status='error',phase='error',message='V6.68 失败',
+                    elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}')
+    finally:v668_thread=None
+
+def _v668_start():
+    global v668_thread
+    if _v668_alive():return False
+    _v668_write(status='starting',phase='starting',message='V6.68 正在启动',
+                processed=0,total=0,current='',elapsed_sec=0,error=None)
+    v668_thread=threading.Thread(target=_v668_run,daemon=True);v668_thread.start();return True
+
+@APP.route('/v668/run',methods=['GET','POST'])
+def v668_run(): _v668_start(); return redirect('/v668/structural-technical-stop')
+
+@APP.get('/api/v668/status')
+def v668_status_api(): return jsonify(_v668_status())
+
+@APP.get('/v668/structural-technical-stop')
+def v668_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v668_status(); r={}
+    if V668_RESULT.exists():
+        try:r=json.loads(V668_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v668_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v668/run"><button>▶ 开始 V6.68 Structural Stop Reconstruction</button></a>'
+    trs=''
+    for x in r.get('ledger',[]):
+        trs+=f"<tr><td><b>{e(x.get('reference'))}</b></td><td>{float(x.get('coverage',0))*100:.1f}%</td><td>{float(x.get('all_median_dist',0))*100:+.2f}%</td><td>{float(x.get('winner_median_dist',0))*100:+.2f}%</td><td>{float(x.get('stop7_median_dist',0))*100:+.2f}%</td><td>{float(x.get('within_2_4',0))*100:.1f}%</td><td>{float(x.get('within_5_7',0))*100:.1f}%</td><td>{float(x.get('beyond_7',0))*100:.1f}%</td></tr>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #4ade80;border-radius:14px;padding:16px}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body><div class="w">
+<a href="/v667/post-breakout-defense-attribution">← V6.67</a>
+<div class="c"><h1>🧭 V6.68 Structural Technical Stop Reconstruction</h1><div class="info"><b>不把 V6.67 的相关性直接变成止损公式。</b><br>先重建入场前可见的结构失效参考位，再决定是否有资格做 Stop A/B。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',0) or 0)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2><p>Rows：{int(r.get('rows',0) or 0):,} · +100 Winner：{int(r.get('winner100_n',0) or 0):,} · STOP7：{int(r.get('stop7_n',0) or 0):,}</p></div>
+<div class="c"><h2>Pre-Entry Structural Geometry</h2><table><tr><th>Reference</th><th>Coverage</th><th>All Median</th><th>Winner Median</th><th>STOP7 Median</th><th>2–4%</th><th>5–7%</th><th>&gt;7%</th></tr>{trs or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>重要：</b>{e(r.get('important',''))}<br><b>防过拟合：</b>{e(r.get('anti_overfit',''))}<br><b>下一步：</b>{e(r.get('next_step',''))}<br><b>冻结：</b>{e(r.get('frozen',''))}<br><b>Cache：</b>{e(r.get('cache_note',''))}</div></div>
+</div></body></html>"""
+
+
+_v668_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v668_home_base is not None:
+    def _v668_home_wrap(*args,**kwargs):
+        resp=_v668_home_base(*args,**kwargs)
+        card="""<div id="v668-structural-stop" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0"><h2>🧭 V6.68 Structural Technical Stop Reconstruction</h2><p>入场前结构失效位 · 只重建，不优化止损</p><a href="/v668/structural-technical-stop"><button>打开 V6.68</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            p=body.find('v667-post-breakout'); d=body.rfind('<div',0,p) if p>=0 else -1
+            pos=d if d>=0 else body.find('<body')
+            if pos>=0: body=body[:pos]+card+body[pos:]
+            else: body=card+body
+            resp.set_data(body); return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v668_home_base: APP.view_functions[ep]=_v668_home_wrap
