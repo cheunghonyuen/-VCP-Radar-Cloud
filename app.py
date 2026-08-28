@@ -33294,3 +33294,226 @@ if _v672_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v672_home_base:APP.view_functions[ep]=_v672_home_wrap
+
+
+# ========================= V6.73 REGIME SEMANTIC DRIFT AUDIT =========================
+V673_DIR=DATA_DIR/'v673_regime_semantic_drift'
+V673_STATUS=V673_DIR/'status.json'; V673_RESULT=V673_DIR/'result.json'
+v673_thread=None
+
+def _v673_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
+    if V673_STATUS.exists():
+        try:x.update(json.loads(V673_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v673_write(**kw):
+    V673_DIR.mkdir(parents=True,exist_ok=True);x=_v673_status();x.update(kw)
+    V673_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v673_alive(): return v673_thread is not None and v673_thread.is_alive()
+
+def _v673_run():
+    global v673_thread
+    t0=time.time()
+    try:
+        _v673_write(status='running',phase='load',
+                     message='读取 V6.69 paired cache + SPY cached OHLC；重建 regime 背后的 point-in-time 结构…',
+                     processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():
+            raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','control_ret','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+        Z=P[need].copy()
+        Z['listing_id']=Z['listing_id'].astype(str)
+        Z['entry_date']=pd.to_datetime(Z['entry_date'],errors='coerce').dt.normalize()
+        Z['control_ret']=pd.to_numeric(Z['control_ret'],errors='coerce')
+        Z=Z.dropna(subset=['entry_date','control_ret']).copy()
+
+        spy=load_cached("SPY")
+        if spy is None or len(spy)<220:
+            raise RuntimeError('SPY cached OHLC 不存在或不足220日')
+        S=spy.copy().sort_index()
+        idx=pd.to_datetime(S.index,errors='coerce').normalize()
+        S=S.copy(); S.index=idx
+        S=S[~S.index.isna()].copy()
+
+        # Reconstruct exactly the components behind V6.57, point-in-time only.
+        S['ma20']=S.Close.rolling(20).mean()
+        S['ma50']=S.Close.rolling(50).mean()
+        S['ma200']=S.Close.rolling(200).mean()
+        S['ma50_old']=S['ma50'].shift(20)
+        S['ma200_old']=S['ma200'].shift(20)
+        S['ret20']=S.Close/S.Close.shift(20)-1
+        S['ret60']=S.Close/S.Close.shift(60)-1
+        S['dist_ma20']=S.Close/S.ma20-1
+        S['dist_ma50']=S.Close/S.ma50-1
+        S['dist_ma200']=S.Close/S.ma200-1
+        S['ma50_slope20']=S.ma50/S.ma50_old-1
+        S['ma200_slope20']=S.ma200/S.ma200_old-1
+        S['drawdown_63']=S.Close/S.Close.rolling(63).max()-1
+        S['drawdown_126']=S.Close/S.Close.rolling(126).max()-1
+
+        def classify(r):
+            vals=[r.Close,r.ma20,r.ma50,r.ma200,r.ma50_old,r.ma200_old]
+            if any(pd.isna(v) for v in vals): return "UNKNOWN"
+            strong=(r.Close>r.ma20>r.ma50>r.ma200 and
+                    r.ma50>r.ma50_old and r.ma200>r.ma200_old and
+                    (r.ret20 if pd.notna(r.ret20) else 0)>0)
+            if strong:return "STRONG_BULL"
+            bull=(r.Close>r.ma200 and r.ma200>r.ma200_old)
+            if bull:return "BULL"
+            weak=(r.Close>r.ma200 or r.ma50>r.ma200)
+            if weak:return "TRANSITION"
+            return "DEFENSIVE"
+        S['regime']=S.apply(classify,axis=1)
+
+        F=S[['regime','ret20','ret60','dist_ma20','dist_ma50','dist_ma200',
+             'ma50_slope20','ma200_slope20','drawdown_63','drawdown_126']].reset_index()
+        F=F.rename(columns={F.columns[0]:'entry_date'}).sort_values('entry_date')
+
+        Z=pd.merge_asof(Z.sort_values('entry_date'),F.sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['year']=Z.entry_date.dt.year
+        Z['era']=np.where(Z.year.between(2006,2015),'ERA2_2006_2015',
+                  np.where(Z.year.between(2016,2026),'ERA3_2016_2026','OTHER'))
+        Z=Z[Z.era.isin(['ERA2_2006_2015','ERA3_2016_2026'])].copy()
+
+        _v673_write(status='running',phase='drift',
+                     message='比较同一 TRANSITION / DEFENSIVE 标签在两个年代的真实 market geometry…',
+                     processed=1,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        feats=['ret20','ret60','dist_ma20','dist_ma50','dist_ma200',
+               'ma50_slope20','ma200_slope20','drawdown_63','drawdown_126']
+
+        rows=[]
+        for regime in ['TRANSITION','DEFENSIVE']:
+            for era in ['ERA2_2006_2015','ERA3_2016_2026']:
+                g=Z[(Z.regime==regime)&(Z.era==era)].copy()
+                r={'regime':regime,'era':era,'n':int(len(g)),
+                   'avg_trade_return':float(g.control_ret.mean()) if len(g) else None,
+                   'stop_share':float(g.control_reason.astype(str).str.contains('STOP7',case=False,regex=False).mean()) if len(g) else None,
+                   'winner100_share':float((g.control_ret>=1).mean()) if len(g) else None}
+                for f in feats:
+                    x=pd.to_numeric(g[f],errors='coerce')
+                    r[f+'_median']=float(x.median()) if x.notna().any() else None
+                    r[f+'_mean']=float(x.mean()) if x.notna().any() else None
+                rows.append(r)
+
+        # Direct cross-era differences, descriptive only.
+        diffs=[]
+        for regime in ['TRANSITION','DEFENSIVE']:
+            a=next((x for x in rows if x['regime']==regime and x['era']=='ERA2_2006_2015'),None)
+            b=next((x for x in rows if x['regime']==regime and x['era']=='ERA3_2016_2026'),None)
+            if not a or not b:continue
+            for f in feats:
+                av=a.get(f+'_median'); bv=b.get(f+'_median')
+                if av is None or bv is None:continue
+                diffs.append({'regime':regime,'feature':f,
+                              'era2_median':av,'era3_median':bv,'delta_era3_minus_era2':bv-av})
+
+        # Rank by standardized absolute median shift using pooled robust scale from both eras.
+        ranked=[]
+        for d in diffs:
+            regime=d['regime']; f=d['feature']
+            g=Z[(Z.regime==regime)&(Z.era.isin(['ERA2_2006_2015','ERA3_2016_2026']))]
+            x=pd.to_numeric(g[f],errors='coerce').dropna()
+            if len(x)<50:continue
+            q75=float(x.quantile(.75));q25=float(x.quantile(.25));scale=q75-q25
+            score=abs(d['delta_era3_minus_era2'])/scale if scale>0 else 0.0
+            dd=dict(d);dd['robust_shift_iqr']=float(score);ranked.append(dd)
+        ranked=sorted(ranked,key=lambda x:-x['robust_shift_iqr'])
+
+        # Coverage/meaning drift diagnostics.
+        coverage=[]
+        for era in ['ERA2_2006_2015','ERA3_2016_2026']:
+            g=Z[Z.era==era]
+            for reg in ['STRONG_BULL','BULL','TRANSITION','DEFENSIVE','UNKNOWN']:
+                coverage.append({'era':era,'regime':reg,'n':int((g.regime==reg).sum()),
+                                 'share':float((g.regime==reg).mean()) if len(g) else 0.0})
+
+        verdict='REGIME_SEMANTIC_DRIFT_CONFIRMED' if ranked and ranked[0]['robust_shift_iqr']>=0.25 else 'REGIME_SEMANTIC_DRIFT_WEAK'
+        result={
+            'version':'V6.73 Regime Semantic Drift Audit',
+            'verdict':verdict,
+            'regime_geometry':rows,
+            'ranked_cross_era_shifts':ranked,
+            'coverage':coverage,
+            'question':'Does the same V6.57 TRANSITION/DEFENSIVE label correspond to materially different SPY trend/drawdown geometry across eras?',
+            'important':'Diagnostic only. No new threshold, no new regime definition, no sizing change, no market gate.',
+            'next_step':('If drift is confirmed, do not use the categorical regime label directly for sizing. Test only one source-supported warning semantic built from the most stable underlying point-in-time geometry.'
+                         if verdict=='REGIME_SEMANTIC_DRIFT_CONFIRMED'
+                         else
+                         'If drift is weak, close Market Exposure as a rule branch and move to the next JLaw execution module.'),
+            'cache_note':'V6.69 paired cache + cached SPY OHLC only; 0 Tiingo; no universe scan; no exit reconstruction.'
+        }
+        V673_DIR.mkdir(parents=True,exist_ok=True)
+        V673_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v673_write(status='done',phase='done',message=f'V6.73 完成：{verdict}',
+                     processed=3,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        tb=traceback.format_exc()
+        _v673_write(status='error',phase='error',message=f'V6.73 失败：{type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=tb)
+    finally:v673_thread=None
+
+def _v673_start():
+    global v673_thread
+    if _v673_alive():return False
+    _v673_write(status='starting',phase='starting',message='V6.73 正在启动',
+                 processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+    v673_thread=threading.Thread(target=_v673_run,daemon=True);v673_thread.start();return True
+
+@APP.route('/v673/run',methods=['GET','POST'])
+def v673_run():_v673_start();return redirect('/v673/regime-semantic-drift')
+
+@APP.get('/api/v673/status')
+def v673_status_api():return jsonify(_v673_status())
+
+@APP.get('/v673/regime-semantic-drift')
+def v673_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v673_status();r={}
+    if V673_RESULT.exists():
+        try:r=json.loads(V673_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v673_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v673/run"><button>▶ 开始 V6.73 Drift Audit</button></a>'
+    trs=''
+    for x in r.get('regime_geometry',[]):
+        trs+=f"<tr><td><b>{e(x.get('regime'))}</b></td><td>{e(x.get('era'))}</td><td>{int(x.get('n',0))}</td><td>{float(x.get('avg_trade_return',0) or 0)*100:.2f}%</td><td>{float(x.get('stop_share',0) or 0)*100:.1f}%</td><td>{float(x.get('winner100_share',0) or 0)*100:.1f}%</td><td>{float(x.get('ret20_median',0) or 0)*100:.2f}%</td><td>{float(x.get('ret60_median',0) or 0)*100:.2f}%</td><td>{float(x.get('dist_ma200_median',0) or 0)*100:.2f}%</td><td>{float(x.get('drawdown_63_median',0) or 0)*100:.2f}%</td></tr>"
+    sh=''
+    for x in r.get('ranked_cross_era_shifts',[])[:12]:
+        sh+=f"<tr><td>{e(x.get('regime'))}</td><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('era2_median',0))*100:.2f}%</td><td>{float(x.get('era3_median',0))*100:.2f}%</td><td>{float(x.get('robust_shift_iqr',0)):.2f}</td></tr>"
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#faf5ff;border:1px solid #c084fc;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
+<a href="/">← 首页</a>
+<div class="c"><h1>🧬 V6.73 Regime Semantic Drift Audit</h1><div class="info">拆开 V6.57 标签本身：比较同一个 TRANSITION / DEFENSIVE 在两个年代背后的 SPY 20/60日收益、MA距离、MA斜率和 drawdown。只诊断，不改交易。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',3) or 3)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>Same Label, Different Geometry?</h2><table><tr><th>Regime</th><th>Era</th><th>N</th><th>Trade Avg</th><th>STOP7</th><th>+100</th><th>SPY20</th><th>SPY60</th><th>vs MA200</th><th>63d DD</th></tr>{trs or '<tr><td colspan="10">运行后显示。</td></tr>'}</table></div>
+<div class="c"><h2>Largest Cross-Era Geometry Shifts</h2><table><tr><th>Regime</th><th>Feature</th><th>2006–15 Median</th><th>2016–26 Median</th><th>Shift / IQR</th></tr>{sh or '<tr><td colspan="5">运行后显示。</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v673_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v673_home_base is not None:
+    def _v673_home_wrap(*args,**kwargs):
+        resp=_v673_home_base(*args,**kwargs)
+        card="""<div id="v673-regime-drift" style="background:#faf5ff;border:5px solid #9333ea;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V6.73 Regime Semantic Drift Audit</h2><p>Same label · different market geometry? · diagnostic only</p><a href="/v673/regime-semantic-drift"><button>打开 V6.73</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v673_home_base:APP.view_functions[ep]=_v673_home_wrap
