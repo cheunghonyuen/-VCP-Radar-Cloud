@@ -37046,3 +37046,392 @@ if _v682_home_base is not None:
         body=str(resp);return body if 'id="v682-entry-timing-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v682_home_base:APP.view_functions[ep]=_v682_home_wrap
+
+
+# ========================= V6.83 STOP7 WINNER PATH ANATOMY =========================
+V683_DIR=DATA_DIR/'v683_stop7_winner_path_anatomy'
+V683_STATUS=V683_DIR/'status.json'; V683_RESULT=V683_DIR/'result.json'
+v683_thread=None
+
+def _v683_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V683_STATUS.exists():
+        try:x.update(json.loads(V683_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v683_write(**kw):
+    V683_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v683_status();x.update(kw)
+    V683_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v683_alive(): return v683_thread is not None and v683_thread.is_alive()
+
+def _v683_run():
+    global v683_thread
+    t0=time.time()
+    try:
+        # 1) Reconcile exact frozen control first.
+        _v683_write(status='running',phase='control_parity',
+                     message='先复现 V6.70F 28.25% Control，再做路径诊断…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v683_write(status='running',phase='control_parity',
+                             message=f'Control cache {n}/{tot}',
+                             processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.83 STOP7 Winner Path Anatomy',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap}
+            V683_DIR.mkdir(parents=True,exist_ok=True)
+            V683_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v683_write(status='done',phase='blocked',message=f'Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['schedule_id']=S.index.astype(str)
+        S=S.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+        admitted_ids=sorted(set(S.listing_id.astype(str)))
+
+        # 2) Only exact admitted OHLC.
+        _v683_write(status='running',phase='admitted_ohlc',
+                     message=f'只读取 exact admitted OHLC · {len(admitted_ids):,} listings',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        oh={};tot2=len(admitted_ids)
+        for n,lid in enumerate(admitted_ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+            if not q.empty:oh[lid]=q
+            if n==1 or n%100==0 or n==tot2:
+                _v683_write(status='running',phase='admitted_ohlc',
+                             message=f'Admitted OHLC {n}/{tot2}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # 3) Build complete path anatomy.
+        _v683_write(status='running',phase='path_anatomy',
+                     message='拆 Entry → completed-session proof → peak → STOP7 → future recovery…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[];total=len(S)
+        proof_levels=[.05,.10,.20,.30]
+        for k,r in S.iterrows():
+            q=oh.get(str(r.listing_id))
+            if q is None or q.empty:continue
+            dates=list(q.date)
+            try:i0=dates.index(pd.Timestamp(r.entry_date).normalize())
+            except ValueError:continue
+            try:ix=dates.index(pd.Timestamp(r.exit_date).normalize())
+            except ValueError:continue
+            if ix<=i0:continue
+
+            ep=float(r.entry_px);xp=float(r.exit_px)
+            pre=q.iloc[i0:ix].copy()   # STRICTLY before STOP day: avoids same-day OHLC ordering look-ahead.
+            through=q.iloc[i0:ix+1].copy()
+            future=q.iloc[i0:min(len(q),i0+1261)].copy()
+            if pre.empty or future.empty:continue
+
+            pre_high=pd.to_numeric(pre.high,errors='coerce')
+            peak_pos=int(np.nanargmax(pre_high.to_numpy(dtype=float)))
+            peak_row=pre.iloc[peak_pos]
+            peak_px=float(peak_row.high)
+            peak_date=pd.Timestamp(peak_row.date).normalize()
+            pre_mfe=float(peak_px/ep-1)
+            stop_ret=float(xp/ep-1)
+            peak_to_exit=float(xp/peak_px-1) if peak_px>0 else np.nan
+            peak_to_stop_sessions=int(ix-(i0+peak_pos))
+            entry_to_stop_sessions=int(ix-i0)
+
+            rec={
+                'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
+                'entry_date':r.entry_date,'stop_date':r.exit_date,
+                'entry_px':ep,'stop_px':xp,'control_reason':str(r.exit_reason),
+                'orig_stop':bool('STOP' in str(r.exit_reason).upper()),
+                'pre_stop_completed_mfe':pre_mfe,
+                'peak_date':peak_date,'peak_to_stop_sessions':peak_to_stop_sessions,
+                'entry_to_stop_sessions':entry_to_stop_sessions,
+                'peak_to_exit_drawdown':peak_to_exit,
+                'stop_ret':stop_ret,
+                'future_mfe':float((pd.to_numeric(future.high,errors='coerce')/ep-1).max()),
+            }
+            rec['future20']=bool(rec['future_mfe']>=.20)
+            rec['future50']=bool(rec['future_mfe']>=.50)
+            rec['future100']=bool(rec['future_mfe']>=1.00)
+
+            highest=0.0
+            for lv in proof_levels:
+                hit=pre[pd.to_numeric(pre.high,errors='coerce')>=ep*(1+lv)]
+                key=str(int(lv*100))
+                rec[f'proof{key}_before_stop']=bool(len(hit)>0)
+                rec[f'proof{key}_first_session']=int(hit.index[0]-pre.index[0]) if len(hit)>0 else None
+                if len(hit)>0:highest=lv
+            rec['highest_completed_proof_before_stop']=highest
+
+            # Path speed / giveback descriptors, all known by STOP event.
+            rec['mfe_per_session']=float(pre_mfe/max(1,entry_to_stop_sessions))
+            rec['giveback_from_peak_pct']=float(-peak_to_exit) if np.isfinite(peak_to_exit) else np.nan
+            rec['giveback_ratio_to_mfe']=float((-peak_to_exit)/(pre_mfe+1e-9)) if pre_mfe>0 and np.isfinite(peak_to_exit) else np.nan
+            rows.append(rec)
+
+            if k==0 or (k+1)%100==0 or k+1==total:
+                _v683_write(status='running',phase='path_anatomy',
+                             message=f'Path anatomy {k+1}/{total}',
+                             processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('Path anatomy 结果为空')
+        A=A[A.orig_stop].copy()
+        if A.empty:raise RuntimeError('Exact admitted STOP cohort 为空')
+
+        # 4) Predeclared proof-state panels. No optimization.
+        _v683_write(status='running',phase='proof_state_panels',
+                     message='比较 +5/+10/+20/+30 completed-session proof states；不拟合阈值…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        base={
+            'stop_n':int(len(A)),
+            'future20_rate':float(A.future20.mean()),
+            'future50_rate':float(A.future50.mean()),
+            'future100_rate':float(A.future100.mean()),
+            'median_pre_stop_completed_mfe':float(pd.to_numeric(A.pre_stop_completed_mfe,errors='coerce').median()),
+            'median_peak_to_stop_sessions':float(pd.to_numeric(A.peak_to_stop_sessions,errors='coerce').median()),
+            'median_entry_to_stop_sessions':float(pd.to_numeric(A.entry_to_stop_sessions,errors='coerce').median()),
+            'median_peak_to_exit_drawdown':float(pd.to_numeric(A.peak_to_exit_drawdown,errors='coerce').median())
+        }
+
+        panels=[]
+        for lv in proof_levels:
+            key=str(int(lv*100));mask=A[f'proof{key}_before_stop'].astype(bool)
+            g=A[mask].copy();h=A[~mask].copy()
+            panels.append({
+                'proof_level':f'+{key}%','n':int(len(g)),'coverage':float(mask.mean()),
+                'future20_rate':float(g.future20.mean()) if len(g) else None,
+                'future50_rate':float(g.future50.mean()) if len(g) else None,
+                'future100_rate':float(g.future100.mean()) if len(g) else None,
+                'true_failure_rate':float((~g.future20).mean()) if len(g) else None,
+                'median_peak_to_stop_sessions':float(pd.to_numeric(g.peak_to_stop_sessions,errors='coerce').median()) if len(g) else None,
+                'median_giveback_from_peak':float(pd.to_numeric(g.giveback_from_peak_pct,errors='coerce').median()) if len(g) else None,
+                'future20_lift_vs_unproven':float(g.future20.mean()-h.future20.mean()) if len(g) and len(h) else None,
+                'future50_lift_vs_unproven':float(g.future50.mean()-h.future50.mean()) if len(g) and len(h) else None,
+                'future100_lift_vs_unproven':float(g.future100.mean()-h.future100.mean()) if len(g) and len(h) else None,
+            })
+
+        # Highest proof-state mutually exclusive distribution.
+        bins=[]
+        for lo,hi,label in [(-1e9,.05,'NONE_<5'),(.05,.10,'PROOF_5_10'),(.10,.20,'PROOF_10_20'),(.20,.30,'PROOF_20_30'),(.30,1e9,'PROOF_30_PLUS')]:
+            if label=='NONE_<5':
+                g=A[A.highest_completed_proof_before_stop<.05]
+            elif label=='PROOF_30_PLUS':
+                g=A[A.highest_completed_proof_before_stop>=.30]
+            else:
+                g=A[(A.highest_completed_proof_before_stop>=lo)&(A.highest_completed_proof_before_stop<hi)]
+            if len(g):
+                bins.append({
+                    'state':label,'n':int(len(g)),
+                    'future20_rate':float(g.future20.mean()),
+                    'future50_rate':float(g.future50.mean()),
+                    'future100_rate':float(g.future100.mean()),
+                    'median_peak_to_stop_sessions':float(pd.to_numeric(g.peak_to_stop_sessions,errors='coerce').median()),
+                    'median_peak_to_exit_drawdown':float(pd.to_numeric(g.peak_to_exit_drawdown,errors='coerce').median()),
+                    'median_entry_to_stop_sessions':float(pd.to_numeric(g.entry_to_stop_sessions,errors='coerce').median())
+                })
+
+        # Conservative interpretation gate: this is about existence of a distinct "proved-then-stopped" state,
+        # not permission to change the stop yet.
+        candidate=None
+        for p in panels:
+            if p['n']>=20 and p['coverage']>=.10 and p['future50_rate'] is not None and p['future50_lift_vs_unproven'] is not None:
+                if p['future50_lift_vs_unproven']>=.10 and p['true_failure_rate']<=.20:
+                    candidate=p
+                    break
+
+        verdict='PROVEN_STRENGTH_STATE_DISTINCT_ENOUGH_FOR_SOURCE_RECONCILIATION' if candidate else 'NO_SAFE_STOP_REGIME_SWITCH_STATE_YET'
+
+        result={
+            'version':'V6.83 STOP7 Winner Path Anatomy',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'baseline_stop_cohort':base,
+            'proof_state_panels':panels,
+            'highest_proof_state_bins':bins,
+            'candidate_state':candidate,
+            'important':'Diagnostic only. "Proof before stop" requires a COMPLETED session strictly before the STOP day to reach +5/+10/+20/+30; same-day high/low ordering is never assumed. No stop rule is changed.',
+            'history_dedup':'V6.78 proved washout exists; V6.79G rejected simple close-confirmed stop; V6.80-81 found STOP-day price/volume separation too weak; V6.82 rejected mechanical D+1/D+3 entry delay. V6.83 therefore tests only whether a distinct proved-then-stopped path state exists.',
+            'next_step':('If a distinct state exists, reconcile it against JLaw source material and build ONE source-supported winner-preservation semantic before any A/B.'
+                         if candidate else
+                         'Do not switch stop regimes mechanically. Move to setup/breakout-quality attribution or source-derived winner-management context; preserve fixed -7% as baseline.'),
+            'cache_note':'Exact V6.70F Control admission + V6.69 exits + V6.17 admitted-only OHLC; 0 Tiingo; no universe rebuild.'
+        }
+
+        V683_DIR.mkdir(parents=True,exist_ok=True)
+        V683_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V683_DIR/'stop7_winner_path_anatomy_rows.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v683_write(status='done',phase='done',message=f'V6.83 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v683_write(status='error',phase='error',
+                     message=f'V6.83 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v683_thread=None
+
+def _v683_start():
+    global v683_thread
+    if _v683_alive():return False
+    _v683_write(status='starting',phase='starting',message='V6.83 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v683_thread=threading.Thread(target=_v683_run,daemon=True);v683_thread.start();return True
+
+@APP.route('/v683/run',methods=['GET','POST'])
+def v683_run():_v683_start();return redirect('/v683/stop7-winner-path-anatomy')
+
+@APP.get('/api/v683/status')
+def v683_status_api():return jsonify(_v683_status())
+
+@APP.get('/v683/stop7-winner-path-anatomy')
+def v683_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v683_status();R={}
+    if V683_RESULT.exists():
+        try:
+            obj=json.loads(V683_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    G=R.get('baseline_stop_cohort') if isinstance(R.get('baseline_stop_cohort'),dict) else {}
+    arr=R.get('proof_state_panels') if isinstance(R.get('proof_state_panels'),list) else []
+    trs=''
+    for x in arr:
+        trs+=(
+            f"<tr><td><b>{e(x.get('proof_level'))}</b></td>"
+            f"<td>{integer(x.get('n'))}</td>"
+            f"<td>{num(x.get('coverage'))*100:.1f}%</td>"
+            f"<td>{num(x.get('future20_rate'))*100:.1f}%</td>"
+            f"<td>{num(x.get('future50_rate'))*100:.1f}%</td>"
+            f"<td>{num(x.get('future100_rate'))*100:.1f}%</td>"
+            f"<td>{num(x.get('true_failure_rate'))*100:.1f}%</td>"
+            f"<td>{num(x.get('future50_lift_vs_unproven'))*100:+.1f}pp</td>"
+            f"<td>{num(x.get('median_peak_to_stop_sessions')):.0f}</td></tr>"
+        )
+    btn='' if _v683_alive() else '<a href="/v683/run"><button>▶ 开始 V6.83 Winner Path Anatomy</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fdf4ff;border:1px solid #d946ef;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧭 V6.83 STOP7 Winner Path Anatomy</h1>
+<div class="info">不再改 Entry、不再放宽 STOP。只问：在 STOP7 之前，股票是否已经用“完成交易日”的 +5/+10/+20/+30 强势证明自己？如果有，这种 proved-then-stopped 状态与未来 Big Winner 是否真的不同。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>V6.70F Control CAGR: <b>{num(B.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p></div>
+<div class="c"><h2>Exact Admitted STOP Cohort</h2>
+<p>N={integer(G.get('stop_n'))} · future +20={num(G.get('future20_rate'))*100:.1f}% · +50={num(G.get('future50_rate'))*100:.1f}% · +100={num(G.get('future100_rate'))*100:.1f}%</p>
+<p>Median completed-session MFE before STOP={num(G.get('median_pre_stop_completed_mfe'))*100:.1f}% · Entry→STOP={num(G.get('median_entry_to_stop_sessions')):.0f} sessions · Peak→STOP={num(G.get('median_peak_to_stop_sessions')):.0f} sessions · Peak→Exit drawdown={num(G.get('median_peak_to_exit_drawdown'))*100:.1f}%</p></div>
+<div class="c"><h2>Completed-Session Proof Before STOP7</h2>
+<table><tr><th>Proof</th><th>N</th><th>Coverage</th><th>Future +20</th><th>+50</th><th>+100</th><th>True Failure</th><th>+50 Lift vs Unproven</th><th>Median Peak→STOP</th></tr>
+{trs or '<tr><td colspan=9>运行后显示</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v683_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v683_home_base is not None:
+    def _v683_home_wrap(*args,**kwargs):
+        resp=_v683_home_base(*args,**kwargs)
+        card="""<div id="v683-winner-path-card" style="background:#fdf4ff;border:5px solid #c026d3;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧭 V6.83 STOP7 Winner Path Anatomy</h2>
+        <p>Entry → completed-session proof → peak → STOP7 → future winner · exact admitted trades · cache-only</p>
+        <a href="/v683/stop7-winner-path-anatomy"><button>打开 V6.83</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v683-winner-path-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v683-winner-path-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v683_home_base:APP.view_functions[ep]=_v683_home_wrap
