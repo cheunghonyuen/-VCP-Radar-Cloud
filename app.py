@@ -33517,3 +33517,241 @@ if _v673_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v673_home_base:APP.view_functions[ep]=_v673_home_wrap
+
+
+# ========================= V6.74 CONTINUOUS MARKET WARNING ATTRIBUTION =========================
+V674_DIR=DATA_DIR/'v674_continuous_market_warning_attribution'
+V674_STATUS=V674_DIR/'status.json'; V674_RESULT=V674_DIR/'result.json'
+v674_thread=None
+
+def _v674_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
+    if V674_STATUS.exists():
+        try:x.update(json.loads(V674_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v674_write(**kw):
+    V674_DIR.mkdir(parents=True,exist_ok=True);x=_v674_status();x.update(kw)
+    V674_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v674_alive(): return v674_thread is not None and v674_thread.is_alive()
+
+def _v674_spearman(x,y):
+    x=pd.to_numeric(x,errors='coerce');y=pd.to_numeric(y,errors='coerce')
+    m=x.notna()&y.notna()
+    if m.sum()<100:return None
+    rx=x[m].rank(method='average');ry=y[m].rank(method='average')
+    return float(rx.corr(ry))
+
+def _v674_profile(g,feature):
+    x=pd.to_numeric(g[feature],errors='coerce')
+    z=g[x.notna()].copy()
+    if len(z)<250:return []
+    try:
+        z['_q']=pd.qcut(pd.to_numeric(z[feature],errors='coerce'),5,labels=False,duplicates='drop')
+    except Exception:
+        return []
+    rows=[]
+    for q,h in z.groupby('_q',sort=True):
+        ret=pd.to_numeric(h.control_ret,errors='coerce')
+        rows.append({
+            'q':int(q)+1,'n':int(len(h)),
+            'feature_median':float(pd.to_numeric(h[feature],errors='coerce').median()),
+            'avg_return':float(ret.mean()),
+            'stop_share':float(h.control_reason.astype(str).str.contains('STOP7',case=False,regex=False).mean()),
+            'winner100_share':float((ret>=1).mean())
+        })
+    return rows
+
+def _v674_run():
+    global v674_thread
+    t0=time.time()
+    try:
+        _v674_write(status='running',phase='load',
+                     message='读取 V6.69 paired cache + cached SPY OHLC；连续因子归因，不改规则…',
+                     processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists(): raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','control_ret','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+
+        Z=P[need].copy()
+        Z['listing_id']=Z['listing_id'].astype(str)
+        Z['entry_date']=pd.to_datetime(Z['entry_date'],errors='coerce').dt.normalize()
+        Z['control_ret']=pd.to_numeric(Z['control_ret'],errors='coerce')
+        Z=Z.dropna(subset=['entry_date','control_ret']).copy()
+
+        spy=load_cached("SPY")
+        if spy is None or len(spy)<220: raise RuntimeError('SPY cached OHLC 不存在或不足220日')
+        S=spy.copy().sort_index()
+        S.index=pd.to_datetime(S.index,errors='coerce').normalize()
+        S=S[~S.index.isna()].copy()
+        if 'Close' not in S.columns: raise RuntimeError('SPY cache 缺 Close')
+
+        S['ma20']=S.Close.rolling(20).mean()
+        S['ma50']=S.Close.rolling(50).mean()
+        S['ma200']=S.Close.rolling(200).mean()
+        S['ret20']=S.Close/S.Close.shift(20)-1
+        S['ret60']=S.Close/S.Close.shift(60)-1
+        S['dist_ma20']=S.Close/S.ma20-1
+        S['dist_ma50']=S.Close/S.ma50-1
+        S['dist_ma200']=S.Close/S.ma200-1
+        S['ma50_slope20']=S.ma50/S.ma50.shift(20)-1
+        S['ma200_slope20']=S.ma200/S.ma200.shift(20)-1
+        S['drawdown_63']=S.Close/S.Close.rolling(63).max()-1
+        S['drawdown_126']=S.Close/S.Close.rolling(126).max()-1
+
+        # Source-supported market warning context: rising market with contracting volume.
+        if 'Volume' in S.columns:
+            v=pd.to_numeric(S.Volume,errors='coerce')
+            S['vol20_vs60']=v.rolling(20).mean()/v.rolling(60).mean()-1
+            S['price_up_vol_down_20']=((S.ret20>0)&(S.vol20_vs60<0)).astype(float)
+        else:
+            S['vol20_vs60']=np.nan
+            S['price_up_vol_down_20']=np.nan
+
+        feats=['ret20','ret60','dist_ma20','dist_ma50','dist_ma200',
+               'ma50_slope20','ma200_slope20','drawdown_63','drawdown_126',
+               'vol20_vs60','price_up_vol_down_20']
+        F=S[feats].reset_index()
+        F=F.rename(columns={F.columns[0]:'entry_date'}).sort_values('entry_date')
+        Z=pd.merge_asof(Z.sort_values('entry_date'),F,on='entry_date',direction='backward')
+        Z['year']=Z.entry_date.dt.year
+        Z['era']=np.where(Z.year.between(2006,2015),'ERA2_2006_2015',
+                  np.where(Z.year.between(2016,2026),'ERA3_2016_2026','OTHER'))
+        Z=Z[Z.era.isin(['ERA2_2006_2015','ERA3_2016_2026'])].copy()
+        Z['stop7']=Z.control_reason.astype(str).str.contains('STOP7',case=False,regex=False).astype(float)
+        Z['winner100']=(Z.control_ret>=1).astype(float)
+
+        _v674_write(status='running',phase='correlations',
+                     message='计算每个连续 warning feature 在两个年代的方向一致性…',
+                     processed=1,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        profiles=[]
+        for f in feats:
+            if pd.to_numeric(Z[f],errors='coerce').notna().sum()<500: continue
+            era_stats=[]
+            for era,g in Z.groupby('era',sort=True):
+                era_stats.append({
+                    'era':era,'n':int(pd.to_numeric(g[f],errors='coerce').notna().sum()),
+                    'rho_return':_v674_spearman(g[f],g.control_ret),
+                    'rho_stop':_v674_spearman(g[f],g.stop7),
+                    'rho_winner100':_v674_spearman(g[f],g.winner100),
+                    'median':float(pd.to_numeric(g[f],errors='coerce').median())
+                })
+                profiles.append({'feature':f,'era':era,'quintiles':_v674_profile(g,f)})
+            if len(era_stats)!=2: continue
+            a,b=era_stats
+            def same_sign(k):
+                x=a.get(k);y=b.get(k)
+                return x is not None and y is not None and x*y>0
+            consistency=sum([
+                same_sign('rho_return'),
+                same_sign('rho_stop'),
+                same_sign('rho_winner100')
+            ])
+            strength=np.nanmean([
+                abs(a.get('rho_return') or 0),abs(b.get('rho_return') or 0),
+                abs(a.get('rho_stop') or 0),abs(b.get('rho_stop') or 0),
+                abs(a.get('rho_winner100') or 0),abs(b.get('rho_winner100') or 0)
+            ])
+            rows.append({
+                'feature':f,'era_stats':era_stats,
+                'direction_consistency_0_3':int(consistency),
+                'mean_abs_rho':float(strength),
+                'stable_warning_candidate':bool(consistency>=2 and strength>=0.05)
+            })
+
+        rows=sorted(rows,key=lambda x:(not x['stable_warning_candidate'],-x['direction_consistency_0_3'],-x['mean_abs_rho']))
+        candidates=[x for x in rows if x['stable_warning_candidate']]
+
+        _v674_write(status='running',phase='source_alignment',
+                     message='区分 source-supported warning semantics 与纯诊断 market geometry…',
+                     processed=2,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Do not automatically promote any feature into a rule.
+        verdict='STABLE_CONTINUOUS_WARNING_CANDIDATE_FOUND' if candidates else 'NO_STABLE_CONTINUOUS_WARNING_CANDIDATE'
+        result={
+            'version':'V6.74 Continuous Market Warning Attribution',
+            'verdict':verdict,
+            'feature_stability':rows,
+            'quintile_profiles':profiles,
+            'source_supported_semantics':[
+                {'semantic':'reduce exposure when warning signals strengthen','support':'JLaw source explicitly describes reducing investment weight/exposure when warning signals appear.'},
+                {'semantic':'rising market + shrinking volume divergence','support':'JLaw source explicitly cites shrinking volume while the market was rising as a warning before a pullback.'}
+            ],
+            'model_diagnostic_only_features':['ret20','ret60','MA distances/slopes','63d/126d drawdown'],
+            'important':'No threshold search, no combined score, no exposure replay, no new market gate. Quintiles are descriptive only.',
+            'next_step':('If a source-supported continuous warning (especially volume divergence) is stable across both eras, advance only that ONE semantic to a controlled exposure A/B. Otherwise close Market Exposure as a trading-rule branch and move to the next JLaw execution module.'
+                         if candidates else
+                         'Close Market Exposure as a trading-rule branch; retain it only as descriptive context and move to the next JLaw execution module.'),
+            'cache_note':'V6.69 paired cache + cached SPY OHLC only; 0 Tiingo; no universe scan; no exit reconstruction.'
+        }
+        V674_DIR.mkdir(parents=True,exist_ok=True)
+        V674_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v674_write(status='done',phase='done',message=f'V6.74 完成：{verdict}',
+                     processed=3,total=3,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        tb=traceback.format_exc()
+        _v674_write(status='error',phase='error',message=f'V6.74 失败：{type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=tb)
+    finally:v674_thread=None
+
+def _v674_start():
+    global v674_thread
+    if _v674_alive():return False
+    _v674_write(status='starting',phase='starting',message='V6.74 正在启动',
+                 processed=0,total=3,current='',elapsed_sec=0,error=None,traceback=None)
+    v674_thread=threading.Thread(target=_v674_run,daemon=True);v674_thread.start();return True
+
+@APP.route('/v674/run',methods=['GET','POST'])
+def v674_run():_v674_start();return redirect('/v674/continuous-market-warning-attribution')
+
+@APP.get('/api/v674/status')
+def v674_status_api():return jsonify(_v674_status())
+
+@APP.get('/v674/continuous-market-warning-attribution')
+def v674_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v674_status();r={}
+    if V674_RESULT.exists():
+        try:r=json.loads(V674_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v674_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v674/run"><button>▶ 开始 V6.74 Attribution</button></a>'
+    trs=''
+    for x in r.get('feature_stability',[]):
+        es=x.get('era_stats',[])
+        if len(es)<2:continue
+        a,b=es[0],es[1]
+        trs+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{int(x.get('direction_consistency_0_3',0))}/3</td><td>{float(x.get('mean_abs_rho',0)):.3f}</td><td>{e(x.get('stable_warning_candidate'))}</td><td>{float(a.get('rho_stop') or 0):+.3f}</td><td>{float(b.get('rho_stop') or 0):+.3f}</td><td>{float(a.get('rho_return') or 0):+.3f}</td><td>{float(b.get('rho_return') or 0):+.3f}</td></tr>"
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
+<a href="/">← 首页</a>
+<div class="c"><h1>📡 V6.74 Continuous Market Warning Attribution</h1><div class="info">不再相信 TRANSITION / DEFENSIVE 标签本身。直接检查 ret20/ret60、MA结构、drawdown、以及 source-supported 的“上涨但成交量萎缩”是否跨年代稳定关联 STOP / Big Winner。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',3) or 3)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(r.get('verdict','—'))}</h2></div>
+<div class="c"><h2>Cross-Era Continuous Warning Stability</h2><table><tr><th>Feature</th><th>Direction</th><th>|rho|</th><th>Candidate</th><th>STOP rho 06–15</th><th>STOP rho 16–26</th><th>Return rho 06–15</th><th>Return rho 16–26</th></tr>{trs or '<tr><td colspan="8">运行后显示。</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v674_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v674_home_base is not None:
+    def _v674_home_wrap(*args,**kwargs):
+        resp=_v674_home_base(*args,**kwargs)
+        card="""<div id="v674-cont-warning" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0"><h2>📡 V6.74 Continuous Market Warning Attribution</h2><p>continuous warnings · cross-era stability · diagnostic only</p><a href="/v674/continuous-market-warning-attribution"><button>打开 V6.74</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v674_home_base:APP.view_functions[ep]=_v674_home_wrap
