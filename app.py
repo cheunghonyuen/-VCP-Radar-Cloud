@@ -38889,3 +38889,355 @@ if _v688_home_base is not None:
         body=str(resp);return body if 'id="v688-delta-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v688_home_base:APP.view_functions[ep]=_v688_home_wrap
+
+
+# ========================= V6.89 CONTROL WEALTH-SOURCE ATTRIBUTION =========================
+V689_DIR=DATA_DIR/'v689_control_wealth_source_attribution'
+V689_STATUS=V689_DIR/'status.json'; V689_RESULT=V689_DIR/'result.json'
+v689_thread=None
+
+def _v689_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V689_STATUS.exists():
+        try:x.update(json.loads(V689_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v689_write(**kw):
+    V689_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v689_status();x.update(kw)
+    V689_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v689_alive(): return v689_thread is not None and v689_thread.is_alive()
+
+def _v689_share(x,total):
+    try:
+        return float(x/total) if total not in [0,None] and np.isfinite(total) else None
+    except Exception:
+        return None
+
+def _v689_run():
+    global v689_thread
+    t0=time.time()
+    try:
+        _v689_write(status='running',phase='control_parity',
+                     message='先复现 V6.70F 28.25% Control，冻结 exact admitted trades…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v689_write(status='running',phase='control_parity',
+                             message=f'Control cache {n}/{tot}',
+                             processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.89 Control Wealth-Source Attribution',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap}
+            V689_DIR.mkdir(parents=True,exist_ok=True)
+            V689_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v689_write(status='done',phase='blocked',message=f'Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['ret']=pd.to_numeric(S.exit_px,errors='coerce')/pd.to_numeric(S.entry_px,errors='coerce')-1
+        S['entry_year']=pd.to_datetime(S.entry_date).dt.year.astype(int)
+        S['exit_year']=pd.to_datetime(S.exit_date).dt.year.astype(int)
+        S['hold_days']=(pd.to_datetime(S.exit_date)-pd.to_datetime(S.entry_date)).dt.days.astype(int)
+        S['gross_gain']=S.ret.clip(lower=0)
+        S['gross_loss']=(-S.ret.clip(upper=0))
+        total_gain=float(S.gross_gain.sum()); total_loss=float(S.gross_loss.sum()); net=float(S.ret.sum())
+
+        _v689_write(status='running',phase='bucket_attribution',
+                     message='拆解 Winner / Loser return buckets 与总盈利贡献…',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        bucket_specs=[
+            ('LOSS_LE_10', lambda x:x<=-.10),
+            ('LOSS_7_TO_10', lambda x:(x>-.10)&(x<=-.07)),
+            ('LOSS_0_TO_7', lambda x:(x>-.07)&(x<0)),
+            ('WIN_0_TO_20', lambda x:(x>=0)&(x<.20)),
+            ('WIN_20_TO_50', lambda x:(x>=.20)&(x<.50)),
+            ('WIN_50_TO_100', lambda x:(x>=.50)&(x<1.00)),
+            ('WIN_100_PLUS', lambda x:x>=1.00),
+        ]
+        buckets=[]
+        for name,fn in bucket_specs:
+            g=S[fn(S.ret)].copy()
+            rsum=float(g.ret.sum()) if len(g) else 0.0
+            pos=float(g.gross_gain.sum()) if len(g) else 0.0
+            neg=float(g.gross_loss.sum()) if len(g) else 0.0
+            buckets.append({
+                'bucket':name,'n':int(len(g)),'share_trades':float(len(g)/len(S)) if len(S) else None,
+                'sum_return_units':rsum,'avg_return':float(g.ret.mean()) if len(g) else None,
+                'median_return':float(g.ret.median()) if len(g) else None,
+                'share_gross_gain':_v689_share(pos,total_gain),
+                'share_gross_loss':_v689_share(neg,total_loss),
+                'median_hold_days':float(g.hold_days.median()) if len(g) else None
+            })
+
+        _v689_write(status='running',phase='time_regime_attribution',
+                     message='拆 Year / Era / Market Regime 盈利来源与拖累…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        yearly=[]
+        for y,g in S.groupby('entry_year'):
+            yearly.append({
+                'year':int(y),'n':int(len(g)),
+                'sum_return_units':float(g.ret.sum()),
+                'avg_return':float(g.ret.mean()),
+                'win_rate':float((g.ret>0).mean()),
+                'gross_gain':float(g.gross_gain.sum()),
+                'gross_loss':float(g.gross_loss.sum()),
+                'share_gross_gain':_v689_share(float(g.gross_gain.sum()),total_gain),
+                'share_gross_loss':_v689_share(float(g.gross_loss.sum()),total_loss)
+            })
+        yearly=sorted(yearly,key=lambda x:x['year'])
+
+        S['era']=pd.cut(S.entry_year,bins=[1995,2005,2015,2026],
+                        labels=['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'],
+                        include_lowest=True).astype(str)
+        era_rows=[]
+        for er,g in S.groupby('era'):
+            era_rows.append({
+                'era':str(er),'n':int(len(g)),
+                'sum_return_units':float(g.ret.sum()),
+                'avg_return':float(g.ret.mean()),
+                'win_rate':float((g.ret>0).mean()),
+                'share_gross_gain':_v689_share(float(g.gross_gain.sum()),total_gain),
+                'share_gross_loss':_v689_share(float(g.gross_loss.sum()),total_loss)
+            })
+
+        regime_rows=[]
+        for er,g in S.groupby('regime'):
+            regime_rows.append({
+                'regime':str(er),'n':int(len(g)),
+                'sum_return_units':float(g.ret.sum()),
+                'avg_return':float(g.ret.mean()),
+                'win_rate':float((g.ret>0).mean()),
+                'share_gross_gain':_v689_share(float(g.gross_gain.sum()),total_gain),
+                'share_gross_loss':_v689_share(float(g.gross_loss.sum()),total_loss)
+            })
+        regime_rows=sorted(regime_rows,key=lambda x:x['sum_return_units'],reverse=True)
+
+        _v689_write(status='running',phase='concentration',
+                     message='测 Big Winner concentration：Top 1/5/10/20 trades 占多少 gross gain…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        wins=S[S.ret>0].sort_values('ret',ascending=False).copy()
+        top_conc=[]
+        for k in [1,3,5,10,20,30,50]:
+            g=wins.head(min(k,len(wins)))
+            top_conc.append({
+                'top_n':int(k),'actual_n':int(len(g)),
+                'gross_gain_share':_v689_share(float(g.gross_gain.sum()),total_gain),
+                'mean_return':float(g.ret.mean()) if len(g) else None,
+                'min_return_in_group':float(g.ret.min()) if len(g) else None
+            })
+
+        # exit reason attribution, because this can reveal where wealth is harvested/lost without changing rules.
+        exit_rows=[]
+        for reason,g in S.groupby('exit_reason'):
+            exit_rows.append({
+                'exit_reason':str(reason),'n':int(len(g)),
+                'sum_return_units':float(g.ret.sum()),
+                'avg_return':float(g.ret.mean()),
+                'win_rate':float((g.ret>0).mean()),
+                'share_gross_gain':_v689_share(float(g.gross_gain.sum()),total_gain),
+                'share_gross_loss':_v689_share(float(g.gross_loss.sum()),total_loss),
+                'median_hold_days':float(g.hold_days.median())
+            })
+        exit_rows=sorted(exit_rows,key=lambda x:x['sum_return_units'],reverse=True)
+
+        # Conservative interpretation only.
+        plus100=next((x for x in buckets if x['bucket']=='WIN_100_PLUS'),{})
+        plus50=next((x for x in buckets if x['bucket']=='WIN_50_TO_100'),{})
+        winner50_share=(plus100.get('share_gross_gain') or 0)+(plus50.get('share_gross_gain') or 0)
+        concentrated=bool(winner50_share>=.50)
+        verdict='CONTROL_EDGE_HEAVILY_CONCENTRATED_IN_50PLUS_WINNERS' if concentrated else 'CONTROL_EDGE_BROADLY_DISTRIBUTED'
+
+        result={
+            'version':'V6.89 Control Wealth-Source Attribution',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'trade_count':int(len(S)),
+            'gross_gain_units':total_gain,'gross_loss_units':total_loss,'net_return_units':net,
+            'return_buckets':buckets,
+            'yearly_attribution':yearly,
+            'era_attribution':era_rows,
+            'regime_attribution':regime_rows,
+            'exit_reason_attribution':exit_rows,
+            'top_winner_concentration':top_conc,
+            'winner50plus_gross_gain_share':winner50_share,
+            'important':'Attribution only. No admission, ranking, stop, entry, exit, sizing or market rule is changed. Trade-return units are diagnostic sums, not portfolio CAGR decomposition.',
+            'history_dedup':'This is not V6.16 Capital Ranking and not another Big-Winner DNA model. It answers where the frozen 28.25% control earns and loses its trade-level return units before any new hypothesis is allowed.',
+            'next_step':(
+                'If gross gains are highly concentrated in +50/+100 winners, use the attribution tables to identify which already-existing state/context contains those wealth creators without reopening closed threshold branches. Only then define one new causal hypothesis.'
+                if concentrated else
+                'If gains are broad, stop assuming a handful of Big Winners explain most edge; inspect loss-side concentration and regime/year instability before any new rule.'
+            ),
+            'cache_note':'Exact V6.70F Control admission + V6.69 exits + existing V6.17 close cache; 0 Tiingo; no universe rebuild.'
+        }
+        V689_DIR.mkdir(parents=True,exist_ok=True)
+        V689_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:S.to_csv(V689_DIR/'control_attribution_trades.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v689_write(status='done',phase='done',message=f'V6.89 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v689_write(status='error',phase='error',
+                     message=f'V6.89 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v689_thread=None
+
+def _v689_start():
+    global v689_thread
+    if _v689_alive():return False
+    _v689_write(status='starting',phase='starting',message='V6.89 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v689_thread=threading.Thread(target=_v689_run,daemon=True);v689_thread.start();return True
+
+@APP.route('/v689/run',methods=['GET','POST'])
+def v689_run():_v689_start();return redirect('/v689/control-wealth-attribution')
+
+@APP.get('/api/v689/status')
+def v689_status_api():return jsonify(_v689_status())
+
+@APP.get('/v689/control-wealth-attribution')
+def v689_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v689_status();R={}
+    if V689_RESULT.exists():
+        try:
+            z=json.loads(V689_RESULT.read_text(encoding='utf-8'))
+            if isinstance(z,dict):R=z
+        except Exception:pass
+
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+
+    B=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    buckets=R.get('return_buckets') if isinstance(R.get('return_buckets'),list) else []
+    years=R.get('yearly_attribution') if isinstance(R.get('yearly_attribution'),list) else []
+    regimes=R.get('regime_attribution') if isinstance(R.get('regime_attribution'),list) else []
+    conc=R.get('top_winner_concentration') if isinstance(R.get('top_winner_concentration'),list) else []
+
+    btr=''
+    for x in buckets:
+        btr+=f"<tr><td><b>{e(x.get('bucket'))}</b></td><td>{integer(x.get('n'))}</td><td>{num(x.get('share_trades'))*100:.1f}%</td><td>{num(x.get('avg_return'))*100:+.1f}%</td><td>{num(x.get('share_gross_gain'))*100:.1f}%</td><td>{num(x.get('share_gross_loss'))*100:.1f}%</td></tr>"
+    ctr=''
+    for x in conc:
+        ctr+=f"<tr><td>Top {integer(x.get('top_n'))}</td><td>{integer(x.get('actual_n'))}</td><td>{num(x.get('gross_gain_share'))*100:.1f}%</td><td>{num(x.get('mean_return'))*100:.1f}%</td><td>{num(x.get('min_return_in_group'))*100:.1f}%</td></tr>"
+    ytr=''
+    for x in sorted(years,key=lambda z:abs(num(z.get('sum_return_units'))),reverse=True)[:12]:
+        ytr+=f"<tr><td>{integer(x.get('year'))}</td><td>{integer(x.get('n'))}</td><td>{num(x.get('sum_return_units')):+.2f}</td><td>{num(x.get('avg_return'))*100:+.1f}%</td><td>{num(x.get('win_rate'))*100:.1f}%</td></tr>"
+    rtr=''
+    for x in regimes:
+        rtr+=f"<tr><td><b>{e(x.get('regime'))}</b></td><td>{integer(x.get('n'))}</td><td>{num(x.get('sum_return_units')):+.2f}</td><td>{num(x.get('avg_return'))*100:+.1f}%</td><td>{num(x.get('share_gross_gain'))*100:.1f}%</td><td>{num(x.get('share_gross_loss'))*100:.1f}%</td></tr>"
+
+    btn='' if _v689_alive() else '<a href="/v689/run"><button>▶ 开始 V6.89 Wealth Attribution</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #16a34a;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>💰 V6.89 Control Wealth-Source Attribution</h1>
+<div class="info">不改任何规则。只拆 28.25% Control 的财富来源：哪些 return buckets / years / regimes / exits 真正在贡献，Big Winners 到底占多少 gross gain。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>V6.70F Control CAGR: <b>{num(B.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p>
+<p>Trades: <b>{integer(R.get('trade_count'))}</b> · +50/+100 Winner gross-gain share: <b>{num(R.get('winner50plus_gross_gain_share'))*100:.1f}%</b></p></div>
+
+<div class="c"><h2>Return Bucket Attribution</h2>
+<table><tr><th>Bucket</th><th>N</th><th>Trade Share</th><th>Avg Return</th><th>Gross Gain Share</th><th>Gross Loss Share</th></tr>{btr or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+
+<div class="c"><h2>Top Winner Concentration</h2>
+<table><tr><th>Group</th><th>N</th><th>Gross Gain Share</th><th>Mean Return</th><th>Lowest Return</th></tr>{ctr or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+
+<div class="c"><h2>Largest Year Contributions</h2>
+<table><tr><th>Year</th><th>N</th><th>Return Units</th><th>Avg Return</th><th>WR</th></tr>{ytr or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+
+<div class="c"><h2>Market Regime Attribution</h2>
+<table><tr><th>Regime</th><th>N</th><th>Return Units</th><th>Avg Return</th><th>Gross Gain Share</th><th>Gross Loss Share</th></tr>{rtr or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v689_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v689_home_base is not None:
+    def _v689_home_wrap(*args,**kwargs):
+        resp=_v689_home_base(*args,**kwargs)
+        card="""<div id="v689-wealth-card" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>💰 V6.89 Control Wealth-Source Attribution</h2>
+        <p>28.25% Control · return buckets / years / regimes / winner concentration · diagnostic only</p>
+        <a href="/v689/control-wealth-attribution"><button>打开 V6.89</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v689-wealth-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v689-wealth-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v689_home_base:APP.view_functions[ep]=_v689_home_wrap
