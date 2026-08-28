@@ -44645,10 +44645,36 @@ def _v699_run():
             st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st['skipped_capacity']=int(skipcap);st['skipped_cash']=int(skipcash);st['replacement_count']=int(len(repl));return st,repl
 
         _v699_write(status='running',phase='replay',message='A/B replay：A FIRST_COME vs B single-feature replacement…',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
-        A,_=sim('A_NO_REPLACEMENT',False)
+        # Structural parity must be checked on the SAME clean candidate stream used by V6.97,
+        # before execution-price availability filters.  V6.97 is an admission reconstruction,
+        # not an executable price replay; comparing its 445 admissions to the executable subset
+        # (408 in the first V6.99 build) was an invalid parity check.
         if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json for FIRST_COME parity')
         r97=json.loads(V697_RESULT.read_text(encoding='utf-8'));expected=int((r97.get('reconstruction') or {}).get('admitted_first_come') or 0)
-        if expected and int(A.get('admitted_positions',0))!=expected:raise RuntimeError(f'FIRST_COME parity mismatch: V6.99 A={A.get("admitted_positions")} vs V6.97={expected}. Challenger blocked.')
+        PF=F.copy()
+        om=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first')
+        PF=PF.drop(columns=['candidate_order'],errors='ignore').merge(om,on=['listing_id','entry_date'],how='left')
+        PF['candidate_order']=pd.to_numeric(PF.candidate_order,errors='coerce')
+        mo=PF.candidate_order.isna()
+        if mo.any():
+            base=float(P.candidate_order.max()+1 if len(P) else 10**9)
+            PF.loc[mo,'candidate_order']=base+np.arange(int(mo.sum()))
+        PF=PF.dropna(subset=['entry_date','exit_date','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        active={};struct_admitted=0
+        for dt,g in PF.groupby('entry_date',sort=True):
+            dt=pd.Timestamp(dt).normalize()
+            for j in list(active):
+                if pd.Timestamp(active[j])<=dt:active.pop(j,None)
+            for j,r in g.iterrows():
+                if len(active)<10:
+                    active[int(j)]=pd.Timestamp(r.exit_date);struct_admitted+=1
+        if expected and struct_admitted!=expected:
+            raise RuntimeError(f'FIRST_COME structural parity mismatch: V6.99={struct_admitted} vs V6.97={expected}. Challenger blocked.')
+
+        A,_=sim('A_NO_REPLACEMENT',False)
+        executable_ratio=float(A.get('admitted_positions',0)/expected) if expected else np.nan
+        if expected and executable_ratio<0.90:
+            raise RuntimeError(f'Executable coverage too low: A={A.get("admitted_positions")} / V6.97={expected} ({executable_ratio:.1%}). Challenger blocked.')
         B,repls=sim('B_ONE_REPLACEMENT_INC_CURRENT_RET',True)
         _v699_write(status='running',phase='audit',message='Replacement economics + year stability…',processed=5,total=7,elapsed_sec=round(time.time()-t0,1))
         annA=A.get('annual',{});annB=B.get('annual',{});ys=sorted(set(annA)&set(annB));beats=sum(annB[y]>annA[y] for y in ys);year_share=float(beats/len(ys)) if ys else np.nan
@@ -44657,7 +44683,7 @@ def _v699_run():
         else:RR=pd.DataFrame();re_diag={'count':0}
         keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate','winner20_capture','winner30_capture','winner50_capture','winner100_capture'];delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
         pass_econ=bool((delta['cagr']>=0.01 or delta['profit_factor']>=0.10) and B['maxdd']>=A['maxdd']-0.03 and B['winner30_capture']>=A['winner30_capture']-1e-12 and (not ys or year_share>=0.50));verdict='ONE_REPLACEMENT_PASSES_PIT_ECONOMIC_AB' if pass_econ else 'ONE_REPLACEMENT_FAILS_PIT_ECONOMIC_AB'
-        result={'version':'V6.99 ONE Replacement PIT A/B','verdict':verdict,'shared_feature':'inc_current_ret','rule':{'full_book_only':True,'victim':'lowest incumbent current return','trigger':'inc_current_ret < 0','candidate_score_used':False,'max_replacements_per_day':1,'friction_each_leg':0.001},'A':A,'B':B,'delta':delta,'replacement_diagnostics':re_diag,'year_stability':{'comparable_years':len(ys),'B_beats_A_years':int(beats),'share':year_share,'A':annA,'B':annB},'candidate_rows':int(len(Z)),'missing_price_listings':int(missing),'acceptance':'PASS only if CAGR improves by >=1pp OR PF by >=0.10, MaxDD does not worsen by >3pp, +30 winner capture is not reduced, and B beats A in >=50% of comparable years.','important':'Causal dynamic 10-slot PIT execution A/B with frozen zero threshold and exactly one validated feature. This is not an independent feature-selection holdout because V6.98 selected the feature on the same historical era; year stability is a post-selection temporal audit.','history_dedup':'Does not reopen V6.16I composite ranking/gap grids. No candidate score, no threshold sweep, no additional feature, no Tiingo/universe scan.','next_step':('If PASS, run one truly forward-chained feature-selection/activation confirmation before production promotion.' if pass_econ else 'Reject replacement and return to FIRST_COME; do not tune neighboring thresholds.'),'cache_note':'V6.94 clean candidate store + V6.69 order/entry/exit + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
+        result={'version':'V6.99 ONE Replacement PIT A/B','verdict':verdict,'shared_feature':'inc_current_ret','rule':{'full_book_only':True,'victim':'lowest incumbent current return','trigger':'inc_current_ret < 0','candidate_score_used':False,'max_replacements_per_day':1,'friction_each_leg':0.001},'A':A,'B':B,'delta':delta,'replacement_diagnostics':re_diag,'year_stability':{'comparable_years':len(ys),'B_beats_A_years':int(beats),'share':year_share,'A':annA,'B':annB},'candidate_rows':int(len(Z)),'missing_price_listings':int(missing),'parity':{'v697_expected_admissions':int(expected),'structural_admissions':int(struct_admitted),'executable_A_admissions':int(A.get('admitted_positions',0)),'executable_coverage_vs_v697':executable_ratio},'acceptance':'PASS only if CAGR improves by >=1pp OR PF by >=0.10, MaxDD does not worsen by >3pp, +30 winner capture is not reduced, and B beats A in >=50% of comparable years.','important':'Structural FIRST_COME parity is checked before price-availability filtering; executable A and B then use the identical price-covered subset. Causal dynamic 10-slot PIT execution A/B with frozen zero threshold and exactly one validated feature. This is not an independent feature-selection holdout because V6.98 selected the feature on the same historical era; year stability is a post-selection temporal audit.','history_dedup':'Does not reopen V6.16I composite ranking/gap grids. No candidate score, no threshold sweep, no additional feature, no Tiingo/universe scan.','next_step':('If PASS, run one truly forward-chained feature-selection/activation confirmation before production promotion.' if pass_econ else 'Reject replacement and return to FIRST_COME; do not tune neighboring thresholds.'),'cache_note':'V6.94 clean candidate store + V6.69 order/entry/exit + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
         V699_DIR.mkdir(parents=True,exist_ok=True);V699_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
         if len(RR):RR.to_csv(V699_DIR/'replacement_ledger.csv.gz',index=False,compression='gzip')
         _v699_write(status='done',phase='done',message=f'V6.99 完成：{verdict}',processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
