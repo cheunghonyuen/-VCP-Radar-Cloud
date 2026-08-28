@@ -44256,3 +44256,241 @@ if _v697_home_base is not None:
         body=str(resp);return body if 'id="v697-capacity-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v697_home_base:APP.view_functions[ep]=_v697_home_wrap
+
+
+# ========================= V6.98 POINT-IN-TIME CONTEST STRENGTH-GAP AUDIT =========================
+V698_DIR=DATA_DIR/'v698_pit_contest_strength_gap'
+V698_STATUS=V698_DIR/'status.json'; V698_RESULT=V698_DIR/'result.json'
+v698_thread=None
+
+def _v698_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V698_STATUS.exists():
+        try:x.update(json.loads(V698_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v698_write(**kw):
+    V698_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v698_status();x.update(kw)
+    V698_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v698_alive():
+    return v698_thread is not None and v698_thread.is_alive()
+
+def _v698_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(pd.Series(x),errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average'); n1=int((z.y==1).sum()); n0=int((z.y==0).sum())
+    if not n1 or not n0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v698_feat_table(q):
+    z=q[['date','open','high','low','close']].copy().sort_values('date').reset_index(drop=True)
+    c=pd.to_numeric(z.close,errors='coerce'); h=pd.to_numeric(z.high,errors='coerce')
+    z['ret10']=c/c.shift(10)-1; z['ret20']=c/c.shift(20)-1
+    z['ma20']=c.rolling(20,min_periods=20).mean(); z['ma50']=c.rolling(50,min_periods=50).mean()
+    z['above_ma20']=c/z.ma20-1; z['above_ma50']=c/z.ma50-1
+    z['high20']=h.rolling(20,min_periods=20).max(); z['high50']=h.rolling(50,min_periods=50).max()
+    z['dist20high']=c/z.high20-1; z['dist50high']=c/z.high50-1
+    vals=np.log(c.clip(lower=1e-9)).to_numpy(dtype=float); slope=np.full(len(z),np.nan)
+    for i in range(19,len(z)):
+        y=vals[i-19:i+1]
+        if np.isfinite(y).all():slope[i]=float(np.polyfit(np.arange(20),y,1)[0])
+    z['slope20']=slope
+    return z
+
+def _v698_run():
+    global v698_thread
+    t0=time.time()
+    try:
+        _v698_write(status='running',phase='load',message='读取 clean FIRST_COME stream；不重开旧 V6.16I replacement…',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+        if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json')
+        r97=json.loads(V697_RESULT.read_text(encoding='utf-8'))
+        if str(r97.get('verdict',''))!='CLEAN_CAPACITY_DISPLACEMENT_CONFIRMED__LOSER_OCCUPANCY_MATERIAL':
+            raise RuntimeError('V6.97 未确认 loser occupancy material')
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists():raise RuntimeError('找不到 V6.94 clean candidate feature store')
+        F=pd.read_csv(ffp,compression='gzip')
+        F['listing_id']=F.listing_id.astype(str)
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce'); F['is_stop']=F.is_stop.astype(bool)
+        F=F.dropna(subset=['entry_date','exit_date','ret']).copy()
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        P['listing_id']=P.listing_id.astype(str); P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        om=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first')
+        F=F.merge(om,on=['listing_id','entry_date'],how='left')
+        F['candidate_order']=pd.to_numeric(F.candidate_order,errors='coerce')
+        base=float(P.candidate_order.max()+1 if len(P) else 10**9); m=F.candidate_order.isna()
+        if m.any():F.loc[m,'candidate_order']=base+np.arange(int(m.sum()))
+        F=F.sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        _v698_write(status='running',phase='features',message='Historical Cache only：构建 contest-date point-in-time strength features…',processed=1,total=6,elapsed_sec=round(time.time()-t0,1))
+        pf={}
+        lids=sorted(set(F.listing_id))
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                            'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                            'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+            if len(q)<60:continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy()); hi=[x for x in ev if x['high_confidence']]
+            for c in ['open','high','low','close']:
+                q[c]=[float(v)*_v6894_factor_for_date(hi,dt) for v,dt in zip(q[c],q.date)]
+            z=_v698_feat_table(q)
+            pf[lid]=z.set_index('date')[['close','ret10','ret20','above_ma20','above_ma50','dist20high','dist50high','slope20']]
+            if n==1 or n%100==0 or n==len(lids):
+                _v698_write(status='running',phase='features',message=f'PIT features {n}/{len(lids)}',processed=1,total=6,elapsed_sec=round(time.time()-t0,1))
+
+        def snap(lid,dt):
+            z=pf.get(str(lid))
+            if z is None or z.empty:return None
+            i=z.index.searchsorted(pd.Timestamp(dt).normalize(),side='right')-1
+            if i<0:return None
+            r=z.iloc[int(i)]
+            return {k:(float(r[k]) if pd.notna(r[k]) and np.isfinite(float(r[k])) else np.nan) for k in z.columns}
+
+        _v698_write(status='running',phase='contests',message='重建满仓 contest；GOOD_SWAP vs BAD_SWAP…',processed=2,total=6,elapsed_sec=round(time.time()-t0,1))
+        entries={}
+        for i,r in F.iterrows():entries.setdefault(pd.Timestamp(r.entry_date),[]).append(int(i))
+        active={}; pairs=[]; dates=sorted(entries)
+        fns=['ret10','ret20','above_ma20','above_ma50','dist20high','dist50high','slope20']
+
+        for di,dt in enumerate(dates,1):
+            for j in list(active):
+                if pd.Timestamp(active[j].exit_date)<=dt:active.pop(j,None)
+            for i in entries[dt]:
+                cand=F.loc[i]
+                if len(active)<10:
+                    active[i]=cand;continue
+                cs=snap(cand.listing_id,dt)
+                if cs is None:continue
+                for inc in active.values():
+                    ins=snap(inc.listing_id,dt)
+                    if ins is None:continue
+                    good50=bool(cand.ret>=.50 and inc.is_stop); bad50=bool(cand.is_stop and inc.ret>=.50)
+                    good100=bool(cand.ret>=1.0 and inc.is_stop); bad100=bool(cand.is_stop and inc.ret>=1.0)
+                    if not (good50 or bad50 or good100 or bad100):continue
+                    row={'date':dt,'year':int(dt.year),'good50':good50,'bad50':bad50,'good100':good100,'bad100':bad100}
+                    for f in fns:
+                        cv,iv=cs.get(f,np.nan),ins.get(f,np.nan)
+                        row['gap_'+f]=float(cv-iv) if np.isfinite(cv) and np.isfinite(iv) else np.nan
+                    ep=snap(inc.listing_id,inc.entry_date)
+                    row['inc_current_ret']=float(ins['close']/ep['close']-1) if ep and np.isfinite(ep.get('close',np.nan)) and ep['close']>0 and np.isfinite(ins.get('close',np.nan)) else np.nan
+                    row['inc_age_days']=float(max(0,(dt-pd.Timestamp(inc.entry_date)).days))
+                    pairs.append(row)
+            if di==1 or di%250==0 or di==len(dates):
+                _v698_write(status='running',phase='contests',message=f'Contest dates {di}/{len(dates)} · pairs={len(pairs)}',processed=2,total=6,elapsed_sec=round(time.time()-t0,1))
+
+        Q=pd.DataFrame(pairs)
+        if len(Q)<500:raise RuntimeError(f'Extreme contest pairs 太少: {len(Q)}')
+
+        _v698_write(status='running',phase='oos',message='跨年份审计单一 strength-gap；不拟合综合分、不搜阈值…',processed=3,total=6,elapsed_sec=round(time.time()-t0,1))
+        features=['gap_ret10','gap_ret20','gap_above_ma20','gap_above_ma50','gap_dist20high','gap_dist50high','gap_slope20','inc_current_ret','inc_age_days']
+
+        def audit(good,bad,target):
+            sub=Q[Q[good]|Q[bad]].copy();sub['y']=sub[good].astype(int);out=[]
+            for f in features:
+                pa=_v698_auc(sub[f],sub.y); yearly=[]
+                for yy,g in sub.groupby('year'):
+                    z=g[[f,'y']].dropna()
+                    if len(z)<30 or z.y.nunique()<2:continue
+                    a=_v698_auc(z[f],z.y)
+                    if np.isfinite(a):yearly.append({'year':int(yy),'oriented_auc':float(max(a,1-a)),'n':int(len(z))})
+                vals=[x['oriented_auc'] for x in yearly]
+                out.append({'feature':f,'target':target,'n':int(len(sub)),
+                            'pooled_oriented_auc':float(max(pa,1-pa)) if np.isfinite(pa) else None,
+                            'year_count':int(len(vals)),
+                            'mean_year_auc':float(np.mean(vals)) if vals else None,
+                            'weakest_year_auc':float(np.min(vals)) if vals else None,
+                            'year_ge_0_60_share':float(np.mean([v>=.60 for v in vals])) if vals else None})
+            return sorted(out,key=lambda x:((x.get('year_ge_0_60_share') or 0),(x.get('pooled_oriented_auc') or 0)),reverse=True)
+
+        a50=audit('good50','bad50','PLUS50_SWAP');a100=audit('good100','bad100','PLUS100_SWAP')
+        shared=None
+        for f in features:
+            x=next((z for z in a50 if z['feature']==f),None);y=next((z for z in a100 if z['feature']==f),None)
+            if x and y:
+                ok50=(x.get('pooled_oriented_auc') or 0)>=.60 and (x.get('year_count') or 0)>=8 and (x.get('year_ge_0_60_share') or 0)>=.60
+                ok100=(y.get('pooled_oriented_auc') or 0)>=.60 and (y.get('year_count') or 0)>=8 and (y.get('year_ge_0_60_share') or 0)>=.60
+                if ok50 and ok100:
+                    shared={'feature':f,'plus50':x,'plus100':y};break
+
+        verdict='PIT_CONTEST_STRENGTH_GAP_GENERALIZES__ONE_REPLACEMENT_AB_ALLOWED' if shared else 'PIT_CONTEST_STRENGTH_GAP_NOT_STABLE_ENOUGH'
+        result={'version':'V6.98 Point-in-Time Contest Strength-Gap Audit','verdict':verdict,'pair_n':int(len(Q)),
+                'plus50_audit':a50,'plus100_audit':a100,'shared_stable_feature':shared,
+                'history_dedup':'V6.16H/I already tested generic ranking/replacement. V6.98 only audits corrected full-book contests with point-in-time strength gaps.',
+                'important':'Hindsight labels are validation labels only. Features are contest-date point-in-time.',
+                'next_step':('Run ONE dynamic 10-slot replacement A/B using only the single shared feature.' if shared else 'Do not reopen replacement; current point-in-time gaps are not robust enough.'),
+                'cache_note':'V6.94 + V6.69 order + Historical Cache; 0 Tiingo; 0 universe scan; no replay.'}
+        V698_DIR.mkdir(parents=True,exist_ok=True)
+        V698_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        Q.to_csv(V698_DIR/'pit_contest_extreme_pairs.csv.gz',index=False,compression='gzip')
+        _v698_write(status='done',phase='done',message=f'V6.98 完成：{verdict}',processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v698_write(status='error',phase='error',message=f'V6.98 失败：{type(ex).__name__}: {ex}',processed=0,total=6,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v698_thread=None
+
+def _v698_start():
+    global v698_thread
+    if _v698_alive():return False
+    _v698_write(status='starting',phase='starting',message='V6.98 正在启动',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v698_thread=threading.Thread(target=_v698_run,daemon=True);v698_thread.start();return True
+
+@APP.route('/v698/run',methods=['GET','POST'])
+def v698_run():_v698_start();return redirect('/v698/pit-contest-strength-gap')
+
+@APP.get('/api/v698/status')
+def v698_status_api():return jsonify(_v698_status())
+
+@APP.get('/v698/pit-contest-strength-gap')
+def v698_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v698_status(); R={}
+    if V698_RESULT.exists():
+        try:R=json.loads(V698_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def n(v):
+        try:return f"{float(v):.3f}"
+        except Exception:return "—"
+    sh=R.get('shared_stable_feature') or {}
+    def tbl(xs):
+        rr=[]
+        for x in (xs or [])[:12]:
+            rr.append(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('n'))}</td><td>{n(x.get('pooled_oriented_auc'))}</td><td>{e(x.get('year_count'))}</td><td>{n(x.get('mean_year_auc'))}</td><td>{n(x.get('weakest_year_auc'))}</td><td>{n((x.get('year_ge_0_60_share') or 0)*100)}%</td></tr>")
+        return ''.join(rr)
+    btn='' if _v698_alive() else '<a href="/v698/run"><button>▶ 开始 V6.98 Contest Audit</button></a>'
+    return '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}.c{background:white;padding:24px;border-radius:20px;margin:16px 0}button{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left}</style><a href="/">← 首页</a><div class="c"><h1>⚖️ V6.98 PIT Contest Strength-Gap Audit</h1><p>真实满仓 contest：跳过的新候选 vs incumbent，当时强弱差；不直接 replacement。</p></div><div class="c"><h2>状态：'+e(st.get('status'))+'</h2><p>'+e(st.get('message'))+'</p>'+btn+'</div><div class="c"><h2>Verdict: '+e(R.get('verdict','—'))+'</h2><p>Pairs: '+e(R.get('pair_n','—'))+' · Shared: <b>'+e(sh.get('feature','—'))+'</b></p></div><div class="c"><h2>+50</h2><table><tr><th>Feature</th><th>N</th><th>AUC</th><th>Years</th><th>Mean</th><th>Weak</th><th>Year≥.60</th></tr>'+tbl(R.get('plus50_audit'))+'</table></div><div class="c"><h2>+100</h2><table><tr><th>Feature</th><th>N</th><th>AUC</th><th>Years</th><th>Mean</th><th>Weak</th><th>Year≥.60</th></tr>'+tbl(R.get('plus100_audit'))+'</table></div>'
+
+_v698_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v698_home_base is not None:
+    def _v698_home_wrap(*args,**kwargs):
+        resp=_v698_home_base(*args,**kwargs)
+        card='<div id="v698-contest-card" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0"><h2>⚖️ V6.98 PIT Contest Strength-Gap Audit</h2><p>Full-book contests · skipped candidate vs incumbent · cross-year audit</p><a href="/v698/pit-contest-strength-gap"><button>打开 V6.98</button></a></div>'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v698-contest-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v698_home_base:APP.view_functions[ep]=_v698_home_wrap
