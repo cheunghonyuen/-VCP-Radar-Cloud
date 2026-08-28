@@ -43235,3 +43235,305 @@ if _v695_home_base is not None:
         body=str(resp);return body if 'id="v695-stop-burden-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v695_home_base:APP.view_functions[ep]=_v695_home_wrap
+
+
+# ========================= V6.96 STALE-CAPITAL CHECKPOINT COUNTERFACTUAL =========================
+V696_DIR=DATA_DIR/'v696_stale_capital_checkpoint_counterfactual'
+V696_STATUS=V696_DIR/'status.json'; V696_RESULT=V696_DIR/'result.json'
+v696_thread=None
+
+def _v696_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V696_STATUS.exists():
+        try:x.update(json.loads(V696_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v696_write(**kw):
+    V696_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v696_status();x.update(kw)
+    V696_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v696_alive(): return v696_thread is not None and v696_thread.is_alive()
+
+def _v696_run():
+    global v696_thread
+    t0=time.time()
+    try:
+        _v696_write(status='running',phase='load_clean_stream',
+                    message='读取 V6.94 clean candidate stream + V6.95 burden；冻结 D20/D30/D40/D60 checkpoints…',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V695_RESULT.exists():raise RuntimeError('找不到 V6.95 result.json')
+        r95=json.loads(V695_RESULT.read_text(encoding='utf-8'))
+        if str(r95.get('priority',''))!='HOLD_DURATION_BURDEN':
+            raise RuntimeError('V6.95 priority 不是 HOLD_DURATION_BURDEN')
+
+        fp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.94 clean candidate feature store')
+        F=pd.read_csv(fp,compression='gzip')
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F['is_stop']=F.is_stop.astype(bool)
+        F=F.dropna(subset=['entry_date','exit_date','ret']).copy()
+
+        # Trading-day hold length from V6.95 burden rows where available.
+        bfp=V695_DIR/'clean_stop_burden_rows.csv.gz'
+        B=pd.read_csv(bfp,compression='gzip') if bfp.exists() else pd.DataFrame()
+        if not B.empty:
+            B['entry_date']=pd.to_datetime(B.entry_date,errors='coerce').dt.normalize()
+            B['exit_date']=pd.to_datetime(B.exit_date,errors='coerce').dt.normalize()
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        checkpoints=[20,30,40,60]
+        # Diagnostic proxy only, not claimed as JLaw rule:
+        # "stale at checkpoint" = never reached +5% by then AND checkpoint close <= entry.
+        progress_target=.05
+
+        lids=sorted(set(F.listing_id.astype(str)))
+        rows=[]
+        _v696_write(status='running',phase='checkpoint_paths',
+                    message=f'Historical Cache only：逐 listing 构建 D20/D30/D40/D60 当时可见状态 0/{len(lids)}',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+            # Corporate-action normalization, same method used in clean baseline work.
+            ev=_v6894_detect_events(q[['date','open','close']].copy())
+            hi=[x for x in ev if x['high_confidence']]
+            for col in ['open','high','low','close']:
+                q[col]=[float(v)*_v6894_factor_for_date(hi,dt) for v,dt in zip(q[col],q.date)]
+
+            g=F[F.listing_id.astype(str).eq(lid)]
+            for _,r in g.iterrows():
+                ed=pd.Timestamp(r.entry_date).normalize()
+                xd=pd.Timestamp(r.exit_date).normalize()
+                path=q[(q.date>=ed)&(q.date<=xd)].copy().reset_index(drop=True)
+                if len(path)<21:continue
+
+                ep=float(path.close.iloc[0])
+                if ep<=0:continue
+                for cp in checkpoints:
+                    if len(path)<=cp:continue
+                    sub=path.iloc[:cp+1]
+                    cp_close=float(sub.close.iloc[-1])
+                    mfe=float(sub.high.max()/ep-1)
+                    cp_ret=float(cp_close/ep-1)
+                    stale=bool(mfe<progress_target and cp_ret<=0.0)
+                    rows.append({
+                        'listing_id':lid,'entry_date':ed,'checkpoint':cp,
+                        'final_ret':float(r.ret),'is_stop':bool(r.is_stop),
+                        'winner50':bool(float(r.ret)>=.50),'winner100':bool(float(r.ret)>=1.0),
+                        'checkpoint_ret':cp_ret,'mfe_to_checkpoint':mfe,'stale':stale,
+                        'counterfactual_exit_ret':cp_ret
+                    })
+
+            if n==1 or n%100==0 or n==len(lids):
+                _v696_write(status='running',phase='checkpoint_paths',
+                            message=f'Checkpoint paths {n}/{len(lids)} · rows={len(rows)}',
+                            processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        D=pd.DataFrame(rows)
+        if len(D)<1000:raise RuntimeError(f'Checkpoint rows 太少: {len(D)}')
+
+        _v696_write(status='running',phase='trade_level_counterfactual',
+                    message='计算：提前释放多少 eventual STOP、误杀多少 +50/+100 Winner、释放多少持仓天数…',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        summaries=[]
+        for cp in checkpoints:
+            x=D[D.checkpoint.eq(cp)].copy()
+            stale=x[x.stale].copy()
+            if stale.empty:continue
+
+            stop_all=x[x.is_stop]
+            stop_hit=stale[stale.is_stop]
+            w50_all=x[x.winner50]
+            w50_hit=stale[stale.winner50]
+            w100_all=x[x.winner100]
+            w100_hit=stale[stale.winner100]
+
+            # economic delta on touched rows only: counterfactual checkpoint exit vs final strategy outcome
+            delta=stale.counterfactual_exit_ret-stale.final_ret
+            summaries.append({
+                'checkpoint':cp,
+                'eligible_n':int(len(x)),
+                'stale_n':int(len(stale)),
+                'stale_share':float(len(stale)/len(x)),
+                'stop_total':int(len(stop_all)),
+                'stop_touched':int(len(stop_hit)),
+                'stop_touch_rate':float(len(stop_hit)/len(stop_all)) if len(stop_all) else None,
+                'winner50_total':int(len(w50_all)),
+                'winner50_killed':int(len(w50_hit)),
+                'winner50_retention':float(1-len(w50_hit)/len(w50_all)) if len(w50_all) else None,
+                'winner100_total':int(len(w100_all)),
+                'winner100_killed':int(len(w100_hit)),
+                'winner100_retention':float(1-len(w100_hit)/len(w100_all)) if len(w100_all) else None,
+                'avg_checkpoint_exit_ret_on_touched':float(stale.counterfactual_exit_ret.mean()),
+                'avg_final_ret_on_touched':float(stale.final_ret.mean()),
+                'avg_trade_delta_on_touched':float(delta.mean()),
+                'median_trade_delta_on_touched':float(delta.median())
+            })
+
+        _v696_write(status='running',phase='capital_release_estimate',
+                    message='估算 stale STOP 被提前退出可释放的 slot-days；只做 trade-level counterfactual，不做替补交易 replay…',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Merge V6.95 STOP slot-days to quantify freed days only for eventual STOPs.
+        if not B.empty:
+            key=B[['listing_id','entry_date','slot_days']].copy()
+            key['listing_id']=key.listing_id.astype(str)
+            D2=D.merge(key,on=['listing_id','entry_date'],how='left')
+        else:
+            D2=D.copy();D2['slot_days']=np.nan
+
+        cap_rows=[]
+        for cp in checkpoints:
+            x=D2[(D2.checkpoint.eq(cp))&(D2.stale)&(D2.is_stop)&D2.slot_days.notna()].copy()
+            if x.empty:continue
+            x['freed_days']=(pd.to_numeric(x.slot_days,errors='coerce')-cp).clip(lower=0)
+            cap_rows.append({
+                'checkpoint':cp,'stale_stop_n':int(len(x)),
+                'freed_slot_days':int(x.freed_days.sum()),
+                'median_freed_days':float(x.freed_days.median()),
+                'mean_freed_days':float(x.freed_days.mean())
+            })
+
+        # Predeclared economic gate: preserve right tail, touch meaningful STOP load, and checkpoint exit
+        # must not worsen touched-trade average. This is still NOT a portfolio result.
+        candidates=[]
+        for z in summaries:
+            pass_tail=(z.get('winner50_retention') is not None and z['winner50_retention']>=.90 and
+                       z.get('winner100_retention') is not None and z['winner100_retention']>=.90)
+            pass_stop=(z.get('stop_touch_rate') or 0)>=.15
+            pass_trade=(z.get('avg_trade_delta_on_touched') or -999)>0
+            z['gate_tail_90']=pass_tail;z['gate_stop_touch_15']=pass_stop;z['gate_trade_delta_positive']=pass_trade
+            if pass_tail and pass_stop and pass_trade:candidates.append(z)
+
+        best=None
+        if candidates:
+            best=sorted(candidates,key=lambda z:(z['stop_touch_rate'],z['avg_trade_delta_on_touched']),reverse=True)[0]
+            verdict='STALE_CAPITAL_CHECKPOINT_WORTH_ONE_DYNAMIC_PORTFOLIO_REPLAY'
+        else:
+            verdict='STALE_CAPITAL_PROXY_NOT_SAFE_ENOUGH'
+
+        _v696_write(status='running',phase='finalize',
+                    message=f'V6.96 完成判定：{verdict}',
+                    processed=5,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.96 Stale-Capital Checkpoint Counterfactual',
+            'verdict':verdict,
+            'proxy_rule':'At D20/D30/D40/D60, stale = MFE since entry < +5% AND checkpoint close <= entry. This is a model diagnostic proxy, NOT claimed as a JLaw rule.',
+            'checkpoint_summaries':summaries,
+            'capital_release_estimates':cap_rows,
+            'best_checkpoint':best,
+            'gate':'For replay eligibility: retain >=90% of +50 and +100 winners, touch >=15% of eventual STOPs, and improve average return on touched trades.',
+            'history_dedup':'V6.29 tested take-profit/capital recycling after winners and V6.75/80-82 studied STOP failure/event timing. V6.96 is different: it targets the V6.95-identified D91+ capital-time burden using fixed no-progress checkpoints, without altering the -7% stop or entry rules.',
+            'important':'This is not yet a causal portfolio result. Freed slots can admit replacement trades, so only a full dynamic 10-slot replay can determine CAGR/MaxDD/Calmar impact if a checkpoint passes this safety gate.',
+            'next_step':('Run ONE corrected dynamic 10-slot replay using only the single best predeclared checkpoint, with replacement candidates admitted chronologically.'
+                         if best else
+                         'Close this stale-capital proxy. Do not tune +5% or the checkpoint set after seeing results.'),
+            'cache_note':'Historical Cache only; 0 Tiingo; 0 universe scan. Reads prices only for existing clean candidates.'
+        }
+
+        V696_DIR.mkdir(parents=True,exist_ok=True)
+        V696_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        D.to_csv(V696_DIR/'checkpoint_counterfactual_rows.csv.gz',index=False,compression='gzip')
+
+        _v696_write(status='done',phase='done',message=f'V6.96 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v696_write(status='error',phase='error',message=f'V6.96 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v696_thread=None
+
+def _v696_start():
+    global v696_thread
+    if _v696_alive():return False
+    _v696_write(status='starting',phase='starting',message='V6.96 正在启动',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v696_thread=threading.Thread(target=_v696_run,daemon=True);v696_thread.start();return True
+
+@APP.route('/v696/run',methods=['GET','POST'])
+def v696_run():_v696_start();return redirect('/v696/stale-capital-checkpoints')
+
+@APP.get('/api/v696/status')
+def v696_status_api():return jsonify(_v696_status())
+
+@APP.get('/v696/stale-capital-checkpoints')
+def v696_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v696_status();R={}
+    if V696_RESULT.exists():
+        try:R=json.loads(V696_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    S=R.get('checkpoint_summaries',[]) if isinstance(R.get('checkpoint_summaries'),list) else []
+    C=R.get('capital_release_estimates',[]) if isinstance(R.get('capital_release_estimates'),list) else []
+    B=R.get('best_checkpoint',{}) if isinstance(R.get('best_checkpoint'),dict) else {}
+
+    rows=''.join(
+        f"<tr><td><b>D{integer(x.get('checkpoint'))}</b></td><td>{integer(x.get('stale_n')):,}</td><td>{num(x.get('stale_share'))*100:.1f}%</td><td>{num(x.get('stop_touch_rate'))*100:.1f}%</td><td>{num(x.get('winner50_retention'))*100:.1f}%</td><td>{num(x.get('winner100_retention'))*100:.1f}%</td><td>{num(x.get('avg_trade_delta_on_touched'))*100:+.2f}%</td><td>{e(x.get('gate_tail_90'))}</td><td>{e(x.get('gate_stop_touch_15'))}</td><td>{e(x.get('gate_trade_delta_positive'))}</td></tr>"
+        for x in S
+    )
+    crows=''.join(
+        f"<tr><td>D{integer(x.get('checkpoint'))}</td><td>{integer(x.get('stale_stop_n')):,}</td><td>{integer(x.get('freed_slot_days')):,}</td><td>{num(x.get('median_freed_days')):.0f}</td></tr>"
+        for x in C
+    )
+    btn='' if _v696_alive() else '<a href="/v696/run"><button>▶ 开始 V6.96 Stale-Capital Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #16a34a;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>♻️ V6.96 Stale-Capital Checkpoint Counterfactual</h1><div class="info">针对 V6.95 的 84.8% D91+ capital-day 黑洞。固定 D20/D30/D40/D60；stale proxy = 到该日从未 +5% 且当前仍 ≤ Entry。诊断代理，不声称是 JLaw 原规则。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),6)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Best checkpoint: <b>{'D'+str(integer(B.get('checkpoint'))) if B else '—'}</b></p></div>
+<div class="c"><h2>Checkpoint Safety / Economics</h2><table><tr><th>Checkpoint</th><th>Stale N</th><th>Stale Share</th><th>STOP Touched</th><th>+50 Retain</th><th>+100 Retain</th><th>Avg Δ on Touched</th><th>Tail Gate</th><th>STOP Gate</th><th>Δ Gate</th></tr>{rows or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Estimated Slot-Days Freed from Eventual STOPs</h2><table><tr><th>Checkpoint</th><th>Stale STOP N</th><th>Freed Slot-days</th><th>Median Freed Days</th></tr>{crows or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v696_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v696_home_base is not None:
+    def _v696_home_wrap(*args,**kwargs):
+        resp=_v696_home_base(*args,**kwargs)
+        card="""<div id="v696-stale-card" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0"><h2>♻️ V6.96 Stale-Capital Checkpoint Counterfactual</h2><p>D20/D30/D40/D60 no-progress audit · winner retention · STOP touch · slot-days freed</p><a href="/v696/stale-capital-checkpoints"><button>打开 V6.96</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v696-stale-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v696-stale-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v696_home_base:APP.view_functions[ep]=_v696_home_wrap
