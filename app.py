@@ -33755,3 +33755,245 @@ if _v674_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v674_home_base:APP.view_functions[ep]=_v674_home_wrap
+
+
+# ========================= V6.75 STOP7 / BREAKOUT FAILURE DECOMPOSITION =========================
+V675_DIR=DATA_DIR/'v675_stop7_breakout_failure_decomposition'
+V675_STATUS=V675_DIR/'status.json'; V675_RESULT=V675_DIR/'result.json'
+v675_thread=None
+
+def _v675_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'','elapsed_sec':0,'error':None,'traceback':None}
+    if V675_STATUS.exists():
+        try:x.update(json.loads(V675_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v675_write(**kw):
+    V675_DIR.mkdir(parents=True,exist_ok=True); x=_v675_status(); x.update(kw)
+    V675_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v675_alive(): return v675_thread is not None and v675_thread.is_alive()
+
+def _v675_run():
+    global v675_thread
+    t0=time.time()
+    try:
+        _v675_write(status='running',phase='load',
+                     message='读取 V6.69 paired cache + V6.67 early-path cache；不重算 exits…',
+                     processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():
+            raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+
+        Z=P[need].copy()
+        Z['listing_id']=Z['listing_id'].astype(str)
+        Z['entry_date']=pd.to_datetime(Z['entry_date'],errors='coerce').dt.normalize()
+        Z['control_exit_date']=pd.to_datetime(Z['control_exit_date'],errors='coerce').dt.normalize()
+        Z['entry_px']=pd.to_numeric(Z['entry_px'],errors='coerce')
+        Z['control_exit_px']=pd.to_numeric(Z['control_exit_px'],errors='coerce')
+        Z['control_ret']=pd.to_numeric(Z['control_ret'],errors='coerce')
+        Z=Z.dropna(subset=['entry_date','control_exit_date','entry_px','control_exit_px','control_ret']).copy()
+
+        # Use exact trading-session hold if V6.69 generated it elsewhere; otherwise calendar-day proxy
+        Z['hold_days_calendar']=(Z.control_exit_date-Z.entry_date).dt.days.astype(float)
+        Z['is_stop']=Z.control_reason.astype(str).str.contains('STOP7',case=False,regex=False)
+        S=Z[Z.is_stop].copy()
+        if S.empty: raise RuntimeError('STOP7 cohort 为空')
+
+        _v675_write(status='running',phase='early_path_join',
+                     message='连接 V6.67 post-breakout early behavior cache…',
+                     processed=1,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        early_cols=[]
+        if V667_DETAIL.exists():
+            E=pd.read_csv(V667_DETAIL,compression='gzip')
+            E['listing_id']=E['listing_id'].astype(str)
+            E['entry_date']=pd.to_datetime(E['entry_date'],errors='coerce').dt.normalize()
+            candidates=['d1_close_ret','d1_low_ret','d1_high_ret',
+                        'close_ret_d3','min_low_ret_d3','max_high_ret_d3',
+                        'close_ret_d5','min_low_ret_d5','max_high_ret_d5',
+                        'd1_close_above_entry','d1_low_below_prior_low',
+                        'green_close_d5','any_low_below_prior_low_d5']
+            early_cols=[c for c in candidates if c in E.columns]
+            E=E[['listing_id','entry_date']+early_cols].drop_duplicates(['listing_id','entry_date'])
+            S=S.merge(E,on=['listing_id','entry_date'],how='left')
+
+        _v675_write(status='running',phase='classify',
+                     message='分解 Gap / Immediate / Slow / Early-confirmation failure / Positive-first…',
+                     processed=2,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        reason=S.control_reason.astype(str)
+        S['bucket_gap']=reason.str.contains('GAP',case=False,regex=False)
+        # Calendar-day cutoffs are intentionally descriptive, not trading rules.
+        S['bucket_immediate']=S.hold_days_calendar<=7
+        S['bucket_slow']=S.hold_days_calendar>21
+
+        if 'd1_close_ret' in S.columns:
+            S['bucket_d1_failed_confirmation']=pd.to_numeric(S.d1_close_ret,errors='coerce')<0
+            S['bucket_d1_positive_then_stop']=pd.to_numeric(S.d1_close_ret,errors='coerce')>0
+        else:
+            S['bucket_d1_failed_confirmation']=False
+            S['bucket_d1_positive_then_stop']=False
+
+        if 'max_high_ret_d5' in S.columns:
+            mh=pd.to_numeric(S.max_high_ret_d5,errors='coerce')
+            S['bucket_early_strength_then_stop']=mh>=0.05
+        else:
+            S['bucket_early_strength_then_stop']=False
+
+        if 'min_low_ret_d5' in S.columns:
+            ml=pd.to_numeric(S.min_low_ret_d5,errors='coerce')
+            S['bucket_deep_early_damage']=ml<=-0.05
+        else:
+            S['bucket_deep_early_damage']=False
+
+        # mutually-exclusive primary attribution for readability
+        def primary(r):
+            if bool(r.get('bucket_gap',False)): return 'GAP_STOP'
+            if bool(r.get('bucket_immediate',False)) and bool(r.get('bucket_d1_failed_confirmation',False)):
+                return 'IMMEDIATE_FAILED_BREAKOUT'
+            if bool(r.get('bucket_early_strength_then_stop',False)):
+                return 'EARLY_STRENGTH_THEN_STOP'
+            if bool(r.get('bucket_slow',False)):
+                return 'SLOW_FAILURE'
+            if bool(r.get('bucket_d1_failed_confirmation',False)):
+                return 'EARLY_CONFIRMATION_WEAK'
+            return 'OTHER_STOP7'
+        S['primary_bucket']=S.apply(primary,axis=1)
+
+        rows=[]
+        for b,g in S.groupby('primary_bucket',sort=False):
+            ret=pd.to_numeric(g.control_ret,errors='coerce')
+            row={
+                'bucket':b,'n':int(len(g)),'share':float(len(g)/len(S)),
+                'avg_loss':float(ret.mean()),'median_loss':float(ret.median()),
+                'median_hold_calendar_days':float(pd.to_numeric(g.hold_days_calendar,errors='coerce').median()),
+                'gap_share':float(g.bucket_gap.mean()),
+                'd1_positive_share':float(g.bucket_d1_positive_then_stop.mean()),
+                'early_strength_5pct_share':float(g.bucket_early_strength_then_stop.mean())
+            }
+            for c in ['d1_close_ret','close_ret_d3','close_ret_d5','min_low_ret_d5','max_high_ret_d5']:
+                if c in g.columns:
+                    x=pd.to_numeric(g[c],errors='coerce')
+                    row[c+'_median']=float(x.median()) if x.notna().any() else None
+            rows.append(row)
+        rows=sorted(rows,key=lambda x:-x['n'])
+
+        # Cross-tab useful for deciding whether Entry or Stop deserves next test.
+        signals={
+            'stop7_n':int(len(S)),
+            'gap_stop_n':int(S.bucket_gap.sum()),
+            'immediate_stop_n':int(S.bucket_immediate.sum()),
+            'slow_stop_n':int(S.bucket_slow.sum()),
+            'd1_failed_confirmation_n':int(S.bucket_d1_failed_confirmation.sum()),
+            'd1_positive_then_stop_n':int(S.bucket_d1_positive_then_stop.sum()),
+            'early_strength_then_stop_n':int(S.bucket_early_strength_then_stop.sum()),
+            'deep_early_damage_n':int(S.bucket_deep_early_damage.sum())
+        }
+        for k in list(signals):
+            if k.endswith('_n') and k!='stop7_n':
+                signals[k.replace('_n','_share')]=float(signals[k]/signals['stop7_n']) if signals['stop7_n'] else 0.0
+
+        _v675_write(status='running',phase='interpret',
+                     message='生成下一步优先级；V6.75 只归因，不改 Stop/Entry…',
+                     processed=3,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Evidence-led next module choice, without optimizing thresholds.
+        immediate_weak=signals.get('d1_failed_confirmation_share',0)
+        early_strength=signals.get('early_strength_then_stop_share',0)
+        gap_share=signals.get('gap_stop_share',0)
+
+        if gap_share>=0.20:
+            priority='GAP_LIQUIDITY_EXECUTION'
+        elif immediate_weak>=0.50:
+            priority='ENTRY_POST_BREAKOUT_CONFIRMATION'
+        elif early_strength>=0.20:
+            priority='STOP_WASHOUT_PRESERVATION'
+        else:
+            priority='MIXED_STOP7_NO_SINGLE_CAUSE'
+
+        result={
+            'version':'V6.75 STOP7 / Breakout Failure Decomposition',
+            'verdict':'STOP7_DECOMPOSITION_COMPLETE',
+            'priority':priority,
+            'signals':signals,
+            'primary_buckets':rows,
+            'question':'Are STOP7 losses mainly true immediate failed breakouts, gap/liquidity events, slow failures, or trades that showed early strength before later stopping out?',
+            'important':'Diagnostic only. No new stop %, no exit threshold, no entry gate, no market rule, no sizing change.',
+            'interpretation_guardrail':'The 7/21 calendar-day descriptors and +5% early-strength marker are descriptive buckets only; they are not promoted trading rules.',
+            'next_step':{
+                'GAP_LIQUIDITY_EXECUTION':'Audit liquidity/gap execution and whether minimum-liquidity rules are source-supported.',
+                'ENTRY_POST_BREAKOUT_CONFIRMATION':'Reconstruct one source-supported post-breakout confirmation/failure semantic and run ONE controlled Entry/Defense A/B.',
+                'STOP_WASHOUT_PRESERVATION':'Audit whether early-strength STOP7 trades later recover using existing historical cache before changing stop logic.',
+                'MIXED_STOP7_NO_SINGLE_CAUSE':'Do not force one fix. Split the largest bucket further with source-supported semantics.'
+            }.get(priority),
+            'cache_note':'V6.69 paired cache + V6.67 early-path cache only; 0 Tiingo; no universe scan; no exit reconstruction.'
+        }
+        V675_DIR.mkdir(parents=True,exist_ok=True)
+        V675_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v675_write(status='done',phase='done',message=f'V6.75 完成：{priority}',
+                     processed=4,total=4,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        tb=traceback.format_exc()
+        _v675_write(status='error',phase='error',message=f'V6.75 失败：{type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=tb)
+    finally:v675_thread=None
+
+def _v675_start():
+    global v675_thread
+    if _v675_alive():return False
+    _v675_write(status='starting',phase='starting',message='V6.75 正在启动',
+                 processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
+    v675_thread=threading.Thread(target=_v675_run,daemon=True);v675_thread.start();return True
+
+@APP.route('/v675/run',methods=['GET','POST'])
+def v675_run():_v675_start();return redirect('/v675/stop7-breakout-failure-decomposition')
+
+@APP.get('/api/v675/status')
+def v675_status_api():return jsonify(_v675_status())
+
+@APP.get('/v675/stop7-breakout-failure-decomposition')
+def v675_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v675_status();r={}
+    if V675_RESULT.exists():
+        try:r=json.loads(V675_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    running=_v675_alive() or st.get('status') in ('starting','running')
+    btn='' if running else '<a href="/v675/run"><button>▶ 开始 V6.75 STOP7 Decomposition</button></a>'
+    trs=''
+    for x in r.get('primary_buckets',[]):
+        trs+=f"<tr><td><b>{e(x.get('bucket'))}</b></td><td>{int(x.get('n',0))}</td><td>{float(x.get('share',0))*100:.1f}%</td><td>{float(x.get('avg_loss',0))*100:.2f}%</td><td>{float(x.get('median_hold_calendar_days',0)):.0f}d</td><td>{float(x.get('d1_positive_share',0))*100:.1f}%</td><td>{float(x.get('early_strength_5pct_share',0))*100:.1f}%</td></tr>"
+    sig=r.get('signals',{})
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fefce8;border:1px solid #eab308;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w">
+<a href="/">← 首页</a>
+<div class="c"><h1>🧨 V6.75 STOP7 / Breakout Failure Decomposition</h1><div class="info">只回答：STOP7 到底主要是 Gap、立即突破失败、慢性失败，还是先走强再被洗掉？不改任何交易规则。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',4) or 4)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Priority: {e(r.get('priority','—'))}</h2><p>STOP7：{int(sig.get('stop7_n',0)):,} · Gap：{float(sig.get('gap_stop_share',0))*100:.1f}% · D1 failed confirm：{float(sig.get('d1_failed_confirmation_share',0))*100:.1f}% · Early strength then stop：{float(sig.get('early_strength_then_stop_share',0))*100:.1f}%</p></div>
+<div class="c"><table><tr><th>Primary Bucket</th><th>N</th><th>Share</th><th>Avg Loss</th><th>Median Hold</th><th>D1 Positive</th><th>5d +5% Strength</th></tr>{trs or '<tr><td colspan="7">运行后显示。</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v675_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v675_home_base is not None:
+    def _v675_home_wrap(*args,**kwargs):
+        resp=_v675_home_base(*args,**kwargs)
+        card="""<div id="v675-stop7-decomp" style="background:#fefce8;border:5px solid #ca8a04;border-radius:24px;padding:28px;margin:22px 0"><h2>🧨 V6.75 STOP7 / Breakout Failure Decomposition</h2><p>Gap vs immediate failure vs slow failure vs early-strength washout · cache-only</p><a href="/v675/stop7-breakout-failure-decomposition"><button>打开 V6.75</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v675_home_base:APP.view_functions[ep]=_v675_home_wrap
