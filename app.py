@@ -40416,3 +40416,247 @@ if _v6894_home_base is not None:
         body=str(resp);return body if 'id="v6894-corrected-control-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6894_home_base:APP.view_functions[ep]=_v6894_home_wrap
+
+
+# ========================= V6.89.5 CORRECTED BENCHMARK LEDGER + GAP DECOMPOSITION =========================
+V6895_DIR=DATA_DIR/'v6895_corrected_benchmark_ledger_gap'
+V6895_STATUS=V6895_DIR/'status.json'; V6895_RESULT=V6895_DIR/'result.json'
+v6895_thread=None
+
+def _v6895_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6895_STATUS.exists():
+        try:x.update(json.loads(V6895_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6895_write(**kw):
+    V6895_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6895_status();x.update(kw)
+    V6895_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6895_alive(): return v6895_thread is not None and v6895_thread.is_alive()
+
+def _v6895_pf(r):
+    r=pd.to_numeric(pd.Series(r),errors='coerce').dropna()
+    gp=float(r[r>0].sum()); gl=float((-r[r<0]).sum())
+    return float(gp/gl) if gl>0 else (np.inf if gp>0 else np.nan)
+
+def _v6895_run():
+    global v6895_thread
+    t0=time.time()
+    try:
+        _v6895_write(status='running',phase='load_corrected',
+                     message='读取 V6.89.4 corrected benchmark + 215 admitted trades…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V6894_RESULT.exists(): raise RuntimeError('找不到 V6.89.4 result.json')
+        R4=json.loads(V6894_RESULT.read_text(encoding='utf-8'))
+        if str(R4.get('verdict',''))!='CORRECTED_CONTROL_REPLAY_COMPLETE_FINAL':
+            raise RuntimeError('V6.89.4 不是 FINAL corrected replay')
+        fp=V6894_DIR/'corrected_admitted_trades.csv.gz'
+        if not fp.exists(): raise RuntimeError('找不到 corrected_admitted_trades.csv.gz')
+
+        T=pd.read_csv(fp,compression='gzip')
+        if 'ret' not in T.columns:
+            T['ret']=pd.to_numeric(T.exit_px,errors='coerce')/pd.to_numeric(T.entry_px,errors='coerce')-1
+        T['ret']=pd.to_numeric(T.ret,errors='coerce')
+        T=T.dropna(subset=['ret']).copy()
+        if T.empty: raise RuntimeError('corrected admitted trades 为空')
+
+        _v6895_write(status='running',phase='ledger_metrics',
+                     message='独立重算 Avg Win / Avg Loss / Expectancy / PF / STOP / right-tail…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        wins=T[T.ret>0].ret
+        losses=T[T.ret<0].ret
+        avg_trade=float(T.ret.mean())
+        med_trade=float(T.ret.median())
+        wr=float((T.ret>0).mean())
+        avg_win=float(wins.mean()) if len(wins) else np.nan
+        avg_loss=float(losses.mean()) if len(losses) else np.nan
+        pf=float(_v6895_pf(T.ret))
+        stopmask=T.get('exit_reason',pd.Series('',index=T.index)).astype(str).str.upper().str.contains('STOP')
+        stop_rate=float(stopmask.mean())
+        plus20=int((T.ret>=.20).sum()); plus50=int((T.ret>=.50).sum()); plus100=int((T.ret>=1.0).sum())
+        gross_gain=float(wins.sum()) if len(wins) else 0.0
+        gross_loss=float((-losses).sum()) if len(losses) else 0.0
+
+        W=T[T.ret>0].sort_values('ret',ascending=False).copy()
+        conc={}
+        for k in [1,3,5,10,20]:
+            g=W.head(k)
+            conc[f'top{k}_gross_gain_share']=float(g.ret.sum()/gross_gain) if gross_gain>0 and len(g) else None
+
+        B=(R4.get('corrected_control') or {})
+        reported_avg_return=B.get('avg_return')
+        reported_avg_loss=B.get('avg_loss')
+        metric_bug=bool(
+            (reported_avg_return is None or abs(float(reported_avg_return or 0))<1e-12) and abs(avg_trade)>1e-6
+        ) or bool(
+            (reported_avg_loss is None or abs(float(reported_avg_loss or 0))<1e-12) and len(losses)>0 and abs(avg_loss)>1e-6
+        )
+
+        _v6895_write(status='running',phase='gap_decomposition',
+                     message='把真实 13.88% 的缺口拆成 Selection / Loser Load / Right-tail / Portfolio Risk…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # This is a diagnostic prioritizer, not a new trading rule.
+        winner_share=float(len(wins)/len(T))
+        plus50_rate=float(plus50/len(T)); plus100_rate=float(plus100/len(T))
+        maxdd=float(B.get('maxdd',0) or 0)
+        cagr=float(B.get('cagr',0) or 0)
+        exposure=float(B.get('avg_exposure',0) or 0)
+
+        gap_rows=[
+            {
+                'area':'LOSER_LOAD / SELECTION',
+                'severity':float(min(1.0, max(0.0,(stop_rate-.45)/.45))) if stop_rate>.45 else 0.0,
+                'evidence':f'STOP rate={stop_rate*100:.1f}% · WR={wr*100:.1f}% · losing trades={len(losses)}/{len(T)}',
+                'meaning':'Too much capital/time is spent on trades that terminate as losers. This points upstream to candidate quality/admission, not simply stop width.'
+            },
+            {
+                'area':'RIGHT_TAIL SCARCITY',
+                'severity':float(min(1.0,max(0.0,(.12-plus50_rate)/.12))),
+                'evidence':f'+50 count={plus50} ({plus50_rate*100:.1f}%) · +100 count={plus100} ({plus100_rate*100:.1f}%)',
+                'meaning':'The system may not generate enough true outsized winners after data repair.'
+            },
+            {
+                'area':'PORTFOLIO DRAWDOWN / CAPITAL EFFICIENCY',
+                'severity':float(min(1.0,abs(maxdd)/.60)),
+                'evidence':f'CAGR={cagr*100:.2f}% · MaxDD={maxdd*100:.2f}% · Exposure={exposure*100:.1f}%',
+                'meaning':'High exposure is not translating into sufficient risk-adjusted return; capital is busy but inefficient.'
+            },
+            {
+                'area':'WINNER CONCENTRATION',
+                'severity':float(conc.get('top5_gross_gain_share') or 0),
+                'evidence':f'Top5 gross-gain share={(conc.get("top5_gross_gain_share") or 0)*100:.1f}% · Top10={(conc.get("top10_gross_gain_share") or 0)*100:.1f}%',
+                'meaning':'If a handful of winners dominate, preserving and selecting them matters more than small average-trade tweaks.'
+            }
+        ]
+        gap_rows=sorted(gap_rows,key=lambda x:x['severity'],reverse=True)
+        primary=gap_rows[0]
+
+        _v6895_write(status='running',phase='finalize',
+                     message=f'最大缺口：{primary["area"]}',
+                     processed=3,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        verdict='CORRECTED_BENCHMARK_LEDGER_RECONCILED'
+        if metric_bug: verdict='CORRECTED_BENCHMARK_VALID_RENDERER_METRIC_BUG_CONFIRMED'
+
+        result={
+            'version':'V6.89.5 Corrected Benchmark Ledger + Gap Decomposition',
+            'verdict':verdict,
+            'corrected_portfolio':{
+                'cagr':cagr,'maxdd':maxdd,'calmar':B.get('calmar'),
+                'reported_pf':B.get('profit_factor'),'avg_exposure':exposure,
+                'admitted':int(len(T))
+            },
+            'independent_trade_ledger':{
+                'avg_trade':avg_trade,'median_trade':med_trade,'win_rate':wr,
+                'avg_win':avg_win,'avg_loss':avg_loss,'profit_factor':pf,
+                'stop_rate':stop_rate,'gross_gain_units':gross_gain,'gross_loss_units':gross_loss,
+                'plus20':plus20,'plus50':plus50,'plus100':plus100,
+                'plus20_rate':float(plus20/len(T)),'plus50_rate':plus50_rate,'plus100_rate':plus100_rate
+            },
+            'renderer_metric_bug':metric_bug,
+            'reported_vs_independent':{
+                'reported_avg_return':reported_avg_return,
+                'independent_avg_trade':avg_trade,
+                'reported_avg_loss':reported_avg_loss,
+                'independent_avg_loss':avg_loss,
+                'reported_pf':B.get('profit_factor'),
+                'independent_pf':pf
+            },
+            'winner_concentration':conc,
+            'gap_decomposition':gap_rows,
+            'primary_gap':primary,
+            'important':'This version does not claim exact JLaw numeric performance. It identifies the largest internal gap in the corrected system using the clean ledger and the project objective: cut losers, preserve outsized winners, improve CAGR/PF while reducing MaxDD.',
+            'next_step':'Use the single primary gap to choose ONE next causal experiment. Do not reopen closed branches or parameter-grid old ideas.',
+            'cache_note':'Reads V6.89.4 result + corrected admitted trade file only. 0 replay, 0 Tiingo, 0 universe scan.'
+        }
+        V6895_DIR.mkdir(parents=True,exist_ok=True)
+        V6895_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v6895_write(status='done',phase='done',message=f'V6.89.5 完成：{verdict} · Primary={primary["area"]}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6895_write(status='error',phase='error',
+                     message=f'V6.89.5 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6895_thread=None
+
+def _v6895_start():
+    global v6895_thread
+    if _v6895_alive():return False
+    _v6895_write(status='starting',phase='starting',message='V6.89.5 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v6895_thread=threading.Thread(target=_v6895_run,daemon=True);v6895_thread.start();return True
+
+@APP.route('/v6895/run',methods=['GET','POST'])
+def v6895_run():_v6895_start();return redirect('/v6895/corrected-ledger-gap')
+
+@APP.get('/api/v6895/status')
+def v6895_status_api():return jsonify(_v6895_status())
+
+@APP.get('/v6895/corrected-ledger-gap')
+def v6895_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6895_status();R={}
+    if V6895_RESULT.exists():
+        try:R=json.loads(V6895_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    P=R.get('corrected_portfolio',{}) if isinstance(R.get('corrected_portfolio'),dict) else {}
+    L=R.get('independent_trade_ledger',{}) if isinstance(R.get('independent_trade_ledger'),dict) else {}
+    G=R.get('gap_decomposition',[]) if isinstance(R.get('gap_decomposition'),list) else []
+    grow=''
+    for x in G:
+        grow+=f"<tr><td><b>{e(x.get('area'))}</b></td><td>{num(x.get('severity')):.2f}</td><td>{e(x.get('evidence'))}</td><td>{e(x.get('meaning'))}</td></tr>"
+
+    btn='' if _v6895_alive() else '<a href="/v6895/run"><button>▶ 开始 V6.89.5 Ledger + Gap</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🎯 V6.89.5 Corrected Benchmark Ledger + Gap Decomposition</h1>
+<div class="info">一次做完两件事：修正页面 Avg Return/Avg Loss 指标问题；然后把 13.88% 的主要缺口排序，下一步只攻最大的一项。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Primary gap: <b>{e((R.get('primary_gap') or {}).get('area','—'))}</b></p></div>
+<div class="c"><h2>Corrected Portfolio</h2><table><tr><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>Exposure</th><th>Admitted</th></tr>
+<tr><td><b>{num(P.get('cagr'))*100:.2f}%</b></td><td>{num(P.get('maxdd'))*100:.2f}%</td><td>{num(P.get('calmar')):.3f}</td><td>{num(P.get('avg_exposure'))*100:.1f}%</td><td>{integer(P.get('admitted'))}</td></tr></table></div>
+<div class="c"><h2>Independent Trade Ledger</h2><table><tr><th>Avg Trade</th><th>Median</th><th>WR</th><th>Avg Win</th><th>Avg Loss</th><th>PF</th><th>STOP</th><th>+20</th><th>+50</th><th>+100</th></tr>
+<tr><td>{num(L.get('avg_trade'))*100:+.2f}%</td><td>{num(L.get('median_trade'))*100:+.2f}%</td><td>{num(L.get('win_rate'))*100:.1f}%</td><td>{num(L.get('avg_win'))*100:+.2f}%</td><td>{num(L.get('avg_loss'))*100:+.2f}%</td><td>{num(L.get('profit_factor')):.2f}</td><td>{num(L.get('stop_rate'))*100:.1f}%</td><td>{integer(L.get('plus20'))}</td><td>{integer(L.get('plus50'))}</td><td>{integer(L.get('plus100'))}</td></tr></table></div>
+<div class="c"><h2>Gap Ranking</h2><table><tr><th>Area</th><th>Severity</th><th>Evidence</th><th>Meaning</th></tr>{grow or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6895_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6895_home_base is not None:
+    def _v6895_home_wrap(*args,**kwargs):
+        resp=_v6895_home_base(*args,**kwargs)
+        card="""<div id="v6895-gap-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🎯 V6.89.5 Corrected Ledger + Gap Decomposition</h2>
+        <p>13.88% clean baseline · fix ledger metrics · rank the real bottleneck · no replay</p>
+        <a href="/v6895/corrected-ledger-gap"><button>打开 V6.89.5</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6895-gap-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6895-gap-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6895_home_base:APP.view_functions[ep]=_v6895_home_wrap
