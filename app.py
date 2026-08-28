@@ -39241,3 +39241,333 @@ if _v689_home_base is not None:
         body=str(resp);return body if 'id="v689-wealth-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v689_home_base:APP.view_functions[ep]=_v689_home_wrap
+
+
+# ========================= V6.89.1 DOMINANT-WINNER DATA INTEGRITY AUDIT =========================
+V6891_DIR=DATA_DIR/'v6891_dominant_winner_data_integrity_audit'
+V6891_STATUS=V6891_DIR/'status.json'; V6891_RESULT=V6891_DIR/'result.json'
+v6891_thread=None
+
+def _v6891_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6891_STATUS.exists():
+        try:x.update(json.loads(V6891_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6891_write(**kw):
+    V6891_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6891_status();x.update(kw)
+    V6891_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6891_alive(): return v6891_thread is not None and v6891_thread.is_alive()
+
+def _v6891_run():
+    global v6891_thread
+    t0=time.time()
+    try:
+        _v6891_write(status='running',phase='rebuild_exact_control',
+                     message='重建 exact 28.25% Control admitted set，定位异常 Top Winner…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set()
+        for lid in ids:
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+
+        cal=sorted(date_set)
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        if abs(float(B['cagr'])-.2825)>.0015:
+            raise RuntimeError(f'Control benchmark mismatch: {float(B["cagr"])*100:.2f}%')
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['ret']=pd.to_numeric(S.exit_px,errors='coerce')/pd.to_numeric(S.entry_px,errors='coerce')-1
+        S=S.sort_values('ret',ascending=False).reset_index(drop=True)
+        if S.empty:raise RuntimeError('Control admitted set 为空')
+
+        top=S.iloc[0].copy()
+        lid=str(top.listing_id)
+        mr=mmap.get(lid)
+        if mr is None:raise RuntimeError('Top Winner manifest row 不存在')
+
+        # Try to surface ticker/name metadata without assuming exact manifest schema.
+        meta={}
+        for c in ['ticker','symbol','name','companyName','exchange','startDate','endDate','assetType']:
+            if c in M.columns:
+                try:meta[c]=mr[c]
+                except Exception:pass
+
+        _v6891_write(status='running',phase='load_top_path',
+                     message=f'读取 Top Winner 全路径：listing_id={lid}',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        d=_v617fv1_read_price(mr)
+        if d is None or d.empty:raise RuntimeError('Top Winner OHLCV 为空')
+        lc={str(c).lower():c for c in d.columns}
+        req=['date','open','high','low','close']
+        if not all(k in lc for k in req):raise RuntimeError('Top Winner OHLC 缺字段')
+        q=pd.DataFrame({
+            'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+            'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+            'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+            'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+            'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+            'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+        }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+        ed=pd.Timestamp(top.entry_date).normalize()
+        xd=pd.Timestamp(top.exit_date).normalize()
+        path=q[(q.date>=ed)&(q.date<=xd)].copy().reset_index(drop=True)
+        if path.empty:raise RuntimeError('Top Winner entry→exit path 为空')
+
+        _v6891_write(status='running',phase='jump_scan',
+                     message='扫描单日价格跳变 / split-like discontinuity / entry-exit mismatch…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        path['close_ratio']=path.close/path.close.shift(1)
+        path['open_ratio_prev_close']=path.open/path.close.shift(1)
+        path['day_ret']=path.close/path.close.shift(1)-1
+        path['gap_ret']=path.open/path.close.shift(1)-1
+        path['intraday_ret']=path.close/path.open-1
+
+        jumps=path[
+            (path.close_ratio>=3.0)|(path.close_ratio<=1/3)|
+            (path.open_ratio_prev_close>=3.0)|(path.open_ratio_prev_close<=1/3)
+        ].copy()
+
+        jump_rows=[]
+        for _,r in jumps.iterrows():
+            jump_rows.append({
+                'date':str(pd.Timestamp(r.date).date()),
+                'open':float(r.open),'high':float(r.high),'low':float(r.low),'close':float(r.close),
+                'close_ratio':float(r.close_ratio) if pd.notna(r.close_ratio) else None,
+                'open_ratio_prev_close':float(r.open_ratio_prev_close) if pd.notna(r.open_ratio_prev_close) else None,
+                'day_ret':float(r.day_ret) if pd.notna(r.day_ret) else None,
+                'gap_ret':float(r.gap_ret) if pd.notna(r.gap_ret) else None
+            })
+
+        # Check price consistency around frozen entry/exit prices.
+        entry_row=path[path.date.eq(ed)]
+        exit_row=path[path.date.eq(xd)]
+        entry_close=float(entry_row.close.iloc[0]) if len(entry_row) else None
+        exit_close=float(exit_row.close.iloc[0]) if len(exit_row) else None
+        entry_px=float(top.entry_px);exit_px=float(top.exit_px)
+
+        entry_ratio=(entry_px/entry_close) if entry_close not in [None,0] else None
+        exit_ratio=(exit_px/exit_close) if exit_close not in [None,0] else None
+
+        suspicious_trade_return=bool(float(top.ret)>=20.0) # >= 20x gain is audit-trigger only, not automatic rejection.
+        split_like=bool(len(jumps)>0)
+        entry_mismatch=bool(entry_ratio is not None and (entry_ratio>=2 or entry_ratio<=.5))
+        exit_mismatch=bool(exit_ratio is not None and (exit_ratio>=2 or exit_ratio<=.5))
+
+        _v6891_write(status='running',phase='robust_attribution',
+                     message='重算稳健归因：不删除数据，只显示剔除 Top1/Top3 后财富集中度敏感性…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        def stats(g):
+            gp=g[g.ret>0].ret.sum()
+            gl=(-g[g.ret<0].ret).sum()
+            return {
+                'n':int(len(g)),
+                'sum_return_units':float(g.ret.sum()),
+                'gross_gain_units':float(gp),
+                'gross_loss_units':float(gl),
+                'avg_return':float(g.ret.mean()) if len(g) else None,
+                'median_return':float(g.ret.median()) if len(g) else None
+            }
+
+        sensitivity={
+            'all':stats(S),
+            'exclude_top1':stats(S.iloc[1:].copy()) if len(S)>1 else {},
+            'exclude_top3':stats(S.iloc[3:].copy()) if len(S)>3 else {}
+        }
+
+        verdict=('DOMINANT_WINNER_DATA_INTEGRITY_REQUIRES_RECONCILIATION'
+                 if suspicious_trade_return or split_like or entry_mismatch or exit_mismatch
+                 else 'DOMINANT_WINNER_PATH_PASSES_BASIC_SANITY')
+
+        result={
+            'version':'V6.89.1 Dominant-Winner Data Integrity Audit',
+            'verdict':verdict,
+            'benchmark_ok':True,
+            'control_cagr':float(B['cagr']),
+            'top_trade':{
+                'listing_id':lid,
+                'meta':meta,
+                'entry_date':str(ed.date()),
+                'exit_date':str(xd.date()),
+                'entry_px':entry_px,
+                'exit_px':exit_px,
+                'return':float(top.ret),
+                'entry_day_close':entry_close,
+                'exit_day_close':exit_close,
+                'entry_px_vs_close_ratio':entry_ratio,
+                'exit_px_vs_close_ratio':exit_ratio
+            },
+            'flags':{
+                'return_ge_20x':suspicious_trade_return,
+                'split_like_discontinuity':split_like,
+                'entry_price_mismatch':entry_mismatch,
+                'exit_price_mismatch':exit_mismatch
+            },
+            'jump_events':jump_rows,
+            'sensitivity':sensitivity,
+            'important':'This audit does NOT auto-delete the winner. A 499x trade dominating 85.9% of gross gains is too influential to interpret before split/corporate-action/price-scale integrity is reconciled.',
+            'next_step':(
+                'Reconcile this listing against raw historical price scale / split-adjustment convention. If the 499x result is a scale artifact, repair the cache and recompute the 28.25% benchmark before any strategy research.'
+                if verdict!='DOMINANT_WINNER_PATH_PASSES_BASIC_SANITY'
+                else
+                'If the path is genuinely clean, preserve it and continue attribution, while reporting sensitivity excluding Top1 because the strategy edge is extremely concentrated.'
+            ),
+            'cache_note':'Exact Control + one admitted listing OHLCV only; 0 Tiingo; no universe rebuild.'
+        }
+
+        V6891_DIR.mkdir(parents=True,exist_ok=True)
+        V6891_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:path.to_csv(V6891_DIR/'dominant_winner_path.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v6891_write(status='done',phase='done',message=f'V6.89.1 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6891_write(status='error',phase='error',
+                     message=f'V6.89.1 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6891_thread=None
+
+def _v6891_start():
+    global v6891_thread
+    if _v6891_alive():return False
+    _v6891_write(status='starting',phase='starting',message='V6.89.1 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v6891_thread=threading.Thread(target=_v6891_run,daemon=True);v6891_thread.start();return True
+
+@APP.route('/v6891/run',methods=['GET','POST'])
+def v6891_run():_v6891_start();return redirect('/v6891/dominant-winner-integrity')
+
+@APP.get('/api/v6891/status')
+def v6891_status_api():return jsonify(_v6891_status())
+
+@APP.get('/v6891/dominant-winner-integrity')
+def v6891_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6891_status();R={}
+    if V6891_RESULT.exists():
+        try:
+            z=json.loads(V6891_RESULT.read_text(encoding='utf-8'))
+            if isinstance(z,dict):R=z
+        except Exception:pass
+
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    T=R.get('top_trade') if isinstance(R.get('top_trade'),dict) else {}
+    F=R.get('flags') if isinstance(R.get('flags'),dict) else {}
+    J=R.get('jump_events') if isinstance(R.get('jump_events'),list) else []
+    SENS=R.get('sensitivity') if isinstance(R.get('sensitivity'),dict) else {}
+
+    jrows=''
+    for x in J[:20]:
+        jrows+=f"<tr><td>{e(x.get('date'))}</td><td>{num(x.get('open')):.4g}</td><td>{num(x.get('close')):.4g}</td><td>{num(x.get('open_ratio_prev_close')):.2f}x</td><td>{num(x.get('close_ratio')):.2f}x</td><td>{num(x.get('day_ret'))*100:+.1f}%</td></tr>"
+
+    srows=''
+    for k in ['all','exclude_top1','exclude_top3']:
+        x=SENS.get(k,{}) if isinstance(SENS.get(k),dict) else {}
+        srows+=f"<tr><td><b>{e(k)}</b></td><td>{integer(x.get('n'))}</td><td>{num(x.get('sum_return_units')):+.2f}</td><td>{num(x.get('gross_gain_units')):.2f}</td><td>{num(x.get('gross_loss_units')):.2f}</td><td>{num(x.get('avg_return'))*100:+.1f}%</td></tr>"
+
+    btn='' if _v6891_alive() else '<a href="/v6891/run"><button>▶ 开始 V6.89.1 Integrity Audit</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.warn{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🚨 V6.89.1 Dominant-Winner Data Integrity Audit</h1>
+<div class="warn">V6.89 出现单笔 +49,900% 且贡献 85.9% gross gain。先验证 split / corporate-action / price-scale integrity；没有通过前，不解释 Wealth Attribution。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>Control CAGR: <b>{num(R.get('control_cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p></div>
+<div class="c"><h2>Dominant Trade</h2>
+<p>Listing: <b>{e(T.get('listing_id','—'))}</b> · {e(T.get('meta',{}))}</p>
+<p>{e(T.get('entry_date','—'))} @ {num(T.get('entry_px')):.6g} → {e(T.get('exit_date','—'))} @ {num(T.get('exit_px')):.6g} · Return=<b>{num(T.get('return'))*100:+.1f}%</b></p>
+<p>Flags: return≥20x={e(F.get('return_ge_20x'))} · split-like={e(F.get('split_like_discontinuity'))} · entry mismatch={e(F.get('entry_price_mismatch'))} · exit mismatch={e(F.get('exit_price_mismatch'))}</p></div>
+<div class="c"><h2>Split-like / Scale Discontinuities</h2>
+<table><tr><th>Date</th><th>Open</th><th>Close</th><th>Open / Prev Close</th><th>Close / Prev Close</th><th>Day Return</th></tr>
+{jrows or '<tr><td colspan=6>未发现 ≥3x / ≤1/3x 单日价格尺度跳变</td></tr>'}</table></div>
+<div class="c"><h2>Attribution Sensitivity</h2>
+<table><tr><th>Sample</th><th>N</th><th>Return Units</th><th>Gross Gain</th><th>Gross Loss</th><th>Avg Return</th></tr>{srows}</table></div>
+</div></body></html>"""
+
+_v6891_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6891_home_base is not None:
+    def _v6891_home_wrap(*args,**kwargs):
+        resp=_v6891_home_base(*args,**kwargs)
+        card="""<div id="v6891-integrity-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🚨 V6.89.1 Dominant-Winner Data Integrity Audit</h2>
+        <p>Audit the +49,900% / 85.9%-gross-gain trade before interpreting V6.89</p>
+        <a href="/v6891/dominant-winner-integrity"><button>打开 V6.89.1</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6891-integrity-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6891-integrity-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6891_home_base:APP.view_functions[ep]=_v6891_home_wrap
