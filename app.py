@@ -40660,3 +40660,312 @@ if _v6895_home_base is not None:
         body=str(resp);return body if 'id="v6895-gap-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6895_home_base:APP.view_functions[ep]=_v6895_home_wrap
+
+
+# ========================= V6.90 CLEAN ADMISSION REVALIDATION / LOSER-VS-WINNER AUDIT =========================
+V690_DIR=DATA_DIR/'v690_clean_admission_revalidation'
+V690_STATUS=V690_DIR/'status.json'; V690_RESULT=V690_DIR/'result.json'
+v690_thread=None
+
+def _v690_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V690_STATUS.exists():
+        try:x.update(json.loads(V690_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v690_write(**kw):
+    V690_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v690_status();x.update(kw)
+    V690_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v690_alive(): return v690_thread is not None and v690_thread.is_alive()
+
+def _v690_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(x,errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v690_smd(a,b):
+    a=pd.to_numeric(pd.Series(a),errors='coerce').dropna()
+    b=pd.to_numeric(pd.Series(b),errors='coerce').dropna()
+    if len(a)<10 or len(b)<10:return np.nan
+    va=float(a.var(ddof=1));vb=float(b.var(ddof=1))
+    den=np.sqrt(max(1e-12,((len(a)-1)*va+(len(b)-1)*vb)/(len(a)+len(b)-2)))
+    return float((a.mean()-b.mean())/den) if den>0 else np.nan
+
+def _v690_run():
+    global v690_thread
+    t0=time.time()
+    try:
+        _v690_write(status='running',phase='load_clean_ledger',
+                     message='读取 V6.89.4 clean admitted 215 笔；旧 28.25% 数据全部隔离…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V6894_RESULT.exists():raise RuntimeError('找不到 V6.89.4 result.json')
+        r4=json.loads(V6894_RESULT.read_text(encoding='utf-8'))
+        if str(r4.get('verdict',''))!='CORRECTED_CONTROL_REPLAY_COMPLETE_FINAL':
+            raise RuntimeError('V6.89.4 尚未 FINAL')
+        fp=V6894_DIR/'corrected_admitted_trades.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 corrected_admitted_trades.csv.gz')
+        A=pd.read_csv(fp,compression='gzip')
+        A['entry_date']=pd.to_datetime(A.entry_date,errors='coerce').dt.normalize()
+        A['ret']=pd.to_numeric(A.get('ret'),errors='coerce')
+        if 'ret' not in A or A.ret.isna().all():
+            A['ret']=pd.to_numeric(A.exit_px,errors='coerce')/pd.to_numeric(A.entry_px,errors='coerce')-1
+        A=A.dropna(subset=['entry_date','ret']).copy()
+        A['is_stop']=A.get('exit_reason',pd.Series('',index=A.index)).astype(str).str.upper().str.contains('STOP')
+        A['winner50']=A.ret>=.50
+        A['winner100']=A.ret>=1.00
+        A['era']=pd.cut(A.entry_date.dt.year,bins=[1995,2005,2015,2026],
+                        labels=['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'],
+                        include_lowest=True).astype(str)
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        _v690_write(status='running',phase='build_point_in_time_features',
+                     message='只构建 Entry 当日/之前特征；复核旧 V6.15/V6.16 family，但不搜索阈值…',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[];total=len(A)
+        for k,r in A.reset_index(drop=True).iterrows():
+            lid=str(r.listing_id); mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(c in lc for c in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+            ed=pd.Timestamp(r.entry_date).normalize()
+            pre=q[q.date<=ed].copy().reset_index(drop=True)
+            if len(pre)<260:continue
+
+            # normalize historical scale discontinuities; ratios remain point-in-time equivalent.
+            ev=_v6894_detect_events(pre[['date','open','close']].copy())
+            hi=[x for x in ev if x['high_confidence']]
+            for col in ['open','high','low','close']:
+                pre[col]=[
+                    float(v)*_v6894_factor_for_date(hi,dt)
+                    for v,dt in zip(pre[col],pre.date)
+                ]
+
+            c=pre.close.astype(float);h=pre.high.astype(float);l=pre.low.astype(float);v=pd.to_numeric(pre.volume,errors='coerce')
+            close=float(c.iloc[-1])
+            ma10=float(c.tail(10).mean());ma20=float(c.tail(20).mean());ma50=float(c.tail(50).mean())
+            ma150=float(c.tail(150).mean());ma200=float(c.tail(200).mean())
+            ma200_prev=float(c.iloc[-220:-20].mean()) if len(c)>=220 else np.nan
+            hi52=float(h.tail(252).max());lo52=float(l.tail(252).min())
+            tr=(h-l)/c.shift(1)
+            atr20=float(tr.tail(20).mean())
+            range20=float((h.tail(20).max()-l.tail(20).min())/close)
+            range50=float((h.tail(50).max()-l.tail(50).min())/close)
+            v20=float(v.tail(20).mean()) if v.notna().sum()>=20 else np.nan
+            v50=float(v.tail(50).mean()) if v.notna().sum()>=50 else np.nan
+            todayv=float(v.iloc[-1]) if pd.notna(v.iloc[-1]) else np.nan
+
+            ret60=float(close/c.iloc[-61]-1) if len(c)>=61 and c.iloc[-61]>0 else np.nan
+            ret120=float(close/c.iloc[-121]-1) if len(c)>=121 and c.iloc[-121]>0 else np.nan
+            ret252=float(close/c.iloc[-253]-1) if len(c)>=253 and c.iloc[-253]>0 else np.nan
+            trend=bool(close>ma50>ma150>ma200 and (not np.isfinite(ma200_prev) or ma200>ma200_prev))
+            near52=float(close/hi52) if hi52>0 else np.nan
+            offlow=float(close/lo52-1) if lo52>0 else np.nan
+            vol_vs20=float(todayv/v20) if np.isfinite(todayv) and np.isfinite(v20) and v20>0 else np.nan
+            vol20_vs50=float(v20/v50) if np.isfinite(v20) and np.isfinite(v50) and v50>0 else np.nan
+
+            rows.append({
+                'listing_id':lid,'entry_date':ed,'era':str(r.era),
+                'ret':float(r.ret),'is_stop':bool(r.is_stop),
+                'winner50':bool(r.winner50),'winner100':bool(r.winner100),
+                'ret60':ret60,'ret120':ret120,'ret252':ret252,
+                'near_52w_high':near52,'off_52w_low':offlow,
+                'atr20':atr20,'range20':range20,'range50':range50,
+                'vol_vs20':vol_vs20,'vol20_vs50':vol20_vs50,
+                'dist_ma10':float(close/ma10-1),'dist_ma20':float(close/ma20-1),
+                'dist_ma50':float(close/ma50-1),
+                'trend_template':1.0 if trend else 0.0
+            })
+            if k==0 or (k+1)%50==0 or k+1==total:
+                _v690_write(status='running',phase='build_point_in_time_features',
+                             message=f'Clean admission features {k+1}/{total}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=pd.DataFrame(rows)
+        if len(F)<100:raise RuntimeError(f'Clean feature rows 太少: {len(F)}')
+
+        _v690_write(status='running',phase='loser_winner_contrast',
+                     message='STOP vs +50/+100：只做单变量跨 Era 稳定性，不调阈值…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        features=['ret60','ret120','ret252','near_52w_high','off_52w_low',
+                  'atr20','range20','range50','vol_vs20','vol20_vs50',
+                  'dist_ma10','dist_ma20','dist_ma50','trend_template']
+
+        out=[]
+        for target in ['winner50','winner100']:
+            sub=F[(F.is_stop==True)|(F[target]==True)].copy()
+            y=sub[target].astype(int)
+            for f in features:
+                auc=_v690_auc(sub[f],y); smd=_v690_smd(sub.loc[y.eq(1),f],sub.loc[y.eq(0),f])
+                eras=[]
+                for er,g in sub.groupby('era'):
+                    yy=g[target].astype(int)
+                    if len(g)<20 or yy.nunique()<2:continue
+                    a=_v690_auc(g[f],yy)
+                    eras.append({'era':str(er),'auc':float(a) if np.isfinite(a) else None,'n':int(len(g))})
+                vals=[x['auc'] for x in eras if x['auc'] is not None]
+                oriented=float(max(auc,1-auc)) if np.isfinite(auc) else None
+                same_dir=None
+                if vals:
+                    sign=1 if auc>=.5 else -1
+                    same_dir=float(sum(1 for a in vals if (a-.5)*sign>=0)/len(vals))
+                out.append({'target':target,'feature':f,'auc':float(auc) if np.isfinite(auc) else None,
+                            'oriented_auc':oriented,'smd':float(smd) if np.isfinite(smd) else None,
+                            'era_consistency':same_dir,'coverage':float(pd.to_numeric(sub[f],errors='coerce').notna().mean()),
+                            'era':eras})
+
+        _v690_write(status='running',phase='family_revalidation',
+                     message='复核旧 family 是否在 clean data 后仍有信息；只判“值得再测/不值得”…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        fams={
+            'MOMENTUM':['ret60','ret120','ret252'],
+            'BASE_QUALITY':['near_52w_high','atr20','range20','range50','vol_vs20','vol20_vs50'],
+            'LOCATION_EXTENSION':['dist_ma10','dist_ma20','dist_ma50','near_52w_high'],
+            'TREND_LEADERSHIP':['trend_template','ret120','ret252','near_52w_high']
+        }
+        fam_rows=[]
+        for target in ['winner50','winner100']:
+            rows_t=[x for x in out if x['target']==target]
+            for name,cols in fams.items():
+                xs=[x for x in rows_t if x['feature'] in cols and x.get('oriented_auc') is not None]
+                score=float(np.mean([x['oriented_auc'] for x in xs])) if xs else np.nan
+                stable=float(np.mean([x['era_consistency'] for x in xs if x.get('era_consistency') is not None])) if xs else np.nan
+                fam_rows.append({'target':target,'family':name,'mean_oriented_auc':score,
+                                 'mean_era_consistency':stable,'features':cols})
+
+        # Gate is deliberately modest because this is revalidation after data repair, not deployment.
+        candidates=[x for x in fam_rows if np.isfinite(x['mean_oriented_auc']) and
+                    x['mean_oriented_auc']>=.58 and np.isfinite(x['mean_era_consistency']) and
+                    x['mean_era_consistency']>=.67]
+        candidates=sorted(candidates,key=lambda x:(x['mean_oriented_auc'],x['mean_era_consistency']),reverse=True)
+
+        verdict='CLEAN_SELECTION_SIGNAL_WORTH_ONE_AB' if candidates else 'NO_CLEAN_PREENTRY_SELECTION_SIGNAL_STRONG_ENOUGH'
+        best=candidates[0] if candidates else None
+
+        result={
+            'version':'V6.90 Clean Admission Revalidation / Loser-vs-Winner Audit',
+            'verdict':verdict,
+            'clean_baseline':{'cagr':(r4.get('corrected_control') or {}).get('cagr'),
+                              'maxdd':(r4.get('corrected_control') or {}).get('maxdd'),
+                              'admitted':int(len(A))},
+            'clean_feature_rows':int(len(F)),
+            'class_counts':{'stop':int(F.is_stop.sum()),'winner50':int(F.winner50.sum()),'winner100':int(F.winner100.sum())},
+            'best_candidate_family':best,
+            'family_revalidation':fam_rows,
+            'top_features':sorted([x for x in out if x.get('oriented_auc') is not None],
+                                  key=lambda x:(x['oriented_auc'],x.get('era_consistency') or 0),reverse=True)[:20],
+            'history_dedup':'This is NOT a new threshold search. V6.15D/E/F, V6.16A/I and V6.86 already explored related selection/DNA ideas. Because the old benchmark was contaminated by corporate-action artifacts, this version only revalidates predeclared old feature families on the corrected 215-trade ledger. No grids, no invented cutoffs.',
+            'important':'Observational admission audit only. Features are entry-time/pre-entry. It does not claim causality and does not change admission yet.',
+            'next_step':('Build ONE controlled A/B using the best clean family, with a single predeclared rank/filter derived from prior semantics, only if this gate passes.'
+                         if candidates else
+                         'Do not reopen generic selection proxies. Move to a genuinely new source-supported selection semantic or capital-efficiency mechanism.'),
+            'cache_note':'Corrected 215 admitted trades + Historical Cache only; 0 Tiingo; 0 universe rescan; no portfolio replay.'
+        }
+        V690_DIR.mkdir(parents=True,exist_ok=True)
+        V690_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        F.to_csv(V690_DIR/'clean_admission_features.csv.gz',index=False,compression='gzip')
+
+        _v690_write(status='done',phase='done',message=f'V6.90 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v690_write(status='error',phase='error',
+                     message=f'V6.90 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v690_thread=None
+
+def _v690_start():
+    global v690_thread
+    if _v690_alive():return False
+    _v690_write(status='starting',phase='starting',message='V6.90 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v690_thread=threading.Thread(target=_v690_run,daemon=True);v690_thread.start();return True
+
+@APP.route('/v690/run',methods=['GET','POST'])
+def v690_run():_v690_start();return redirect('/v690/clean-admission-revalidation')
+
+@APP.get('/api/v690/status')
+def v690_status_api():return jsonify(_v690_status())
+
+@APP.get('/v690/clean-admission-revalidation')
+def v690_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v690_status(); R={}
+    if V690_RESULT.exists():
+        try:R=json.loads(V690_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('clean_baseline',{}) if isinstance(R.get('clean_baseline'),dict) else {}
+    C=R.get('class_counts',{}) if isinstance(R.get('class_counts'),dict) else {}
+    FAM=R.get('family_revalidation',[]) if isinstance(R.get('family_revalidation'),list) else []
+    TOP=R.get('top_features',[]) if isinstance(R.get('top_features'),list) else []
+    frows=''.join(f"<tr><td><b>{e(x.get('target'))}</b></td><td>{e(x.get('family'))}</td><td>{num(x.get('mean_oriented_auc')):.3f}</td><td>{num(x.get('mean_era_consistency'))*100:.0f}%</td></tr>" for x in FAM)
+    trows=''.join(f"<tr><td><b>{e(x.get('target'))}</b></td><td>{e(x.get('feature'))}</td><td>{num(x.get('oriented_auc')):.3f}</td><td>{num(x.get('smd')):+.3f}</td><td>{num(x.get('era_consistency'))*100:.0f}%</td><td>{num(x.get('coverage'))*100:.0f}%</td></tr>" for x in TOP[:16])
+    best=R.get('best_candidate_family') if isinstance(R.get('best_candidate_family'),dict) else {}
+    btn='' if _v690_alive() else '<a href="/v690/run"><button>▶ 开始 V6.90 Clean Admission Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #16a34a;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧪 V6.90 Clean Admission Revalidation</h1><div class="info">旧 28.25% 已污染，所以只在 13.88% clean baseline 上重新验证 Selection 信息。不是再做一轮阈值优化。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Best family: <b>{e(best.get('family','—'))}</b> · target={e(best.get('target','—'))} · score={num(best.get('mean_oriented_auc')):.3f} · era consistency={num(best.get('mean_era_consistency'))*100:.0f}%</p></div>
+<div class="c"><h2>Clean Baseline Cohort</h2><p>CAGR <b>{num(B.get('cagr'))*100:.2f}%</b> · MaxDD <b>{num(B.get('maxdd'))*100:.2f}%</b> · admitted={integer(B.get('admitted'))} · STOP={integer(C.get('stop'))} · +50={integer(C.get('winner50'))} · +100={integer(C.get('winner100'))}</p></div>
+<div class="c"><h2>Family Revalidation</h2><table><tr><th>Target</th><th>Family</th><th>Mean Oriented AUC</th><th>Era Consistency</th></tr>{frows or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Top Individual Features</h2><table><tr><th>Target</th><th>Feature</th><th>Oriented AUC</th><th>SMD</th><th>Era Consistency</th><th>Coverage</th></tr>{trows or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v690_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v690_home_base is not None:
+    def _v690_home_wrap(*args,**kwargs):
+        resp=_v690_home_base(*args,**kwargs)
+        card="""<div id="v690-clean-admission-card" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧪 V6.90 Clean Admission Revalidation</h2>
+        <p>STOP vs +50/+100 on corrected 13.88% baseline · no grids · cache-only</p>
+        <a href="/v690/clean-admission-revalidation"><button>打开 V6.90</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v690-clean-admission-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v690-clean-admission-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v690_home_base:APP.view_functions[ep]=_v690_home_wrap
