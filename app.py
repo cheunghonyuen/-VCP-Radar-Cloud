@@ -41499,3 +41499,348 @@ if _v692_home_base is not None:
         body=str(resp);return body if 'id="v692-fn-winner-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v692_home_base:APP.view_functions[ep]=_v692_home_wrap
+
+
+# ========================= V6.93 REJECTED SUPER-WINNER PATH DNA VS REJECTED STOP =========================
+V693_DIR=DATA_DIR/'v693_rejected_superwinner_path_dna'
+V693_STATUS=V693_DIR/'status.json'; V693_RESULT=V693_DIR/'result.json'
+v693_thread=None
+
+def _v693_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V693_STATUS.exists():
+        try:x.update(json.loads(V693_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v693_write(**kw):
+    V693_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v693_status();x.update(kw)
+    V693_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v693_alive(): return v693_thread is not None and v693_thread.is_alive()
+
+def _v693_safe_ohlcv(mr, end_date, lookback=90):
+    d=_v617fv1_read_price(mr)
+    if d is None or d.empty:return None
+    lc={str(c).lower():c for c in d.columns}
+    if not all(k in lc for k in ['date','open','high','low','close']):return None
+    q=pd.DataFrame({
+        'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+        'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+        'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+        'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+        'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+        'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+    }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+    q=q[q.date<=pd.Timestamp(end_date).normalize()].copy().tail(max(lookback+40,160)).reset_index(drop=True)
+    if len(q)<lookback+20:return None
+
+    ev=_v6894_detect_events(q[['date','open','close']].copy())
+    hi=[x for x in ev if x['high_confidence']]
+    for col in ['open','high','low','close']:
+        q[col]=[float(v)*_v6894_factor_for_date(hi,dt) for v,dt in zip(q[col],q.date)]
+    return q
+
+def _v693_window_features(q, n):
+    z=q.tail(n).copy()
+    if len(z)<max(10,int(n*.8)):return {}
+    c=z.close.astype(float);h=z.high.astype(float);l=z.low.astype(float)
+    v=pd.to_numeric(z.volume,errors='coerce')
+    ret=float(c.iloc[-1]/c.iloc[0]-1) if c.iloc[0]>0 else np.nan
+    peak=c.cummax()
+    dd=(c/peak-1)
+    maxdd=float(dd.min()) if len(dd) else np.nan
+    rng=float((h.max()-l.min())/c.iloc[-1]) if c.iloc[-1]>0 else np.nan
+    daily_range=(h-l)/c.shift(1)
+    atr=float(daily_range.tail(min(20,len(daily_range))).mean())
+    slope=np.polyfit(np.arange(len(c)),np.log(c.clip(lower=1e-9)),1)[0] if len(c)>=10 else np.nan
+    vol_mean=float(v.mean()) if v.notna().sum()>=5 else np.nan
+    vol_last5=float(v.tail(5).mean()) if v.notna().sum()>=5 else np.nan
+    vol_dry=float(vol_last5/vol_mean) if np.isfinite(vol_mean) and vol_mean>0 else np.nan
+    up_days=int((c.diff()>0).sum())
+    down_days=int((c.diff()<0).sum())
+    hh=int((h.diff()>0).sum())
+    hl=int((l.diff()>0).sum())
+    return {
+        f'ret_{n}':ret,
+        f'maxdd_{n}':maxdd,
+        f'range_{n}':rng,
+        f'atr_{n}':atr,
+        f'log_slope_{n}':float(slope) if np.isfinite(slope) else np.nan,
+        f'vol_dry_{n}':vol_dry,
+        f'updown_ratio_{n}':float(up_days/max(1,down_days)),
+        f'higher_high_share_{n}':float(hh/max(1,len(z)-1)),
+        f'higher_low_share_{n}':float(hl/max(1,len(z)-1)),
+    }
+
+def _v693_shape_features(q):
+    f={}
+    for n in [20,40,60]:
+        f.update(_v693_window_features(q,n))
+
+    c=q.close.astype(float);h=q.high.astype(float);l=q.low.astype(float);v=pd.to_numeric(q.volume,errors='coerce')
+    # Sequence-specific descriptors: these are not old static DNA scores.
+    # contraction sequence = recent 20d range vs prior 20d range vs prior-prior 20d range
+    if len(q)>=60:
+        seg1=q.iloc[-60:-40];seg2=q.iloc[-40:-20];seg3=q.iloc[-20:]
+        def rr(seg):
+            cc=float(seg.close.iloc[-1])
+            return float((seg.high.max()-seg.low.min())/cc) if cc>0 else np.nan
+        r1,r2,r3=rr(seg1),rr(seg2),rr(seg3)
+        f['contraction_20v20']=float(r3/r2) if np.isfinite(r2) and r2>0 else np.nan
+        f['contraction_3stage']=float(r3/r1) if np.isfinite(r1) and r1>0 else np.nan
+        f['contract_monotonic']=1.0 if np.isfinite(r1+r2+r3) and r1>r2>r3 else 0.0
+
+    if len(q)>=40:
+        v20=float(v.tail(20).mean()) if v.notna().sum()>=20 else np.nan
+        vprev=float(v.iloc[-40:-20].mean()) if v.notna().sum()>=40 else np.nan
+        f['volume_dryup_20_vs_prev20']=float(v20/vprev) if np.isfinite(vprev) and vprev>0 else np.nan
+
+        # pivot tightening proxy: last 10d range relative to prior 30d range
+        last10=q.tail(10);prev30=q.iloc[-40:-10]
+        lr=float((last10.high.max()-last10.low.min())/last10.close.iloc[-1])
+        pr=float((prev30.high.max()-prev30.low.min())/prev30.close.iloc[-1])
+        f['pivot_tightening_10_vs_30']=float(lr/pr) if pr>0 else np.nan
+
+    if len(q)>=65:
+        r20=float(c.iloc[-1]/c.iloc[-21]-1)
+        r60=float(c.iloc[-1]/c.iloc[-61]-1)
+        f['momentum_acceleration_20_vs_60']=float(r20-r60/3.0)
+        # recovery speed from worst close in last 40d to entry
+        z=c.tail(40).reset_index(drop=True)
+        i=int(z.idxmin())
+        f['days_from_40d_low_to_entry']=float(len(z)-1-i)
+        f['recovery_from_40d_low']=float(z.iloc[-1]/z.iloc[i]-1) if z.iloc[i]>0 else np.nan
+
+    return f
+
+def _v693_run():
+    global v693_thread
+    t0=time.time()
+    try:
+        _v693_write(status='running',phase='load_false_negatives',
+                    message='读取 V6.92：锁定 5 个被错杀的 +100 Winner 与 rejected STOP 对照…',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V692_RESULT.exists():raise RuntimeError('找不到 V6.92 result.json')
+        r92=json.loads(V692_RESULT.read_text(encoding='utf-8'))
+        if str(r92.get('verdict',''))!='FALSE_NEGATIVE_WINNERS_NOT_SEPARABLE_WITH_EXISTING_NON_BQ_FEATURES':
+            raise RuntimeError('V6.92 不是预期结论，V6.93 不应运行')
+
+        fp=V691_DIR/'walkforward_rows.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.91 walkforward_rows.csv.gz')
+        W=pd.read_csv(fp,compression='gzip')
+        W['entry_date']=pd.to_datetime(W.entry_date,errors='coerce').dt.normalize()
+        W['ret']=pd.to_numeric(W.ret,errors='coerce')
+        W['keep']=W.keep.astype(bool);W['is_stop']=W.is_stop.astype(bool)
+        W['winner100']=W.winner100.astype(bool)
+        winners=W[(~W.keep)&W.winner100].copy()
+        stops=W[(~W.keep)&W.is_stop].copy()
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        _v693_write(status='running',phase='extract_paths',
+                    message=f'抽取逐日路径：Winners={len(winners)} · STOP={len(stops)}；只用 Entry 前 60 日…',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        allrows=pd.concat([
+            winners.assign(label='REJECTED_SUPERWINNER'),
+            stops.assign(label='REJECTED_STOP')
+        ],ignore_index=True)
+
+        for i,r in allrows.iterrows():
+            mr=mmap.get(str(r.listing_id))
+            if mr is None:continue
+            q=_v693_safe_ohlcv(mr,r.entry_date,lookback=60)
+            if q is None:continue
+            f=_v693_shape_features(q)
+            if not f:continue
+            row={'listing_id':str(r.listing_id),'entry_date':pd.Timestamp(r.entry_date).normalize(),
+                 'label':str(r.label),'ret':float(r.ret)}
+            row.update(f);rows.append(row)
+            if i==0 or (i+1)%20==0 or i+1==len(allrows):
+                _v693_write(status='running',phase='extract_paths',
+                            message=f'Path DNA {i+1}/{len(allrows)}',
+                            processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=pd.DataFrame(rows)
+        if F.empty or (F.label=='REJECTED_SUPERWINNER').sum()<4:
+            raise RuntimeError(f'路径样本不足: {len(F)}')
+
+        _v693_write(status='running',phase='path_contrast',
+                    message='比较时间序列形态：收缩顺序 / 量能干涸 / tightening / momentum acceleration / recovery speed…',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        features=[c for c in F.columns if c not in ['listing_id','entry_date','label','ret']]
+        contrasts=[]
+        w=F[F.label.eq('REJECTED_SUPERWINNER')]
+        st=F[F.label.eq('REJECTED_STOP')]
+        for f in features:
+            a=pd.to_numeric(w[f],errors='coerce').dropna()
+            b=pd.to_numeric(st[f],errors='coerce').dropna()
+            if len(a)<4 or len(b)<20:continue
+            smd=_v690_smd(a,b)
+            auc=_v690_auc(pd.concat([a,b],ignore_index=True),
+                          pd.Series([1]*len(a)+[0]*len(b)))
+            oriented=max(auc,1-auc) if np.isfinite(auc) else np.nan
+            contrasts.append({
+                'feature':f,
+                'winner_median':float(a.median()),
+                'stop_median':float(b.median()),
+                'smd':float(smd) if np.isfinite(smd) else None,
+                'oriented_auc':float(oriented) if np.isfinite(oriented) else None,
+                'winner_n':int(len(a)),'stop_n':int(len(b))
+            })
+
+        contrasts=sorted(
+            [x for x in contrasts if x.get('oriented_auc') is not None],
+            key=lambda x:(x['oriented_auc'],abs(x.get('smd') or 0)),reverse=True
+        )
+
+        _v693_write(status='running',phase='leave_one_winner_out',
+                    message='做 leave-one-winner-out 稳定性检查；避免 5 个 Winner 被单一个案支配…',
+                    processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        stable=[]
+        for x in contrasts[:20]:
+            f=x['feature']
+            aucs=[]
+            for lid in w.listing_id.astype(str).unique():
+                ww=w[w.listing_id.astype(str).ne(lid)]
+                a=pd.to_numeric(ww[f],errors='coerce').dropna()
+                b=pd.to_numeric(st[f],errors='coerce').dropna()
+                if len(a)<3 or len(b)<20:continue
+                auc=_v690_auc(pd.concat([a,b],ignore_index=True),
+                              pd.Series([1]*len(a)+[0]*len(b)))
+                if np.isfinite(auc):aucs.append(float(max(auc,1-auc)))
+            if aucs:
+                x2=dict(x)
+                x2['loo_mean_oriented_auc']=float(np.mean(aucs))
+                x2['loo_weakest_oriented_auc']=float(np.min(aucs))
+                x2['loo_pass_share']=float(np.mean([a>=.65 for a in aucs]))
+                stable.append(x2)
+
+        stable=sorted(stable,key=lambda x:(x['loo_weakest_oriented_auc'],x['loo_mean_oriented_auc']),reverse=True)
+        best=stable[0] if stable else None
+        actionable=bool(best and best['loo_weakest_oriented_auc']>=.65 and abs(best.get('smd') or 0)>=.50)
+        verdict='SEQUENCE_PATH_DNA_CLUE_WORTH_ONE_OOS_RESCUE_TEST' if actionable else 'SEQUENCE_PATH_DNA_NOT_STABLE_ENOUGH'
+
+        result={
+            'version':'V6.93 Rejected Super-Winner Path DNA vs Rejected STOP',
+            'verdict':verdict,
+            'cohort':{
+                'rejected_superwinners':int((F.label=='REJECTED_SUPERWINNER').sum()),
+                'rejected_stops':int((F.label=='REJECTED_STOP').sum()),
+                'total_path_rows':int(len(F))
+            },
+            'best_sequence_clue':best,
+            'top_sequence_contrasts':stable[:15],
+            'superwinner_examples':[
+                {'listing_id':str(r.listing_id),'entry_date':str(pd.Timestamp(r.entry_date).date()),
+                 'ret':float(r.ret)}
+                for _,r in w.sort_values('ret',ascending=False).iterrows()
+            ],
+            'history_dedup':'V6.15D/E/F already explored generic/static Big-Winner DNA (leader momentum, dry-up, contraction, near-high, pivot readiness). V6.93 does NOT rebuild that score. It is narrowly limited to the five V6.91 false-negative super-winners and tests sequence geometry over the final 20/40/60 sessions, including contraction order, tightening ratio, momentum acceleration and recovery speed.',
+            'important':'Diagnostic only. With only five rejected super-winners, this cannot establish a production rule. Leave-one-winner-out is required to prevent a single BKNG/NFLX-style case from creating a false signal.',
+            'next_step':(
+                'If one sequence clue survives leave-one-winner-out, build ONE past-only asymmetric rescue OOS test on the same V6.91 rows. No portfolio replay until it preserves >=80% +100 winners while still rejecting materially more STOPs.'
+                if actionable else
+                'Close existing price/volume path-DNA rescue too. Do not tune these descriptors. Return to source-supported qualitative setup semantics or new data not already in the feature store.'
+            ),
+            'cache_note':'V6.91 rejected cohort + Historical Cache only; 0 Tiingo; 0 universe scan; 0 portfolio replay.'
+        }
+        V693_DIR.mkdir(parents=True,exist_ok=True)
+        V693_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        F.to_csv(V693_DIR/'rejected_path_dna.csv.gz',index=False,compression='gzip')
+
+        _v693_write(status='done',phase='done',message=f'V6.93 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v693_write(status='error',phase='error',
+                    message=f'V6.93 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v693_thread=None
+
+def _v693_start():
+    global v693_thread
+    if _v693_alive():return False
+    _v693_write(status='starting',phase='starting',message='V6.93 正在启动',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v693_thread=threading.Thread(target=_v693_run,daemon=True);v693_thread.start();return True
+
+@APP.route('/v693/run',methods=['GET','POST'])
+def v693_run():_v693_start();return redirect('/v693/rejected-superwinner-path-dna')
+
+@APP.get('/api/v693/status')
+def v693_status_api():return jsonify(_v693_status())
+
+@APP.get('/v693/rejected-superwinner-path-dna')
+def v693_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v693_status();R={}
+    if V693_RESULT.exists():
+        try:R=json.loads(V693_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    C=R.get('cohort',{}) if isinstance(R.get('cohort'),dict) else {}
+    B=R.get('best_sequence_clue',{}) if isinstance(R.get('best_sequence_clue'),dict) else {}
+    TOP=R.get('top_sequence_contrasts',[]) if isinstance(R.get('top_sequence_contrasts'),list) else []
+    EX=R.get('superwinner_examples',[]) if isinstance(R.get('superwinner_examples'),list) else []
+
+    trows=''.join(
+        f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{num(x.get('winner_median')):.4f}</td><td>{num(x.get('stop_median')):.4f}</td><td>{num(x.get('smd')):+.3f}</td><td>{num(x.get('oriented_auc')):.3f}</td><td>{num(x.get('loo_mean_oriented_auc')):.3f}</td><td>{num(x.get('loo_weakest_oriented_auc')):.3f}</td></tr>"
+        for x in TOP[:15]
+    )
+    erows=''.join(
+        f"<tr><td>{e(x.get('listing_id'))}</td><td>{e(x.get('entry_date'))}</td><td>{num(x.get('ret'))*100:+.1f}%</td></tr>"
+        for x in EX
+    )
+
+    btn='' if _v693_alive() else '<a href="/v693/run"><button>▶ 开始 V6.93 Path DNA</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #3b82f6;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V6.93 Rejected Super-Winner Path DNA</h1><div class="info">只研究 V6.91 错杀的 5 个未来 +100% Winner 与 rejected STOP 的 Entry 前 20/40/60 日“路径形态”。不是重做旧 V6.15 静态 DNA。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Best clue: <b>{e(B.get('feature','—'))}</b> · LOO weakest AUC={num(B.get('loo_weakest_oriented_auc')):.3f} · SMD={num(B.get('smd')):+.3f}</p></div>
+<div class="c"><h2>Cohort</h2><p>Rejected super-winners=<b>{integer(C.get('rejected_superwinners'))}</b> · Rejected STOP=<b>{integer(C.get('rejected_stops'))}</b> · Valid path rows={integer(C.get('total_path_rows'))}</p></div>
+<div class="c"><h2>Sequence Contrasts</h2><table><tr><th>Feature</th><th>Winner Median</th><th>STOP Median</th><th>SMD</th><th>AUC</th><th>LOO Mean</th><th>LOO Weakest</th></tr>{trows or '<tr><td colspan=7>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Rejected Super-Winners</h2><table><tr><th>Listing</th><th>Entry</th><th>Final Return</th></tr>{erows or '<tr><td colspan=3>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v693_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v693_home_base is not None:
+    def _v693_home_wrap(*args,**kwargs):
+        resp=_v693_home_base(*args,**kwargs)
+        card="""<div id="v693-path-dna-card" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧬 V6.93 Rejected Super-Winner Path DNA</h2>
+        <p>5 false-negative +100 winners vs rejected STOP · 20/40/60-session path geometry · cache-only</p>
+        <a href="/v693/rejected-superwinner-path-dna"><button>打开 V6.93</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v693-path-dna-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v693-path-dna-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v693_home_base:APP.view_functions[ep]=_v693_home_wrap
