@@ -42381,3 +42381,262 @@ if _v6932_home_base is not None:
         body=str(resp);return body if 'id="v6932-rescue-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6932_home_base:APP.view_functions[ep]=_v6932_home_wrap
+
+
+# ========================= V6.93.3 STRICT TEMPORAL PAST-ONLY RESCUE AUDIT =========================
+V6933_DIR=DATA_DIR/'v6933_temporal_past_only_rescue'
+V6933_STATUS=V6933_DIR/'status.json'; V6933_RESULT=V6933_DIR/'result.json'
+v6933_thread=None
+
+def _v6933_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6933_STATUS.exists():
+        try:x.update(json.loads(V6933_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6933_write(**kw):
+    V6933_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6933_status();x.update(kw)
+    V6933_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6933_alive(): return v6933_thread is not None and v6933_thread.is_alive()
+
+def _v6933_percentile(ref, value, higher_better):
+    arr=np.asarray(pd.to_numeric(pd.Series(ref),errors='coerce').dropna(),dtype=float)
+    arr=arr[np.isfinite(arr)]
+    if len(arr)<20 or not np.isfinite(value): return np.nan
+    p=float(np.searchsorted(np.sort(arr),float(value),side='right')/len(arr))
+    return p if higher_better else 1-p
+
+def _v6933_score(row, ref, specs):
+    ps=[]
+    for col,higher in specs:
+        if col not in ref.columns:return np.nan
+        v=float(row[col]) if pd.notna(row.get(col)) else np.nan
+        p=_v6933_percentile(ref[col],v,higher)
+        if np.isfinite(p):ps.append(float(p))
+    return float(np.mean(ps)) if len(ps)>=3 else np.nan
+
+def _v6933_run():
+    global v6933_thread
+    t0=time.time()
+    try:
+        _v6933_write(status='running',phase='load_frozen_path_features',
+                     message='读取 V6.93 path feature store；冻结 4 个特征与方向，不新增、不调参…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V6932_RESULT.exists():raise RuntimeError('找不到 V6.93.2 result.json')
+        r32=json.loads(V6932_RESULT.read_text(encoding='utf-8'))
+        if str(r32.get('verdict',''))!='ASYMMETRIC_RESCUE_OOS_PROMISING_WORTH_FULL_CANDIDATE_REPLAY':
+            raise RuntimeError('V6.93.2 未达到 temporal audit 前置条件')
+
+        fp=V693_DIR/'rejected_path_dna.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.93 rejected_path_dna.csv.gz')
+        F=pd.read_csv(fp,compression='gzip')
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F=F.dropna(subset=['entry_date','ret']).sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        W=F[F.label.astype(str).eq('REJECTED_SUPERWINNER')].copy()
+        S=F[F.label.astype(str).eq('REJECTED_STOP')].copy()
+        if len(W)!=5 or len(S)<50:raise RuntimeError(f'样本不符 Winner={len(W)} STOP={len(S)}')
+
+        specs=[
+            ('contraction_3stage',False),
+            ('contraction_20v20',False),
+            ('updown_ratio_40',True),
+            ('ret_20',True),
+        ]
+        for c,_ in specs:
+            if c not in F.columns:raise RuntimeError(f'缺 Path feature: {c}')
+
+        _v6933_write(status='running',phase='strict_past_only_folds',
+                     message='Strict temporal OOS：测试每个 Super Winner 时，只允许使用其 Entry 之前已经发生的 Winner/STOP…',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        fold_rows=[]
+        chronological=W.sort_values('entry_date').reset_index(drop=True)
+
+        for fold,(idx,held) in enumerate(chronological.iterrows(),1):
+            dt=pd.Timestamp(held.entry_date).normalize()
+            pastW=W[(W.entry_date<dt)&(W.listing_id.astype(str).ne(str(held.listing_id)))].copy()
+            pastS=S[S.entry_date<dt].copy()
+
+            # Need enough temporal history; if unavailable, mark NOT_EVALUABLE rather than leak future info.
+            if len(pastW)<2 or len(pastS)<20:
+                fold_rows.append({
+                    'fold':fold,'held_listing':str(held.listing_id),
+                    'held_entry':str(dt.date()),'held_final_return':float(held.ret),
+                    'past_winner_n':int(len(pastW)),'past_stop_n':int(len(pastS)),
+                    'evaluable':False,'held_score':None,'cut':None,'held_rescued':None,
+                    'past_stop_rescue_rate':None,'reason':'INSUFFICIENT_PAST_HISTORY'
+                })
+                continue
+
+            ref=pd.concat([pastW,pastS],ignore_index=True)
+            pastW_scores=pastW.apply(lambda r:_v6933_score(r,ref,specs),axis=1)
+            if pastW_scores.notna().sum()<2:
+                fold_rows.append({
+                    'fold':fold,'held_listing':str(held.listing_id),
+                    'held_entry':str(dt.date()),'held_final_return':float(held.ret),
+                    'past_winner_n':int(len(pastW)),'past_stop_n':int(len(pastS)),
+                    'evaluable':False,'held_score':None,'cut':None,'held_rescued':None,
+                    'past_stop_rescue_rate':None,'reason':'INSUFFICIENT_PAST_WINNER_SCORES'
+                })
+                continue
+
+            # Frozen rule concept: weakest observed past superwinner.
+            cut=float(pastW_scores.min())
+            held_score=_v6933_score(held,ref,specs)
+            rescued=bool(np.isfinite(held_score) and held_score>=cut)
+
+            pastS_scores=pastS.apply(lambda r:_v6933_score(r,ref,specs),axis=1)
+            stop_rescue_rate=float((pastS_scores>=cut).mean()) if pastS_scores.notna().any() else np.nan
+
+            fold_rows.append({
+                'fold':fold,'held_listing':str(held.listing_id),
+                'held_entry':str(dt.date()),'held_final_return':float(held.ret),
+                'past_winner_n':int(len(pastW)),'past_stop_n':int(len(pastS)),
+                'evaluable':True,'held_score':float(held_score) if np.isfinite(held_score) else None,
+                'cut':cut,'held_rescued':rescued,
+                'past_stop_rescue_rate':stop_rescue_rate,'reason':'OK'
+            })
+
+        _v6933_write(status='running',phase='temporal_aggregate',
+                     message='汇总 strict temporal folds；未满足历史长度的 fold 不伪造结果…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        evals=[x for x in fold_rows if x.get('evaluable')]
+        rescued=sum(1 for x in evals if x.get('held_rescued'))
+        rescue_rate=float(rescued/len(evals)) if evals else 0.0
+        stop_rates=[x['past_stop_rescue_rate'] for x in evals if x.get('past_stop_rescue_rate') is not None and np.isfinite(x['past_stop_rescue_rate'])]
+        avg_stop=float(np.mean(stop_rates)) if stop_rates else np.nan
+        worst_stop=float(np.max(stop_rates)) if stop_rates else np.nan
+        evaluable_share=float(len(evals)/len(fold_rows)) if fold_rows else 0.0
+
+        # Strict gate: enough temporal coverage + rescue economics.
+        pass_coverage=(len(evals)>=3 and evaluable_share>=.60)
+        pass_winner=(rescue_rate>=.80) if evals else False
+        pass_stop=(np.isfinite(avg_stop) and avg_stop<=.35)
+        verdict='STRICT_TEMPORAL_RESCUE_PASSES__FULL_REPLAY_ALLOWED' if (pass_coverage and pass_winner and pass_stop) else 'STRICT_TEMPORAL_RESCUE_NOT_PROVEN'
+
+        _v6933_write(status='running',phase='final_checks',
+                     message=f'Evaluable={len(evals)}/5 · Winner rescue={rescue_rate*100:.1f}% · STOP rescue={avg_stop*100 if np.isfinite(avg_stop) else 0:.1f}%',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.93.3 Strict Temporal Past-Only Rescue Audit',
+            'verdict':verdict,
+            'frozen_features':[
+                {'feature':c,'direction':'HIGHER_BETTER' if h else 'LOWER_BETTER'} for c,h in specs
+            ],
+            'rule':'For each held superwinner, percentile reference and rescue cut are built exclusively from rows whose entry_date is strictly earlier than the held winner. No future STOPs, no future Winners, no threshold tuning.',
+            'folds':fold_rows,
+            'aggregate':{
+                'total_superwinners':int(len(fold_rows)),
+                'evaluable_folds':int(len(evals)),
+                'evaluable_share':evaluable_share,
+                'rescued_evaluable_superwinners':int(rescued),
+                'winner_rescue_rate_on_evaluable':rescue_rate,
+                'avg_past_stop_rescue_rate':float(avg_stop) if np.isfinite(avg_stop) else None,
+                'worst_past_stop_rescue_rate':float(worst_stop) if np.isfinite(worst_stop) else None
+            },
+            'gate':{
+                'temporal_coverage_ge_60pct_and_3folds':pass_coverage,
+                'winner_rescue_ge_80pct':pass_winner,
+                'avg_stop_rescue_le_35pct':pass_stop
+            },
+            'important':'This test fixes the temporal leakage in V6.93.2. Early superwinners may be unevaluable because no earlier superwinner history exists; those folds are explicitly marked insufficient history rather than using future information.',
+            'next_step':(
+                'Proceed to ONE full corrected-candidate dynamic portfolio replay with a production-feasible past-only rescue state machine.'
+                if (pass_coverage and pass_winner and pass_stop) else
+                'Do not run full replay yet. This rescue is not temporally proven; do not tune the cutoff on these five winners.'
+            ),
+            'cache_note':'V6.93 path feature store only; 0 Tiingo; 0 universe scan; 0 portfolio replay.'
+        }
+
+        V6933_DIR.mkdir(parents=True,exist_ok=True)
+        V6933_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v6933_write(status='done',phase='done',message=f'V6.93.3 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6933_write(status='error',phase='error',
+                     message=f'V6.93.3 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6933_thread=None
+
+def _v6933_start():
+    global v6933_thread
+    if _v6933_alive():return False
+    _v6933_write(status='starting',phase='starting',message='V6.93.3 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v6933_thread=threading.Thread(target=_v6933_run,daemon=True);v6933_thread.start();return True
+
+@APP.route('/v6933/run',methods=['GET','POST'])
+def v6933_run():_v6933_start();return redirect('/v6933/strict-temporal-rescue')
+
+@APP.get('/api/v6933/status')
+def v6933_status_api():return jsonify(_v6933_status())
+
+@APP.get('/v6933/strict-temporal-rescue')
+def v6933_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6933_status();R={}
+    if V6933_RESULT.exists():
+        try:R=json.loads(V6933_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    A=R.get('aggregate',{}) if isinstance(R.get('aggregate'),dict) else {}
+    G=R.get('gate',{}) if isinstance(R.get('gate'),dict) else {}
+    FOLDS=R.get('folds',[]) if isinstance(R.get('folds'),list) else []
+    rows=''.join(
+        f"<tr><td>{integer(x.get('fold'))}</td><td>{e(x.get('held_listing'))}</td><td>{e(x.get('held_entry'))}</td><td>{num(x.get('held_final_return'))*100:+.1f}%</td><td>{integer(x.get('past_winner_n'))}</td><td>{integer(x.get('past_stop_n'))}</td><td>{e(x.get('evaluable'))}</td><td>{num(x.get('held_score')):.3f}</td><td>{num(x.get('cut')):.3f}</td><td>{e(x.get('held_rescued'))}</td><td>{num(x.get('past_stop_rescue_rate'))*100:.1f}%</td><td>{e(x.get('reason'))}</td></tr>"
+        for x in FOLDS
+    )
+
+    checks=' · '.join([f"{e(k)}=<b>{e(v)}</b>" for k,v in G.items()])
+    btn='' if _v6933_alive() else '<a href="/v6933/run"><button>▶ 开始 V6.93.3 Strict Temporal Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>⏱️ V6.93.3 Strict Temporal Past-Only Rescue</h1><div class="info">修正 V6.93.2 的未来信息问题：测试某个 Super Winner 时，只能使用它 Entry 之前已经发生的 Winner / STOP。历史不足就标记不可评估，绝不偷看未来。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{checks}</p></div>
+<div class="c"><h2>Aggregate</h2><p>Evaluable folds=<b>{integer(A.get('evaluable_folds'))}/{integer(A.get('total_superwinners'))}</b> ({num(A.get('evaluable_share'))*100:.1f}%) · rescued=<b>{integer(A.get('rescued_evaluable_superwinners'))}</b> · winner rescue={num(A.get('winner_rescue_rate_on_evaluable'))*100:.1f}%</p>
+<p>Avg past STOP rescued back in=<b>{num(A.get('avg_past_stop_rescue_rate'))*100:.1f}%</b> · worst={num(A.get('worst_past_stop_rescue_rate'))*100:.1f}%</p></div>
+<div class="c"><h2>Temporal Folds</h2><table><tr><th>Fold</th><th>Held Winner</th><th>Entry</th><th>Return</th><th>Past W</th><th>Past STOP</th><th>Eval?</th><th>Score</th><th>Cut</th><th>Rescued?</th><th>STOP rescued</th><th>Reason</th></tr>{rows or '<tr><td colspan=12>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6933_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6933_home_base is not None:
+    def _v6933_home_wrap(*args,**kwargs):
+        resp=_v6933_home_base(*args,**kwargs)
+        card="""<div id="v6933-temporal-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>⏱️ V6.93.3 Strict Temporal Past-Only Rescue</h2>
+        <p>No future Winners · no future STOPs · frozen 4-feature Path-DNA · no threshold tuning</p>
+        <a href="/v6933/strict-temporal-rescue"><button>打开 V6.93.3</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6933-temporal-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6933-temporal-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6933_home_base:APP.view_functions[ep]=_v6933_home_wrap
