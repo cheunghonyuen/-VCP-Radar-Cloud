@@ -35315,3 +35315,423 @@ if _v679_home_base is not None:
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v679_home_base:
             APP.view_functions[ep]=_v679_home_wrap
+
+
+# ========================= V6.79F FIXED-ADMISSION FAST WINNER-PRESERVATION A/B =========================
+V679F_DIR=DATA_DIR/'v679f_fixed_admission_fast_winner_preservation_ab'
+V679F_STATUS=V679F_DIR/'status.json'; V679F_RESULT=V679F_DIR/'result.json'
+v679f_thread=None
+
+def _v679f_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,'current':'',
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V679F_STATUS.exists():
+        try:x.update(json.loads(V679F_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v679f_write(**kw):
+    V679F_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v679f_status();x.update(kw)
+    V679F_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v679f_alive(): return v679f_thread is not None and v679f_thread.is_alive()
+
+def _v679f_ps_exit(d,entry_date,entry_px,horizon=1260):
+    """
+    Same single diagnostic challenger as V6.79.
+    Before proof: frozen -7% intraday stop.
+    Proof: within first 5 completed sessions, intraday high >= +5%.
+    After proof: gap <= -7% exits at open; otherwise exit only if close <= -7%.
+    """
+    ed=pd.Timestamp(entry_date).normalize();ep=float(entry_px);stop=ep*.93
+    z=d[d.date>=ed].copy().head(int(horizon)+1).reset_index(drop=True)
+    if z.empty:return None
+    proof=False
+    for j,r in z.iterrows():
+        if j==0:continue
+        o,h,l,c=map(float,[r.open,r.high,r.low,r.close])
+        if j<=5 and h>=ep*1.05: proof=True
+        if o<=stop:
+            return pd.Timestamp(r.date).normalize(),float(o),'PS_CLOSECONF_GAP',int(j),proof
+        if not proof:
+            if l<=stop:
+                return pd.Timestamp(r.date).normalize(),float(stop),'CONTROL_STOP7_PRE_PROOF',int(j),proof
+        else:
+            if c<=stop:
+                return pd.Timestamp(r.date).normalize(),float(c),'PS_CLOSE_CONFIRMED_STOP',int(j),proof
+    rr=z.iloc[-1]
+    return pd.Timestamp(rr.date).normalize(),float(rr.close),'HOLD1260',int(len(z)-1),proof
+
+def _v679f_forced_schedule_replay(Z,price,cal,label,t0):
+    """
+    Fixed-admission shadow ledger.
+    Z contains ONLY the exact Control-admitted trades, with same entry dates/order.
+    No trade can be dropped. If changed exits consume more capital, new scheduled
+    entries are clipped to available cash; no leverage.
+    """
+    Z=Z.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.0;pos={};last={};ledger=[];eqrows=[];step=max(1,len(cal)//20)
+    clipped=0
+    for di,dt in enumerate(cal,1):
+        dt=pd.Timestamp(dt).normalize()
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'schedule_id':rec[i]['schedule_id'],
+                           'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],
+                           'reason':str(rec[i]['exit_reason']),'entry_date':p['entry_date'],'exit_date':dt})
+            last.pop(i,None)
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=float(cp) if cp is not None and np.isfinite(cp) and cp>0 else float(last.get(i,p['entry_px']))
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.0
+            if not np.isfinite(ep) or ep<=0: raise RuntimeError(f'{label}: bad entry price')
+            actual=min(float(target),float(cash))
+            if actual<=1e-12: raise RuntimeError(f'{label}: no cash for fixed schedule {r["schedule_id"]} @ {dt}')
+            if actual+1e-12<target:clipped+=1
+            cash-=actual
+            pos[i]={'listing_id':str(r['listing_id']),'shares':actual/ep,'entry_px':ep,
+                    'cost':actual,'entry_date':dt}
+            last[i]=ep
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=float(cp) if cp is not None and np.isfinite(cp) and cp>0 else float(last.get(i,p['entry_px']))
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv
+        if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq}')
+        eqrows.append((dt,eq,hv/eq))
+
+        if di%step==0 or di==len(cal):
+            _v679f_write(status='running',phase='fixed_shadow_replay',
+                         message=f'{label} {int(round(di/len(cal)*100))}%',
+                         processed=di,total=len(cal),current=label,
+                         elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure'])
+    L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    gp=float(L.loc[L.pnl>0,'pnl'].sum()) if len(L) else 0.;gl=float(-L.loc[L.pnl<=0,'pnl'].sum()) if len(L) else 0.
+    pf=gp/gl if gl>0 else np.inf
+    wr=float((L.ret>0).mean()) if len(L) else np.nan
+    avg=float(L.ret.mean()) if len(L) else np.nan
+    avgwin=float(L.loc[L.ret>0,'ret'].mean()) if len(L) and (L.ret>0).any() else np.nan
+    avgloss=float(L.loc[L.ret<=0,'ret'].mean()) if len(L) and (L.ret<=0).any() else np.nan
+    return {
+        'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+        'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+        'profit_factor':float(pf),'win_rate':wr,'avg_return':avg,
+        'avg_win':avgwin,'avg_loss':avgloss,
+        'winner20':int((L.ret>=.20).sum()) if len(L) else 0,
+        'winner50':int((L.ret>=.50).sum()) if len(L) else 0,
+        'winner100':int((L.ret>=1.0).sum()) if len(L) else 0,
+        'loss10':int((L.ret<=-.10).sum()) if len(L) else 0,
+        'avg_exposure':float(C.exposure.mean()),
+        'clipped_entries':int(clipped),
+        'final_multiple':float(end/start)
+    },L
+
+def _v679f_run():
+    global v679f_thread
+    t0=time.time()
+    try:
+        # --- exact V6.70F control preparation ---
+        _v679f_write(status='running',phase='control_cache',
+                     message='读取 V6.69 paired cache；先复现冻结 Control 28.25%…',
+                     processed=0,total=4,current='',elapsed_sec=0,error=None,traceback=None)
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        # Preserve exact V6.70F sort/index semantics.
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        _v679f_write(status='running',phase='control_price_cache',
+                     message=f'Control parity：读取现有 close cache 0/{tot}',
+                     processed=0,total=tot,current='',elapsed_sec=round(time.time()-t0,1),error=None)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception as ex:raise RuntimeError(f'cache read failed {lid}: {ex}')
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v679f_write(status='running',phase='control_price_cache',
+                             message=f'Control parity cache {n}/{tot}',
+                             processed=n,total=tot,current=lid,
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+
+        _v679f_write(status='running',phase='control_parity',
+                     message='运行已验证 V6.70F Control replay；未到 28.25% 立即阻断…',
+                     processed=0,total=len(cal),current='CONTROL',
+                     elapsed_sec=round(time.time()-t0,1),error=None)
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.79F Fixed-Admission Fast Winner Preservation A/B',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap,
+                    'important':'Control parity failed. Challenger was NOT built.',
+                    'next_step':'Repair parity only; do not interpret winner-preservation.'}
+            V679F_DIR.mkdir(parents=True,exist_ok=True)
+            V679F_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v679f_write(status='done',phase='blocked',
+                         message=f'阻断：Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=len(cal),total=len(cal),current='CONTROL',
+                         elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        # Exact control-selected schedule only.
+        S=Z.loc[sorted(whitelist)].copy()
+        S['schedule_id']=S.index.astype(str)
+        S=S.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+        selected_ids=sorted(set(S.listing_id.astype(str)))
+
+        _v679f_write(status='running',phase='challenger_paths',
+                     message=f'Control 已对齐 28.25%；只重建 {len(S):,} 个 admitted trades 的 Challenger exits…',
+                     processed=0,total=len(selected_ids),current='',
+                     elapsed_sec=round(time.time()-t0,1),error=None)
+
+        oh={};total2=len(selected_ids)
+        for n,lid in enumerate(selected_ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception as ex:raise RuntimeError(f'OHLC cache read failed {lid}: {ex}')
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            oh[lid]=q.reset_index(drop=True)
+            if n==1 or n%100==0 or n==total2:
+                _v679f_write(status='running',phase='challenger_paths',
+                             message=f'Admitted OHLC {n}/{total2}',
+                             processed=n,total=total2,current=lid,
+                             elapsed_sec=round(time.time()-t0,1),error=None)
+
+        C=S[['schedule_id','listing_id','entry_date','entry_px','exit_date','exit_px','exit_reason']].copy()
+        H=[];pair=[];changed=0;proofn=0
+        for k,r in S.iterrows():
+            d=oh.get(str(r.listing_id))
+            if d is None:raise RuntimeError(f'missing admitted OHLC {r.listing_id}')
+            ex=_v679f_ps_exit(d,r.entry_date,float(r.entry_px),1260)
+            if ex is None:raise RuntimeError(f'no challenger exit {r.listing_id}')
+            xd,xp,reason,hold,proof=ex
+            proofn+=int(proof)
+            changed+=int(pd.Timestamp(xd).normalize()!=pd.Timestamp(r.exit_date).normalize() or abs(float(xp)-float(r.exit_px))>1e-8)
+            H.append({'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
+                      'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                      'exit_date':xd,'exit_px':float(xp),'exit_reason':reason})
+            pair.append({'schedule_id':str(r.schedule_id),'proof':bool(proof),
+                         'control_ret':float(r.exit_px)/float(r.entry_px)-1.,
+                         'challenger_ret':float(xp)/float(r.entry_px)-1.,
+                         'control_reason':str(r.exit_reason),'challenger_reason':reason})
+        H=pd.DataFrame(H);D=pd.DataFrame(pair)
+
+        _v679f_write(status='running',phase='fixed_shadow_replay',
+                     message='Fixed-admission shadow：同一批 Control schedule，不允许 admission 漂移…',
+                     processed=0,total=len(cal),current='CONTROL_SHADOW',
+                     elapsed_sec=round(time.time()-t0,1),error=None)
+
+        BC,LC=_v679f_forced_schedule_replay(C,price,cal,'CONTROL_FIXED_SCHEDULE',t0)
+        BH,LH=_v679f_forced_schedule_replay(H,price,cal,'PS_CLOSECONF_FIXED_SCHEDULE',t0)
+
+        shadow_parity=abs(float(BC['cagr'])-.2825)<=.0015
+        p=D[D.proof].copy()
+        paired={
+            'schedule_n':int(len(D)),'proven_strength_n':int(len(p)),'changed_exit_n':int(changed),
+            'control_avg_return_proven':float(p.control_ret.mean()) if len(p) else None,
+            'challenger_avg_return_proven':float(p.challenger_ret.mean()) if len(p) else None,
+            'control_win_rate_proven':float((p.control_ret>0).mean()) if len(p) else None,
+            'challenger_win_rate_proven':float((p.challenger_ret>0).mean()) if len(p) else None,
+            'control_plus20':float((p.control_ret>=.20).mean()) if len(p) else None,
+            'challenger_plus20':float((p.challenger_ret>=.20).mean()) if len(p) else None,
+            'control_plus50':float((p.control_ret>=.50).mean()) if len(p) else None,
+            'challenger_plus50':float((p.challenger_ret>=.50).mean()) if len(p) else None,
+            'control_plus100':float((p.control_ret>=1.).mean()) if len(p) else None,
+            'challenger_plus100':float((p.challenger_ret>=1.).mean()) if len(p) else None,
+            'challenger_loss10':float((p.challenger_ret<=-.10).mean()) if len(p) else None
+        }
+
+        if not shadow_parity:
+            verdict='FIXED_SCHEDULE_CONTROL_PARITY_FAIL'
+        else:
+            risk_ok=BH['maxdd']>=BC['maxdd']-.05 and paired.get('challenger_loss10',1)<=.20
+            edge_ok=(BH['cagr']>BC['cagr'] and BH['calmar']>=BC['calmar'] and
+                     paired.get('challenger_avg_return_proven',-999)>paired.get('control_avg_return_proven',999))
+            verdict='WINNER_PRESERVATION_FIXED_ADMISSION_EDGE_CONFIRMED' if (risk_ok and edge_ok) else 'WINNER_PRESERVATION_PROXY_NOT_SAFE_ENOUGH'
+
+        result={
+            'version':'V6.79F Fixed-Admission Fast Winner Preservation A/B',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'fixed_shadow_control':BC,'fixed_shadow_challenger':BH,
+            'shadow_control_parity':shadow_parity,
+            'paired_proven_strength':paired,
+            'semantic':'Same V6.79 model diagnostic proxy: pre-proof -7% unchanged; after first-5-session +5% proof, gap stop remains immediate and ordinary intraday -7% requires close <= -7%.',
+            'important':'Only exact V6.70F Control-admitted schedule is tested. No admission drift. No threshold grid. No Quick-Profit mixing. No promotion to production rule.',
+            'next_step':('If edge confirmed, source-reconcile a stricter defense semantic that reduces <=-10% leakage before any full actual-portfolio test.'
+                         if verdict=='WINNER_PRESERVATION_FIXED_ADMISSION_EDGE_CONFIRMED'
+                         else
+                         'Reject this close-confirmed proxy as too loose. Preserve the washout finding but do not use this rule; reconstruct a stricter source-supported defense state.'),
+            'cache_note':'V6.69 paired cache + exact V6.70F replay + V6.17 cached prices; Challenger OHLC rebuilt only for Control-admitted trades; 0 Tiingo; no universe rebuild.'
+        }
+        V679F_DIR.mkdir(parents=True,exist_ok=True)
+        V679F_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:D.to_csv(V679F_DIR/'fixed_schedule_paired_trades.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v679f_write(status='done',phase='done',message=f'V6.79F 完成：{verdict}',
+                     processed=1,total=1,current='',elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v679f_write(status='error',phase='error',
+                     message=f'V6.79F 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=1,current='',elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v679f_thread=None
+
+def _v679f_start():
+    global v679f_thread
+    if _v679f_alive():return False
+    _v679f_write(status='starting',phase='starting',message='V6.79F 正在启动',
+                 processed=0,total=1,current='',elapsed_sec=0,error=None,traceback=None)
+    v679f_thread=threading.Thread(target=_v679f_run,daemon=True);v679f_thread.start();return True
+
+@APP.route('/v679f/run',methods=['GET','POST'])
+def v679f_run():_v679f_start();return redirect('/v679f/fixed-admission-winner-preservation')
+
+@APP.get('/api/v679f/status')
+def v679f_status_api():return jsonify(_v679f_status())
+
+@APP.get('/v679f/fixed-admission-winner-preservation')
+def v679f_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v679f_status();R={}
+    if V679F_RESULT.exists():
+        try:
+            obj=json.loads(V679F_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('fixed_shadow_control') if isinstance(R.get('fixed_shadow_control'),dict) else {}
+    H=R.get('fixed_shadow_challenger') if isinstance(R.get('fixed_shadow_challenger'),dict) else {}
+    P=R.get('paired_proven_strength') if isinstance(R.get('paired_proven_strength'),dict) else {}
+    CB=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    btn='' if _v679f_alive() else '<a href="/v679f/run"><button>▶ 开始 V6.79F Fast Fixed-Admission A/B</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #3b82f6;border-radius:14px;padding:16px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🚀 V6.79F Fixed-Admission Fast Winner Preservation A/B</h1>
+<div class="info">先用已验证的 V6.70F replay 对齐 28.25% Control。对齐后只处理 Control 真正 admitted 的交易，冻结 admission schedule，隔离 Exit 本身的效果。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s · {e(st.get('current',''))}</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>V6.70F Control CAGR: <b>{num(CB.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b> · Fixed-shadow parity: <b>{e(R.get('shadow_control_parity','—'))}</b></p></div>
+
+<div class="c"><h2>Exact Fixed-Admission Shadow</h2>
+<table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Return</th><th>Avg Loss</th><th>+20</th><th>+50</th><th>+100</th><th>≤-10</th><th>Exposure</th><th>Clipped</th></tr>
+<tr><td><b>CONTROL_FIXED</b></td><td>{num(B.get('cagr'))*100:.2f}%</td><td>{num(B.get('maxdd'))*100:.2f}%</td><td>{num(B.get('calmar')):.3f}</td><td>{num(B.get('profit_factor')):.2f}</td><td>{num(B.get('win_rate'))*100:.1f}%</td><td>{num(B.get('avg_return'))*100:.2f}%</td><td>{num(B.get('avg_loss'))*100:.2f}%</td><td>{integer(B.get('winner20'))}</td><td>{integer(B.get('winner50'))}</td><td>{integer(B.get('winner100'))}</td><td>{integer(B.get('loss10'))}</td><td>{num(B.get('avg_exposure'))*100:.1f}%</td><td>{integer(B.get('clipped_entries'))}</td></tr>
+<tr><td><b>PS_CLOSECONF_FIXED</b></td><td>{num(H.get('cagr'))*100:.2f}%</td><td>{num(H.get('maxdd'))*100:.2f}%</td><td>{num(H.get('calmar')):.3f}</td><td>{num(H.get('profit_factor')):.2f}</td><td>{num(H.get('win_rate'))*100:.1f}%</td><td>{num(H.get('avg_return'))*100:.2f}%</td><td>{num(H.get('avg_loss'))*100:.2f}%</td><td>{integer(H.get('winner20'))}</td><td>{integer(H.get('winner50'))}</td><td>{integer(H.get('winner100'))}</td><td>{integer(H.get('loss10'))}</td><td>{num(H.get('avg_exposure'))*100:.1f}%</td><td>{integer(H.get('clipped_entries'))}</td></tr>
+</table></div>
+
+<div class="c"><h2>Paired Proven-Strength Trades</h2>
+<table><tr><th>Metric</th><th>Control</th><th>Challenger</th></tr>
+<tr><td>Avg return</td><td>{num(P.get('control_avg_return_proven'))*100:.2f}%</td><td>{num(P.get('challenger_avg_return_proven'))*100:.2f}%</td></tr>
+<tr><td>Win rate</td><td>{num(P.get('control_win_rate_proven'))*100:.1f}%</td><td>{num(P.get('challenger_win_rate_proven'))*100:.1f}%</td></tr>
+<tr><td>+20%</td><td>{num(P.get('control_plus20'))*100:.1f}%</td><td>{num(P.get('challenger_plus20'))*100:.1f}%</td></tr>
+<tr><td>+50%</td><td>{num(P.get('control_plus50'))*100:.1f}%</td><td>{num(P.get('challenger_plus50'))*100:.1f}%</td></tr>
+<tr><td>+100%</td><td>{num(P.get('control_plus100'))*100:.1f}%</td><td>{num(P.get('challenger_plus100'))*100:.1f}%</td></tr>
+</table>
+<p>Schedule N={integer(P.get('schedule_n')):,} · Proven N={integer(P.get('proven_strength_n')):,} · Changed exits={integer(P.get('changed_exit_n')):,} · Challenger ≤-10%={num(P.get('challenger_loss10'))*100:.1f}%</p></div>
+
+<div class="c warn"><b>这版故意不跑“自然 admission 的 Challenger Portfolio”。</b>先把 Exit 本身的因果效果搞清楚；只有 Fixed-Admission 过关，才值得进入下一步真实 10-slot economic replay。</div>
+</div></body></html>"""
+
+_v679f_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v679f_home_base is not None:
+    def _v679f_home_wrap(*args,**kwargs):
+        resp=_v679f_home_base(*args,**kwargs)
+        card="""<div id="v679f-fixed-card" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🚀 V6.79F Fixed-Admission Fast Winner Preservation A/B</h2>
+        <p>28.25% benchmark first · exact Control schedule · Exit-only causal test · cache-only</p>
+        <a href="/v679f/fixed-admission-winner-preservation"><button>打开 V6.79F</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v679f-fixed-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v679f-fixed-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v679f_home_base:APP.view_functions[ep]=_v679f_home_wrap
