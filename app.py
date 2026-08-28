@@ -39797,3 +39797,311 @@ if _v6892_home_base is not None:
         body=str(resp); return body if 'id="v6892-fast-integrity-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6892_home_base:APP.view_functions[ep]=_v6892_home_wrap
+
+
+# ========================= V6.89.3 DATA-INTEGRITY REPAIR / CORPORATE-ACTION SAFE TRADE RETURNS =========================
+V6893_DIR=DATA_DIR/'v6893_data_integrity_repair'
+V6893_STATUS=V6893_DIR/'status.json'; V6893_RESULT=V6893_DIR/'result.json'
+v6893_thread=None
+
+def _v6893_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6893_STATUS.exists():
+        try:x.update(json.loads(V6893_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6893_write(**kw):
+    V6893_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6893_status();x.update(kw)
+    V6893_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6893_alive(): return v6893_thread is not None and v6893_thread.is_alive()
+
+def _v6893_round_factor_score(r):
+    """Heuristic confidence only; never treated as authoritative split metadata."""
+    if not np.isfinite(r) or r<=0:return (False,None,None)
+    cands=[2,3,4,5,10,20,25,50,100,200,250,500,1000]
+    vals=cands + [1/x for x in cands]
+    best=min(vals,key=lambda x:abs(np.log(r/x)))
+    rel=abs(np.log(r/best))
+    return (bool(rel<=0.04),float(best),float(rel))
+
+def _v6893_scale_events(q):
+    q=q.copy().sort_values('date').reset_index(drop=True)
+    q['prev_close']=q.close.shift(1)
+    q['open_ratio']=q.open/q.prev_close
+    q['close_ratio']=q.close/q.prev_close
+    q['intraday_abs']=abs(q.close/q.open-1)
+    out=[]
+    for _,r in q.iloc[1:].iterrows():
+        orat=float(r.open_ratio) if pd.notna(r.open_ratio) else np.nan
+        crat=float(r.close_ratio) if pd.notna(r.close_ratio) else np.nan
+        if not np.isfinite(orat) or not np.isfinite(crat):continue
+        extreme=(orat>=3 or orat<=1/3) and (crat>=3 or crat<=1/3)
+        if not extreme:continue
+        # scale-like event should affect open and close similarly, not be an intraday explosion.
+        agreement=abs(np.log(max(1e-12,orat/crat)))<=0.10
+        intraday=float(r.intraday_abs) if pd.notna(r.intraday_abs) else np.nan
+        calm=bool(np.isfinite(intraday) and intraday<=0.25)
+        okround,rf,dist=_v6893_round_factor_score(crat)
+        confidence='HIGH' if agreement and calm and okround else ('MEDIUM' if agreement and calm else 'LOW')
+        out.append({
+            'date':pd.Timestamp(r.date).normalize(),
+            'prev_close':float(r.prev_close),
+            'open':float(r.open),'close':float(r.close),
+            'open_ratio':orat,'close_ratio':crat,
+            'intraday_abs':intraday,
+            'round_factor':rf,'round_factor_log_error':dist,
+            'confidence':confidence,
+            'high_confidence':bool(confidence=='HIGH')
+        })
+    return out
+
+def _v6893_run():
+    global v6893_thread
+    t0=time.time()
+    try:
+        _v6893_write(status='running',phase='load_frozen_control',
+                     message='读取 V6.89 已冻结的 232 笔 exact admitted trades；不重跑 Control…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        r89=json.loads(V689_RESULT.read_text(encoding='utf-8')) if V689_RESULT.exists() else {}
+        if not isinstance(r89,dict) or not r89.get('benchmark_ok'):
+            raise RuntimeError('V6.89 benchmark result 不存在或未通过')
+        old_cagr=float((r89.get('control_benchmark') or {}).get('cagr',0) or 0)
+
+        fp=V689_DIR/'control_attribution_trades.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.89 control_attribution_trades.csv.gz')
+        S=pd.read_csv(fp,compression='gzip')
+        need=['listing_id','entry_date','entry_px','exit_date','exit_px','ret']
+        miss=[c for c in need if c not in S.columns]
+        if miss:raise RuntimeError('V6.89 frozen trade file 缺字段: '+','.join(miss))
+        S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
+        S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
+        S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce')
+        S['exit_px']=pd.to_numeric(S.exit_px,errors='coerce')
+        S['ret']=pd.to_numeric(S.ret,errors='coerce')
+        S=S.dropna(subset=['entry_date','exit_date','entry_px','exit_px','ret']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        lids=sorted(set(S.listing_id.astype(str)))
+        events_by_lid={}
+        _v6893_write(status='running',phase='scan_admitted_listings',
+                     message=f'仅扫描 admitted listings 的 scale discontinuity · {len(lids)} listings',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            ev=_v6893_scale_events(q)
+            if ev:events_by_lid[lid]=ev
+            if n==1 or n%50==0 or n==len(lids):
+                _v6893_write(status='running',phase='scan_admitted_listings',
+                             message=f'Scale scan {n}/{len(lids)} · affected listings={len(events_by_lid)}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        _v6893_write(status='running',phase='repair_trade_returns',
+                     message='对跨越 HIGH-confidence scale events 的交易做价格尺度归一；LOW/MEDIUM 只标记不自动修…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        repaired=[]
+        audit=[]
+        for _,r in S.iterrows():
+            lid=str(r.listing_id);ed=pd.Timestamp(r.entry_date).normalize();xd=pd.Timestamp(r.exit_date).normalize()
+            factor=1.0;used=[];amb=[]
+            for ev in events_by_lid.get(lid,[]):
+                if ed < ev['date'] <= xd:
+                    if ev['high_confidence']:
+                        factor*=float(ev['close_ratio'])
+                        used.append(ev)
+                    else:
+                        amb.append(ev)
+            old_ret=float(r.ret)
+            corrected_entry=float(r.entry_px)*factor
+            new_ret=float(r.exit_px)/corrected_entry-1 if corrected_entry>0 else np.nan
+            auto_repaired=bool(len(used)>0 and np.isfinite(new_ret))
+            repaired.append({
+                **r.to_dict(),
+                'old_ret':old_ret,
+                'scale_factor':float(factor),
+                'corrected_entry_px_on_exit_scale':float(corrected_entry),
+                'corrected_ret':float(new_ret) if np.isfinite(new_ret) else old_ret,
+                'auto_repaired':auto_repaired,
+                'high_conf_event_count':len(used),
+                'ambiguous_event_count':len(amb)
+            })
+            if used or amb:
+                audit.append({
+                    'listing_id':lid,'entry_date':str(ed.date()),'exit_date':str(xd.date()),
+                    'old_ret':old_ret,'corrected_ret':float(new_ret) if np.isfinite(new_ret) else None,
+                    'scale_factor':float(factor),
+                    'high_conf_events':[{
+                        'date':str(x['date'].date()),'ratio':x['close_ratio'],
+                        'round_factor':x['round_factor'],'confidence':x['confidence']
+                    } for x in used],
+                    'ambiguous_events':[{
+                        'date':str(x['date'].date()),'ratio':x['close_ratio'],'confidence':x['confidence']
+                    } for x in amb]
+                })
+
+        F=pd.DataFrame(repaired)
+        _v6893_write(status='running',phase='recompute_diagnostics',
+                     message='重算修复后的 trade-level attribution；先不声称新的组合 CAGR…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        def _stats(col):
+            x=pd.to_numeric(F[col],errors='coerce').dropna()
+            return {
+                'n':int(len(x)),
+                'sum_return_units':float(x.sum()),
+                'gross_gain_units':float(x[x>0].sum()),
+                'gross_loss_units':float((-x[x<0]).sum()),
+                'avg_return':float(x.mean()),
+                'median_return':float(x.median()),
+                'win_rate':float((x>0).mean()),
+                'plus50_count':int((x>=.50).sum()),
+                'plus100_count':int((x>=1.0).sum())
+            }
+
+        old_stats=_stats('old_ret');new_stats=_stats('corrected_ret')
+        repaired_trades=int(F.auto_repaired.sum())
+        ambiguous_trades=int((F.ambiguous_event_count>0).sum())
+
+        # specifically record ZBZX if present
+        z=F[F.listing_id.astype(str).str.startswith('ZBZX__')].copy()
+        zbzx=None
+        if len(z):
+            rr=z.sort_values('old_ret',ascending=False).iloc[0]
+            zbzx={'listing_id':str(rr.listing_id),'old_ret':float(rr.old_ret),
+                  'scale_factor':float(rr.scale_factor),'corrected_ret':float(rr.corrected_ret),
+                  'entry_px':float(rr.entry_px),'corrected_entry_px_on_exit_scale':float(rr.corrected_entry_px_on_exit_scale),
+                  'exit_px':float(rr.exit_px)}
+
+        verdict=('HIGH_CONFIDENCE_SCALE_ARTIFACTS_REPAIRED_REPLAY_REQUIRED'
+                 if repaired_trades>0 else
+                 'NO_HIGH_CONFIDENCE_SCALE_ARTIFACT_IN_ADMITTED_TRADES')
+
+        result={
+            'version':'V6.89.3 Data-Integrity Repair / Corporate-Action Safe Trade Returns',
+            'verdict':verdict,
+            'frozen_old_control_cagr':old_cagr,
+            'repaired_trade_count':repaired_trades,
+            'ambiguous_trade_count':ambiguous_trades,
+            'affected_listing_count':int(len(events_by_lid)),
+            'zbzx_repair':zbzx,
+            'old_trade_level_stats':old_stats,
+            'repaired_trade_level_stats':new_stats,
+            'repair_audit':audit,
+            'important':'Automatic repair is limited to HIGH-confidence scale-like discontinuities inferred from OHLC continuity (open and close jump together, calm intraday move, near a round split factor). This is not authoritative corporate-action metadata. MEDIUM/LOW events are not auto-repaired.',
+            'cagr_warning':'The old 28.25% CAGR is now invalid for research interpretation if any admitted trade was repaired. Trade-level return repair alone is not enough to publish a new CAGR because portfolio cash/admission path can change after correcting a dominant winner.',
+            'next_step':(
+                'Run one corrected portfolio replay using ONLY the repaired admitted-trade return/price scale and the frozen admission schedule, then publish new CAGR/PF/MaxDD/Calmar. Do not reopen strategy optimization before that.'
+                if repaired_trades>0 else
+                'If no high-confidence artifacts remain, manually reconcile ambiguous events before accepting the old benchmark.'
+            ),
+            'cache_note':'Admitted listings only; no Tiingo; no universe rebuild. Uses existing Historical Cache.'
+        }
+        V6893_DIR.mkdir(parents=True,exist_ok=True)
+        V6893_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        F.to_csv(V6893_DIR/'repaired_control_trades.csv.gz',index=False,compression='gzip')
+
+        _v6893_write(status='done',phase='done',message=f'V6.89.3 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6893_write(status='error',phase='error',
+                     message=f'V6.89.3 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6893_thread=None
+
+def _v6893_start():
+    global v6893_thread
+    if _v6893_alive():return False
+    _v6893_write(status='starting',phase='starting',message='V6.89.3 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v6893_thread=threading.Thread(target=_v6893_run,daemon=True);v6893_thread.start();return True
+
+@APP.route('/v6893/run',methods=['GET','POST'])
+def v6893_run():_v6893_start();return redirect('/v6893/data-integrity-repair')
+
+@APP.get('/api/v6893/status')
+def v6893_status_api():return jsonify(_v6893_status())
+
+@APP.get('/v6893/data-integrity-repair')
+def v6893_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6893_status();R={}
+    if V6893_RESULT.exists():
+        try:R=json.loads(V6893_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    Z=R.get('zbzx_repair') if isinstance(R.get('zbzx_repair'),dict) else {}
+    O=R.get('old_trade_level_stats') if isinstance(R.get('old_trade_level_stats'),dict) else {}
+    N=R.get('repaired_trade_level_stats') if isinstance(R.get('repaired_trade_level_stats'),dict) else {}
+    A=R.get('repair_audit') if isinstance(R.get('repair_audit'),list) else []
+    rows=''
+    for x in A[:30]:
+        rows+=f"<tr><td>{e(x.get('listing_id'))}</td><td>{e(x.get('entry_date'))}</td><td>{e(x.get('exit_date'))}</td><td>{num(x.get('old_ret'))*100:+.1f}%</td><td>{num(x.get('scale_factor')):.3g}x</td><td>{num(x.get('corrected_ret'))*100:+.1f}%</td><td>{len(x.get('high_conf_events',[]))}</td><td>{len(x.get('ambiguous_events',[]))}</td></tr>"
+
+    btn='' if _v6893_alive() else '<a href="/v6893/run"><button>▶ 开始 V6.89.3 Repair</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.warn{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧯 V6.89.3 Data-Integrity Repair</h1><div class="warn">修的是 corporate-action / price-scale 数据污染，不是交易策略。HIGH-confidence 才自动归一；可疑但不确定的 event 只标记，不擅自修。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Repaired trades: <b>{integer(R.get('repaired_trade_count'))}</b> · Ambiguous trades: <b>{integer(R.get('ambiguous_trade_count'))}</b> · Affected listings: <b>{integer(R.get('affected_listing_count'))}</b></p>
+<p>Old Control CAGR shown only for reference: <b>{num(R.get('frozen_old_control_cagr'))*100:.2f}%</b> — if any trade was repaired, this CAGR is no longer valid for interpretation.</p></div>
+<div class="c"><h2>ZBZX Repair</h2><p>{e(Z.get('listing_id','—'))}</p><p>Old return <b>{num(Z.get('old_ret'))*100:+.1f}%</b> · scale factor <b>{num(Z.get('scale_factor')):.3g}x</b> · corrected return <b>{num(Z.get('corrected_ret'))*100:+.1f}%</b></p>
+<p>Entry {num(Z.get('entry_px')):.6g} → adjusted-entry-on-exit-scale {num(Z.get('corrected_entry_px_on_exit_scale')):.6g} · Exit {num(Z.get('exit_px')):.6g}</p></div>
+<div class="c"><h2>Trade-Level Stats Before vs After</h2><table><tr><th></th><th>Gross Gain</th><th>Gross Loss</th><th>Avg Return</th><th>WR</th><th>+50</th><th>+100</th></tr>
+<tr><td><b>Before</b></td><td>{num(O.get('gross_gain_units')):.2f}</td><td>{num(O.get('gross_loss_units')):.2f}</td><td>{num(O.get('avg_return'))*100:+.1f}%</td><td>{num(O.get('win_rate'))*100:.1f}%</td><td>{integer(O.get('plus50_count'))}</td><td>{integer(O.get('plus100_count'))}</td></tr>
+<tr><td><b>After</b></td><td>{num(N.get('gross_gain_units')):.2f}</td><td>{num(N.get('gross_loss_units')):.2f}</td><td>{num(N.get('avg_return'))*100:+.1f}%</td><td>{num(N.get('win_rate'))*100:.1f}%</td><td>{integer(N.get('plus50_count'))}</td><td>{integer(N.get('plus100_count'))}</td></tr></table></div>
+<div class="c"><h2>Repair Audit</h2><table><tr><th>Listing</th><th>Entry</th><th>Exit</th><th>Old Return</th><th>Scale</th><th>Corrected Return</th><th>High-conf</th><th>Ambiguous</th></tr>{rows or '<tr><td colspan=8>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6893_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6893_home_base is not None:
+    def _v6893_home_wrap(*args,**kwargs):
+        resp=_v6893_home_base(*args,**kwargs)
+        card="""<div id="v6893-repair-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧯 V6.89.3 Data-Integrity Repair</h2>
+        <p>Corporate-action / price-scale normalization · admitted listings only · no Tiingo</p>
+        <a href="/v6893/data-integrity-repair"><button>打开 V6.89.3</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6893-repair-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6893-repair-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6893_home_base:APP.view_functions[ep]=_v6893_home_wrap
