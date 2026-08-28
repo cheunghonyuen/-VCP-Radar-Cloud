@@ -40969,3 +40969,291 @@ if _v690_home_base is not None:
         body=str(resp);return body if 'id="v690-clean-admission-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v690_home_base:APP.view_functions[ep]=_v690_home_wrap
+
+
+# ========================= V6.91 CLEAN BASE-QUALITY WALK-FORWARD ADMISSION A/B =========================
+V691_DIR=DATA_DIR/'v691_clean_base_quality_walkforward_ab'
+V691_STATUS=V691_DIR/'status.json'; V691_RESULT=V691_DIR/'result.json'
+v691_thread=None
+
+def _v691_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V691_STATUS.exists():
+        try:x.update(json.loads(V691_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v691_write(**kw):
+    V691_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v691_status();x.update(kw)
+    V691_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v691_alive(): return v691_thread is not None and v691_thread.is_alive()
+
+def _v691_pct(train, value, higher=True):
+    a=pd.to_numeric(pd.Series(train),errors='coerce').dropna().values.astype(float)
+    if len(a)<20 or not np.isfinite(value): return np.nan
+    p=(np.searchsorted(np.sort(a),float(value),side='right'))/len(a)
+    return float(p if higher else 1-p)
+
+def _v691_metrics(g):
+    if g is None or len(g)==0:
+        return {'n':0,'stop_rate':None,'wr':None,'avg_return':None,'pf':None,'plus50':0,'plus100':0}
+    r=pd.to_numeric(g.ret,errors='coerce').dropna()
+    stop=g.is_stop.astype(bool)
+    gp=float(r[r>0].sum()); gl=float((-r[r<0]).sum())
+    return {
+        'n':int(len(g)),
+        'stop_rate':float(stop.mean()),
+        'wr':float((r>0).mean()),
+        'avg_return':float(r.mean()),
+        'median_return':float(r.median()),
+        'pf':float(gp/gl) if gl>0 else (999.0 if gp>0 else None),
+        'plus50':int((r>=.50).sum()),
+        'plus100':int((r>=1.0).sum())
+    }
+
+def _v691_run():
+    global v691_thread
+    t0=time.time()
+    try:
+        _v691_write(status='running',phase='load_clean_features',
+                    message='读取 V6.90 clean feature rows；冻结 BASE_QUALITY family，不搜索新因子…',
+                    processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V690_RESULT.exists(): raise RuntimeError('找不到 V6.90 result.json')
+        r90=json.loads(V690_RESULT.read_text(encoding='utf-8'))
+        if str(r90.get('verdict',''))!='CLEAN_SELECTION_SIGNAL_WORTH_ONE_AB':
+            raise RuntimeError('V6.90 未授权 A/B')
+        best=r90.get('best_candidate_family') or {}
+        if str(best.get('family'))!='BASE_QUALITY':
+            raise RuntimeError(f'V6.90 best family 不是 BASE_QUALITY: {best.get("family")}')
+
+        fp=V690_DIR/'clean_admission_features.csv.gz'
+        if not fp.exists(): raise RuntimeError('找不到 clean_admission_features.csv.gz')
+        F=pd.read_csv(fp,compression='gzip')
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F['is_stop']=F.is_stop.astype(bool)
+        F['winner50']=F.winner50.astype(bool)
+        F['winner100']=F.winner100.astype(bool)
+        F=F.dropna(subset=['entry_date','ret']).sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        # PREDECLARED family from V6.90. Direction is fixed from the clean audit:
+        # lower ATR/ranges/volume ratios are "better"; nearer 52w high is "better".
+        specs=[
+            ('near_52w_high',True),
+            ('atr20',False),
+            ('range20',False),
+            ('range50',False),
+            ('vol_vs20',False),
+            ('vol20_vs50',False),
+        ]
+
+        _v691_write(status='running',phase='walk_forward_score',
+                    message='Walk-forward：每个测试年只用以前年份的分布计算 BASE_QUALITY percentile；cut=历史中位数…',
+                    processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        years=sorted(int(y) for y in F.entry_date.dt.year.dropna().unique())
+        parts=[];year_rows=[]
+        for y in years:
+            tr=F[F.entry_date.dt.year<y].copy()
+            te=F[F.entry_date.dt.year==y].copy()
+            if len(tr)<40 or len(te)<3: continue
+
+            # score both train and test using only train distributions
+            def score_df(df):
+                vals=[]
+                for _,r in df.iterrows():
+                    ps=[]
+                    for col,higher in specs:
+                        v=pd.to_numeric(pd.Series([r.get(col)]),errors='coerce').iloc[0]
+                        p=_v691_pct(tr[col],v,higher)
+                        if np.isfinite(p): ps.append(float(p))
+                    vals.append(float(np.mean(ps)) if len(ps)>=4 else np.nan)
+                return pd.Series(vals,index=df.index,dtype=float)
+
+            tr_score=score_df(tr)
+            te['bq_score']=score_df(te)
+            cut=float(tr_score.dropna().median())
+            te['keep']=te.bq_score>=cut
+
+            base=_v691_metrics(te)
+            kept=_v691_metrics(te[te.keep])
+            stop_total=int(te.is_stop.sum())
+            stop_kept=int(te.loc[te.keep,'is_stop'].sum())
+            w50_total=int(te.winner50.sum()); w50_kept=int(te.loc[te.keep,'winner50'].sum())
+            w100_total=int(te.winner100.sum()); w100_kept=int(te.loc[te.keep,'winner100'].sum())
+
+            year_rows.append({
+                'year':y,'train_n':int(len(tr)),'test_n':int(len(te)),'cut':cut,
+                'kept_n':int(te.keep.sum()),
+                'stop_rejection':float((stop_total-stop_kept)/stop_total) if stop_total else None,
+                'winner50_retention':float(w50_kept/w50_total) if w50_total else None,
+                'winner100_retention':float(w100_kept/w100_total) if w100_total else None,
+                'base':base,'kept':kept
+            })
+            parts.append(te)
+
+        if not parts: raise RuntimeError('没有可用 walk-forward 年份')
+        O=pd.concat(parts,ignore_index=True)
+        eligible=O[O.bq_score.notna()].copy()
+        kept=eligible[eligible.keep].copy()
+
+        _v691_write(status='running',phase='oos_economic_test',
+                    message='汇总真正 OOS：STOP rejection vs +50/+100 retention；不看 portfolio CAGR…',
+                    processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        base=_v691_metrics(eligible); challenger=_v691_metrics(kept)
+        stop_total=int(eligible.is_stop.sum()); stop_kept=int(kept.is_stop.sum())
+        w50_total=int(eligible.winner50.sum()); w50_kept=int(kept.winner50.sum())
+        w100_total=int(eligible.winner100.sum()); w100_kept=int(kept.winner100.sum())
+
+        stop_rejection=float((stop_total-stop_kept)/stop_total) if stop_total else 0.
+        w50_ret=float(w50_kept/w50_total) if w50_total else 0.
+        w100_ret=float(w100_kept/w100_total) if w100_total else 0.
+        keep_rate=float(len(kept)/len(eligible)) if len(eligible) else 0.
+        pf_delta=(challenger['pf']-base['pf']) if challenger.get('pf') is not None and base.get('pf') is not None else None
+        avg_delta=(challenger['avg_return']-base['avg_return']) if challenger.get('avg_return') is not None else None
+
+        # Predeclared promotion gate: must actually remove losers while preserving the right tail.
+        pass_stop=stop_rejection>=.25
+        pass_w50=w50_ret>=.80
+        pass_w100=w100_ret>=.80
+        pass_pf=pf_delta is not None and pf_delta>0
+        pass_avg=avg_delta is not None and avg_delta>0
+        pass_coverage=.25<=keep_rate<=.75
+
+        candidate=bool(pass_stop and pass_w50 and pass_w100 and pass_pf and pass_avg and pass_coverage)
+        verdict='BASE_QUALITY_WALKFORWARD_ADMISSION_CANDIDATE' if candidate else 'BASE_QUALITY_OOS_EDGE_NOT_ECONOMIC_ENOUGH'
+
+        _v691_write(status='running',phase='finalize',
+                    message=f'V6.91 OOS 完成：STOP reject={stop_rejection*100:.1f}% · +100 retain={w100_ret*100:.1f}%',
+                    processed=3,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.91 Clean Base-Quality Walk-Forward Admission A/B',
+            'verdict':verdict,
+            'control_clean_baseline':'V6.89.4 corrected 13.88% baseline; this version is trade-level OOS screening only.',
+            'walkforward_rule':{
+                'family':'BASE_QUALITY',
+                'features':[x[0] for x in specs],
+                'directions':{c:('HIGHER_BETTER' if h else 'LOWER_BETTER') for c,h in specs},
+                'score':'mean of past-distribution percentiles; requires >=4 available features',
+                'cut':'median BASE_QUALITY score from all prior years only',
+                'threshold_search':False
+            },
+            'oos':{
+                'eligible_n':int(len(eligible)),'kept_n':int(len(kept)),'keep_rate':keep_rate,
+                'base':base,'challenger':challenger,
+                'stop_total':stop_total,'stop_kept':stop_kept,'stop_rejection':stop_rejection,
+                'winner50_total':w50_total,'winner50_kept':w50_kept,'winner50_retention':w50_ret,
+                'winner100_total':w100_total,'winner100_kept':w100_kept,'winner100_retention':w100_ret,
+                'pf_delta':pf_delta,'avg_return_delta':avg_delta
+            },
+            'pass_checks':{
+                'stop_rejection_ge_25pct':pass_stop,
+                'winner50_retention_ge_80pct':pass_w50,
+                'winner100_retention_ge_80pct':pass_w100,
+                'pf_improves':pass_pf,
+                'avg_return_improves':pass_avg,
+                'keep_rate_25_to_75pct':pass_coverage
+            },
+            'yearly':year_rows,
+            'history_dedup':'V6.47 and V6.46 previously tested source-supported ranking/review gates, and V6.15/16 tested generic DNA. V6.91 is allowed only because the old benchmark was later shown contaminated. It does not invent a new feature family, does not sweep thresholds, and does not claim this is a JLaw original rule.',
+            'important':'This is NOT yet a portfolio result. Filtering old admitted trades can overstate benefit because freed slots may admit replacement trades. Only if this OOS gate passes may V6.92 replay the full corrected candidate stream with the same walk-forward rule.',
+            'next_step':('Run ONE full corrected-candidate portfolio replay with exactly this walk-forward BASE_QUALITY rule.'
+                         if candidate else
+                         'Close BASE_QUALITY hard-admission branch again; do not tune cutoff. Move to a different mechanism.'),
+            'cache_note':'V6.90 clean features only; 0 replay; 0 Tiingo; 0 universe scan.'
+        }
+        V691_DIR.mkdir(parents=True,exist_ok=True)
+        V691_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        O.to_csv(V691_DIR/'walkforward_rows.csv.gz',index=False,compression='gzip')
+
+        _v691_write(status='done',phase='done',message=f'V6.91 完成：{verdict}',
+                    processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v691_write(status='error',phase='error',
+                    message=f'V6.91 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v691_thread=None
+
+def _v691_start():
+    global v691_thread
+    if _v691_alive(): return False
+    _v691_write(status='starting',phase='starting',message='V6.91 正在启动',
+                processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v691_thread=threading.Thread(target=_v691_run,daemon=True);v691_thread.start();return True
+
+@APP.route('/v691/run',methods=['GET','POST'])
+def v691_run(): _v691_start(); return redirect('/v691/base-quality-walkforward-ab')
+
+@APP.get('/api/v691/status')
+def v691_status_api(): return jsonify(_v691_status())
+
+@APP.get('/v691/base-quality-walkforward-ab')
+def v691_page():
+    import html
+    e=lambda x:html.escape(str(x)); st=_v691_status(); R={}
+    if V691_RESULT.exists():
+        try:R=json.loads(V691_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v); return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    O=R.get('oos',{}) if isinstance(R.get('oos'),dict) else {}
+    B=O.get('base',{}) if isinstance(O.get('base'),dict) else {}
+    C=O.get('challenger',{}) if isinstance(O.get('challenger'),dict) else {}
+    P=R.get('pass_checks',{}) if isinstance(R.get('pass_checks'),dict) else {}
+    Y=R.get('yearly',[]) if isinstance(R.get('yearly'),list) else []
+
+    yrows=''
+    for x in Y:
+        yrows+=f"<tr><td>{integer(x.get('year'))}</td><td>{integer(x.get('test_n'))}</td><td>{integer(x.get('kept_n'))}</td><td>{num(x.get('stop_rejection'))*100:.1f}%</td><td>{num(x.get('winner50_retention'))*100:.1f}%</td><td>{num(x.get('winner100_retention'))*100:.1f}%</td></tr>"
+
+    checks=' · '.join([f"{e(k)}=<b>{e(v)}</b>" for k,v in P.items()])
+    btn='' if _v691_alive() else '<a href="/v691/run"><button>▶ 开始 V6.91 Walk-Forward A/B</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fefce8;border:1px solid #eab308;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>⚖️ V6.91 Clean BASE_QUALITY Walk-Forward A/B</h1><div class="info">真正 OOS：每个测试年只用以前年份分布，固定 BASE_QUALITY family，cut=历史中位数。没有 grid search；先看能否挡 STOP 又保住 +50/+100。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{checks}</p></div>
+<div class="c"><h2>OOS Economic Test</h2>
+<table><tr><th></th><th>N</th><th>STOP</th><th>WR</th><th>Avg Return</th><th>PF</th><th>+50</th><th>+100</th></tr>
+<tr><td><b>Control cohort</b></td><td>{integer(B.get('n'))}</td><td>{num(B.get('stop_rate'))*100:.1f}%</td><td>{num(B.get('wr'))*100:.1f}%</td><td>{num(B.get('avg_return'))*100:+.1f}%</td><td>{num(B.get('pf')):.2f}</td><td>{integer(B.get('plus50'))}</td><td>{integer(B.get('plus100'))}</td></tr>
+<tr><td><b>BASE_QUALITY kept</b></td><td>{integer(C.get('n'))}</td><td>{num(C.get('stop_rate'))*100:.1f}%</td><td>{num(C.get('wr'))*100:.1f}%</td><td>{num(C.get('avg_return'))*100:+.1f}%</td><td>{num(C.get('pf')):.2f}</td><td>{integer(C.get('plus50'))}</td><td>{integer(C.get('plus100'))}</td></tr></table>
+<p>Keep rate=<b>{num(O.get('keep_rate'))*100:.1f}%</b> · STOP rejection=<b>{num(O.get('stop_rejection'))*100:.1f}%</b> · +50 retention=<b>{num(O.get('winner50_retention'))*100:.1f}%</b> · +100 retention=<b>{num(O.get('winner100_retention'))*100:.1f}%</b></p></div>
+<div class="c"><h2>Year-by-Year OOS</h2><table><tr><th>Year</th><th>Test N</th><th>Kept</th><th>STOP reject</th><th>+50 retain</th><th>+100 retain</th></tr>{yrows or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v691_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v691_home_base is not None:
+    def _v691_home_wrap(*args,**kwargs):
+        resp=_v691_home_base(*args,**kwargs)
+        card="""<div id="v691-bq-ab-card" style="background:#fefce8;border:5px solid #ca8a04;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>⚖️ V6.91 Clean BASE_QUALITY Walk-Forward A/B</h2>
+        <p>Past-only cutoff · STOP rejection vs +50/+100 retention · no threshold grid</p>
+        <a href="/v691/base-quality-walkforward-ab"><button>打开 V6.91</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v691-bq-ab-card"' not in body:
+                p=body.find('<body'); g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp); return body if 'id="v691-bq-ab-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v691_home_base:APP.view_functions[ep]=_v691_home_wrap
