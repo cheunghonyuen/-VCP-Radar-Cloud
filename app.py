@@ -37435,3 +37435,252 @@ if _v683_home_base is not None:
         body=str(resp);return body if 'id="v683-winner-path-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v683_home_base:APP.view_functions[ep]=_v683_home_wrap
+
+
+# ========================= V6.84 JLAW WINNER-MANAGEMENT SOURCE RECONCILIATION =========================
+V684_DIR=DATA_DIR/'v684_jlaw_winner_management_source_reconciliation'
+V684_STATUS=V684_DIR/'status.json'; V684_RESULT=V684_DIR/'result.json'
+v684_thread=None
+
+def _v684_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V684_STATUS.exists():
+        try:x.update(json.loads(V684_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v684_write(**kw):
+    V684_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v684_status();x.update(kw)
+    V684_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v684_alive(): return v684_thread is not None and v684_thread.is_alive()
+
+def _v684_run():
+    global v684_thread
+    t0=time.time()
+    try:
+        _v684_write(status='running',phase='load_v683',
+                     message='读取 V6.83 proved-then-stopped path result…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V683_RESULT.exists():
+            raise RuntimeError('找不到 V6.83 result.json')
+        v683=json.loads(V683_RESULT.read_text(encoding='utf-8'))
+        if not isinstance(v683,dict):raise RuntimeError('V6.83 result 不是 dict')
+        if not bool(v683.get('benchmark_ok')):
+            raise RuntimeError('V6.83 benchmark 未对齐，禁止 source reconciliation')
+        cand=v683.get('candidate_state')
+        if not isinstance(cand,dict):
+            raise RuntimeError('V6.83 没有 candidate_state，禁止继续')
+
+        _v684_write(status='running',phase='load_source_reconstruction',
+                     message='读取既有 JLaw winner-management source reconstruction；不重新扫字幕…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Reuse prior source-reconstruction artifacts if present.
+        source_artifacts=[]
+        source_dirs=[]
+        for nm in ['V658D_DIR','V658C_DIR','V659B_DIR']:
+            d=globals().get(nm)
+            if d is not None:source_dirs.append((nm,d))
+        for nm,d in source_dirs:
+            try:
+                rp=Path(d)/'result.json'
+                if rp.exists():
+                    obj=json.loads(rp.read_text(encoding='utf-8'))
+                    if isinstance(obj,dict):
+                        source_artifacts.append({'name':nm,'result':obj})
+            except Exception:
+                pass
+
+        # Canonical source-supported semantics already reconstructed in V6.58C/D.
+        # IMPORTANT: do not convert examples into new numeric rules.
+        semantics=[
+            {
+                'semantic':'STOP_EXIT',
+                'supported':True,
+                'source_basis':'When a predefined stop actually triggers, JLaw exits weak positions; strong names that do not trigger their stop are held.',
+                'numeric_profit_threshold_supported':False,
+                'implication_for_v683':'Does NOT support cancelling a stop merely because prior MFE reached +20% or +30%.'
+            },
+            {
+                'semantic':'HOLD_WINNER_IF_STOP_SURVIVES',
+                'supported':True,
+                'source_basis':'If a stock remains relatively strong and survives the correction without triggering the stop, he tries to keep holding rather than sell only because of subjective market fear.',
+                'numeric_profit_threshold_supported':False,
+                'implication_for_v683':'Supports letting strength run only while the actual stop/sell condition has not fired.'
+            },
+            {
+                'semantic':'PARTIAL_PROFIT_SELECTED_WINNERS',
+                'supported':True,
+                'source_basis':'Actual-trade examples include partial profit taking on selected extended winners.',
+                'numeric_profit_threshold_supported':False,
+                'implication_for_v683':'Supports partial harvesting as a case semantic, but not a universal +20/+30 fixed-profit rule.'
+            },
+            {
+                'semantic':'MARKET_RISK_TIGHTEN_AND_PROFIT_LOCK',
+                'supported':True,
+                'source_basis':'First-person reconstruction supports reducing exposure / tightening stops / locking profit when market warning or deterioration appears.',
+                'numeric_profit_threshold_supported':False,
+                'implication_for_v683':'If anything, source context can tighten protection on winners under warning; it does not justify mechanically widening a -7% stop after +20/+30.'
+            }
+        ]
+
+        _v684_write(status='running',phase='reconcile',
+                     message='把 V6.83 +20/+30 proof state 与 source-supported semantics 对齐…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        proof_level=str(cand.get('proof_level',''))
+        future50=float(cand.get('future50_rate')) if cand.get('future50_rate') is not None else None
+        true_failure=float(cand.get('true_failure_rate')) if cand.get('true_failure_rate') is not None else None
+        coverage=float(cand.get('coverage')) if cand.get('coverage') is not None else None
+        n=int(cand.get('n') or 0)
+
+        # Explicitly evaluate proposed actions against source support and prior test history.
+        proposals=[
+            {
+                'proposal':'CANCEL_OR_WIDEN_STOP_AFTER_PROFIT_PROOF',
+                'source_supported':False,
+                'already_tested_or_related':'V6.79G close-confirmed stop proxy failed: no winner rescue and severe-loss leakage rose sharply.',
+                'decision':'REJECT'
+            },
+            {
+                'proposal':'FIXED_TAKE_PROFIT_AT_20_OR_30',
+                'source_supported':False,
+                'already_tested_or_related':'Earlier V6.29 already tested fixed +20/+30 take-profit / partial-harvest variants; do not repeat.',
+                'decision':'REJECT_DUPLICATE'
+            },
+            {
+                'proposal':'KEEP_BASE_STOP_BUT_ADD_SOURCE_SUPPORTED_WINNER_MANAGEMENT_CONTEXT',
+                'source_supported':True,
+                'already_tested_or_related':'Source semantics support HOLD while stop survives, selected partial profit, and market-warning tightening/profit lock.',
+                'decision':'ONLY_VALID_DIRECTION'
+            }
+        ]
+
+        # No A/B is allowed unless source material supports a concrete, identifiable action.
+        # Current source corpus does NOT justify a universal +20/+30 -> wider stop switch.
+        ab_ready=False
+        verdict='SOURCE_DOES_NOT_SUPPORT_PROFIT_THRESHOLD_STOP_SWITCH'
+        next_step=(
+            'Do NOT run another stop-widening A/B. Preserve fixed -7% baseline. '
+            'Use the proved-strength state only as a diagnostic tag, then reconcile exact source-supported '
+            'winner-management contexts (relative-strength survival, selected partial profit, market-warning tightening/profit lock) '
+            'against the existing exit engine. A new A/B is allowed only when one concrete source action is both identifiable and not already tested.'
+        )
+
+        result={
+            'version':'V6.84 JLaw Winner-Management Source Reconciliation',
+            'verdict':verdict,
+            'ab_ready':ab_ready,
+            'v683_candidate':{
+                'proof_level':proof_level,'n':n,'coverage':coverage,
+                'future50_rate':future50,'true_failure_rate':true_failure
+            },
+            'source_semantics':semantics,
+            'proposal_reconciliation':proposals,
+            'source_artifact_count':len(source_artifacts),
+            'important_negative':'The source material does not support turning +20% or +30% prior profit into a universal rule that cancels or widens the stop. Great-Wall-Motor-style partial-profit examples are cases, not universal numeric thresholds.',
+            'history_dedup':'V6.29 already tested fixed/partial take-profit families. V6.79G rejected a generic relaxed-stop proxy. V6.80-81 found STOP-event price/volume separation weak. V6.82 rejected fixed entry delay. Do not repeat those branches.',
+            'next_step':next_step,
+            'cache_note':'Reads V6.83 result + prior V6.58C/D/V6.59 source-reconstruction artifacts only; 0 Tiingo; no historical replay; no universe rebuild.'
+        }
+        V684_DIR.mkdir(parents=True,exist_ok=True)
+        V684_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v684_write(status='done',phase='done',message=f'V6.84 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v684_write(status='error',phase='error',
+                     message=f'V6.84 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v684_thread=None
+
+def _v684_start():
+    global v684_thread
+    if _v684_alive():return False
+    _v684_write(status='starting',phase='starting',message='V6.84 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v684_thread=threading.Thread(target=_v684_run,daemon=True);v684_thread.start();return True
+
+@APP.route('/v684/run',methods=['GET','POST'])
+def v684_run():_v684_start();return redirect('/v684/jlaw-winner-management-reconciliation')
+
+@APP.get('/api/v684/status')
+def v684_status_api():return jsonify(_v684_status())
+
+@APP.get('/v684/jlaw-winner-management-reconciliation')
+def v684_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v684_status();R={}
+    if V684_RESULT.exists():
+        try:
+            obj=json.loads(V684_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+
+    C=R.get('v683_candidate') if isinstance(R.get('v683_candidate'),dict) else {}
+    sem=R.get('source_semantics') if isinstance(R.get('source_semantics'),list) else []
+    prop=R.get('proposal_reconciliation') if isinstance(R.get('proposal_reconciliation'),list) else []
+
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    sr=''
+    for x in sem:
+        sr+=f"<tr><td><b>{e(x.get('semantic'))}</b></td><td>{'YES' if x.get('supported') else 'NO'}</td><td>{e(x.get('source_basis'))}</td><td>{e(x.get('implication_for_v683'))}</td></tr>"
+    pr=''
+    for x in prop:
+        pr+=f"<tr><td><b>{e(x.get('proposal'))}</b></td><td>{'YES' if x.get('source_supported') else 'NO'}</td><td>{e(x.get('decision'))}</td><td>{e(x.get('already_tested_or_related'))}</td></tr>"
+
+    btn='' if _v684_alive() else '<a href="/v684/run"><button>▶ 开始 V6.84 Source Reconciliation</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fefce8;border:1px solid #eab308;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>📚 V6.84 JLaw Winner-Management Source Reconciliation</h1>
+<div class="info">先查来源，再决定是否允许 A/B。V6.83 的 +20/+30 proved-strength 只是统计状态，不能自动变成新的 Stop 规则。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>A/B Ready: <b>{e(R.get('ab_ready','—'))}</b></p>
+<p>V6.83 candidate: <b>{e(C.get('proof_level','—'))}</b> · N={integer(C.get('n'))} · Coverage={num(C.get('coverage'))*100:.1f}% · Future +50={num(C.get('future50_rate'))*100:.1f}% · True Failure={num(C.get('true_failure_rate'))*100:.1f}%</p></div>
+<div class="c"><h2>Source-Supported Winner Management</h2>
+<table><tr><th>Semantic</th><th>Supported</th><th>Source Basis</th><th>Implication for V6.83</th></tr>{sr or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>What We Are Allowed to Test Next</h2>
+<table><tr><th>Proposal</th><th>Source Supported</th><th>Decision</th><th>History / Reason</th></tr>{pr or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v684_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v684_home_base is not None:
+    def _v684_home_wrap(*args,**kwargs):
+        resp=_v684_home_base(*args,**kwargs)
+        card="""<div id="v684-source-card" style="background:#fefce8;border:5px solid #ca8a04;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>📚 V6.84 JLaw Winner-Management Source Reconciliation</h2>
+        <p>V6.83 proved-strength state → source semantics → A/B permission gate · no replay</p>
+        <a href="/v684/jlaw-winner-management-reconciliation"><button>打开 V6.84</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v684-source-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v684-source-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v684_home_base:APP.view_functions[ep]=_v684_home_wrap
