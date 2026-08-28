@@ -44736,3 +44736,542 @@ if _v699_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v699_home_base:APP.view_functions[ep]=_v699_home_wrap
+
+
+# ========================= V7.00 WINNER-SAFE FAILURE CONFIRMATION =========================
+V700_DIR=DATA_DIR/'v700_winner_safe_failure_confirmation'
+V700_STATUS=V700_DIR/'status.json'; V700_RESULT=V700_DIR/'result.json'
+v700_thread=None
+
+def _v700_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':8,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V700_STATUS.exists():
+        try:x.update(json.loads(V700_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v700_write(**kw):
+    V700_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v700_status();x.update(kw)
+    V700_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v700_alive():
+    return v700_thread is not None and v700_thread.is_alive()
+
+def _v700_exact(pack, dt, field):
+    if pack is None:return np.nan
+    dns=pack.get('date_ns'); vals=pack.get(field)
+    if dns is None or vals is None or len(dns)==0:return np.nan
+    x=np.int64(pd.Timestamp(dt).normalize().value)
+    j=int(np.searchsorted(dns,x,side='left'))
+    if j>=len(dns) or dns[j]!=x:return np.nan
+    v=float(vals[j]); return v if np.isfinite(v) and v>0 else np.nan
+
+def _v700_entry_index(pack, dt):
+    if pack is None:return None
+    dns=pack.get('date_ns')
+    if dns is None or len(dns)==0:return None
+    x=np.int64(pd.Timestamp(dt).normalize().value)
+    j=int(np.searchsorted(dns,x,side='left'))
+    if j>=len(dns) or dns[j]!=x:return None
+    return j
+
+def _v700_failure_at(pack, entry_idx, entry_px, cp):
+    """
+    Predeclared semantic confirmation, no percentage grid:
+      1) checkpoint close <= entry
+      2) close < MA20
+      3) 10-session return < 0
+      4) close < prior 10-session low
+    Evaluated only at D20/D30/D40/D60 close.
+    """
+    if pack is None or entry_idx is None:return None
+    j=int(entry_idx)+int(cp)
+    dns=pack.get('date_ns')
+    if dns is None or j>=len(dns) or j<20:return None
+    close=float(pack['close'][j])
+    if not np.isfinite(close) or close<=0 or not np.isfinite(entry_px) or entry_px<=0:return None
+    ma20=float(np.mean(np.asarray(pack['close'][j-19:j+1],dtype=float)))
+    c10=float(pack['close'][j-10])
+    prior10=np.asarray(pack['low'][j-10:j],dtype=float)
+    if len(prior10)<10 or not np.isfinite(prior10).all() or not np.isfinite(c10) or c10<=0:return None
+    ret10=float(close/c10-1.0)
+    prior10low=float(np.min(prior10))
+    fail=bool(close<=entry_px and close<ma20 and ret10<0.0 and close<prior10low)
+    return {
+        'checkpoint':int(cp),
+        'date_ns':int(dns[j]),
+        'date':str(pd.Timestamp(int(dns[j])).date()),
+        'close':close,
+        'ret_from_entry':float(close/entry_px-1.0),
+        'ma20':ma20,
+        'ret10':ret10,
+        'prior10low':prior10low,
+        'fail':fail
+    }
+
+def _v700_run():
+    global v700_thread
+    t0=time.time()
+    try:
+        _v700_write(status='running',phase='precheck',
+                    message='V7.00 precheck：关闭 V6.99 replacement；锁定 failure-confirmation 语义…',
+                    processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+
+        if not V699_RESULT.exists():raise RuntimeError('找不到 V6.99 result.json')
+        r99=json.loads(V699_RESULT.read_text(encoding='utf-8'))
+        if str(r99.get('verdict',''))!='ONE_REPLACEMENT_FAILS_PIT_ECONOMIC_AB':
+            raise RuntimeError('V6.99 不是已确认 FAIL；V7.00 不应启动')
+        if not V695_RESULT.exists():raise RuntimeError('找不到 V6.95 result.json')
+        r95=json.loads(V695_RESULT.read_text(encoding='utf-8'))
+        if str(r95.get('priority',''))!='HOLD_DURATION_BURDEN':
+            raise RuntimeError('V6.95 未确认 HOLD_DURATION_BURDEN')
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists():raise RuntimeError('找不到 V6.94 clean candidate feature store')
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+
+        F=pd.read_csv(ffp,compression='gzip')
+        P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        F['listing_id']=F.listing_id.astype(str)
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F['is_stop']=F.is_stop.astype(bool)
+
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        meta=P[need].copy()
+        meta['listing_id']=meta.listing_id.astype(str)
+        meta['entry_date']=pd.to_datetime(meta.entry_date,errors='coerce').dt.normalize()
+        meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize()
+        meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left')
+        Z['candidate_order']=pd.to_numeric(Z.candidate_order,errors='coerce')
+        Z['entry_px_raw']=pd.to_numeric(Z.entry_px,errors='coerce')
+        Z['exit_px_raw']=pd.to_numeric(Z.control_exit_px,errors='coerce')
+        Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret'])
+        Z=Z.sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        if len(Z)<500:raise RuntimeError(f'clean candidate rows too small: {len(Z)}')
+
+        # FIRST_COME structural parity, same clean stream.
+        if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json')
+        r97=json.loads(V697_RESULT.read_text(encoding='utf-8'))
+        expected=int((r97.get('reconstruction') or {}).get('admitted_first_come') or 0)
+        PF=F.copy()
+        om=P[['listing_id','entry_date','candidate_order']].copy()
+        om['listing_id']=om.listing_id.astype(str);om['entry_date']=pd.to_datetime(om.entry_date,errors='coerce').dt.normalize()
+        om=om.drop_duplicates(['listing_id','entry_date'],keep='first')
+        PF=PF.drop(columns=['candidate_order'],errors='ignore').merge(om,on=['listing_id','entry_date'],how='left')
+        PF['candidate_order']=pd.to_numeric(PF.candidate_order,errors='coerce')
+        mo=PF.candidate_order.isna()
+        if mo.any():
+            base=float(pd.to_numeric(P.candidate_order,errors='coerce').max()+1)
+            PF.loc[mo,'candidate_order']=base+np.arange(int(mo.sum()))
+        PF=PF.dropna(subset=['entry_date','exit_date','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        active={};struct_admitted=0
+        for dt,g in PF.groupby('entry_date',sort=True):
+            dt=pd.Timestamp(dt).normalize()
+            for j in list(active):
+                if pd.Timestamp(active[j])<=dt:active.pop(j,None)
+            for j,r in g.iterrows():
+                if len(active)<10:
+                    active[int(j)]=pd.Timestamp(r.exit_date);struct_admitted+=1
+        if expected and struct_admitted!=expected:
+            raise RuntimeError(f'FIRST_COME parity mismatch V7.00={struct_admitted} vs V6.97={expected}')
+
+        _v700_write(status='running',phase='price_cache',
+                    message=f'Parity OK {struct_admitted}/{expected} · Historical Cache corporate-action-safe OHLC…',
+                    processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index')
+        packs={};factors={};missing=0;lids=list(spans.keys())
+
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=120)
+            hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10)
+            q=q[(q.date>=lo)&(q.date<=hi)].copy()
+            if q.empty:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy())
+            hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
+            for c in ['open','high','low','close']:
+                q[c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
+            packs[str(lid)]={
+                'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),
+                'open':q.open.to_numpy(dtype='float32'),
+                'high':q.high.to_numpy(dtype='float32'),
+                'low':q.low.to_numpy(dtype='float32'),
+                'close':q.close.to_numpy(dtype='float32')
+            }
+            if n==1 or n%100==0 or n==len(lids):
+                _v700_write(status='running',phase='price_cache',
+                            message=f'OHLC packs {n}/{len(lids)} · missing={missing}',
+                            processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        # Normalize cached entry/exit prices onto the same corporate-action-safe scale.
+        def sf(lid,dt):
+            return float(_v6894_factor_for_date(factors.get(str(lid),[]),pd.Timestamp(dt).normalize()))
+        Z['entry_px_safe']=[float(px)*sf(lid,dt) for px,lid,dt in zip(Z.entry_px_raw,Z.listing_id,Z.entry_date)]
+        Z['exit_px_safe']=[float(px)*sf(lid,dt) for px,lid,dt in zip(Z.exit_px_raw,Z.listing_id,Z.exit_date)]
+        Z=Z[Z.listing_id.astype(str).isin(packs.keys())].copy().reset_index(drop=True)
+
+        _v700_write(status='running',phase='trade_safety',
+                    message='Trade-level safety：D20/D30/D40/D60 首次 failure confirmation vs D91 STOP / +30/+50/+100 Winner…',
+                    processed=2,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        # D91 labels and slot-days.
+        B95=pd.read_csv(V695_DIR/'clean_stop_burden_rows.csv.gz',compression='gzip')
+        B95['listing_id']=B95.listing_id.astype(str)
+        B95['entry_date']=pd.to_datetime(B95.entry_date,errors='coerce').dt.normalize()
+        bmap={(str(r.listing_id),pd.Timestamp(r.entry_date).normalize()):(str(r.hold_bucket),float(r.slot_days))
+              for _,r in B95.iterrows()}
+
+        diag=[]
+        checkpoints=[20,30,40,60]
+        for i,r in Z.iterrows():
+            p=packs.get(str(r.listing_id))
+            ei=_v700_entry_index(p,r.entry_date)
+            if ei is None:continue
+            first=None
+            for cp in checkpoints:
+                q=_v700_failure_at(p,ei,float(r.entry_px_safe),cp)
+                if q and q['fail']:
+                    first=q;break
+            hb,sd=bmap.get((str(r.listing_id),pd.Timestamp(r.entry_date).normalize()),('',np.nan))
+            diag.append({
+                'id':int(i),'listing_id':str(r.listing_id),'entry_date':pd.Timestamp(r.entry_date),
+                'final_ret':float(r.ret),'is_stop':bool(r.is_stop),
+                'is_d91':bool(hb=='D91_PLUS_VERY_SLOW_STOP'),
+                'slot_days':sd,
+                'winner30':bool(float(r.ret)>=.30),
+                'winner50':bool(float(r.ret)>=.50),
+                'winner100':bool(float(r.ret)>=1.0),
+                'triggered':bool(first is not None),
+                'trigger_cp':int(first['checkpoint']) if first else None,
+                'trigger_date':pd.Timestamp(first['date']) if first else pd.NaT,
+                'trigger_ret':float(first['ret_from_entry']) if first else np.nan
+            })
+        D=pd.DataFrame(diag)
+        if D.empty:raise RuntimeError('V7.00 diagnostic rows empty')
+
+        def retention(col):
+            g=D[D[col]]
+            return float(1-g.triggered.mean()) if len(g) else np.nan
+        d91=D[D.is_d91]
+        d91_capture=float(d91.triggered.mean()) if len(d91) else np.nan
+        d91_freed=[]
+        for _,r in d91[d91.triggered].iterrows():
+            if pd.notna(r.slot_days) and pd.notna(r.trigger_cp):
+                d91_freed.append(max(0.0,float(r.slot_days)-float(r.trigger_cp)))
+        freed_days=float(np.sum(d91_freed)) if d91_freed else 0.0
+        touched=D[D.triggered].copy()
+        touched_delta=(pd.to_numeric(touched.trigger_ret,errors='coerce')-pd.to_numeric(touched.final_ret,errors='coerce')) if len(touched) else pd.Series(dtype=float)
+
+        safety={
+            'rows':int(len(D)),
+            'triggered_n':int(D.triggered.sum()),
+            'trigger_rate':float(D.triggered.mean()),
+            'd91_n':int(len(d91)),
+            'd91_triggered':int(d91.triggered.sum()),
+            'd91_capture_rate':d91_capture,
+            'd91_freed_slot_days_est':freed_days,
+            'd91_median_freed_days':float(np.median(d91_freed)) if d91_freed else None,
+            'winner30_retention':retention('winner30'),
+            'winner50_retention':retention('winner50'),
+            'winner100_retention':retention('winner100'),
+            'avg_touched_trade_delta':float(touched_delta.mean()) if len(touched_delta) else None,
+            'positive_touched_delta_share':float((touched_delta>0).mean()) if len(touched_delta) else None
+        }
+
+        safety_pass=bool(
+            (safety.get('winner30_retention') or 0)>=.95 and
+            (safety.get('winner50_retention') or 0)>=.97 and
+            (safety.get('winner100_retention') or 0)>=.98 and
+            (safety.get('d91_capture_rate') or 0)>=.10 and
+            (safety.get('avg_touched_trade_delta') or -999)>0
+        )
+
+        _v700_write(status='running',phase='replay_prep',
+                    message=f'Safety gate={safety_pass} · 构建同一 executable stream 的 A/B 10-slot replay…',
+                    processed=3,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY calendar cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        cal=set(pd.to_datetime(R.date,errors='coerce').dropna().dt.normalize().tolist())
+        cal.update(Z.entry_date.tolist());cal.update(Z.exit_date.tolist());cal=sorted(cal)
+
+        rec=Z.to_dict('index');entries={};exits={}
+        for i,r in rec.items():
+            entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i)
+            exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+        future={i:float(r['ret']) for i,r in rec.items()}
+        denoms={t:sum(v>=t for v in future.values()) for t in [.20,.30,.50,1.0]}
+
+        # Map diagnostic trigger by executable row key, not dataframe index.
+        trigmap={}
+        for _,r in D[D.triggered].iterrows():
+            key=(str(r.listing_id),pd.Timestamp(r.entry_date).normalize())
+            trigmap[key]={'cp':int(r.trigger_cp),'signal_date':pd.Timestamp(r.trigger_date).normalize()}
+
+        def sim(label,treatment=False):
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];admitted=[]
+            pending={};early_exits=[];skipcap=0;skipcash=0;step=max(1,len(cal)//20)
+
+            for di,dt in enumerate(cal,1):
+                dt=pd.Timestamp(dt).normalize()
+
+                # Execute prior-close failure confirmations at the next exact trading-session OPEN.
+                for i in list(pending):
+                    if i not in pos:
+                        pending.pop(i,None);continue
+                    p=pos[i]
+                    op=_v700_exact(packs.get(p['listing_id']),dt,'open')
+                    if not np.isfinite(op):continue
+                    gross=p['shares']*op
+                    proceeds=gross*(1.0-0.001)
+                    cash+=proceeds
+                    ledger.append({'id':i,'ret':proceeds/p['cost']-1.0,'pnl':proceeds-p['cost'],
+                                   'reason':'V700_FAILURE_CONFIRM_NEXT_OPEN',
+                                   'entry_date':p['entry_date'],'exit_date':dt})
+                    early_exits.append({'id':i,'signal_date':pending[i]['signal_date'],'exit_date':dt,
+                                        'cp':pending[i]['cp'],'ret':proceeds/p['cost']-1.0,
+                                        'future_ret':future.get(i,np.nan)})
+                    pos.pop(i,None);last.pop(i,None);pending.pop(i,None)
+
+                # Frozen control exits.
+                for i in exits.get(dt,[]):
+                    p=pos.pop(i,None)
+                    if p is None:continue
+                    pending.pop(i,None)
+                    xp=float(rec[i]['exit_px_safe'])
+                    proceeds=p['shares']*xp
+                    cash+=proceeds
+                    ledger.append({'id':i,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],
+                                   'reason':str(rec[i].get('control_reason',rec[i].get('exit_reason',''))),
+                                   'entry_date':p['entry_date'],'exit_date':dt})
+                    last.pop(i,None)
+
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close')
+                    cp=cp if np.isfinite(cp) else last.get(i,p['entry_px'])
+                    last[i]=cp;hv+=p['shares']*cp
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0
+
+                # FIRST_COME admissions only. No replacement.
+                for i in entries.get(dt,[]):
+                    r=rec[i];ep=float(r['entry_px_safe'])
+                    if not np.isfinite(ep) or ep<=0:skipcash+=1;continue
+                    if len(pos)<10 and target>0:
+                        invest=min(float(target),float(cash))
+                        if invest>1e-12:
+                            cash-=invest
+                            pos[i]={'listing_id':str(r['listing_id']),'shares':invest/ep,
+                                    'entry_px':ep,'cost':invest,'entry_date':dt}
+                            last[i]=ep;admitted.append(i);continue
+                        skipcash+=1
+                    else:skipcap+=1
+
+                # At the CLOSE, arm the predeclared confirmation for next-session open.
+                if treatment:
+                    for i,p in list(pos.items()):
+                        if i in pending:continue
+                        key=(p['listing_id'],pd.Timestamp(p['entry_date']).normalize())
+                        tr=trigmap.get(key)
+                        if tr and pd.Timestamp(tr['signal_date']).normalize()==dt:
+                            pending[i]={'signal_date':dt,'cp':int(tr['cp'])}
+
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close')
+                    cp=cp if np.isfinite(cp) else last.get(i,p['entry_px'])
+                    last[i]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+                eqrows.append((dt,float(eq),float(hv/eq) if eq>0 else np.nan,len(pos)))
+
+                if di%step==0 or di==len(cal):
+                    _v700_write(status='running',phase='replay',
+                                message=f'{label} {int(round(di/len(cal)*100))}%',
+                                processed=5,total=8,elapsed_sec=round(time.time()-t0,1))
+
+            st=_v699_stats(eqrows,ledger,admitted,future,denoms,label)
+            st['skipped_capacity']=int(skipcap);st['skipped_cash']=int(skipcash)
+            st['failure_exit_count']=int(len(early_exits))
+            return st,pd.DataFrame(early_exits)
+
+        _v700_write(status='running',phase='replay',
+                    message='A/B：A frozen FIRST_COME vs B winner-safe failure confirmation…',
+                    processed=4,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        A,_=sim('A_FROZEN_FIRST_COME',False)
+        executable_ratio=float(A.get('admitted_positions',0)/expected) if expected else np.nan
+        if expected and executable_ratio<.90:
+            raise RuntimeError(f'Executable A coverage too low {A.get("admitted_positions")}/{expected}={executable_ratio:.1%}')
+        BT,EL=sim('B_V700_FAILURE_CONFIRM',True)
+
+        _v700_write(status='running',phase='economics',
+                    message='计算 CAGR / PF / MaxDD / Calmar / winner capture / year stability…',
+                    processed=6,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate',
+              'winner20_capture','winner30_capture','winner50_capture','winner100_capture']
+        delta={k:(BT.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
+        annA=A.get('annual',{});annB=BT.get('annual',{})
+        ys=sorted(set(annA)&set(annB))
+        beats=sum(annB[y]>annA[y] for y in ys)
+        year_share=float(beats/len(ys)) if ys else np.nan
+
+        econ_pass=bool(
+            safety_pass and
+            (delta['cagr']>=.01 or delta['profit_factor']>=.10 or delta['calmar']>=.03) and
+            BT['maxdd']>=A['maxdd']-.03 and
+            BT['winner50_capture']>=A['winner50_capture']-1e-12 and
+            BT['winner100_capture']>=A['winner100_capture']-1e-12 and
+            (not ys or year_share>=.50)
+        )
+
+        verdict='WINNER_SAFE_FAILURE_CONFIRMATION_PASSES_FULL_ECONOMIC_AB' if econ_pass else (
+            'WINNER_SAFE_FAILURE_CONFIRMATION_FAILS_SAFETY_GATE' if not safety_pass
+            else 'WINNER_SAFE_FAILURE_CONFIRMATION_FAILS_PORTFOLIO_ECONOMICS'
+        )
+
+        result={
+            'version':'V7.00 Winner-Safe Failure Confirmation',
+            'verdict':verdict,
+            'rule':{
+                'checkpoints':[20,30,40,60],
+                'confirmation':'checkpoint close <= entry AND close < MA20 AND ret10 < 0 AND close < prior10-session low',
+                'execution':'confirm at checkpoint close; exit next exact trading-session open',
+                'failure_exit_friction':0.001,
+                'no_replacement':True,
+                'no_threshold_grid':True
+            },
+            'trade_level_safety':safety,
+            'safety_gate':{
+                'winner30_retention_ge_95':bool((safety.get('winner30_retention') or 0)>=.95),
+                'winner50_retention_ge_97':bool((safety.get('winner50_retention') or 0)>=.97),
+                'winner100_retention_ge_98':bool((safety.get('winner100_retention') or 0)>=.98),
+                'd91_capture_ge_10':bool((safety.get('d91_capture_rate') or 0)>=.10),
+                'touched_trade_delta_positive':bool((safety.get('avg_touched_trade_delta') or -999)>0),
+                'overall':safety_pass
+            },
+            'A':A,'B':BT,'delta':delta,
+            'year_stability':{'comparable_years':len(ys),'B_beats_A_years':int(beats),'share':year_share,'A':annA,'B':annB},
+            'parity':{'v697_expected_admissions':int(expected),'structural_admissions':int(struct_admitted),
+                      'executable_A_admissions':int(A.get('admitted_positions',0)),
+                      'executable_coverage_vs_v697':executable_ratio},
+            'acceptance':'PASS only if trade-level winner safety passes first; then CAGR +1pp OR PF +0.10 OR Calmar +0.03, MaxDD not worse by >3pp, +50/+100 account winner capture not reduced, and B beats A in >=50% comparable years.',
+            'history_dedup':'V6.96 generic stale proxy failed; V6.96.1 showed D91 anatomy was not safely separable; V6.99 replacement failed economically. V7.00 does not retune those branches. It tests one structural failure-confirmation state with no percentage threshold sweep and no replacement.',
+            'important':'This is a model-diagnostic proxy, not claimed as a verbatim JLaw rule. Signal is close-of-day, execution is next-open to avoid same-day lookahead.',
+            'next_step':('If PASS, freeze and forward-chain confirm once before production.' if econ_pass else 'Close early-exit/capital-recycling branch; do not tune neighboring thresholds. Return to Entry/Trigger/actual-buy quality.'),
+            'cache_note':'V6.94 clean stream + V6.69 order + V6.17 Historical Cache + V6.95 burden labels + SPY calendar; 0 Tiingo; 0 universe rescan.'
+        }
+
+        V700_DIR.mkdir(parents=True,exist_ok=True)
+        V700_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        D.to_csv(V700_DIR/'failure_confirmation_trade_safety.csv.gz',index=False,compression='gzip')
+        if len(EL):EL.to_csv(V700_DIR/'failure_exit_ledger.csv.gz',index=False,compression='gzip')
+
+        _v700_write(status='done',phase='done',message=f'V7.00 完成：{verdict}',
+                    processed=8,total=8,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v700_write(status='error',phase='error',
+                    message=f'V7.00 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=8,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v700_thread=None
+
+def _v700_start():
+    global v700_thread
+    if _v700_alive():return False
+    _v700_write(status='starting',phase='starting',message='V7.00 正在启动',
+                processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+    v700_thread=threading.Thread(target=_v700_run,daemon=True);v700_thread.start();return True
+
+@APP.route('/v700/run',methods=['GET','POST'])
+def v700_run():
+    _v700_start();return redirect('/v700/winner-safe-failure-confirmation')
+
+@APP.get('/api/v700/status')
+def v700_status_api():
+    return jsonify(_v700_status())
+
+@APP.get('/v700/winner-safe-failure-confirmation')
+def v700_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v700_status();R={}
+    if V700_RESULT.exists():
+        try:R=json.loads(V700_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=np.nan):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def pct(v):
+        x=num(v);return '—' if not np.isfinite(x) else f'{x*100:.2f}%'
+    def n2(v):
+        x=num(v);return '—' if not np.isfinite(x) else f'{x:.2f}'
+
+    S=R.get('trade_level_safety',{}) or {}
+    G=R.get('safety_gate',{}) or {}
+    A=R.get('A',{}) or {};B=R.get('B',{}) or {};D=R.get('delta',{}) or {};Y=R.get('year_stability',{}) or {}
+
+    def accrow(label,x):
+        return f"<tr><td><b>{e(label)}</b></td><td>{pct(x.get('cagr'))}</td><td>{n2(x.get('profit_factor'))}</td><td>{pct(x.get('maxdd'))}</td><td>{n2(x.get('calmar'))}</td><td>{pct(x.get('win_rate'))}</td><td>{pct(x.get('avg_trade'))}</td><td>{pct(x.get('winner30_capture'))}</td><td>{pct(x.get('winner50_capture'))}</td><td>{pct(x.get('winner100_capture'))}</td><td>{int(x.get('failure_exit_count',0) or 0)}</td></tr>"
+
+    btn='' if _v700_alive() else '<a href="/v700/run"><button>▶ 开始 V7.00 Winner-Safe Failure</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #10b981;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧯 V7.00 Winner-Safe Failure Confirmation</h1><div class="info">D20/D30/D40/D60 只在 close 确认：仍≤Entry、跌破 MA20、ret10<0、并创 prior-10-session low；下一交易日 open 执行。无 replacement、无阈值 sweep。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',8) or 8)} · {num(st.get('elapsed_sec'),0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Safety overall=<b>{e(G.get('overall','—'))}</b></p></div>
+<div class="c"><h2>Trade-Level Winner Safety</h2><table><tr><th>Triggered</th><th>D91 Capture</th><th>D91 Freed Slot-days</th><th>+30 Retain</th><th>+50 Retain</th><th>+100 Retain</th><th>Avg Δ Touched</th><th>Positive Δ</th></tr>
+<tr><td>{int(S.get('triggered_n',0) or 0):,}</td><td>{pct(S.get('d91_capture_rate'))}</td><td>{int(S.get('d91_freed_slot_days_est',0) or 0):,}</td><td>{pct(S.get('winner30_retention'))}</td><td>{pct(S.get('winner50_retention'))}</td><td>{pct(S.get('winner100_retention'))}</td><td>{pct(S.get('avg_touched_trade_delta'))}</td><td>{pct(S.get('positive_touched_delta_share'))}</td></tr></table></div>
+<div class="c"><h2>Full 10-Slot A/B</h2><table><tr><th>Strategy</th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>Avg Trade</th><th>+30 Cap</th><th>+50 Cap</th><th>+100 Cap</th><th>Failure Exits</th></tr>
+{accrow('A Frozen FIRST_COME',A)}{accrow('B V7.00 Failure Confirm',B)}</table>
+<p>Δ CAGR={pct(D.get('cagr'))} · Δ PF={n2(D.get('profit_factor'))} · Δ MaxDD={pct(D.get('maxdd'))} · Δ Calmar={n2(D.get('calmar'))}</p>
+<p>Comparable years={int(Y.get('comparable_years',0) or 0)} · B beats A={int(Y.get('B_beats_A_years',0) or 0)} · share={pct(Y.get('share'))}</p></div>
+</div></body></html>"""
+
+_v700_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v700_home_base is not None:
+    def _v700_home_wrap(*args,**kwargs):
+        resp=_v700_home_base(*args,**kwargs)
+        card="""<div id="v700-failure-card" style="background:#ecfdf5;border:5px solid #10b981;border-radius:24px;padding:28px;margin:22px 0"><h2>🧯 V7.00 Winner-Safe Failure Confirmation</h2><p>D20/D30/D40/D60 · next-open execution · winner safety + full 10-slot A/B</p><a href="/v700/winner-safe-failure-confirmation"><button>打开 V7.00</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v700-failure-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v700_home_base:APP.view_functions[ep]=_v700_home_wrap
