@@ -36685,3 +36685,364 @@ if _v681_home_base is not None:
         body=str(resp);return body if 'id="v681-rich-stop7-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v681_home_base:APP.view_functions[ep]=_v681_home_wrap
+
+
+# ========================= V6.82 ENTRY-TIMING COUNTERFACTUAL AUDIT =========================
+V682_DIR=DATA_DIR/'v682_entry_timing_counterfactual_audit'
+V682_STATUS=V682_DIR/'status.json'; V682_RESULT=V682_DIR/'result.json'
+v682_thread=None
+
+def _v682_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V682_STATUS.exists():
+        try:x.update(json.loads(V682_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v682_write(**kw):
+    V682_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v682_status();x.update(kw)
+    V682_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v682_alive(): return v682_thread is not None and v682_thread.is_alive()
+
+def _v682_fixed_stop_trade(q,entry_idx,entry_px,horizon=1260):
+    """
+    Trade-level diagnostic only.
+    Enter at supplied price/index, then use the same fixed -7% intraday stop and HOLD1260.
+    No portfolio/admission logic is changed.
+    """
+    if entry_idx is None or entry_idx<0 or entry_idx>=len(q):return None
+    ep=float(entry_px)
+    if not np.isfinite(ep) or ep<=0:return None
+    stop=ep*.93
+    z=q.iloc[entry_idx:min(len(q),entry_idx+int(horizon)+1)].reset_index(drop=True)
+    if z.empty:return None
+    mfe=float((z.high/ep-1).max())
+    mae=float((z.low/ep-1).min())
+    for j,r in z.iterrows():
+        if j==0:continue
+        o,h,l,c=map(float,[r.open,r.high,r.low,r.close])
+        if o<=stop:
+            return {'exit_date':pd.Timestamp(r.date).normalize(),'exit_px':float(o),
+                    'reason':'STOP_GAP','ret':float(o/ep-1),'mfe':mfe,'mae':mae,'hold_sessions':int(j)}
+        if l<=stop:
+            return {'exit_date':pd.Timestamp(r.date).normalize(),'exit_px':float(stop),
+                    'reason':'STOP7','ret':-.07,'mfe':mfe,'mae':mae,'hold_sessions':int(j)}
+    rr=z.iloc[-1]
+    return {'exit_date':pd.Timestamp(rr.date).normalize(),'exit_px':float(rr.close),
+            'reason':'HOLD1260','ret':float(rr.close/ep-1),'mfe':mfe,'mae':mae,'hold_sessions':int(len(z)-1)}
+
+def _v682_run():
+    global v682_thread
+    t0=time.time()
+    try:
+        _v682_write(status='running',phase='control_parity',
+                     message='先复现 V6.70F 28.25% Control，确认 exact admitted schedule…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v682_write(status='running',phase='control_parity',
+                             message=f'Control cache {n}/{tot}',
+                             processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.82 Entry-Timing Counterfactual Audit',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap}
+            V682_DIR.mkdir(parents=True,exist_ok=True)
+            V682_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v682_write(status='done',phase='blocked',message=f'Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['schedule_id']=S.index.astype(str)
+        S=S.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+        admitted_ids=sorted(set(S.listing_id.astype(str)))
+
+        _v682_write(status='running',phase='admitted_ohlc',
+                     message=f'只读取 Control admitted OHLC · {len(admitted_ids):,} listings',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        oh={};tot2=len(admitted_ids)
+        for n,lid in enumerate(admitted_ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+            if not q.empty:oh[lid]=q
+            if n==1 or n%100==0 or n==tot2:
+                _v682_write(status='running',phase='admitted_ohlc',
+                             message=f'Admitted OHLC {n}/{tot2}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        _v682_write(status='running',phase='counterfactuals',
+                     message='同一批 admitted opportunities：Original vs D+1 Open vs D+3 Open…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[];total=len(S)
+        for k,r in S.iterrows():
+            q=oh.get(str(r.listing_id))
+            if q is None or q.empty:continue
+            dates=list(q.date)
+            try:i0=dates.index(pd.Timestamp(r.entry_date).normalize())
+            except ValueError:continue
+
+            # Original control outcome from frozen cache, not recomputed.
+            orig_ret=float(r.exit_px)/float(r.entry_px)-1.0
+            orig_stop=('STOP' in str(r.exit_reason).upper())
+
+            # Future opportunity labels from original entry, diagnostic only.
+            z=q.iloc[i0:min(len(q),i0+1261)]
+            future_mfe=float((z.high/float(r.entry_px)-1).max()) if len(z) else np.nan
+            future20=bool(np.isfinite(future_mfe) and future_mfe>=.20)
+            future50=bool(np.isfinite(future_mfe) and future_mfe>=.50)
+            future100=bool(np.isfinite(future_mfe) and future_mfe>=1.00)
+
+            rec={'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
+                 'entry_date':r.entry_date,'orig_entry_px':float(r.entry_px),
+                 'orig_ret':orig_ret,'orig_stop':orig_stop,
+                 'future_mfe':future_mfe,'future20':future20,'future50':future50,'future100':future100}
+
+            # Entry geometry in first 5 sessions.
+            first=q.iloc[i0:min(len(q),i0+6)].copy()
+            rec['min_low_d1']=float(first.low.iloc[:2].min()/float(r.entry_px)-1) if len(first)>=2 else np.nan
+            rec['min_low_d3']=float(first.low.iloc[:4].min()/float(r.entry_px)-1) if len(first)>=4 else np.nan
+            rec['min_low_d5']=float(first.low.iloc[:6].min()/float(r.entry_px)-1) if len(first)>=6 else np.nan
+            rec['max_high_d3']=float(first.high.iloc[:4].max()/float(r.entry_px)-1) if len(first)>=4 else np.nan
+            rec['max_high_d5']=float(first.high.iloc[:6].max()/float(r.entry_px)-1) if len(first)>=6 else np.nan
+
+            for name,delay in [('D1_OPEN',1),('D3_OPEN',3)]:
+                if i0+delay>=len(q):
+                    rec[name+'_available']=False
+                    continue
+                ep=float(q.open.iloc[i0+delay])
+                ex=_v682_fixed_stop_trade(q,i0+delay,ep,1260)
+                rec[name+'_available']=ex is not None
+                rec[name+'_entry_px']=ep
+                rec[name+'_entry_delta']=ep/float(r.entry_px)-1
+                if ex is not None:
+                    rec[name+'_ret']=ex['ret']
+                    rec[name+'_mfe']=ex['mfe']
+                    rec[name+'_mae']=ex['mae']
+                    rec[name+'_stop']=('STOP' in ex['reason'])
+                    rec[name+'_plus20']=bool(ex['mfe']>=.20)
+                    rec[name+'_plus50']=bool(ex['mfe']>=.50)
+                    rec[name+'_plus100']=bool(ex['mfe']>=1.0)
+            rows.append(rec)
+            if k==0 or (k+1)%100==0 or k+1==total:
+                _v682_write(status='running',phase='counterfactuals',
+                             message=f'Entry counterfactuals {k+1}/{total}',
+                             processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('Entry counterfactual rows 为空')
+
+        _v682_write(status='running',phase='washout_attribution',
+                     message='专看 Original STOP7 但最终会成为 Winner 的 washout，判断固定延迟是否改善…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        summaries=[]
+        for target in [20,50,100]:
+            cohort=A[A.orig_stop & A[f'future{target}']].copy()
+            for name in ['D1_OPEN','D3_OPEN']:
+                avail=cohort[cohort.get(name+'_available',False)==True].copy() if len(cohort) else cohort
+                if len(avail):
+                    summaries.append({
+                        'target':f'+{target}%','variant':name,'n':int(len(avail)),
+                        'median_entry_delta':float(pd.to_numeric(avail[name+'_entry_delta'],errors='coerce').median()),
+                        'stop_rate':float(avail[name+'_stop'].mean()),
+                        'winner_retention':float(avail[name+f'_plus{target}'].mean()),
+                        'rescued_from_stop':int(((avail.orig_stop==True)&(avail[name+'_stop']==False)).sum()),
+                        'median_ret':float(pd.to_numeric(avail[name+'_ret'],errors='coerce').median()),
+                        'avg_ret':float(pd.to_numeric(avail[name+'_ret'],errors='coerce').mean())
+                    })
+
+        geometry={
+            'admitted_n':int(len(A)),
+            'orig_stop_rate':float(A.orig_stop.mean()),
+            'future20_rate':float(A.future20.mean()),
+            'future50_rate':float(A.future50.mean()),
+            'future100_rate':float(A.future100.mean()),
+            'median_min_low_d1':float(pd.to_numeric(A.min_low_d1,errors='coerce').median()),
+            'median_min_low_d3':float(pd.to_numeric(A.min_low_d3,errors='coerce').median()),
+            'median_min_low_d5':float(pd.to_numeric(A.min_low_d5,errors='coerce').median())
+        }
+
+        # Conservative promotion gate: one fixed delay must reduce stop rate by >=10pp in washout cohort
+        # while retaining >=90% of the corresponding future winners.
+        cand=[]
+        for x in summaries:
+            # original cohort stop rate is 100% by construction
+            x['stop_reduction_pp']=float((1.0-x['stop_rate'])*100)
+            x['candidate']=bool(x['stop_reduction_pp']>=10 and x['winner_retention']>=.90)
+            if x['candidate']:cand.append(x)
+        verdict='FIXED_DELAY_ENTRY_OPPORTUNITY_FOUND_DIAGNOSTIC_ONLY' if cand else 'FIXED_DELAY_ENTRY_DOES_NOT_SOLVE_WASHOUT'
+
+        result={
+            'version':'V6.82 Entry-Timing Counterfactual Audit',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'geometry':geometry,'washout_delay_summary':summaries,
+            'important':'Diagnostic only. This is NOT another pullback-rule optimization. Only two predeclared fixed delays (D+1 open, D+3 open) are tested on the exact V6.70F Control-admitted opportunities, using the same fixed -7% trade-level stop.',
+            'history_dedup':'Earlier project branches already explored pullback windows, pivot/10MA/20MA support, re-strength triggers, next-session execution and skip-chase logic. V6.82 deliberately does not retune those rules; it asks only whether simple entry timing displacement can remove washout geometry.',
+            'next_step':('If a fixed delay preserves >=90% winners and materially reduces STOP7, reconstruct ONE source-supported delayed/confirmed entry semantic for controlled A/B.'
+                         if cand else
+                         'Do not delay entries mechanically. Return to setup/breakout quality attribution rather than repeating pullback/trigger parameter tests.'),
+            'cache_note':'Exact V6.70F Control admission + V6.69 exits + V6.17 admitted-only OHLC; 0 Tiingo; no universe rebuild.'
+        }
+        V682_DIR.mkdir(parents=True,exist_ok=True)
+        V682_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V682_DIR/'entry_timing_counterfactual_rows.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v682_write(status='done',phase='done',message=f'V6.82 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v682_write(status='error',phase='error',
+                     message=f'V6.82 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v682_thread=None
+
+def _v682_start():
+    global v682_thread
+    if _v682_alive():return False
+    _v682_write(status='starting',phase='starting',message='V6.82 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v682_thread=threading.Thread(target=_v682_run,daemon=True);v682_thread.start();return True
+
+@APP.route('/v682/run',methods=['GET','POST'])
+def v682_run():_v682_start();return redirect('/v682/entry-timing-counterfactual')
+
+@APP.get('/api/v682/status')
+def v682_status_api():return jsonify(_v682_status())
+
+@APP.get('/v682/entry-timing-counterfactual')
+def v682_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v682_status();R={}
+    if V682_RESULT.exists():
+        try:
+            obj=json.loads(V682_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    G=R.get('geometry') if isinstance(R.get('geometry'),dict) else {}
+    arr=R.get('washout_delay_summary') if isinstance(R.get('washout_delay_summary'),list) else []
+    trs=''
+    for x in arr:
+        trs+=f"<tr><td><b>{e(x.get('target'))}</b></td><td>{e(x.get('variant'))}</td><td>{integer(x.get('n'))}</td><td>{num(x.get('median_entry_delta'))*100:+.2f}%</td><td>{num(x.get('stop_rate'))*100:.1f}%</td><td>{num(x.get('winner_retention'))*100:.1f}%</td><td>{num(x.get('stop_reduction_pp')):.1f}pp</td><td>{'YES' if x.get('candidate') else '-'}</td></tr>"
+    btn='' if _v682_alive() else '<a href="/v682/run"><button>▶ 开始 V6.82 Entry Timing Audit</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #22c55e;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🎯 V6.82 Entry-Timing Counterfactual Audit</h1>
+<div class="info">不重复旧 Pullback/Trigger 参数测试。只问：对 exact Control-admitted opportunities，机械地晚 1 天或 3 天入场，能不能减少 STOP7 washout，同时保住 Big Winner？</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>V6.70F Control CAGR: <b>{num(B.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p></div>
+<div class="c"><h2>Entry Geometry</h2>
+<p>Admitted N={integer(G.get('admitted_n'))} · Original STOP={num(G.get('orig_stop_rate'))*100:.1f}% · Future +20={num(G.get('future20_rate'))*100:.1f}% · +50={num(G.get('future50_rate'))*100:.1f}% · +100={num(G.get('future100_rate'))*100:.1f}%</p>
+<p>Median early low vs entry: D1 {num(G.get('median_min_low_d1'))*100:+.2f}% · D3 {num(G.get('median_min_low_d3'))*100:+.2f}% · D5 {num(G.get('median_min_low_d5'))*100:+.2f}%</p></div>
+<div class="c"><h2>Original STOP7 + Future Winner · Fixed Delay Audit</h2>
+<table><tr><th>Future target</th><th>Variant</th><th>N</th><th>Median Entry Δ</th><th>New Stop Rate</th><th>Winner Retention</th><th>Stop Reduction</th><th>Candidate</th></tr>
+{trs or '<tr><td colspan=8>运行后显示</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v682_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v682_home_base is not None:
+    def _v682_home_wrap(*args,**kwargs):
+        resp=_v682_home_base(*args,**kwargs)
+        card="""<div id="v682-entry-timing-card" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🎯 V6.82 Entry-Timing Counterfactual Audit</h2>
+        <p>Exact admitted opportunities · D+1 / D+3 fixed delay · washout retention · cache-only</p>
+        <a href="/v682/entry-timing-counterfactual"><button>打开 V6.82</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v682-entry-timing-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v682-entry-timing-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v682_home_base:APP.view_functions[ep]=_v682_home_wrap
