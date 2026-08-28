@@ -34472,3 +34472,247 @@ if _v677_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v677_home_base:APP.view_functions[ep]=_v677_home_wrap
+
+
+# ========================= V6.78 PROVEN-STRENGTH STOP7 WASHOUT AUTOPSY =========================
+V678_DIR=DATA_DIR/'v678_proven_strength_stop7_washout_autopsy'
+V678_STATUS=V678_DIR/'status.json'; V678_RESULT=V678_DIR/'result.json'
+v678_thread=None
+
+def _v678_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V678_STATUS.exists():
+        try:x.update(json.loads(V678_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v678_write(**kw):
+    V678_DIR.mkdir(parents=True,exist_ok=True);x=_v678_status();x.update(kw)
+    V678_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v678_alive():return v678_thread is not None and v678_thread.is_alive()
+
+def _v678_run():
+    global v678_thread
+    t0=time.time()
+    try:
+        _v678_write(status='running',phase='load',message='读取 V6.69 paired trades + V6.17 cached price paths…',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        P=P.copy()
+        P['listing_id']=P.listing_id.astype(str)
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce')
+        P=P.dropna(subset=['entry_date','control_exit_date','entry_px']).copy()
+        P=P[P.control_reason.astype(str).str.contains('STOP7',case=False,regex=False)].copy()
+        if P.empty:raise RuntimeError('STOP7 cohort 为空')
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('找不到 V6.17 Historical Cache manifest')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        M=M[M[lidcol].astype(str).isin(set(P.listing_id.astype(str)))].copy()
+        if M.empty:raise RuntimeError('Historical manifest 与 STOP7 cohort 无匹配')
+
+        _v678_write(status='running',phase='price_cache',message=f'读取 STOP7 所需 cached paths · {len(M):,} listings',processed=1,total=5,elapsed_sec=round(time.time()-t0,1))
+        paths={}
+        total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            lid=str(mr[lidcol])
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if not q.empty:paths[lid]=q.reset_index(drop=True)
+            if n==1 or n%500==0 or n==total:
+                _v678_write(status='running',phase='price_cache',message=f'cached paths {n:,}/{total:,}',processed=1,total=5,elapsed_sec=round(time.time()-t0,1))
+        if not paths:raise RuntimeError('cached price paths 为空')
+
+        _v678_write(status='running',phase='washout_path',message='重建“先证明强势 → 后 STOP7 → 再恢复”的完整路径…',processed=2,total=5,elapsed_sec=round(time.time()-t0,1))
+        rows=[]
+        levels=[.05,.10,.20,.30,.50,1.00]
+        for r in P.itertuples(index=False):
+            g=paths.get(str(r.listing_id))
+            if g is None:continue
+            q=g[g.date>=r.entry_date].head(1260).copy()
+            if q.empty:continue
+            ep=float(r.entry_px)
+            hi=q.high.to_numpy(dtype=float)/ep-1.0
+            lo=q.low.to_numpy(dtype=float)/ep-1.0
+            cl=q.close.to_numpy(dtype=float)/ep-1.0
+            stop_date=pd.Timestamp(r.control_exit_date).normalize()
+            pre=q[q.date<=stop_date].copy()
+            post=q[q.date>stop_date].copy()
+            if pre.empty:continue
+            pre_hi=pre.high.to_numpy(dtype=float)/ep-1.0
+            # Proven strength = first 5 sessions touched +5%
+            proven=bool(len(pre_hi) and float(pd.Series(pre_hi[:min(5,len(pre_hi))]).max())>=.05)
+            if not proven:continue
+
+            # What happened BEFORE stop?
+            pre_mfe=float(np.nanmax(pre.high.to_numpy(dtype=float)/ep-1.0))
+            pre_mae=float(np.nanmin(pre.low.to_numpy(dtype=float)/ep-1.0))
+            stop_gap=bool('GAP' in str(r.control_reason).upper())
+            days_to_stop=int((stop_date-pd.Timestamp(r.entry_date).normalize()).days)
+
+            # What happened AFTER stop, measured vs original entry.
+            rec={'listing_id':str(r.listing_id),'entry_date':r.entry_date,'stop_date':stop_date,
+                 'pre_stop_mfe':pre_mfe,'pre_stop_mae':pre_mae,'stop_gap':stop_gap,'days_to_stop_calendar':days_to_stop}
+            if len(post):
+                ph=post.high.to_numpy(dtype=float)/ep-1.0
+                rec['post_stop_max_high']=float(np.nanmax(ph))
+                for lv in levels[1:]:
+                    idx=np.where(np.isfinite(ph)&(ph>=lv))[0]
+                    rec[f'post_hit_{int(lv*100)}']=bool(len(idx))
+                    rec[f'post_days_to_{int(lv*100)}']=int(idx[0]+1) if len(idx) else None
+            else:
+                rec['post_stop_max_high']=None
+                for lv in levels[1:]:
+                    rec[f'post_hit_{int(lv*100)}']=False
+                    rec[f'post_days_to_{int(lv*100)}']=None
+            rows.append(rec)
+
+        A=pd.DataFrame(rows)
+        if A.empty:raise RuntimeError('Proven-strength STOP7 cohort 为空')
+
+        _v678_write(status='running',phase='decompose',message='分解：多大 pre-stop strength 最容易被洗掉后再成为 Winner…',processed=3,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        bands=[
+            ('MFE_5_10',.05,.10),
+            ('MFE_10_20',.10,.20),
+            ('MFE_20_30',.20,.30),
+            ('MFE_30_PLUS',.30,999)
+        ]
+        band_rows=[]
+        for name,lo_b,hi_b in bands:
+            g=A[(A.pre_stop_mfe>=lo_b)&(A.pre_stop_mfe<hi_b)].copy()
+            if g.empty:continue
+            row={'band':name,'n':int(len(g)),
+                 'median_pre_stop_mfe':float(g.pre_stop_mfe.median()),
+                 'median_days_to_stop':float(g.days_to_stop_calendar.median()),
+                 'gap_stop_share':float(g.stop_gap.mean()),
+                 'median_post_stop_max_high':float(pd.to_numeric(g.post_stop_max_high,errors='coerce').median())}
+            for lv in [10,20,30,50,100]:
+                row[f'post_hit_{lv}_rate']=float(g[f'post_hit_{lv}'].mean())
+                d=pd.to_numeric(g.loc[g[f'post_hit_{lv}'],f'post_days_to_{lv}'],errors='coerce')
+                row[f'median_post_days_to_{lv}']=float(d.median()) if d.notna().any() else None
+            band_rows.append(row)
+
+        # Recovery after stop grouped by hold duration to see immediate vs slow washout.
+        dur_rows=[]
+        for name,mask in [
+            ('STOP_WITHIN_14D',A.days_to_stop_calendar<=14),
+            ('STOP_15_60D',(A.days_to_stop_calendar>14)&(A.days_to_stop_calendar<=60)),
+            ('STOP_61D_PLUS',A.days_to_stop_calendar>60)
+        ]:
+            g=A[mask].copy()
+            if g.empty:continue
+            dur_rows.append({
+                'group':name,'n':int(len(g)),
+                'median_pre_stop_mfe':float(g.pre_stop_mfe.median()),
+                'post_hit20_rate':float(g.post_hit_20.mean()),
+                'post_hit50_rate':float(g.post_hit_50.mean()),
+                'post_hit100_rate':float(g.post_hit_100.mean()),
+                'gap_stop_share':float(g.stop_gap.mean())
+            })
+
+        _v678_write(status='running',phase='interpret',message='确定下一步：是否值得建立“proven-strength 后的不同防守状态”…',processed=4,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        # Diagnostic-only gate. If recovery is very high after proof of strength, investigate stateful defense.
+        overall={
+            'n':int(len(A)),
+            'median_pre_stop_mfe':float(A.pre_stop_mfe.median()),
+            'post_hit20_rate':float(A.post_hit_20.mean()),
+            'post_hit30_rate':float(A.post_hit_30.mean()),
+            'post_hit50_rate':float(A.post_hit_50.mean()),
+            'post_hit100_rate':float(A.post_hit_100.mean()),
+            'gap_stop_share':float(A.stop_gap.mean()),
+            'median_days_to_stop':float(A.days_to_stop_calendar.median())
+        }
+        verdict='PROVEN_STRENGTH_STOP7_WASHOUT_CONFIRMED' if overall['post_hit20_rate']>=0.50 else 'PROVEN_STRENGTH_WASHOUT_WEAK'
+        result={
+            'version':'V6.78 Proven-Strength STOP7 Washout Autopsy',
+            'verdict':verdict,
+            'overall':overall,
+            'pre_stop_strength_bands':band_rows,
+            'stop_duration_groups':dur_rows,
+            'source_alignment':'JLaw source supports predefined stop exits, holding strong names that survive their stops, and position-aware HOLD/REDUCE/SELL. It does NOT by itself support widening a stop after +5%; V6.78 therefore remains diagnostic only.',
+            'important':'No new stop rule. No wider stop. No breakeven move. No trailing stop. No profit lock. This only asks whether a stock that already proved strength belongs to a distinct risk state worth source-faithful reconstruction.',
+            'next_step':('Reconstruct ONE source-supported “proven-strength / hold-winner” defense semantic from existing transcripts and test it against frozen -7% control.'
+                         if verdict=='PROVEN_STRENGTH_STOP7_WASHOUT_CONFIRMED'
+                         else
+                         'Do not branch the stop state. Keep -7% frozen and continue entry-quality research.'),
+            'cache_note':'V6.69 STOP7 cohort + V6.17 manifest/cached OHLC only; 0 Tiingo; no universe rebuild; no exit reconstruction.'
+        }
+        V678_DIR.mkdir(parents=True,exist_ok=True)
+        V678_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V678_DIR/'proven_strength_stop7_rows.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+        _v678_write(status='done',phase='done',message=f'V6.78 完成：{verdict}',processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v678_write(status='error',phase='error',message=f'V6.78 失败：{type(ex).__name__}: {ex}',processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v678_thread=None
+
+def _v678_start():
+    global v678_thread
+    if _v678_alive():return False
+    _v678_write(status='starting',phase='starting',message='V6.78 正在启动',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v678_thread=threading.Thread(target=_v678_run,daemon=True);v678_thread.start();return True
+
+@APP.route('/v678/run',methods=['GET','POST'])
+def v678_run():_v678_start();return redirect('/v678/proven-strength-stop7-autopsy')
+
+@APP.get('/api/v678/status')
+def v678_status_api():return jsonify(_v678_status())
+
+@APP.get('/v678/proven-strength-stop7-autopsy')
+def v678_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v678_status();R={}
+    if V678_RESULT.exists():
+        try:R=json.loads(V678_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    btn='' if _v678_alive() else '<a href="/v678/run"><button>▶ 开始 V6.78 Washout Autopsy</button></a>'
+    O=R.get('overall',{})
+    br=''
+    for x in R.get('pre_stop_strength_bands',[]):
+        br+=f"<tr><td><b>{e(x['band'])}</b></td><td>{x['n']:,}</td><td>{x['median_pre_stop_mfe']*100:.1f}%</td><td>{x['post_hit20_rate']*100:.1f}%</td><td>{x['post_hit50_rate']*100:.1f}%</td><td>{x['post_hit100_rate']*100:.1f}%</td><td>{x['median_days_to_stop']:.0f}d</td></tr>"
+    dr=''
+    for x in R.get('stop_duration_groups',[]):
+        dr+=f"<tr><td><b>{e(x['group'])}</b></td><td>{x['n']:,}</td><td>{x['median_pre_stop_mfe']*100:.1f}%</td><td>{x['post_hit20_rate']*100:.1f}%</td><td>{x['post_hit50_rate']*100:.1f}%</td><td>{x['post_hit100_rate']*100:.1f}%</td></tr>"
+    err=''
+    if st.get('error'):err=f"<div class='err'><b>具体错误：</b>{e(st['error'])}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #818cf8;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.err{{background:#fff1f2;border:1px solid #fb7185;padding:15px;border-radius:12px}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🛡️ V6.78 Proven-Strength STOP7 Washout Autopsy</h1><div class="info">主线回归 Big Winner：专看已经在前5日证明过 +5% strength、后来却 STOP7 的股票。只做路径归因，不修改 -7% Stop。</div></div>
+<div class="c"><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>N={int(O.get('n',0)):,} · median pre-stop MFE={float(O.get('median_pre_stop_mfe',0) or 0)*100:.1f}% · after stop +20={float(O.get('post_hit20_rate',0) or 0)*100:.1f}% · +50={float(O.get('post_hit50_rate',0) or 0)*100:.1f}% · +100={float(O.get('post_hit100_rate',0) or 0)*100:.1f}%</p></div>
+<div class="c"><h2>By Pre-Stop Strength</h2><table><tr><th>Band</th><th>N</th><th>Median MFE</th><th>Post +20</th><th>Post +50</th><th>Post +100</th><th>Median Stop Day</th></tr>{br or '<tr><td colspan=7>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>By Stop Timing</h2><table><tr><th>Group</th><th>N</th><th>Median MFE</th><th>Post +20</th><th>Post +50</th><th>Post +100</th></tr>{dr or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v678_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v678_home_base is not None:
+    def _v678_home_wrap(*args,**kwargs):
+        resp=_v678_home_base(*args,**kwargs)
+        card="""<div id="v678-washout" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🛡️ V6.78 Proven-Strength STOP7 Washout Autopsy</h2><p>Big Winner mainline · proven strength -> STOP7 -> recovery</p><a href="/v678/proven-strength-stop7-autopsy"><button>打开 V6.78</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v678_home_base:APP.view_functions[ep]=_v678_home_wrap
