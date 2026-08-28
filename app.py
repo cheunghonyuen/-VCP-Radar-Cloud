@@ -43011,3 +43011,227 @@ if _v694_home_base is not None:
         body=str(resp);return body if 'id="v694-full-path-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v694_home_base:APP.view_functions[ep]=_v694_home_wrap
+
+
+# ========================= V6.95 CLEAN STOP CAPITAL-BURDEN ATTRIBUTION =========================
+V695_DIR=DATA_DIR/'v695_clean_stop_capital_burden'
+V695_STATUS=V695_DIR/'status.json'; V695_RESULT=V695_DIR/'result.json'
+v695_thread=None
+
+def _v695_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V695_STATUS.exists():
+        try:x.update(json.loads(V695_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v695_write(**kw):
+    V695_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v695_status();x.update(kw)
+    V695_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v695_alive(): return v695_thread is not None and v695_thread.is_alive()
+
+def _v695_bucket(days):
+    d=float(days)
+    if d<=3:return 'D0_3_FAST_STOP'
+    if d<=10:return 'D4_10_EARLY_STOP'
+    if d<=30:return 'D11_30_MID_STOP'
+    if d<=90:return 'D31_90_SLOW_STOP'
+    return 'D91_PLUS_VERY_SLOW_STOP'
+
+def _v695_run():
+    global v695_thread
+    t0=time.time()
+    try:
+        _v695_write(status='running',phase='load_clean_candidate_rows',
+                    message='读取 V6.94 clean candidate feature store；不重复 V6.75 STOP taxonomy…',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        fp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.94 clean_candidate_path_features.csv.gz')
+        F=pd.read_csv(fp,compression='gzip')
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F['is_stop']=F.is_stop.astype(bool)
+        F=F.dropna(subset=['entry_date','exit_date','ret']).copy()
+        S=F[F.is_stop].copy()
+        if len(S)<1000:raise RuntimeError(f'Clean STOP rows 太少: {len(S)}')
+
+        _v695_write(status='running',phase='calendar_and_regime',
+                    message='用现有 SPY point-in-time calendar/regime 计算每笔 STOP 的 slot-days…',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+        cal=np.array(sorted(R.date.unique()),dtype='datetime64[D]')
+
+        def slot_days(ed,xd):
+            a=np.datetime64(pd.Timestamp(ed).date(),'D'); b=np.datetime64(pd.Timestamp(xd).date(),'D')
+            lo=int(np.searchsorted(cal,a,side='left')); hi=int(np.searchsorted(cal,b,side='right'))
+            return max(1,hi-lo)
+
+        S['slot_days']=[slot_days(ed,xd) for ed,xd in zip(S.entry_date,S.exit_date)]
+        S['hold_bucket']=S.slot_days.map(_v695_bucket)
+
+        RR=R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date')
+        S=pd.merge_asof(S.sort_values('entry_date'),RR,on='entry_date',direction='backward')
+        S['regime']=S.regime.fillna('UNKNOWN').astype(str)
+
+        _v695_write(status='running',phase='burden_attribution',
+                    message='按频率 × slot-days 拆资本负担；找最大资金时间黑洞…',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        total_n=len(S); total_days=float(S.slot_days.sum())
+        order=['D0_3_FAST_STOP','D4_10_EARLY_STOP','D11_30_MID_STOP','D31_90_SLOW_STOP','D91_PLUS_VERY_SLOW_STOP']
+        bucket_rows=[]
+        for b in order:
+            g=S[S.hold_bucket.eq(b)]
+            if g.empty:continue
+            bucket_rows.append({
+                'bucket':b,'n':int(len(g)),'count_share':float(len(g)/total_n),
+                'slot_days':int(g.slot_days.sum()),'capital_day_share':float(g.slot_days.sum()/total_days),
+                'median_slot_days':float(g.slot_days.median()),'avg_loss':float(g.ret.mean()),
+                'median_loss':float(g.ret.median())
+            })
+
+        regime_rows=[]
+        for name,g in S.groupby('regime'):
+            regime_rows.append({
+                'regime':str(name),'n':int(len(g)),'count_share':float(len(g)/total_n),
+                'slot_days':int(g.slot_days.sum()),'capital_day_share':float(g.slot_days.sum()/total_days),
+                'median_slot_days':float(g.slot_days.median()),'avg_loss':float(g.ret.mean())
+            })
+        regime_rows=sorted(regime_rows,key=lambda x:x['capital_day_share'],reverse=True)
+
+        _v695_write(status='running',phase='descriptive_path_burden',
+                    message='Path-DNA 只做描述，不再当筛选器；确认 STOP 负担是否集中在某个 quartile…',
+                    processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        specs=[('contraction_3stage',False),('contraction_20v20',False),('updown_ratio_40',True),('ret_20',True)]
+        ps=[]
+        for col,higher in specs:
+            x=pd.to_numeric(S[col],errors='coerce')
+            p=x.rank(pct=True,method='average')
+            ps.append(p if higher else (1-p))
+        S['path_score_desc']=pd.concat(ps,axis=1).mean(axis=1)
+        try:S['path_quartile']=pd.qcut(S.path_score_desc,4,labels=['Q1_LOW','Q2','Q3','Q4_HIGH'],duplicates='drop').astype(str)
+        except Exception:S['path_quartile']='UNAVAILABLE'
+
+        path_rows=[]
+        for name,g in S.groupby('path_quartile'):
+            path_rows.append({
+                'path_quartile':str(name),'n':int(len(g)),'count_share':float(len(g)/total_n),
+                'capital_day_share':float(g.slot_days.sum()/total_days),
+                'median_slot_days':float(g.slot_days.median()),'avg_loss':float(g.ret.mean())
+            })
+        path_rows=sorted(path_rows,key=lambda x:x['path_quartile'])
+
+        dominant=max(bucket_rows,key=lambda x:x['capital_day_share']) if bucket_rows else None
+        dominant_regime=regime_rows[0] if regime_rows else None
+
+        if dominant and dominant['capital_day_share']>=.35:
+            priority='HOLD_DURATION_BURDEN'
+        elif dominant_regime and dominant_regime['capital_day_share']>=.45:
+            priority='MARKET_REGIME_BURDEN'
+        else:
+            priority='DIFFUSE_STOP_BURDEN_NO_SINGLE_SOURCE'
+
+        verdict='STOP_CAPITAL_BURDEN_SOURCE_IDENTIFIED' if priority!='DIFFUSE_STOP_BURDEN_NO_SINGLE_SOURCE' else 'STOP_BURDEN_DIFFUSE_NO_SINGLE_DOMINANT_SOURCE'
+
+        result={
+            'version':'V6.95 Clean STOP Capital-Burden Attribution',
+            'verdict':verdict,'priority':priority,
+            'clean_stop_n':int(total_n),'total_stop_slot_days':int(total_days),
+            'hold_duration_buckets':bucket_rows,'market_regime_burden':regime_rows,
+            'path_quartile_burden_descriptive_only':path_rows,
+            'dominant_hold_bucket':dominant,'dominant_regime':dominant_regime,
+            'history_dedup':'V6.75 already decomposed STOP7 into gap/immediate/slow/early-strength types; V6.80-82 tested STOP classifiers/delayed entry. V6.95 instead measures economic burden on the full clean stream: which STOP class consumes the most slot-days/capital time and in which market regime.',
+            'important':'Count share is not capital damage. This version ranks STOP burden by slot-days, not by a new predictive score.',
+            'next_step':('Run one causal experiment against the single dominant burden source only; preserve the clean -7% stop and do not reopen closed STOP classifiers.'
+                         if priority!='DIFFUSE_STOP_BURDEN_NO_SINGLE_SOURCE'
+                         else 'Do not invent a broad STOP rule. Move to portfolio-level capital scheduling because no single STOP source dominates.'),
+            'cache_note':'Reads V6.94 clean feature store + SPY regime cache only; 0 Tiingo; 0 universe scan; 0 historical-price reread; 0 replay.'
+        }
+
+        V695_DIR.mkdir(parents=True,exist_ok=True)
+        V695_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        S[['listing_id','entry_date','exit_date','ret','slot_days','hold_bucket','regime','path_score_desc','path_quartile']].to_csv(
+            V695_DIR/'clean_stop_burden_rows.csv.gz',index=False,compression='gzip'
+        )
+        _v695_write(status='done',phase='done',message=f'V6.95 完成：{verdict} · Priority={priority}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v695_write(status='error',phase='error',message=f'V6.95 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v695_thread=None
+
+def _v695_start():
+    global v695_thread
+    if _v695_alive():return False
+    _v695_write(status='starting',phase='starting',message='V6.95 正在启动',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v695_thread=threading.Thread(target=_v695_run,daemon=True);v695_thread.start();return True
+
+@APP.route('/v695/run',methods=['GET','POST'])
+def v695_run():_v695_start();return redirect('/v695/clean-stop-capital-burden')
+
+@APP.get('/api/v695/status')
+def v695_status_api():return jsonify(_v695_status())
+
+@APP.get('/v695/clean-stop-capital-burden')
+def v695_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v695_status();R={}
+    if V695_RESULT.exists():
+        try:R=json.loads(V695_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('hold_duration_buckets',[]) if isinstance(R.get('hold_duration_buckets'),list) else []
+    G=R.get('market_regime_burden',[]) if isinstance(R.get('market_regime_burden'),list) else []
+    P=R.get('path_quartile_burden_descriptive_only',[]) if isinstance(R.get('path_quartile_burden_descriptive_only'),list) else []
+    brows=''.join(f"<tr><td><b>{e(x.get('bucket'))}</b></td><td>{integer(x.get('n')):,}</td><td>{num(x.get('count_share'))*100:.1f}%</td><td>{integer(x.get('slot_days')):,}</td><td><b>{num(x.get('capital_day_share'))*100:.1f}%</b></td><td>{num(x.get('median_slot_days')):.0f}</td><td>{num(x.get('avg_loss'))*100:+.2f}%</td></tr>" for x in B)
+    grows=''.join(f"<tr><td><b>{e(x.get('regime'))}</b></td><td>{integer(x.get('n')):,}</td><td>{num(x.get('count_share'))*100:.1f}%</td><td>{num(x.get('capital_day_share'))*100:.1f}%</td><td>{num(x.get('median_slot_days')):.0f}</td><td>{num(x.get('avg_loss'))*100:+.2f}%</td></tr>" for x in G)
+    prows=''.join(f"<tr><td>{e(x.get('path_quartile'))}</td><td>{integer(x.get('n')):,}</td><td>{num(x.get('count_share'))*100:.1f}%</td><td>{num(x.get('capital_day_share'))*100:.1f}%</td><td>{num(x.get('median_slot_days')):.0f}</td></tr>" for x in P)
+    btn='' if _v695_alive() else '<a href="/v695/run"><button>▶ 开始 V6.95 STOP Burden</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧱 V6.95 Clean STOP Capital-Burden Attribution</h1><div class="info">不重复 V6.75 分类。这里问的是：56k+ clean STOP 到底哪一类最占用 10-slot 的时间与资本？按 slot-days 排，不按数量猜。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Priority: <b>{e(R.get('priority','—'))}</b> · clean STOP N={integer(R.get('clean_stop_n')):,} · total STOP slot-days={integer(R.get('total_stop_slot_days')):,}</p></div>
+<div class="c"><h2>Hold-Duration Burden</h2><table><tr><th>Bucket</th><th>N</th><th>Count Share</th><th>Slot-days</th><th>Capital-day Share</th><th>Median Hold</th><th>Avg Loss</th></tr>{brows or '<tr><td colspan=7>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Market-Regime Burden</h2><table><tr><th>Regime</th><th>N</th><th>Count Share</th><th>Capital-day Share</th><th>Median Hold</th><th>Avg Loss</th></tr>{grows or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Path Quartile Burden · Descriptive Only</h2><table><tr><th>Quartile</th><th>N</th><th>Count Share</th><th>Capital-day Share</th><th>Median Hold</th></tr>{prows or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v695_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v695_home_base is not None:
+    def _v695_home_wrap(*args,**kwargs):
+        resp=_v695_home_base(*args,**kwargs)
+        card="""<div id="v695-stop-burden-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0"><h2>🧱 V6.95 Clean STOP Capital-Burden Attribution</h2><p>56k+ STOP · slot-day burden · hold duration + market regime · cache-only</p><a href="/v695/clean-stop-capital-burden"><button>打开 V6.95</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v695-stop-burden-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v695-stop-burden-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v695_home_base:APP.view_functions[ep]=_v695_home_wrap
