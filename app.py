@@ -34677,38 +34677,105 @@ def v678_run():_v678_start();return redirect('/v678/proven-strength-stop7-autops
 @APP.get('/api/v678/status')
 def v678_status_api():return jsonify(_v678_status())
 
-@APP.get('/v678/proven-strength-stop7-autopsy')
-def v678_page():
+
+@APP.get('/v6782/proven-strength-stop7-autopsy')
+def v6782_page():
     import html
-    e=lambda x:html.escape(str(x));st=_v678_status();R={}
+    e=lambda x: html.escape(str(x))
+    st=_v678_status()
+    R={}
+    load_warning=''
     if V678_RESULT.exists():
-        try:R=json.loads(V678_RESULT.read_text(encoding='utf-8'))
-        except Exception:pass
-    btn='' if _v678_alive() else '<a href="/v678/run"><button>▶ 开始 V6.78 Washout Autopsy</button></a>'
-    O=R.get('overall',{})
+        try:
+            obj=json.loads(V678_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):
+                R=obj
+            else:
+                load_warning='旧 result.json 不是 dict，已忽略。'
+        except Exception as ex:
+            load_warning=f'旧 result.json 无法解析，已忽略：{type(ex).__name__}: {ex}'
+
+    def num(v, default=0.0):
+        try:
+            x=float(v)
+            return x if np.isfinite(x) else default
+        except Exception:
+            return default
+
+    def integer(v, default=0):
+        try:return int(float(v))
+        except Exception:return default
+
+    btn='' if _v678_alive() else '<a href="/v6782/run"><button>▶ 开始 V6.78.2 Washout Autopsy</button></a>'
+    O=R.get('overall') if isinstance(R.get('overall'),dict) else {}
+
     br=''
-    for x in R.get('pre_stop_strength_bands',[]):
-        br+=f"<tr><td><b>{e(x['band'])}</b></td><td>{x['n']:,}</td><td>{x['median_pre_stop_mfe']*100:.1f}%</td><td>{x['post_hit20_rate']*100:.1f}%</td><td>{x['post_hit50_rate']*100:.1f}%</td><td>{x['post_hit100_rate']*100:.1f}%</td><td>{x['median_days_to_stop']:.0f}d</td></tr>"
+    arr=R.get('pre_stop_strength_bands',[])
+    if not isinstance(arr,list): arr=[]
+    for x in arr:
+        if not isinstance(x,dict): continue
+        br += (
+            "<tr>"
+            f"<td><b>{e(x.get('band','—'))}</b></td>"
+            f"<td>{integer(x.get('n')):,}</td>"
+            f"<td>{num(x.get('median_pre_stop_mfe'))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_20_rate', x.get('post_hit20_rate')))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_50_rate', x.get('post_hit50_rate')))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_100_rate', x.get('post_hit100_rate')))*100:.1f}%</td>"
+            f"<td>{num(x.get('median_days_to_stop')):.0f}d</td>"
+            "</tr>"
+        )
+
     dr=''
-    for x in R.get('stop_duration_groups',[]):
-        dr+=f"<tr><td><b>{e(x['group'])}</b></td><td>{x['n']:,}</td><td>{x['median_pre_stop_mfe']*100:.1f}%</td><td>{x['post_hit20_rate']*100:.1f}%</td><td>{x['post_hit50_rate']*100:.1f}%</td><td>{x['post_hit100_rate']*100:.1f}%</td></tr>"
+    arr2=R.get('stop_duration_groups',[])
+    if not isinstance(arr2,list): arr2=[]
+    for x in arr2:
+        if not isinstance(x,dict): continue
+        dr += (
+            "<tr>"
+            f"<td><b>{e(x.get('group','—'))}</b></td>"
+            f"<td>{integer(x.get('n')):,}</td>"
+            f"<td>{num(x.get('median_pre_stop_mfe'))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_20_rate', x.get('post_hit20_rate')))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_50_rate', x.get('post_hit50_rate')))*100:.1f}%</td>"
+            f"<td>{num(x.get('post_hit_100_rate', x.get('post_hit100_rate')))*100:.1f}%</td>"
+            "</tr>"
+        )
+
     err=''
-    if st.get('error'):err=f"<div class='err'><b>具体错误：</b>{e(st['error'])}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
-    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #818cf8;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.err{{background:#fff1f2;border:1px solid #fb7185;padding:15px;border-radius:12px}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>🛡️ V6.78 Proven-Strength STOP7 Washout Autopsy</h1><div class="info">主线回归 Big Winner：专看已经在前5日证明过 +5% strength、后来却 STOP7 的股票。只做路径归因，不修改 -7% Stop。</div></div>
-<div class="c"><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
-<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>N={int(O.get('n',0)):,} · median pre-stop MFE={float(O.get('median_pre_stop_mfe',0) or 0)*100:.1f}% · after stop +20={float(O.get('post_hit20_rate',0) or 0)*100:.1f}% · +50={float(O.get('post_hit50_rate',0) or 0)*100:.1f}% · +100={float(O.get('post_hit100_rate',0) or 0)*100:.1f}%</p></div>
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    if load_warning:
+        err += f"<div class='warn'><b>旧结果提示：</b>{e(load_warning)}</div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #818cf8;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.err{{background:#fff1f2;border:1px solid #fb7185;padding:15px;border-radius:12px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;padding:15px;border-radius:12px;margin-top:10px}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🛡️ V6.78.2 Proven-Strength STOP7 Washout Autopsy</h1><div class="info">独立安全页面：不修改首页，不信任旧 result.json 的字段结构。只做路径归因，不修改 -7% Stop。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>N={integer(O.get('n')):,} · median pre-stop MFE={num(O.get('median_pre_stop_mfe'))*100:.1f}% · after stop +20={num(O.get('post_hit20_rate', O.get('post_hit_20_rate')))*100:.1f}% · +50={num(O.get('post_hit50_rate', O.get('post_hit_50_rate')))*100:.1f}% · +100={num(O.get('post_hit100_rate', O.get('post_hit_100_rate')))*100:.1f}%</p></div>
 <div class="c"><h2>By Pre-Stop Strength</h2><table><tr><th>Band</th><th>N</th><th>Median MFE</th><th>Post +20</th><th>Post +50</th><th>Post +100</th><th>Median Stop Day</th></tr>{br or '<tr><td colspan=7>运行后显示</td></tr>'}</table></div>
 <div class="c"><h2>By Stop Timing</h2><table><tr><th>Group</th><th>N</th><th>Median MFE</th><th>Post +20</th><th>Post +50</th><th>Post +100</th></tr>{dr or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
 </div></body></html>"""
 
+@APP.route('/v6782/run',methods=['GET','POST'])
+def v6782_run():
+    _v678_start()
+    return redirect('/v6782/proven-strength-stop7-autopsy')
 
-# V6.78.1 stability fix:
-# Do NOT monkey-patch the existing homepage view. The production app has accumulated
-# multiple historical homepage wrappers; adding another wrapper can make "/" fail
-# even though the V6.78 audit route itself is valid.
-# Open directly at: /v678/proven-strength-stop7-autopsy
+@APP.get('/api/v6782/status')
+def v6782_status_api():
+    return jsonify(_v678_status())
 
-@APP.get('/v678')
-def v678_launcher():
-    return redirect('/v678/proven-strength-stop7-autopsy')
+@APP.get('/v6783/proven-strength-stop7-autopsy')
+def v6783_page():
+    return v6782_page()
+
+@APP.route('/v6783/run',methods=['GET','POST'])
+def v6783_run():
+    _v678_start()
+    return redirect('/v6783/proven-strength-stop7-autopsy')
+
+@APP.get('/api/v6783/status')
+def v6783_status_api():
+    return jsonify(_v678_status())
