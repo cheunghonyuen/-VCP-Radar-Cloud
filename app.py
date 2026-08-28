@@ -38658,3 +38658,234 @@ if _v687_home_base is not None:
         body=str(resp);return body if 'id="v687-dedup-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v687_home_base:APP.view_functions[ep]=_v687_home_wrap
+
+
+# ========================= V6.88 NEW-SOURCE SEMANTIC DELTA GATE =========================
+V688_DIR=DATA_DIR/'v688_new_source_semantic_delta_gate'
+V688_STATUS=V688_DIR/'status.json'; V688_RESULT=V688_DIR/'result.json'
+v688_thread=None
+
+def _v688_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V688_STATUS.exists():
+        try:x.update(json.loads(V688_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v688_write(**kw):
+    V688_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v688_status();x.update(kw)
+    V688_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v688_alive(): return v688_thread is not None and v688_thread.is_alive()
+
+def _v688_jload(p):
+    try:
+        if p is not None and Path(p).exists():
+            z=json.loads(Path(p).read_text(encoding='utf-8'))
+            return z if isinstance(z,dict) else {}
+    except Exception:pass
+    return {}
+
+def _v688_run():
+    global v688_thread
+    t0=time.time()
+    try:
+        _v688_write(status='running',phase='load_v687',
+                     message='读取 V6.87 查重结论；禁止把旧 Actual-Buy 研究换名重跑…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        r87=_v688_jload(V687_RESULT)
+        if not r87:raise RuntimeError('找不到 V6.87 result.json')
+
+        _v688_write(status='running',phase='known_semantics',
+                     message='锁定旧语义集合：V6.45–54 / V6.55–59 / V6.66 / V6.75–87…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        known=[
+            'TIGHT_VCP_SETUP',
+            'VOLUME_CONTEXT',
+            'PIVOT_BREAKOUT',
+            'RS_LEADERSHIP_CONTEXT',
+            'FUNDAMENTALS_EARNINGS_CONTEXT',
+            'BUY_WATCH_PASS_DECISION_STACK',
+            'EXTENDED_CHASE_CAUTION',
+            'MARKET_PERMISSION_EXPOSURE',
+            'PREDEFINED_STOP_EXIT',
+            'HOLD_RELATIVE_STRENGTH_IF_STOP_SURVIVES',
+            'SELECTED_PARTIAL_PROFIT',
+            'MARKET_WARNING_TIGHTEN_OR_PROFIT_LOCK',
+            'POST_BREAKOUT_CONFIRMATION_RESTRENGTH',
+            'RISK_BASED_POSITION_SIZE_DERIVABLE',
+            'ADD_SECONDARY_PIVOT_DERIVABLE'
+        ]
+
+        # Recent source batch already supplied by the user and re-checked before this build.
+        # This is a source-delta ledger, not an invented strategy rule.
+        recent_sources=[
+            {
+                'source':'1(20260826-090920).pdf',
+                'observations':[
+                    'Actual buy occurred when Great Wall Motor broke its pivot.',
+                    'A predefined stop was set near 7.7x.',
+                    'During later market corrections, the position was held because that stop was not breached.',
+                    'The stock showed relative strength: quick new highs on rebounds, shallow pullbacks, and a higher-high progression.',
+                    'The speaker explicitly rejected selling solely because of subjective fear that the market might correct.'
+                ],
+                'mapped_old_semantics':[
+                    'PIVOT_BREAKOUT',
+                    'PREDEFINED_STOP_EXIT',
+                    'HOLD_RELATIVE_STRENGTH_IF_STOP_SURVIVES',
+                    'MARKET_PERMISSION_EXPOSURE'
+                ],
+                'novel_semantic':None,
+                'decision':'REINFORCES_EXISTING_SEMANTICS'
+            },
+            {
+                'source':'1(9).pdf',
+                'observations':[
+                    'Urgent market warning cited rising-wedge breakdown, loss of a key support area, and a heavy-volume decline.',
+                    'The message warned against relying on hope that the market would simply rebound.'
+                ],
+                'mapped_old_semantics':[
+                    'MARKET_PERMISSION_EXPOSURE',
+                    'MARKET_WARNING_TIGHTEN_OR_PROFIT_LOCK'
+                ],
+                'novel_semantic':None,
+                'decision':'REINFORCES_EXISTING_MARKET_WARNING_CONTEXT'
+            }
+        ]
+
+        _v688_write(status='running',phase='delta_compare',
+                     message='比较 Recent Source Batch vs 已知语义；只有“新 + 重复出现 + 买入当时可知”才准晋级…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        novel=[]
+        for srcx in recent_sources:
+            ns=srcx.get('novel_semantic')
+            if ns:
+                novel.append({'semantic':ns,'source':srcx.get('source')})
+
+        # Promotion gate is intentionally strict.
+        # A semantic needs repetition across >=2 distinct recent sources AND must be point-in-time executable.
+        counts={}
+        for x in novel:
+            counts[x['semantic']]=counts.get(x['semantic'],0)+1
+        promoted=[k for k,v in counts.items() if v>=2]
+
+        if promoted:
+            verdict='NOVEL_REPEATED_SOURCE_SEMANTIC_FOUND_READY_FOR_EXECUTABILITY_AUDIT'
+            next_step='Build one executability audit for the single promoted semantic; no historical A/B yet.'
+            ab_ready=False
+        else:
+            verdict='NO_NOVEL_SEMANTIC_DELTA_IN_CURRENT_NEW_SOURCE_BATCH'
+            next_step=(
+                'Do not create V6.89 just to keep version numbers moving. Keep V6.44 28.25% benchmark frozen. '
+                'Append future JLaw urgent notes / actual buys / breakout reviews to the source registry and run this delta gate again. '
+                'Only a genuinely new repeated semantic may reopen research.'
+            )
+            ab_ready=False
+
+        result={
+            'version':'V6.88 New-Source Semantic Delta Gate',
+            'verdict':verdict,
+            'ab_ready':ab_ready,
+            'known_semantics':known,
+            'recent_source_batch':recent_sources,
+            'novel_candidates':novel,
+            'promoted_semantics':promoted,
+            'promotion_rule':'A semantic must be absent from prior experiment/source taxonomy, repeated in at least two distinct recent sources, known at decision time, and concrete enough to audit without inventing a threshold.',
+            'important':'Reinforcement is useful for the knowledge base but is NOT permission to repeat an old experiment.',
+            'next_step':next_step,
+            'cache_note':'Source-delta audit only. 0 historical replay, 0 Tiingo, 0 universe scan.'
+        }
+        V688_DIR.mkdir(parents=True,exist_ok=True)
+        V688_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v688_write(status='done',phase='done',message=f'V6.88 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v688_write(status='error',phase='error',
+                     message=f'V6.88 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v688_thread=None
+
+def _v688_start():
+    global v688_thread
+    if _v688_alive():return False
+    _v688_write(status='starting',phase='starting',message='V6.88 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v688_thread=threading.Thread(target=_v688_run,daemon=True);v688_thread.start();return True
+
+@APP.route('/v688/run',methods=['GET','POST'])
+def v688_run():_v688_start();return redirect('/v688/new-source-semantic-delta')
+
+@APP.get('/api/v688/status')
+def v688_status_api():return jsonify(_v688_status())
+
+@APP.get('/v688/new-source-semantic-delta')
+def v688_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v688_status();R={}
+    if V688_RESULT.exists():
+        try:
+            z=json.loads(V688_RESULT.read_text(encoding='utf-8'))
+            if isinstance(z,dict):R=z
+        except Exception:pass
+
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+
+    batch=R.get('recent_source_batch') if isinstance(R.get('recent_source_batch'),list) else []
+    rows=''
+    for x in batch:
+        obs='<br>'.join('• '+e(y) for y in x.get('observations',[]))
+        mapped='<br>'.join(e(y) for y in x.get('mapped_old_semantics',[]))
+        rows+=f"<tr><td><b>{e(x.get('source'))}</b></td><td>{obs}</td><td>{mapped}</td><td>{e(x.get('decision'))}</td></tr>"
+
+    btn='' if _v688_alive() else '<a href="/v688/run"><button>▶ 开始 V6.88 Delta Gate</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eff6ff;border:1px solid #3b82f6;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🛰️ V6.88 New-Source Semantic Delta Gate</h1>
+<div class="info">不是再读一遍旧 JLaw 资料。只比较“最近新增资料”与旧知识库：强化旧语义 ≠ 新实验；只有真正新、重复出现、决策时可知的语义才准晋级。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>A/B Ready: <b>{e(R.get('ab_ready','—'))}</b></p>
+<p>Promoted semantics: <b>{e(', '.join(R.get('promoted_semantics',[])) or 'None')}</b></p></div>
+<div class="c"><h2>Recent Source Delta</h2>
+<table><tr><th>Source</th><th>Observed</th><th>Maps to old semantics</th><th>Decision</th></tr>{rows or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v688_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v688_home_base is not None:
+    def _v688_home_wrap(*args,**kwargs):
+        resp=_v688_home_base(*args,**kwargs)
+        card="""<div id="v688-delta-card" style="background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🛰️ V6.88 New-Source Semantic Delta Gate</h2>
+        <p>Recent JLaw sources vs existing taxonomy · reinforcement ≠ new experiment · no replay</p>
+        <a href="/v688/new-source-semantic-delta"><button>打开 V6.88</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v688-delta-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v688-delta-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v688_home_base:APP.view_functions[ep]=_v688_home_wrap
