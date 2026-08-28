@@ -43537,3 +43537,364 @@ if _v696_home_base is not None:
         body=str(resp);return body if 'id="v696-stale-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v696_home_base:APP.view_functions[ep]=_v696_home_wrap
+
+
+# ========================= V6.96.1 D91+ BURDEN ANATOMY =========================
+V6961_DIR=DATA_DIR/'v6961_d91plus_burden_anatomy'
+V6961_STATUS=V6961_DIR/'status.json'; V6961_RESULT=V6961_DIR/'result.json'
+v6961_thread=None
+
+def _v6961_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6961_STATUS.exists():
+        try:x.update(json.loads(V6961_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6961_write(**kw):
+    V6961_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6961_status();x.update(kw)
+    V6961_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6961_alive(): return v6961_thread is not None and v6961_thread.is_alive()
+
+def _v6961_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(pd.Series(x),errors='coerce'),
+                    'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0)) if n1 and n0 else np.nan
+
+def _v6961_smd(a,b):
+    aa=np.asarray(pd.to_numeric(pd.Series(a),errors='coerce').dropna(),dtype=float)
+    bb=np.asarray(pd.to_numeric(pd.Series(b),errors='coerce').dropna(),dtype=float)
+    aa=aa[np.isfinite(aa)];bb=bb[np.isfinite(bb)]
+    if len(aa)<2 or len(bb)<2:return np.nan
+    va=np.var(aa,ddof=1);vb=np.var(bb,ddof=1)
+    den=np.sqrt(((len(aa)-1)*va+(len(bb)-1)*vb)/max(1,len(aa)+len(bb)-2))
+    return float((aa.mean()-bb.mean())/den) if np.isfinite(den) and den>0 else np.nan
+
+def _v6961_checkpoint_features(path, ep, cp):
+    if len(path)<=cp:return None
+    z=path.iloc[:cp+1].copy().reset_index(drop=True)
+    c=z.close.astype(float);h=z.high.astype(float);l=z.low.astype(float)
+    if ep<=0:return None
+    cp_close=float(c.iloc[-1])
+    peak=float(h.max())
+    peak_i=int(h.idxmax())
+    low=float(l.min())
+    low_i=int(l.idxmin())
+
+    out={
+        'checkpoint_ret':float(cp_close/ep-1),
+        'mfe':float(peak/ep-1),
+        'mae':float(low/ep-1),
+        'drawdown_from_peak':float(cp_close/peak-1) if peak>0 else np.nan,
+        'days_since_peak':float(len(z)-1-peak_i),
+        'days_since_low':float(len(z)-1-low_i),
+        'recovery_from_low':float(cp_close/low-1) if low>0 else np.nan,
+        'above_entry':1.0 if cp_close>ep else 0.0,
+    }
+
+    for n in [10,20]:
+        if len(z)>=n+1:
+            zz=z.tail(n+1)
+            cc=zz.close.astype(float)
+            hh=zz.high.astype(float);ll=zz.low.astype(float)
+            out[f'ret_{n}']=float(cc.iloc[-1]/cc.iloc[0]-1) if cc.iloc[0]>0 else np.nan
+            out[f'range_{n}']=float((hh.max()-ll.min())/cc.iloc[-1]) if cc.iloc[-1]>0 else np.nan
+            out[f'new_high_{n}']=1.0 if float(cc.iloc[-1])>=float(hh.iloc[:-1].max()) else 0.0
+            out[f'higher_low_share_{n}']=float((ll.diff()>0).sum()/max(1,len(ll)-1))
+            try:
+                out[f'log_slope_{n}']=float(np.polyfit(np.arange(len(cc)),np.log(cc.clip(lower=1e-9)),1)[0])
+            except Exception:
+                out[f'log_slope_{n}']=np.nan
+    return out
+
+def _v6961_run():
+    global v6961_thread
+    t0=time.time()
+    try:
+        _v6961_write(status='running',phase='load_d91_targets',
+                     message='锁定 V6.95 真正 D91+ capital-day 黑洞；不再混入普通短期 STOP…',
+                     processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V695_RESULT.exists():raise RuntimeError('找不到 V6.95 result.json')
+        r95=json.loads(V695_RESULT.read_text(encoding='utf-8'))
+        if str(r95.get('priority',''))!='HOLD_DURATION_BURDEN':
+            raise RuntimeError('V6.95 未确认 HOLD_DURATION_BURDEN')
+
+        bfp=V695_DIR/'clean_stop_burden_rows.csv.gz'
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not bfp.exists() or not ffp.exists():
+            raise RuntimeError('找不到 V6.95 burden rows 或 V6.94 clean candidate features')
+
+        B=pd.read_csv(bfp,compression='gzip')
+        B['entry_date']=pd.to_datetime(B.entry_date,errors='coerce').dt.normalize()
+        B['exit_date']=pd.to_datetime(B.exit_date,errors='coerce').dt.normalize()
+        B['listing_id']=B.listing_id.astype(str)
+        D91=B[B.hold_bucket.astype(str).eq('D91_PLUS_VERY_SLOW_STOP')].copy()
+
+        F=pd.read_csv(ffp,compression='gzip')
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['listing_id']=F.listing_id.astype(str)
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F=F.dropna(subset=['entry_date','exit_date','ret']).copy()
+
+        # Comparator: winners that survive long enough to be observable at each checkpoint.
+        # We compare future +50/+100 winners against the actual D91+ STOP cohort.
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        checkpoints=[20,30,40,60]
+        target_keys=set(zip(D91.listing_id.astype(str),D91.entry_date))
+        universe=F[(F.ret>=.50) | F.apply(lambda r:(str(r.listing_id),r.entry_date) in target_keys,axis=1)].copy()
+        lids=sorted(set(universe.listing_id.astype(str)))
+
+        _v6961_write(status='running',phase='extract_checkpoint_anatomy',
+                     message=f'Historical Cache only：D91+ STOP vs surviving Winners · 0/{len(lids)} listings',
+                     processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+            ev=_v6894_detect_events(q[['date','open','close']].copy())
+            hi=[x for x in ev if x['high_confidence']]
+            for col in ['open','high','low','close']:
+                q[col]=[float(v)*_v6894_factor_for_date(hi,dt) for v,dt in zip(q[col],q.date)]
+
+            g=universe[universe.listing_id.eq(lid)]
+            for _,r in g.iterrows():
+                ed=pd.Timestamp(r.entry_date).normalize()
+                xd=pd.Timestamp(r.exit_date).normalize()
+                path=q[(q.date>=ed)&(q.date<=xd)].copy().reset_index(drop=True)
+                if len(path)<21:continue
+                ep=float(path.close.iloc[0])
+                is_d91=((lid,ed) in target_keys)
+                label='D91_STOP' if is_d91 else ('WIN100' if float(r.ret)>=1.0 else 'WIN50')
+
+                for cp in checkpoints:
+                    if len(path)<=cp:continue
+                    f=_v6961_checkpoint_features(path,ep,cp)
+                    if not f:continue
+                    row={'listing_id':lid,'entry_date':ed,'checkpoint':cp,'label':label,
+                         'final_ret':float(r.ret),'is_d91_stop':is_d91,
+                         'winner50':bool(float(r.ret)>=.50),'winner100':bool(float(r.ret)>=1.0)}
+                    row.update(f);rows.append(row)
+
+            if n==1 or n%100==0 or n==len(lids):
+                _v6961_write(status='running',phase='extract_checkpoint_anatomy',
+                             message=f'Checkpoint anatomy {n}/{len(lids)} · rows={len(rows)}',
+                             processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=pd.DataFrame(rows)
+        if len(A)<1000:raise RuntimeError(f'Anatomy rows 太少: {len(A)}')
+
+        _v6961_write(status='running',phase='contrast',
+                     message='比较 D91+ STOP 与 +50/+100 Winner：当时价格进展、peak giveback、recent trend、new-high recovery…',
+                     processed=2,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        feature_cols=['checkpoint_ret','mfe','mae','drawdown_from_peak','days_since_peak',
+                      'days_since_low','recovery_from_low','above_entry',
+                      'ret_10','range_10','new_high_10','higher_low_share_10','log_slope_10',
+                      'ret_20','range_20','new_high_20','higher_low_share_20','log_slope_20']
+
+        panels=[];candidate_features=[]
+        for cp in checkpoints:
+            x=A[A.checkpoint.eq(cp)].copy()
+            stop=x[x.is_d91_stop]
+            w50=x[x.winner50]
+            w100=x[x.winner100]
+            contrasts=[]
+            for f in feature_cols:
+                if f not in x.columns:continue
+                for target_name,target in [('WIN50',w50),('WIN100',w100)]:
+                    a=pd.to_numeric(target[f],errors='coerce').dropna()
+                    b=pd.to_numeric(stop[f],errors='coerce').dropna()
+                    if len(a)<20 or len(b)<100:continue
+                    auc=_v6961_auc(pd.concat([a,b],ignore_index=True),
+                                  pd.Series([1]*len(a)+[0]*len(b)))
+                    smd=_v6961_smd(a,b)
+                    contrasts.append({
+                        'feature':f,'target':target_name,
+                        'winner_median':float(a.median()),'d91_stop_median':float(b.median()),
+                        'auc':float(auc) if np.isfinite(auc) else None,
+                        'oriented_auc':float(max(auc,1-auc)) if np.isfinite(auc) else None,
+                        'smd':float(smd) if np.isfinite(smd) else None,
+                        'winner_n':int(len(a)),'stop_n':int(len(b))
+                    })
+            panels.append({
+                'checkpoint':cp,
+                'd91_stop_n':int(len(stop)),
+                'winner50_n':int(len(w50)),
+                'winner100_n':int(len(w100)),
+                'contrasts':sorted(contrasts,key=lambda z:(z.get('oriented_auc') or 0),reverse=True)
+            })
+
+        _v6961_write(status='running',phase='cross_checkpoint_stability',
+                     message='找跨 D20/D30/D40/D60 同方向、同目标都稳定的候选；不拟合阈值…',
+                     processed=3,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Aggregate feature stability separately for +50 and +100.
+        for target in ['WIN50','WIN100']:
+            for f in feature_cols:
+                vals=[]
+                signs=[]
+                for p in panels:
+                    z=next((c for c in p['contrasts'] if c['feature']==f and c['target']==target),None)
+                    if z and z.get('oriented_auc') is not None and z.get('smd') is not None:
+                        vals.append(z['oriented_auc'])
+                        signs.append(np.sign(z['smd']))
+                if len(vals)==4:
+                    same_dir=(len(set([int(v) for v in signs if v!=0]))<=1)
+                    candidate_features.append({
+                        'feature':f,'target':target,
+                        'mean_oriented_auc':float(np.mean(vals)),
+                        'weakest_oriented_auc':float(np.min(vals)),
+                        'same_direction_all_checkpoints':bool(same_dir),
+                        'all_ge_0_60':bool(all(v>=.60 for v in vals))
+                    })
+
+        candidate_features=sorted(candidate_features,
+                                  key=lambda z:(z['all_ge_0_60'],z['same_direction_all_checkpoints'],
+                                                z['weakest_oriented_auc'],z['mean_oriented_auc']),
+                                  reverse=True)
+
+        best50=next((z for z in candidate_features if z['target']=='WIN50' and z['same_direction_all_checkpoints'] and z['all_ge_0_60']),None)
+        best100=next((z for z in candidate_features if z['target']=='WIN100' and z['same_direction_all_checkpoints'] and z['all_ge_0_60']),None)
+
+        # Require at least one feature robust for BOTH +50 and +100.
+        shared=None
+        for f in feature_cols:
+            a=next((z for z in candidate_features if z['feature']==f and z['target']=='WIN50'),None)
+            b=next((z for z in candidate_features if z['feature']==f and z['target']=='WIN100'),None)
+            if a and b and a['same_direction_all_checkpoints'] and b['same_direction_all_checkpoints'] and a['all_ge_0_60'] and b['all_ge_0_60']:
+                shared={'feature':f,'winner50':a,'winner100':b};break
+
+        verdict='D91_BURDEN_ANATOMY_HAS_STABLE_SEPARATOR__ONE_RULE_TEST_ALLOWED' if shared else 'D91_BURDEN_ANATOMY_NOT_SEPARABLE_SAFELY'
+
+        _v6961_write(status='running',phase='finalize',
+                     message=f'V6.96.1 完成：{verdict}',
+                     processed=5,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.96.1 D91+ Burden Anatomy',
+            'verdict':verdict,
+            'd91_stop_count_source':int(len(D91)),
+            'checkpoint_panels':panels,
+            'cross_checkpoint_stability':candidate_features,
+            'best_winner50_feature':best50,
+            'best_winner100_feature':best100,
+            'shared_stable_separator':shared,
+            'history_dedup':'V6.75 classified failure types; V6.80-82 tested STOP event classifiers/delayed entry; V6.96 tested a crude generic stale proxy. V6.96.1 is narrower: only the V6.95 D91+ STOP capital-burden cohort is contrasted against trades that survive to the same checkpoint and later become +50/+100 winners.',
+            'important':'Diagnostic anatomy only. No exit rule and no cutoff is created here. A feature must separate D91+ STOP from BOTH +50 and +100 winners in the same direction at D20/D30/D40/D60 before one rule test is allowed.',
+            'next_step':('Build ONE predeclared checkpoint rule using only the shared stable separator; test winner retention, D91 capital-day capture, and touched-trade economics before any portfolio replay.'
+                         if shared else
+                         'Close stale-capital exit branch. Do not tune checkpoint thresholds or combine weak anatomy features.'),
+            'cache_note':'V6.94/V6.95 + Historical Cache only; 0 Tiingo; 0 universe scan; no portfolio replay.'
+        }
+
+        V6961_DIR.mkdir(parents=True,exist_ok=True)
+        V6961_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        A.to_csv(V6961_DIR/'d91_checkpoint_anatomy_rows.csv.gz',index=False,compression='gzip')
+
+        _v6961_write(status='done',phase='done',message=f'V6.96.1 完成：{verdict}',
+                     processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6961_write(status='error',phase='error',message=f'V6.96.1 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6961_thread=None
+
+def _v6961_start():
+    global v6961_thread
+    if _v6961_alive():return False
+    _v6961_write(status='starting',phase='starting',message='V6.96.1 正在启动',
+                 processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v6961_thread=threading.Thread(target=_v6961_run,daemon=True);v6961_thread.start();return True
+
+@APP.route('/v6961/run',methods=['GET','POST'])
+def v6961_run():_v6961_start();return redirect('/v6961/d91-burden-anatomy')
+
+@APP.get('/api/v6961/status')
+def v6961_status_api():return jsonify(_v6961_status())
+
+@APP.get('/v6961/d91-burden-anatomy')
+def v6961_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6961_status();R={}
+    if V6961_RESULT.exists():
+        try:R=json.loads(V6961_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    SH=R.get('shared_stable_separator',{}) if isinstance(R.get('shared_stable_separator'),dict) else {}
+    ST=R.get('cross_checkpoint_stability',[]) if isinstance(R.get('cross_checkpoint_stability'),list) else []
+    P=R.get('checkpoint_panels',[]) if isinstance(R.get('checkpoint_panels'),list) else []
+
+    srows=''.join(
+        f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('target'))}</td><td>{num(x.get('mean_oriented_auc')):.3f}</td><td>{num(x.get('weakest_oriented_auc')):.3f}</td><td>{e(x.get('same_direction_all_checkpoints'))}</td><td>{e(x.get('all_ge_0_60'))}</td></tr>"
+        for x in ST[:25]
+    )
+
+    prows=''
+    for p in P:
+        top=(p.get('contrasts') or [])[:6]
+        detail='<br>'.join([f"{e(x.get('feature'))}/{e(x.get('target'))}: AUC {num(x.get('oriented_auc')):.3f}, SMD {num(x.get('smd')):+.2f}" for x in top])
+        prows+=f"<tr><td>D{integer(p.get('checkpoint'))}</td><td>{integer(p.get('d91_stop_n')):,}</td><td>{integer(p.get('winner50_n')):,}</td><td>{integer(p.get('winner100_n')):,}</td><td>{detail}</td></tr>"
+
+    btn='' if _v6961_alive() else '<a href="/v6961/run"><button>▶ 开始 V6.96.1 D91+ Anatomy</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fffbeb;border:1px solid #d97706;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🔬 V6.96.1 D91+ Burden Anatomy</h1><div class="info">只看 V6.95 真正的 D91+ 慢 STOP 黑洞，对比同样活到 D20/D30/D40/D60、后来成为 +50/+100 Winner 的交易。不是再调 +5% stale proxy。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),6)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>D91 source N=<b>{integer(R.get('d91_stop_count_source')):,}</b> · shared separator=<b>{e(SH.get('feature','—'))}</b></p></div>
+<div class="c"><h2>Cross-Checkpoint Stability</h2><table><tr><th>Feature</th><th>Target</th><th>Mean AUC</th><th>Weakest AUC</th><th>Same Direction</th><th>All ≥0.60</th></tr>{srows or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Checkpoint Anatomy</h2><table><tr><th>Checkpoint</th><th>D91 STOP</th><th>+50 Winner</th><th>+100 Winner</th><th>Top contrasts</th></tr>{prows or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6961_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6961_home_base is not None:
+    def _v6961_home_wrap(*args,**kwargs):
+        resp=_v6961_home_base(*args,**kwargs)
+        card="""<div id="v6961-d91-card" style="background:#fffbeb;border:5px solid #d97706;border-radius:24px;padding:28px;margin:22px 0"><h2>🔬 V6.96.1 D91+ Burden Anatomy</h2><p>True D91+ STOP vs surviving +50/+100 winners · D20/D30/D40/D60 · cache-only</p><a href="/v6961/d91-burden-anatomy"><button>打开 V6.96.1</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6961-d91-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6961-d91-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6961_home_base:APP.view_functions[ep]=_v6961_home_wrap
