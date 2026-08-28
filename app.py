@@ -37684,3 +37684,306 @@ if _v684_home_base is not None:
         body=str(resp);return body if 'id="v684-source-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v684_home_base:APP.view_functions[ep]=_v684_home_wrap
+
+
+# ========================= V6.85 WINNER-MANAGEMENT STATE MACHINE / NOVEL GAP AUDIT =========================
+V685_DIR=DATA_DIR/'v685_winner_management_state_machine_gap_audit'
+V685_STATUS=V685_DIR/'status.json'; V685_RESULT=V685_DIR/'result.json'
+v685_thread=None
+
+def _v685_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V685_STATUS.exists():
+        try:x.update(json.loads(V685_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v685_write(**kw):
+    V685_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v685_status();x.update(kw)
+    V685_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v685_alive(): return v685_thread is not None and v685_thread.is_alive()
+
+def _v685_read_json(p):
+    try:
+        if p is not None and Path(p).exists():
+            x=json.loads(Path(p).read_text(encoding='utf-8'))
+            return x if isinstance(x,dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def _v685_code_presence(code):
+    low=code.lower()
+    def has_any(xs):return any(x.lower() in low for x in xs)
+    return {
+        'STOP_EXIT':has_any(['stop7','-7% stop','7% stop']),
+        'HOLD_WINNER':has_any(['hold1260','hold winner','hold_win']),
+        'PARTIAL_PROFIT':has_any(['partial profit','partial_profit','scale out','scale_out','partial sell','trim']),
+        'MARKET_RISK_TIGHTEN':has_any(['tighten stop','tighten_stop','profit lock','profit_lock']),
+        'FINAL_EXIT_SIGNAL':has_any(['final_exit','sell_signal','sell signal','exit_reason'])
+    }
+
+def _v685_run():
+    global v685_thread
+    t0=time.time()
+    try:
+        _v685_write(status='running',phase='load_source',
+                     message='读取 V6.84 + V6.59/V6.58 source reconciliation；不重新扫字幕…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        r84=_v685_read_json(V684_RESULT)
+        if not r84:
+            raise RuntimeError('找不到 V6.84 result.json')
+        if r84.get('verdict')!='SOURCE_DOES_NOT_SUPPORT_PROFIT_THRESHOLD_STOP_SWITCH':
+            raise RuntimeError('V6.84 verdict 不符合预期，先不要继续')
+
+        r59=_v685_read_json(V659_RESULT if 'V659_RESULT' in globals() else None)
+        r58d=_v685_read_json(V658D_RESULT if 'V658D_RESULT' in globals() else None)
+
+        _v685_write(status='running',phase='inspect_current_engine',
+                     message='检查当前代码中已存在的 winner-management components…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        try: code=Path(__file__).read_text(encoding='utf-8')
+        except Exception: code=''
+        present=_v685_code_presence(code)
+
+        # Canonical state machine reconstructed from explicit source semantics only.
+        states=[
+            {
+                'state':'S0_POSITION_OPEN',
+                'source_action':'Position is open under predefined risk.',
+                'transition':'If predefined stop triggers -> S1_STOP_EXIT. Otherwise keep evaluating strength/context.',
+                'source_specificity':'HIGH',
+                'numeric_rule_source_supported':False
+            },
+            {
+                'state':'S1_STOP_EXIT',
+                'source_action':'Exit when predefined stop actually triggers; weak names leave.',
+                'transition':'Terminal.',
+                'source_specificity':'HIGH',
+                'numeric_rule_source_supported':False
+            },
+            {
+                'state':'S2_HOLD_WINNER_IF_STOP_SURVIVES',
+                'source_action':'Keep holding relatively strong survivors when correction/market fear alone has not triggered the actual stop/sell condition.',
+                'transition':'Stay held until actual sell/stop condition or selected profit-management action.',
+                'source_specificity':'HIGH',
+                'numeric_rule_source_supported':False
+            },
+            {
+                'state':'S3_SELECTED_PARTIAL_PROFIT',
+                'source_action':'Selected extended winners may be partially sold / profit harvested.',
+                'transition':'Remaining position continues to final exit / risk management.',
+                'source_specificity':'MEDIUM_CASE_BASED',
+                'numeric_rule_source_supported':False
+            },
+            {
+                'state':'S4_MARKET_WARNING_TIGHTEN_OR_PROFIT_LOCK',
+                'source_action':'Under market warning/deterioration, exposure may be reduced, stops tightened, and profitable extended holdings may be sold to lock profit.',
+                'transition':'May reduce/exit depending on actual warning and position condition.',
+                'source_specificity':'MEDIUM',
+                'numeric_rule_source_supported':False
+            },
+            {
+                'state':'S5_FINAL_EXIT',
+                'source_action':'Final exit occurs on actual sell signal/stop or deliberate profit lock in deteriorating conditions.',
+                'transition':'Terminal.',
+                'source_specificity':'HIGH_LEVEL_ONLY',
+                'numeric_rule_source_supported':False
+            }
+        ]
+
+        _v685_write(status='running',phase='dedup_gap_audit',
+                     message='做历史查重：哪些 gap 已测过、哪些只是语义存在但还不能编码…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # Prior work / dedup map. This is intentionally conservative.
+        audit=[
+            {
+                'component':'STOP_EXIT',
+                'source_supported':True,
+                'code_present':bool(present['STOP_EXIT']),
+                'prior_test_status':'BASELINE_ALIGNED',
+                'novel_ab_eligible':False,
+                'reason':'Fixed -7% is the frozen implementation proxy; V6.84 explicitly rejects profit-threshold stop cancellation/widening.'
+            },
+            {
+                'component':'HOLD_WINNER_IF_STOP_SURVIVES',
+                'source_supported':True,
+                'code_present':bool(present['HOLD_WINNER']),
+                'prior_test_status':'PARTIAL_ALIGNMENT_ONLY',
+                'novel_ab_eligible':False,
+                'reason':'HOLD1260 exists, but source gives no concrete new numeric hold/exit geometry. Cannot invent one from general HOLD language.'
+            },
+            {
+                'component':'SELECTED_PARTIAL_PROFIT',
+                'source_supported':True,
+                'code_present':bool(present['PARTIAL_PROFIT']),
+                'prior_test_status':'DUPLICATE_BRANCH_ALREADY_EXPLORED',
+                'novel_ab_eligible':False,
+                'reason':'V6.29 already tested fixed +20/+30 / partial-harvest families; Great Wall Motor prices are case examples, not universal thresholds.'
+            },
+            {
+                'component':'MARKET_WARNING_TIGHTEN_OR_PROFIT_LOCK',
+                'source_supported':True,
+                'code_present':bool(present['MARKET_RISK_TIGHTEN']),
+                'prior_test_status':'SEMANTIC_GAP_BUT_NOT_EXECUTION_READY',
+                'novel_ab_eligible':False,
+                'reason':'Source supports the behavior, but does not yet specify an identifiable point-in-time trigger plus exact position-level action. V6.70 tested cautious NEW-position sizing, not a source-faithful current-winner tighten/lock rule.'
+            },
+            {
+                'component':'FINAL_EXIT_SIGNAL',
+                'source_supported':True,
+                'code_present':bool(present['FINAL_EXIT_SIGNAL']),
+                'prior_test_status':'GENERIC_HOOK_PRESENT_SOURCE_GEOMETRY_MISSING',
+                'novel_ab_eligible':False,
+                'reason':'Generic exit hooks exist, but source corpus does not yet provide a concrete untested final-exit geometry that can be encoded without invention.'
+            }
+        ]
+
+        # Cross-check prior V6.59 biggest gap, but do not blindly reuse it.
+        biggest59=r59.get('biggest_gap',{}) if isinstance(r59.get('biggest_gap'),dict) else {}
+        biggest59_name=str(biggest59.get('component',''))
+        if biggest59_name:
+            for a in audit:
+                a['v659_biggest_gap_match']=bool(a['component']==biggest59_name)
+
+        eligible=[a for a in audit if a.get('novel_ab_eligible')]
+        if eligible:
+            verdict='ONE_NOVEL_SOURCE_SUPPORTED_WINNER_MANAGEMENT_AB_READY'
+            next_step='Advance only the single eligible component to a benchmark-first A/B.'
+        else:
+            verdict='STATE_MACHINE_RECONSTRUCTED_NO_NOVEL_EXECUTABLE_ACTION_YET'
+            next_step=(
+                'Do NOT launch another winner-management parameter A/B. The remaining gap is source-to-execution specificity: '
+                'for MARKET_WARNING_TIGHTEN_OR_PROFIT_LOCK / FINAL_EXIT, extract exact first-person trigger conditions and actions '
+                'from the transcript corpus. If no concrete point-in-time action emerges, close this branch and move to setup/breakout-quality attribution.'
+            )
+
+        result={
+            'version':'V6.85 Winner-Management State Machine / Novel Gap Audit',
+            'verdict':verdict,
+            'ab_ready':bool(eligible),
+            'source_state_machine':states,
+            'component_audit':audit,
+            'v659_previous_biggest_gap':biggest59,
+            'v684_candidate':r84.get('v683_candidate',{}),
+            'important':'This version intentionally performs NO historical replay and NO new threshold design. It prevents duplicate testing and separates source-supported behavior from executable rule geometry.',
+            'history_dedup':[
+                'V6.29 fixed/partial take-profit families already explored.',
+                'V6.59 already performed broad winner-management source-vs-code gap audit.',
+                'V6.70 cautious exposure branch changed new-position sizing, not current-winner stop geometry.',
+                'V6.79G rejected generic close-confirmed stop relaxation.',
+                'V6.80-81 found STOP-day price/volume separation too weak.',
+                'V6.82 rejected fixed D+1/D+3 entry delay.',
+                'V6.83 found +30% proved-then-stopped state statistically distinct.',
+                'V6.84 rejected converting +20/+30 proof into stop cancellation/widening.'
+            ],
+            'next_step':next_step,
+            'cache_note':'Reads V6.84 + prior V6.58D/V6.59 results + current app source only; 0 Tiingo; 0 historical replay; 0 universe rebuild.'
+        }
+        V685_DIR.mkdir(parents=True,exist_ok=True)
+        V685_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v685_write(status='done',phase='done',message=f'V6.85 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v685_write(status='error',phase='error',
+                     message=f'V6.85 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v685_thread=None
+
+def _v685_start():
+    global v685_thread
+    if _v685_alive():return False
+    _v685_write(status='starting',phase='starting',message='V6.85 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v685_thread=threading.Thread(target=_v685_run,daemon=True);v685_thread.start();return True
+
+@APP.route('/v685/run',methods=['GET','POST'])
+def v685_run():_v685_start();return redirect('/v685/winner-management-state-machine')
+
+@APP.get('/api/v685/status')
+def v685_status_api():return jsonify(_v685_status())
+
+@APP.get('/v685/winner-management-state-machine')
+def v685_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v685_status();R={}
+    if V685_RESULT.exists():
+        try:
+            obj=json.loads(V685_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+
+    states=R.get('source_state_machine') if isinstance(R.get('source_state_machine'),list) else []
+    audit=R.get('component_audit') if isinstance(R.get('component_audit'),list) else []
+    strows=''
+    for x in states:
+        strows+=f"<tr><td><b>{e(x.get('state'))}</b></td><td>{e(x.get('source_action'))}</td><td>{e(x.get('transition'))}</td><td>{e(x.get('source_specificity'))}</td></tr>"
+    arows=''
+    for x in audit:
+        arows+=f"<tr><td><b>{e(x.get('component'))}</b></td><td>{'YES' if x.get('source_supported') else 'NO'}</td><td>{'YES' if x.get('code_present') else 'NO'}</td><td>{e(x.get('prior_test_status'))}</td><td>{'YES' if x.get('novel_ab_eligible') else 'NO'}</td><td>{e(x.get('reason'))}</td></tr>"
+
+    btn='' if _v685_alive() else '<a href="/v685/run"><button>▶ 开始 V6.85 State Machine Audit</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧩 V6.85 Winner-Management State Machine / Novel Gap Audit</h1>
+<div class="info">这版不是再测参数。把 JLaw 已确认的 winner-management 行为重建成状态机，然后逐项查：当前代码有没有、以前测没测过、有没有“来源支持 + 未测试 + 足够具体”可以进入 A/B 的新动作。</div></div>
+
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>A/B Ready: <b>{e(R.get('ab_ready','—'))}</b></p></div>
+
+<div class="c"><h2>Source-Supported State Machine</h2>
+<table><tr><th>State</th><th>Source Action</th><th>Transition</th><th>Specificity</th></tr>
+{strows or '<tr><td colspan=4>运行后显示</td></tr>'}
+</table></div>
+
+<div class="c"><h2>Novel Gap Audit</h2>
+<table><tr><th>Component</th><th>Source</th><th>Code Present</th><th>Prior Status</th><th>New A/B Eligible</th><th>Reason</th></tr>
+{arows or '<tr><td colspan=6>运行后显示</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v685_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v685_home_base is not None:
+    def _v685_home_wrap(*args,**kwargs):
+        resp=_v685_home_base(*args,**kwargs)
+        card="""<div id="v685-state-machine-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧩 V6.85 Winner-Management State Machine / Novel Gap Audit</h2>
+        <p>Source semantics → state machine → history dedup → A/B permission gate · no replay</p>
+        <a href="/v685/winner-management-state-machine"><button>打开 V6.85</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v685-state-machine-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v685-state-machine-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v685_home_base:APP.view_functions[ep]=_v685_home_wrap
