@@ -44494,3 +44494,214 @@ if _v698_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v698_home_base:APP.view_functions[ep]=_v698_home_wrap
+
+# ========================= V6.99 ONE REPLACEMENT PIT A/B =========================
+V699_DIR=DATA_DIR/'v699_one_replacement_pit_ab'
+V699_STATUS=V699_DIR/'status.json'; V699_RESULT=V699_DIR/'result.json'
+v699_thread=None
+
+def _v699_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V699_STATUS.exists():
+        try:x.update(json.loads(V699_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v699_write(**kw):
+    V699_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v699_status();x.update(kw)
+    V699_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v699_alive(): return v699_thread is not None and v699_thread.is_alive()
+
+def _v699_quote(pack,dt,field='close'):
+    if pack is None:return np.nan
+    dns=pack.get('date_ns');vals=pack.get(field)
+    if dns is None or vals is None or len(dns)==0:return np.nan
+    x=np.int64(pd.Timestamp(dt).normalize().value);j=int(np.searchsorted(dns,x,side='right')-1)
+    if j<0:return np.nan
+    v=float(vals[j]);return v if np.isfinite(v) and v>0 else np.nan
+
+def _v699_stats(eqrows,ledger,admitted_ids,all_future,denoms,label):
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure','open_slots']);L=pd.DataFrame(ledger)
+    if C.empty:raise RuntimeError(f'{label}: empty equity curve')
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0;dd=C.equity/C.equity.cummax()-1.0;maxdd=float(dd.min())
+    if len(L):
+        L['pnl']=pd.to_numeric(L.pnl,errors='coerce');L['ret']=pd.to_numeric(L.ret,errors='coerce')
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=float(gp/gl) if gl>0 else np.inf
+        wr=float((L.ret>0).mean());avg=float(L.ret.mean());aw=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan;al=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        stop_rate=float(L.reason.astype(str).str.contains('STOP',case=False,na=False).mean())
+    else:pf=wr=avg=aw=al=stop_rate=np.nan
+    adm=set(int(i) for i in admitted_ids)
+    def cap(th):
+        den=denoms.get(th,0)
+        return float(sum(1 for i in adm if np.isfinite(all_future.get(i,np.nan)) and all_future[i]>=th)/den) if den else np.nan
+    annual={};yy=pd.to_datetime(C.date).dt.year
+    for y,g in C.groupby(yy):
+        if len(g)>=2:annual[int(y)]=float(g.equity.iloc[-1]/g.equity.iloc[0]-1)
+    return {'strategy':label,'end_equity':end,'final_multiple':float(end/start) if start>0 else np.nan,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,'profit_factor':pf,'win_rate':wr,'avg_trade':avg,'avg_win':aw,'avg_loss':al,'stop_rate':stop_rate,'trades':int(len(L)),'admitted_positions':int(len(adm)),'avg_exposure':float(C.exposure.mean()),'avg_open_slots':float(C.open_slots.mean()),'winner20_capture':cap(.20),'winner30_capture':cap(.30),'winner50_capture':cap(.50),'winner100_capture':cap(1.0),'annual':annual}
+
+def _v699_run():
+    global v699_thread
+    t0=time.time()
+    try:
+        _v699_write(status='running',phase='precheck',message='V6.98 gate + single shared feature precheck…',processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+        if not V698_RESULT.exists():raise RuntimeError('找不到 V6.98 result.json')
+        r98=json.loads(V698_RESULT.read_text(encoding='utf-8'))
+        if str(r98.get('verdict',''))!='PIT_CONTEST_STRENGTH_GAP_GENERALIZES__ONE_REPLACEMENT_AB_ALLOWED':raise RuntimeError('V6.98 gate 未通过，V6.99 不允许启动')
+        shared=(r98.get('shared_stable_feature') or {}).get('feature')
+        if shared!='inc_current_ret':raise RuntimeError(f'V6.99 frozen rule requires shared=inc_current_ret; got {shared!r}. 不自动换规则。')
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists():raise RuntimeError('找不到 V6.94 clean candidate feature store')
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        meta=P[need].copy();meta['listing_id']=meta.listing_id.astype(str);meta['entry_date']=pd.to_datetime(meta.entry_date,errors='coerce').dt.normalize();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left');Z['candidate_order']=pd.to_numeric(Z.candidate_order,errors='coerce');Z['entry_px_raw']=pd.to_numeric(Z.entry_px,errors='coerce');Z['exit_px_raw']=pd.to_numeric(Z.control_exit_px,errors='coerce')
+        Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        if len(Z)<500:raise RuntimeError(f'clean candidate rows too small: {len(Z)}')
+
+        _v699_write(status='running',phase='price_cache',message='Historical Cache only：compact corporate-action-safe price arrays…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};factors={};missing=0
+        lids=list(spans.keys())
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','close']):missing+=1;continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=10);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10);q=q[(q.date>=lo)&(q.date<=hi)].copy()
+            if q.empty:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
+            q['safe_open']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.open,q.date)];q['safe_close']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.close,q.date)]
+            packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),'open':q.safe_open.to_numpy(dtype='float32'),'close':q.safe_close.to_numpy(dtype='float32')}
+            if n==1 or n%100==0 or n==len(lids):_v699_write(status='running',phase='price_cache',message=f'compact prices {n}/{len(lids)} · missing={missing}',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        # Same price-scale normalization as V6.94/V6.98.
+        eps=[];xps=[];keep=[]
+        for _,r in Z.iterrows():
+            lid=str(r.listing_id);hev=factors.get(lid,[]);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date))
+            eps.append(ep);xps.append(xp);keep.append(lid in packs and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        Z['entry_px_safe']=eps;Z['exit_px_safe']=xps;Z=Z[np.asarray(keep,dtype=bool)].reset_index(drop=True)
+
+        _v699_write(status='running',phase='calendar',message='构建交易日历与候选事件索引…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY PIT calendar unavailable')
+        R=rg.reset_index();
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        cal=set(pd.to_datetime(R.date,errors='coerce').dropna().dt.normalize().tolist());cal.update(Z.entry_date.tolist());cal.update(Z.exit_date.tolist());cal=sorted(cal)
+        rec=Z.to_dict('index');entries={};exits={}
+        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+        future={i:float(r['ret']) for i,r in rec.items()};denoms={t:sum(v>=t for v in future.values()) for t in [.20,.30,.50,1.0]}
+
+        def sim(label,replacement=False):
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];admitted=[];repl=[];skipcap=0;skipcash=0;step=max(1,len(cal)//20)
+            for di,dt in enumerate(cal,1):
+                dt=pd.Timestamp(dt).normalize()
+                for i in exits.get(dt,[]):
+                    p=pos.pop(i,None)
+                    if p is None:continue
+                    xp=float(rec[i]['exit_px_safe']);proceeds=p['shares']*xp;cash+=proceeds;ledger.append({'id':i,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],'reason':str(rec[i].get('control_reason',rec[i].get('exit_reason',''))),'entry_date':p['entry_date'],'exit_date':dt});last.pop(i,None)
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0;replacements_today=0
+                for i in entries.get(dt,[]):
+                    r=rec[i];ep=float(r['entry_px_safe'])
+                    if not np.isfinite(ep) or ep<=0:skipcash+=1;continue
+                    if len(pos)<10 and target>0:
+                        invest=min(float(target),float(cash))
+                        if invest>1e-12:
+                            cash-=invest;pos[i]={'listing_id':str(r['listing_id']),'shares':invest/ep,'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep;admitted.append(i);continue
+                        skipcash+=1;continue
+                    if len(pos)>=10 and replacement and replacements_today<1:
+                        snaps=[]
+                        for vid,vp in pos.items():
+                            cp=_v699_quote(packs.get(vp['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(vid,vp['entry_px']);cur_ret=cp/vp['entry_px']-1.0 if vp['entry_px']>0 else np.nan
+                            if np.isfinite(cur_ret):snaps.append((float(cur_ret),int(vid),float(cp)))
+                        if snaps:
+                            snaps.sort(key=lambda x:(x[0],x[1]));worst_ret,vid,sale_px=snaps[0]
+                            if worst_ret<0.0:
+                                vp=pos.pop(vid);gross=vp['shares']*sale_px;sale_net=gross*(1.0-0.001);buy_cash=sale_net;net_invest=buy_cash*(1.0-0.001);cash+=sale_net;cash-=buy_cash
+                                ledger.append({'id':vid,'ret':sale_net/vp['cost']-1.0,'pnl':sale_net-vp['cost'],'reason':'REPLACED_INCUMBENT','entry_date':vp['entry_date'],'exit_date':dt})
+                                pos[i]={'listing_id':str(r['listing_id']),'shares':net_invest/ep,'entry_px':ep,'cost':buy_cash,'entry_date':dt};last[i]=ep;admitted.append(i);repl.append({'date':dt,'inc_id':vid,'cand_id':i,'inc_current_ret':worst_ret,'inc_future_ret':future.get(vid,np.nan),'cand_future_ret':future.get(i,np.nan),'future_delta':future.get(i,np.nan)-future.get(vid,np.nan)});replacements_today+=1;continue
+                    skipcap+=1
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+                eqrows.append((dt,float(eq),float(hv/eq) if eq>0 else np.nan,len(pos)))
+                if di%step==0 or di==len(cal):_v699_write(status='running',phase='replay',message=f'{label} {int(round(di/len(cal)*100))}%',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+            st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st['skipped_capacity']=int(skipcap);st['skipped_cash']=int(skipcash);st['replacement_count']=int(len(repl));return st,repl
+
+        _v699_write(status='running',phase='replay',message='A/B replay：A FIRST_COME vs B single-feature replacement…',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+        A,_=sim('A_NO_REPLACEMENT',False)
+        if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json for FIRST_COME parity')
+        r97=json.loads(V697_RESULT.read_text(encoding='utf-8'));expected=int((r97.get('reconstruction') or {}).get('admitted_first_come') or 0)
+        if expected and int(A.get('admitted_positions',0))!=expected:raise RuntimeError(f'FIRST_COME parity mismatch: V6.99 A={A.get("admitted_positions")} vs V6.97={expected}. Challenger blocked.')
+        B,repls=sim('B_ONE_REPLACEMENT_INC_CURRENT_RET',True)
+        _v699_write(status='running',phase='audit',message='Replacement economics + year stability…',processed=5,total=7,elapsed_sec=round(time.time()-t0,1))
+        annA=A.get('annual',{});annB=B.get('annual',{});ys=sorted(set(annA)&set(annB));beats=sum(annB[y]>annA[y] for y in ys);year_share=float(beats/len(ys)) if ys else np.nan
+        if repls:
+            RR=pd.DataFrame(repls);fd=pd.to_numeric(RR.future_delta,errors='coerce');re_diag={'count':int(len(RR)),'mean_inc_current_ret':float(pd.to_numeric(RR.inc_current_ret,errors='coerce').mean()),'mean_future_delta':float(fd.mean()),'median_future_delta':float(fd.median()),'positive_future_delta_share':float((fd>0).mean()),'candidate_plus20_share':float((pd.to_numeric(RR.cand_future_ret,errors='coerce')>=.20).mean()),'candidate_plus30_share':float((pd.to_numeric(RR.cand_future_ret,errors='coerce')>=.30).mean())}
+        else:RR=pd.DataFrame();re_diag={'count':0}
+        keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate','winner20_capture','winner30_capture','winner50_capture','winner100_capture'];delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
+        pass_econ=bool((delta['cagr']>=0.01 or delta['profit_factor']>=0.10) and B['maxdd']>=A['maxdd']-0.03 and B['winner30_capture']>=A['winner30_capture']-1e-12 and (not ys or year_share>=0.50));verdict='ONE_REPLACEMENT_PASSES_PIT_ECONOMIC_AB' if pass_econ else 'ONE_REPLACEMENT_FAILS_PIT_ECONOMIC_AB'
+        result={'version':'V6.99 ONE Replacement PIT A/B','verdict':verdict,'shared_feature':'inc_current_ret','rule':{'full_book_only':True,'victim':'lowest incumbent current return','trigger':'inc_current_ret < 0','candidate_score_used':False,'max_replacements_per_day':1,'friction_each_leg':0.001},'A':A,'B':B,'delta':delta,'replacement_diagnostics':re_diag,'year_stability':{'comparable_years':len(ys),'B_beats_A_years':int(beats),'share':year_share,'A':annA,'B':annB},'candidate_rows':int(len(Z)),'missing_price_listings':int(missing),'acceptance':'PASS only if CAGR improves by >=1pp OR PF by >=0.10, MaxDD does not worsen by >3pp, +30 winner capture is not reduced, and B beats A in >=50% of comparable years.','important':'Causal dynamic 10-slot PIT execution A/B with frozen zero threshold and exactly one validated feature. This is not an independent feature-selection holdout because V6.98 selected the feature on the same historical era; year stability is a post-selection temporal audit.','history_dedup':'Does not reopen V6.16I composite ranking/gap grids. No candidate score, no threshold sweep, no additional feature, no Tiingo/universe scan.','next_step':('If PASS, run one truly forward-chained feature-selection/activation confirmation before production promotion.' if pass_econ else 'Reject replacement and return to FIRST_COME; do not tune neighboring thresholds.'),'cache_note':'V6.94 clean candidate store + V6.69 order/entry/exit + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
+        V699_DIR.mkdir(parents=True,exist_ok=True);V699_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        if len(RR):RR.to_csv(V699_DIR/'replacement_ledger.csv.gz',index=False,compression='gzip')
+        _v699_write(status='done',phase='done',message=f'V6.99 完成：{verdict}',processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v699_write(status='error',phase='error',message=f'V6.99 失败：{type(ex).__name__}: {ex}',processed=0,total=7,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v699_thread=None
+
+def _v699_start():
+    global v699_thread
+    if _v699_alive():return False
+    _v699_write(status='starting',phase='starting',message='V6.99 正在启动',processed=0,total=7,elapsed_sec=0,error=None,traceback=None);v699_thread=threading.Thread(target=_v699_run,daemon=True);v699_thread.start();return True
+
+@APP.route('/v699/run',methods=['GET','POST'])
+def v699_run():_v699_start();return redirect('/v699/one-replacement-pit-ab')
+
+@APP.get('/api/v699/status')
+def v699_status_api():return jsonify(_v699_status())
+
+@APP.get('/v699/one-replacement-pit-ab')
+def v699_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v699_status();R={}
+    if V699_RESULT.exists():
+        try:R=json.loads(V699_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=np.nan):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def pct(v):
+        x=num(v);return '—' if not np.isfinite(x) else f'{x*100:.2f}%'
+    A=R.get('A') or {};B=R.get('B') or {};RD=R.get('replacement_diagnostics') or {};Y=R.get('year_stability') or {}
+    btn='' if _v699_alive() else '<a href="/v699/run"><button>▶ 开始 V6.99 ONE Replacement A/B</button></a>';err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:24px;border-radius:20px;margin:16px 0}}.info{{background:#eef6ff;border:1px solid #93c5fd;border-radius:14px;padding:14px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a><div class="c"><h1>🔁 V6.99 ONE Replacement PIT A/B</h1><div class="info">只用 V6.98 唯一 shared feature：<b>inc_current_ret</b>。满仓时只看最弱 incumbent；若当前收益 &lt; 0%，最多换 1 笔/日。无 candidate score、无阈值 sweep。</div></div><div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {e(st.get('processed'))}/{e(st.get('total'))} · {num(st.get('elapsed_sec'),0):.1f}s</p>{btn}{err}</div><div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{e(R.get('acceptance',''))}</p></div><div class="c"><h2>A/B Account</h2><table><tr><th></th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>Avg Trade</th><th>STOP%</th><th>+20 Cap</th><th>+30 Cap</th><th>Repl</th></tr><tr><td><b>A No Replacement</b></td><td>{pct(A.get('cagr'))}</td><td>{num(A.get('profit_factor')):.2f}</td><td>{pct(A.get('maxdd'))}</td><td>{num(A.get('calmar')):.2f}</td><td>{pct(A.get('win_rate'))}</td><td>{pct(A.get('avg_trade'))}</td><td>{pct(A.get('stop_rate'))}</td><td>{pct(A.get('winner20_capture'))}</td><td>{pct(A.get('winner30_capture'))}</td><td>0</td></tr><tr><td><b>B ONE Replacement</b></td><td>{pct(B.get('cagr'))}</td><td>{num(B.get('profit_factor')):.2f}</td><td>{pct(B.get('maxdd'))}</td><td>{num(B.get('calmar')):.2f}</td><td>{pct(B.get('win_rate'))}</td><td>{pct(B.get('avg_trade'))}</td><td>{pct(B.get('stop_rate'))}</td><td>{pct(B.get('winner20_capture'))}</td><td>{pct(B.get('winner30_capture'))}</td><td>{int(B.get('replacement_count',0) or 0)}</td></tr></table></div><div class="c"><h2>Replacement Diagnostics</h2><p>Count={int(RD.get('count',0) or 0)} · mean incumbent current ret={pct(RD.get('mean_inc_current_ret'))} · mean future delta={pct(RD.get('mean_future_delta'))} · positive delta share={pct(RD.get('positive_future_delta_share'))}</p><p>Comparable years={int(Y.get('comparable_years',0) or 0)} · B beats A={int(Y.get('B_beats_A_years',0) or 0)} · share={pct(Y.get('share'))}</p></div></div><script>setTimeout(async()=>{{try{{let q=await fetch('/api/v699/status',{{cache:'no-store'}}),x=await q.json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></body></html>'''
+
+_v699_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v699_home_base is not None:
+    def _v699_home_wrap(*args,**kwargs):
+        resp=_v699_home_base(*args,**kwargs);card='<div id="v699-replacement-card" style="background:#f5f3ff;border:5px solid #7c3aed;border-radius:24px;padding:28px;margin:22px 0"><h2>🔁 V6.99 ONE Replacement PIT A/B</h2><p>inc_current_ret only · full-book weakest loser replacement · 10-slot causal replay</p><a href="/v699/one-replacement-pit-ab"><button>打开 V6.99</button></a></div>'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v699-replacement-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v699_home_base:APP.view_functions[ep]=_v699_home_wrap
