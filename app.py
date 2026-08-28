@@ -41844,3 +41844,286 @@ if _v693_home_base is not None:
         body=str(resp);return body if 'id="v693-path-dna-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v693_home_base:APP.view_functions[ep]=_v693_home_wrap
+
+
+# ========================= V6.93.1 PATH-DNA METRIC INTEGRITY / EFFECT-SIZE AUDIT =========================
+V6931_DIR=DATA_DIR/'v6931_path_dna_metric_integrity'
+V6931_STATUS=V6931_DIR/'status.json'; V6931_RESULT=V6931_DIR/'result.json'
+v6931_thread=None
+
+def _v6931_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6931_STATUS.exists():
+        try:x.update(json.loads(V6931_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6931_write(**kw):
+    V6931_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6931_status();x.update(kw)
+    V6931_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6931_alive(): return v6931_thread is not None and v6931_thread.is_alive()
+
+def _v6931_arrays(a,b):
+    aa=np.asarray(pd.to_numeric(pd.Series(a),errors='coerce').dropna(),dtype=float)
+    bb=np.asarray(pd.to_numeric(pd.Series(b),errors='coerce').dropna(),dtype=float)
+    aa=aa[np.isfinite(aa)]; bb=bb[np.isfinite(bb)]
+    return aa,bb
+
+def _v6931_smd(a,b):
+    aa,bb=_v6931_arrays(a,b)
+    if len(aa)<2 or len(bb)<2:return np.nan
+    va=float(np.var(aa,ddof=1)); vb=float(np.var(bb,ddof=1))
+    den=np.sqrt(((len(aa)-1)*va+(len(bb)-1)*vb)/max(1,(len(aa)+len(bb)-2)))
+    if not np.isfinite(den) or den<=0:return np.nan
+    return float((np.mean(aa)-np.mean(bb))/den)
+
+def _v6931_cliffs_delta(a,b):
+    aa,bb=_v6931_arrays(a,b)
+    if len(aa)==0 or len(bb)==0:return np.nan
+    gt=0;lt=0
+    for x in aa:
+        gt += int(np.sum(x>bb))
+        lt += int(np.sum(x<bb))
+    return float((gt-lt)/(len(aa)*len(bb)))
+
+def _v6931_auc(a,b):
+    aa,bb=_v6931_arrays(a,b)
+    if len(aa)==0 or len(bb)==0:return np.nan
+    vals=np.concatenate([aa,bb])
+    y=np.concatenate([np.ones(len(aa),dtype=int),np.zeros(len(bb),dtype=int)])
+    ranks=pd.Series(vals).rank(method='average').to_numpy()
+    n1=len(aa);n0=len(bb)
+    auc=(ranks[:n1].sum()-n1*(n1+1)/2)/(n1*n0)
+    return float(auc)
+
+def _v6931_run():
+    global v6931_thread
+    t0=time.time()
+    try:
+        _v6931_write(status='running',phase='load_v693',
+                     message='读取 V6.93 path DNA 原始 rows；独立重算 effect size…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V693_RESULT.exists():raise RuntimeError('找不到 V6.93 result.json')
+        r93=json.loads(V693_RESULT.read_text(encoding='utf-8'))
+        fp=V693_DIR/'rejected_path_dna.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.93 rejected_path_dna.csv.gz')
+
+        F=pd.read_csv(fp,compression='gzip')
+        if 'label' not in F.columns:raise RuntimeError('V6.93 path DNA 缺 label')
+        W=F[F.label.astype(str).eq('REJECTED_SUPERWINNER')].copy()
+        S=F[F.label.astype(str).eq('REJECTED_STOP')].copy()
+        if len(W)<4 or len(S)<20:raise RuntimeError(f'样本不足 Winner={len(W)} STOP={len(S)}')
+
+        candidate_features=[
+            'contraction_3stage','contraction_20v20','updown_ratio_40',
+            'ret_20','ret_60','updown_ratio_20','updown_ratio_60',
+            'range_20','range_40','recovery_from_40d_low','ret_40',
+            'log_slope_60','maxdd_20','contract_monotonic',
+            'days_from_40d_low_to_entry'
+        ]
+
+        _v6931_write(status='running',phase='independent_effect_sizes',
+                     message='计算 pooled-SD SMD / Cliff delta / rank AUC；不复用旧 SMD 函数…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        for f in candidate_features:
+            if f not in F.columns:continue
+            a=pd.to_numeric(W[f],errors='coerce').dropna()
+            b=pd.to_numeric(S[f],errors='coerce').dropna()
+            if len(a)<4 or len(b)<20:continue
+            auc=_v6931_auc(a,b)
+            oriented=max(auc,1-auc) if np.isfinite(auc) else np.nan
+            smd=_v6931_smd(a,b)
+            delta=_v6931_cliffs_delta(a,b)
+            rows.append({
+                'feature':f,
+                'winner_n':int(len(a)),'stop_n':int(len(b)),
+                'winner_mean':float(np.mean(a)),'stop_mean':float(np.mean(b)),
+                'winner_median':float(np.median(a)),'stop_median':float(np.median(b)),
+                'winner_sd':float(np.std(a,ddof=1)) if len(a)>1 else None,
+                'stop_sd':float(np.std(b,ddof=1)) if len(b)>1 else None,
+                'smd':float(smd) if np.isfinite(smd) else None,
+                'cliffs_delta':float(delta) if np.isfinite(delta) else None,
+                'auc':float(auc) if np.isfinite(auc) else None,
+                'oriented_auc':float(oriented) if np.isfinite(oriented) else None,
+            })
+
+        _v6931_write(status='running',phase='leave_one_winner_out',
+                     message='对最强候选做 leave-one-winner-out：AUC / SMD / Cliff delta 稳定性…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        enriched=[]
+        for x in rows:
+            f=x['feature']
+            aucs=[];smds=[];deltas=[]
+            for lid in W.listing_id.astype(str).unique():
+                ww=W[W.listing_id.astype(str).ne(lid)]
+                a=pd.to_numeric(ww[f],errors='coerce').dropna()
+                b=pd.to_numeric(S[f],errors='coerce').dropna()
+                if len(a)<3 or len(b)<20:continue
+                au=_v6931_auc(a,b)
+                sm=_v6931_smd(a,b)
+                de=_v6931_cliffs_delta(a,b)
+                if np.isfinite(au):aucs.append(float(max(au,1-au)))
+                if np.isfinite(sm):smds.append(float(abs(sm)))
+                if np.isfinite(de):deltas.append(float(abs(de)))
+            y=dict(x)
+            y['loo_auc_mean']=float(np.mean(aucs)) if aucs else None
+            y['loo_auc_weakest']=float(np.min(aucs)) if aucs else None
+            y['loo_abs_smd_mean']=float(np.mean(smds)) if smds else None
+            y['loo_abs_smd_weakest']=float(np.min(smds)) if smds else None
+            y['loo_abs_cliff_mean']=float(np.mean(deltas)) if deltas else None
+            y['loo_abs_cliff_weakest']=float(np.min(deltas)) if deltas else None
+            enriched.append(y)
+
+        enriched=sorted(
+            enriched,
+            key=lambda x:(
+                x.get('loo_auc_weakest') if x.get('loo_auc_weakest') is not None else -1,
+                x.get('loo_abs_cliff_weakest') if x.get('loo_abs_cliff_weakest') is not None else -1
+            ),
+            reverse=True
+        )
+
+        best=enriched[0] if enriched else None
+        # Require robust rank separation AND non-trivial effect size.
+        actionable=bool(
+            best and
+            (best.get('loo_auc_weakest') or 0)>=.65 and
+            (
+                (best.get('loo_abs_smd_weakest') or 0)>=.50 or
+                (best.get('loo_abs_cliff_weakest') or 0)>=.33
+            )
+        )
+
+        old_best=(r93.get('best_sequence_clue') or {}) if isinstance(r93.get('best_sequence_clue'),dict) else {}
+        old_smd=old_best.get('smd')
+        metric_bug_confirmed=bool(
+            old_best and
+            abs(float(old_smd or 0))<1e-12 and
+            best and
+            best.get('feature')==old_best.get('feature') and
+            (
+                abs(best.get('smd') or 0)>.05 or
+                abs(best.get('cliffs_delta') or 0)>.05
+            )
+        )
+
+        verdict=(
+            'PATH_DNA_EFFECT_CONFIRMED_WORTH_ONE_RESCUE_OOS'
+            if actionable else
+            'PATH_DNA_EFFECT_NOT_ROBUST_ENOUGH_CLOSE_BRANCH'
+        )
+        if metric_bug_confirmed:
+            verdict='SMD_BUG_CONFIRMED__'+verdict
+
+        _v6931_write(status='running',phase='finalize',
+                     message=f'Best={best.get("feature") if best else "—"} · actionable={actionable}',
+                     processed=3,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.93.1 Path-DNA Metric Integrity / Effect-Size Audit',
+            'verdict':verdict,
+            'metric_bug_confirmed':metric_bug_confirmed,
+            'old_v693_best':old_best,
+            'best_effect':best,
+            'all_effects':enriched,
+            'gate':{
+                'loo_auc_weakest_ge_0_65':bool(best and (best.get('loo_auc_weakest') or 0)>=.65),
+                'loo_abs_smd_weakest_ge_0_50_or_cliff_ge_0_33':bool(
+                    best and (
+                        (best.get('loo_abs_smd_weakest') or 0)>=.50 or
+                        (best.get('loo_abs_cliff_weakest') or 0)>=.33
+                    )
+                ),
+                'actionable':actionable
+            },
+            'important':'This version only validates metric integrity and effect size. It does not tune thresholds, does not create a rescue rule, and does not replay the portfolio.',
+            'next_step':(
+                'Build ONE past-only asymmetric rescue OOS using the single validated sequence clue; still no portfolio replay until +100 retention >=80% and STOP rejection remains materially positive.'
+                if actionable else
+                'Close sequence-path rescue. Do not tune these descriptors further.'
+            ),
+            'cache_note':'Reads V6.93 rejected_path_dna.csv.gz only. 0 Tiingo; 0 universe scan; 0 replay.'
+        }
+
+        V6931_DIR.mkdir(parents=True,exist_ok=True)
+        V6931_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v6931_write(status='done',phase='done',message=f'V6.93.1 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6931_write(status='error',phase='error',
+                     message=f'V6.93.1 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6931_thread=None
+
+def _v6931_start():
+    global v6931_thread
+    if _v6931_alive():return False
+    _v6931_write(status='starting',phase='starting',message='V6.93.1 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v6931_thread=threading.Thread(target=_v6931_run,daemon=True);v6931_thread.start();return True
+
+@APP.route('/v6931/run',methods=['GET','POST'])
+def v6931_run():_v6931_start();return redirect('/v6931/path-dna-metric-integrity')
+
+@APP.get('/api/v6931/status')
+def v6931_status_api():return jsonify(_v6931_status())
+
+@APP.get('/v6931/path-dna-metric-integrity')
+def v6931_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6931_status();R={}
+    if V6931_RESULT.exists():
+        try:R=json.loads(V6931_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    B=R.get('best_effect',{}) if isinstance(R.get('best_effect'),dict) else {}
+    E=R.get('all_effects',[]) if isinstance(R.get('all_effects'),list) else []
+    rows=''.join(
+        f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{num(x.get('winner_median')):.4f}</td><td>{num(x.get('stop_median')):.4f}</td><td>{num(x.get('smd')):+.3f}</td><td>{num(x.get('cliffs_delta')):+.3f}</td><td>{num(x.get('oriented_auc')):.3f}</td><td>{num(x.get('loo_auc_weakest')):.3f}</td><td>{num(x.get('loo_abs_smd_weakest')):.3f}</td><td>{num(x.get('loo_abs_cliff_weakest')):.3f}</td></tr>"
+        for x in E[:15]
+    )
+    btn='' if _v6931_alive() else '<a href="/v6931/run"><button>▶ 开始 V6.93.1 Metric Integrity</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #06b6d4;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧪 V6.93.1 Path-DNA Metric Integrity</h1><div class="info">专查 V6.93 为什么所有 SMD 都显示 0.000。独立重算 pooled-SD SMD、Cliff's delta、rank AUC，并做 leave-one-winner-out。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',4) or 4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>SMD bug confirmed: <b>{e(R.get('metric_bug_confirmed','—'))}</b></p>
+<p>Best: <b>{e(B.get('feature','—'))}</b> · SMD={num(B.get('smd')):+.3f} · Cliff={num(B.get('cliffs_delta')):+.3f} · AUC={num(B.get('oriented_auc')):.3f} · LOO weakest AUC={num(B.get('loo_auc_weakest')):.3f}</p></div>
+<div class="c"><h2>Effect-Size Audit</h2><table><tr><th>Feature</th><th>Winner Med</th><th>STOP Med</th><th>SMD</th><th>Cliff Δ</th><th>AUC</th><th>LOO AUC Weak</th><th>LOO |SMD| Weak</th><th>LOO |Cliff| Weak</th></tr>{rows or '<tr><td colspan=9>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6931_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6931_home_base is not None:
+    def _v6931_home_wrap(*args,**kwargs):
+        resp=_v6931_home_base(*args,**kwargs)
+        card="""<div id="v6931-metric-card" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧪 V6.93.1 Path-DNA Metric Integrity</h2>
+        <p>Independent SMD + Cliff delta + AUC · verify V6.93 zero-SMD bug · no replay</p>
+        <a href="/v6931/path-dna-metric-integrity"><button>打开 V6.93.1</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6931-metric-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6931-metric-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6931_home_base:APP.view_functions[ep]=_v6931_home_wrap
