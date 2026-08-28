@@ -44565,7 +44565,37 @@ def _v699_run():
         Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
         if len(Z)<500:raise RuntimeError(f'clean candidate rows too small: {len(Z)}')
 
-        _v699_write(status='running',phase='price_cache',message='Historical Cache only：compact corporate-action-safe price arrays…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+        # FIX2: fail-fast structural parity BEFORE the expensive historical price-cache pass.
+        # Reproduce V6.97's clean FIRST_COME reconstruction exactly, including dtype normalization.
+        if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json for FIRST_COME parity')
+        r97=json.loads(V697_RESULT.read_text(encoding='utf-8'));expected=int((r97.get('reconstruction') or {}).get('admitted_first_come') or 0)
+        PF=F.copy()
+        Pstruct=P[['listing_id','entry_date','candidate_order']].copy()
+        Pstruct['listing_id']=Pstruct['listing_id'].astype(str)
+        Pstruct['entry_date']=pd.to_datetime(Pstruct['entry_date'],errors='coerce').dt.normalize()
+        PF['listing_id']=PF['listing_id'].astype(str)
+        PF['entry_date']=pd.to_datetime(PF['entry_date'],errors='coerce').dt.normalize()
+        PF['exit_date']=pd.to_datetime(PF['exit_date'],errors='coerce').dt.normalize()
+        om=Pstruct.drop_duplicates(['listing_id','entry_date'],keep='first')
+        PF=PF.drop(columns=['candidate_order'],errors='ignore').merge(om,on=['listing_id','entry_date'],how='left')
+        PF['candidate_order']=pd.to_numeric(PF.candidate_order,errors='coerce')
+        mo=PF.candidate_order.isna()
+        if mo.any():
+            base=float(Pstruct.candidate_order.max()+1 if len(Pstruct) else 10**9)
+            PF.loc[mo,'candidate_order']=base+np.arange(int(mo.sum()))
+        PF=PF.dropna(subset=['entry_date','exit_date','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        active={};struct_admitted=0
+        for dt,g in PF.groupby('entry_date',sort=True):
+            dt=pd.Timestamp(dt).normalize()
+            for j in list(active):
+                if pd.Timestamp(active[j])<=dt:active.pop(j,None)
+            for j,r in g.iterrows():
+                if len(active)<10:
+                    active[int(j)]=pd.Timestamp(r.exit_date);struct_admitted+=1
+        if expected and struct_admitted!=expected:
+            raise RuntimeError(f'FIRST_COME structural parity mismatch: V6.99={struct_admitted} vs V6.97={expected}. Challenger blocked before price replay.')
+
+        _v699_write(status='running',phase='price_cache',message=f'Parity OK {struct_admitted}/{expected} · Historical Cache only：compact corporate-action-safe price arrays…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
         M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
         if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
         mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};factors={};missing=0
@@ -44645,32 +44675,7 @@ def _v699_run():
             st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st['skipped_capacity']=int(skipcap);st['skipped_cash']=int(skipcash);st['replacement_count']=int(len(repl));return st,repl
 
         _v699_write(status='running',phase='replay',message='A/B replay：A FIRST_COME vs B single-feature replacement…',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
-        # Structural parity must be checked on the SAME clean candidate stream used by V6.97,
-        # before execution-price availability filters.  V6.97 is an admission reconstruction,
-        # not an executable price replay; comparing its 445 admissions to the executable subset
-        # (408 in the first V6.99 build) was an invalid parity check.
-        if not V697_RESULT.exists():raise RuntimeError('找不到 V6.97 result.json for FIRST_COME parity')
-        r97=json.loads(V697_RESULT.read_text(encoding='utf-8'));expected=int((r97.get('reconstruction') or {}).get('admitted_first_come') or 0)
-        PF=F.copy()
-        om=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first')
-        PF=PF.drop(columns=['candidate_order'],errors='ignore').merge(om,on=['listing_id','entry_date'],how='left')
-        PF['candidate_order']=pd.to_numeric(PF.candidate_order,errors='coerce')
-        mo=PF.candidate_order.isna()
-        if mo.any():
-            base=float(P.candidate_order.max()+1 if len(P) else 10**9)
-            PF.loc[mo,'candidate_order']=base+np.arange(int(mo.sum()))
-        PF=PF.dropna(subset=['entry_date','exit_date','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
-        active={};struct_admitted=0
-        for dt,g in PF.groupby('entry_date',sort=True):
-            dt=pd.Timestamp(dt).normalize()
-            for j in list(active):
-                if pd.Timestamp(active[j])<=dt:active.pop(j,None)
-            for j,r in g.iterrows():
-                if len(active)<10:
-                    active[int(j)]=pd.Timestamp(r.exit_date);struct_admitted+=1
-        if expected and struct_admitted!=expected:
-            raise RuntimeError(f'FIRST_COME structural parity mismatch: V6.99={struct_admitted} vs V6.97={expected}. Challenger blocked.')
-
+        # Structural parity already passed in preflight before the expensive price-cache pass.
         A,_=sim('A_NO_REPLACEMENT',False)
         executable_ratio=float(A.get('admitted_positions',0)/expected) if expected else np.nan
         if expected and executable_ratio<0.90:
