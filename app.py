@@ -35735,3 +35735,311 @@ if _v679f_home_base is not None:
         body=str(resp);return body if 'id="v679f-fixed-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v679f_home_base:APP.view_functions[ep]=_v679f_home_wrap
+
+
+# ========================= V6.79G TRADE-LEVEL EXIT-ONLY PAIRED COUNTERFACTUAL =========================
+V679G_DIR=DATA_DIR/'v679g_trade_level_exit_only_paired'
+V679G_STATUS=V679G_DIR/'status.json'; V679G_RESULT=V679G_DIR/'result.json'
+v679g_thread=None
+
+def _v679g_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V679G_STATUS.exists():
+        try:x.update(json.loads(V679G_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v679g_write(**kw):
+    V679G_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v679g_status();x.update(kw)
+    V679G_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v679g_alive():return v679g_thread is not None and v679g_thread.is_alive()
+
+def _v679g_run():
+    global v679g_thread
+    t0=time.time()
+    try:
+        _v679g_write(status='running',phase='load_control_schedule',
+                     message='读取 V6.69 + V6.70F Control admission schedule…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists(): raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v679g_write(status='running',phase='control_parity',
+                             message=f'Control parity cache {n}/{tot}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.79G Trade-Level Exit-Only Paired Counterfactual',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap,
+                    'important':'Control parity failed; paired Challenger not built.'}
+            V679G_DIR.mkdir(parents=True,exist_ok=True)
+            V679G_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v679g_write(status='done',phase='blocked',message=f'Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['schedule_id']=S.index.astype(str)
+        S=S.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+        admitted_ids=sorted(set(S.listing_id.astype(str)))
+
+        _v679g_write(status='running',phase='admitted_ohlc',
+                     message=f'只读取 Control admitted OHLC · {len(admitted_ids):,} listings',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        oh={}
+        for n,lid in enumerate(admitted_ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if not q.empty:oh[lid]=q.reset_index(drop=True)
+            if n==1 or n%100==0 or n==len(admitted_ids):
+                _v679g_write(status='running',phase='admitted_ohlc',
+                             message=f'Admitted OHLC {n}/{len(admitted_ids)}',
+                             processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        _v679g_write(status='running',phase='paired_counterfactual',
+                     message=f'逐笔对比 Control Exit vs Challenger Exit · trades {len(S):,}',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        total=len(S)
+        for k,r in S.iterrows():
+            d=oh.get(str(r.listing_id))
+            if d is None:continue
+            ex=_v679f_ps_exit(d,r.entry_date,float(r.entry_px),1260)
+            if ex is None:continue
+            xd,xp,reason,hold,proof=ex
+            cr=float(r.exit_px)/float(r.entry_px)-1.0
+            hr=float(xp)/float(r.entry_px)-1.0
+            rows.append({
+                'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
+                'entry_date':r.entry_date,'proof':bool(proof),
+                'control_ret':cr,'challenger_ret':hr,'delta_ret':hr-cr,
+                'control_exit_date':r.exit_date,'challenger_exit_date':xd,
+                'control_reason':str(r.exit_reason),'challenger_reason':reason,
+                'challenger_hold_sessions':int(hold)
+            })
+            if k==0 or (k+1)%500==0 or k+1==total:
+                _v679g_write(status='running',phase='paired_counterfactual',
+                             message=f'Paired trades {k+1:,}/{total:,}',
+                             processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        D=pd.DataFrame(rows)
+        if D.empty:raise RuntimeError('paired counterfactual 结果为空')
+        PZ=D[D.proof].copy()
+        if PZ.empty:raise RuntimeError('Proven Strength paired cohort 为空')
+
+        _v679g_write(status='running',phase='risk_decomposition',
+                     message='分解 Winner rescue 与 Loser leakage…',
+                     processed=4,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        metrics={
+            'schedule_n':int(len(D)),'proven_n':int(len(PZ)),
+            'changed_exit_n':int((PZ.control_exit_date.astype(str)!=PZ.challenger_exit_date.astype(str)).sum()),
+            'control_avg_return':float(PZ.control_ret.mean()),
+            'challenger_avg_return':float(PZ.challenger_ret.mean()),
+            'delta_avg_return':float((PZ.challenger_ret-PZ.control_ret).mean()),
+            'control_wr':float((PZ.control_ret>0).mean()),
+            'challenger_wr':float((PZ.challenger_ret>0).mean()),
+            'control_plus20':float((PZ.control_ret>=.20).mean()),
+            'challenger_plus20':float((PZ.challenger_ret>=.20).mean()),
+            'control_plus50':float((PZ.control_ret>=.50).mean()),
+            'challenger_plus50':float((PZ.challenger_ret>=.50).mean()),
+            'control_plus100':float((PZ.control_ret>=1.0).mean()),
+            'challenger_plus100':float((PZ.challenger_ret>=1.0).mean()),
+            'control_loss10':float((PZ.control_ret<=-.10).mean()),
+            'challenger_loss10':float((PZ.challenger_ret<=-.10).mean()),
+            'rescued_to_plus20':int(((PZ.control_ret<.20)&(PZ.challenger_ret>=.20)).sum()),
+            'rescued_to_plus50':int(((PZ.control_ret<.50)&(PZ.challenger_ret>=.50)).sum()),
+            'rescued_to_plus100':int(((PZ.control_ret<1.0)&(PZ.challenger_ret>=1.0)).sum()),
+            'new_loss10':int(((PZ.control_ret>-.10)&(PZ.challenger_ret<=-.10)).sum()),
+            'improved_trade_share':float((PZ.delta_ret>0).mean()),
+            'worsened_trade_share':float((PZ.delta_ret<0).mean()),
+            'median_delta_ret':float(PZ.delta_ret.median())
+        }
+
+        # Diagnostic ratio: winner rescue vs new severe-loss leakage.
+        rescue_units=(metrics['rescued_to_plus20']+2*metrics['rescued_to_plus50']+4*metrics['rescued_to_plus100'])
+        leakage_units=max(1,metrics['new_loss10'])
+        metrics['rescue_to_leakage_score']=float(rescue_units/leakage_units)
+
+        # Conservative gate: edge must improve avg return and winners without excessive new severe losses.
+        edge=(metrics['delta_avg_return']>0 and
+              metrics['challenger_plus20']>metrics['control_plus20'] and
+              metrics['challenger_plus50']>metrics['control_plus50'])
+        safe=(metrics['challenger_loss10']<=.20 and metrics['new_loss10']<=max(10,int(.05*len(PZ))))
+        verdict='TRADE_LEVEL_WINNER_PRESERVATION_EDGE_CONFIRMED_BUT_NEEDS_STRICTER_RISK_FILTER' if edge and not safe else (
+                'TRADE_LEVEL_WINNER_PRESERVATION_EDGE_CONFIRMED' if edge and safe else
+                'TRADE_LEVEL_WINNER_PRESERVATION_PROXY_FAILS')
+
+        result={
+            'version':'V6.79G Trade-Level Exit-Only Paired Counterfactual',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'paired_metrics':metrics,
+            'important':'No portfolio cash model and no admission replay are used here. This isolates the exit counterfactual on the exact V6.70F Control-admitted trade schedule.',
+            'next_step':('Build one stricter defense semantic that preserves most rescued +20/+50/+100 winners while cutting new <=-10% leakage. Do not change entry/admission.'
+                         if 'EDGE_CONFIRMED' in verdict else
+                         'Reject this proxy and return to source-supported defense reconstruction.'),
+            'cache_note':'V6.69 + exact V6.70F Control admission + V6.17 admitted-only OHLC; 0 Tiingo; no universe rebuild.'
+        }
+        V679G_DIR.mkdir(parents=True,exist_ok=True)
+        V679G_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:D.to_csv(V679G_DIR/'paired_exit_only_trades.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v679g_write(status='done',phase='done',message=f'V6.79G 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v679g_write(status='error',phase='error',
+                     message=f'V6.79G 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v679g_thread=None
+
+def _v679g_start():
+    global v679g_thread
+    if _v679g_alive():return False
+    _v679g_write(status='starting',phase='starting',message='V6.79G 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v679g_thread=threading.Thread(target=_v679g_run,daemon=True);v679g_thread.start();return True
+
+@APP.route('/v679g/run',methods=['GET','POST'])
+def v679g_run():_v679g_start();return redirect('/v679g/exit-only-paired')
+
+@APP.get('/api/v679g/status')
+def v679g_status_api():return jsonify(_v679g_status())
+
+@APP.get('/v679g/exit-only-paired')
+def v679g_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v679g_status();R={}
+    if V679G_RESULT.exists():
+        try:
+            obj=json.loads(V679G_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    M=R.get('paired_metrics') if isinstance(R.get('paired_metrics'),dict) else {}
+    CB=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    btn='' if _v679g_alive() else '<a href="/v679g/run"><button>▶ 开始 V6.79G Exit-Only Paired</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f5f3ff;border:1px solid #8b5cf6;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V6.79G Trade-Level Exit-Only Paired Counterfactual</h1>
+<div class="info">完全移除 portfolio cash/admission 干扰。先用 V6.70F 对齐 28.25%，然后只在同一批 Control-admitted trades 上比较 Exit 本身。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>V6.70F Control CAGR: <b>{num(CB.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p></div>
+<div class="c"><h2>Exact Same Proven-Strength Trades</h2>
+<table><tr><th>Metric</th><th>Control</th><th>Challenger</th></tr>
+<tr><td>Avg return</td><td>{num(M.get('control_avg_return'))*100:.2f}%</td><td>{num(M.get('challenger_avg_return'))*100:.2f}%</td></tr>
+<tr><td>Win rate</td><td>{num(M.get('control_wr'))*100:.1f}%</td><td>{num(M.get('challenger_wr'))*100:.1f}%</td></tr>
+<tr><td>+20%</td><td>{num(M.get('control_plus20'))*100:.1f}%</td><td>{num(M.get('challenger_plus20'))*100:.1f}%</td></tr>
+<tr><td>+50%</td><td>{num(M.get('control_plus50'))*100:.1f}%</td><td>{num(M.get('challenger_plus50'))*100:.1f}%</td></tr>
+<tr><td>+100%</td><td>{num(M.get('control_plus100'))*100:.1f}%</td><td>{num(M.get('challenger_plus100'))*100:.1f}%</td></tr>
+<tr><td>≤ -10%</td><td>{num(M.get('control_loss10'))*100:.1f}%</td><td>{num(M.get('challenger_loss10'))*100:.1f}%</td></tr>
+</table></div>
+<div class="c"><h2>Winner Rescue vs Loser Leakage</h2>
+<p>Proven N={integer(M.get('proven_n')):,} · Improved trades={num(M.get('improved_trade_share'))*100:.1f}% · Worsened={num(M.get('worsened_trade_share'))*100:.1f}%</p>
+<p>Rescued to +20: <b>{integer(M.get('rescued_to_plus20')):,}</b> · +50: <b>{integer(M.get('rescued_to_plus50')):,}</b> · +100: <b>{integer(M.get('rescued_to_plus100')):,}</b></p>
+<p>New ≤-10% losses: <b>{integer(M.get('new_loss10')):,}</b> · Rescue/Leakage score: <b>{num(M.get('rescue_to_leakage_score')):.2f}</b></p></div>
+</div></body></html>"""
+
+_v679g_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v679g_home_base is not None:
+    def _v679g_home_wrap(*args,**kwargs):
+        resp=_v679g_home_base(*args,**kwargs)
+        card="""<div id="v679g-exit-only-card" style="background:#f5f3ff;border:5px solid #7c3aed;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧬 V6.79G Exit-Only Paired Counterfactual</h2>
+        <p>28.25% Control first · exact admitted trades · no cash conflict · cache-only</p>
+        <a href="/v679g/exit-only-paired"><button>打开 V6.79G</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v679g-exit-only-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v679g-exit-only-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v679g_home_base:APP.view_functions[ep]=_v679g_home_wrap
