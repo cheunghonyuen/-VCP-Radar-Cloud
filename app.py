@@ -40105,3 +40105,314 @@ if _v6893_home_base is not None:
         body=str(resp);return body if 'id="v6893-repair-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6893_home_base:APP.view_functions[ep]=_v6893_home_wrap
+
+
+# ========================= V6.89.4 CORPORATE-ACTION-SAFE FULL CONTROL REPLAY =========================
+V6894_DIR=DATA_DIR/'v6894_corporate_action_safe_control_replay'
+V6894_STATUS=V6894_DIR/'status.json'; V6894_RESULT=V6894_DIR/'result.json'
+v6894_thread=None
+
+def _v6894_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6894_STATUS.exists():
+        try:x.update(json.loads(V6894_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6894_write(**kw):
+    V6894_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6894_status();x.update(kw)
+    V6894_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6894_alive(): return v6894_thread is not None and v6894_thread.is_alive()
+
+def _v6894_detect_events(q):
+    q=q.copy().sort_values('date').reset_index(drop=True)
+    q['prev_close']=q.close.shift(1)
+    q['open_ratio']=q.open/q.prev_close
+    q['close_ratio']=q.close/q.prev_close
+    q['intraday_abs']=abs(q.close/q.open-1)
+    out=[]
+    for _,r in q.iloc[1:].iterrows():
+        orat=float(r.open_ratio) if pd.notna(r.open_ratio) else np.nan
+        crat=float(r.close_ratio) if pd.notna(r.close_ratio) else np.nan
+        if not np.isfinite(orat) or not np.isfinite(crat):continue
+        if not ((orat>=3 or orat<=1/3) and (crat>=3 or crat<=1/3)):continue
+        agreement=abs(np.log(max(1e-12,orat/crat)))<=0.10
+        intr=float(r.intraday_abs) if pd.notna(r.intraday_abs) else np.nan
+        calm=bool(np.isfinite(intr) and intr<=0.25)
+        okround,rf,dist=_v6893_round_factor_score(crat)
+        conf='HIGH' if agreement and calm and okround else ('MEDIUM' if agreement and calm else 'LOW')
+        out.append({'date':pd.Timestamp(r.date).normalize(),'ratio':crat,'confidence':conf,
+                    'high_confidence':bool(conf=='HIGH'),'round_factor':rf})
+    return out
+
+def _v6894_factor_for_date(events,dt):
+    dt=pd.Timestamp(dt).normalize()
+    f=1.0
+    for ev in events:
+        if ev['high_confidence'] and dt < ev['date']:
+            f*=float(ev['ratio'])
+    return float(f)
+
+def _v6894_run():
+    global v6894_thread
+    t0=time.time()
+    try:
+        _v6894_write(status='running',phase='load_candidate_cache',
+                     message='读取 V6.69 全候选 paired cache；只复用现有历史缓存，不打 Tiingo…',
+                     processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px_raw':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px_raw':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px_raw','exit_date','exit_px_raw']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        lids=sorted(set(Z.listing_id.astype(str)))
+        _v6894_write(status='running',phase='build_safe_price_cache',
+                     message=f'Corporate-action-safe price cache 0/{len(lids)}',
+                     processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        price={};date_set=set();events_by_lid={};ambiguous_by_lid={}
+        missing=0
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:
+                missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:
+                missing+=1;continue
+            if d is None or d.empty:
+                missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','close']):
+                missing+=1;continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+            if q.empty:
+                missing+=1;continue
+
+            ev=_v6894_detect_events(q)
+            hi=[x for x in ev if x['high_confidence']]
+            amb=[x for x in ev if not x['high_confidence']]
+            if hi:events_by_lid[lid]=hi
+            if amb:ambiguous_by_lid[lid]=amb
+
+            if hi:
+                q['safe_close']=[float(c)*_v6894_factor_for_date(hi,dt) for c,dt in zip(q.close,q.date)]
+            else:
+                q['safe_close']=q.close.astype(float)
+
+            price[lid]=dict(zip(q.date,q.safe_close))
+            date_set.update(q.date.tolist())
+
+            if n==1 or n%100==0 or n==len(lids):
+                _v6894_write(status='running',phase='build_safe_price_cache',
+                             message=f'Corporate-action-safe price cache {n}/{len(lids)} · high-conf listings={len(events_by_lid)} · ambiguous={len(ambiguous_by_lid)}',
+                             processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        if not date_set:raise RuntimeError('safe trading calendar 为空')
+
+        _v6894_write(status='running',phase='repair_candidate_prices',
+                     message='把每一笔候选 Entry/Exit 价格归一到同一 corporate-action scale…',
+                     processed=2,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        entry_safe=[];exit_safe=[];cross_hi=[];cross_amb=[]
+        for _,r in Z.iterrows():
+            lid=str(r.listing_id); ed=pd.Timestamp(r.entry_date); xd=pd.Timestamp(r.exit_date)
+            hi=events_by_lid.get(lid,[])
+            amb=ambiguous_by_lid.get(lid,[])
+            ef=_v6894_factor_for_date(hi,ed)
+            xf=_v6894_factor_for_date(hi,xd)
+            entry_safe.append(float(r.entry_px_raw)*ef)
+            exit_safe.append(float(r.exit_px_raw)*xf)
+            cross_hi.append(sum(1 for ev in hi if ed < ev['date'] <= xd))
+            cross_amb.append(sum(1 for ev in amb if ed < ev['date'] <= xd))
+
+        Z['entry_px']=entry_safe
+        Z['exit_px']=exit_safe
+        Z['high_conf_crossings']=cross_hi
+        Z['ambiguous_crossings']=cross_amb
+
+        # A corrected benchmark cannot be called final if any actually eligible candidate
+        # crosses an ambiguous discontinuity. We still replay, but mark it provisional.
+        total_ambiguous_crossing_candidates=int((Z.ambiguous_crossings>0).sum())
+        total_high_conf_crossing_candidates=int((Z.high_conf_crossings>0).sum())
+
+        cal=sorted(date_set)
+        _v6894_write(status='running',phase='corrected_dynamic_replay',
+                     message='开始 corrected Control：10-slot / cash / admission 全部重新动态决定…',
+                     processed=3,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        B,whitelist=_v670f_replay_core(
+            Z[['listing_id','entry_date','entry_px','exit_date','exit_px','exit_reason','regime']].copy(),
+            price,cal,'CORPORATE_ACTION_SAFE_CONTROL',t0,None,False,heartbeat=False
+        )
+
+        _v6894_write(status='running',phase='admission_audit',
+                     message='检查修复后实际 admitted trades 与旧 232 笔的变化…',
+                     processed=4,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+        admitted=Z.loc[sorted(whitelist)].copy()
+        admitted['ret']=admitted.exit_px/admitted.entry_px-1
+        oldfp=V689_DIR/'control_attribution_trades.csv.gz'
+        old_ids=set()
+        if oldfp.exists():
+            old=pd.read_csv(oldfp,compression='gzip')
+            if all(c in old.columns for c in ['listing_id','entry_date']):
+                old_ids=set(zip(old.listing_id.astype(str),pd.to_datetime(old.entry_date,errors='coerce').dt.normalize().astype(str)))
+        new_ids=set(zip(admitted.listing_id.astype(str),pd.to_datetime(admitted.entry_date).dt.normalize().astype(str)))
+        added=len(new_ids-old_ids);removed=len(old_ids-new_ids);same=len(new_ids&old_ids)
+
+        amb_admitted=int((admitted.ambiguous_crossings>0).sum()) if 'ambiguous_crossings' in admitted else 0
+        hi_admitted=int((admitted.high_conf_crossings>0).sum()) if 'high_conf_crossings' in admitted else 0
+
+        verdict=('CORRECTED_CONTROL_REPLAY_COMPLETE_FINAL'
+                 if amb_admitted==0 else
+                 'CORRECTED_CONTROL_REPLAY_COMPLETE_BUT_AMBIGUOUS_CA_EVENTS_REMAIN')
+
+        # Fresh benchmark = whatever the corrected dynamic replay actually produces.
+        result={
+            'version':'V6.89.4 Corporate-Action-Safe Full Control Replay',
+            'verdict':verdict,
+            'old_invalid_control_cagr':0.2825,
+            'corrected_control':B,
+            'corrected_benchmark':{
+                'cagr':B.get('cagr'),'maxdd':B.get('maxdd'),'calmar':B.get('calmar'),
+                'profit_factor':B.get('profit_factor'),'win_rate':B.get('win_rate'),
+                'avg_return':B.get('avg_return'),'avg_loss':B.get('avg_loss'),
+                'avg_exposure':B.get('avg_exposure')
+            },
+            'candidate_count':int(len(Z)),
+            'admitted_count':int(len(admitted)),
+            'high_conf_scale_listings':int(len(events_by_lid)),
+            'ambiguous_scale_listings':int(len(ambiguous_by_lid)),
+            'high_conf_crossing_candidates':total_high_conf_crossing_candidates,
+            'ambiguous_crossing_candidates':total_ambiguous_crossing_candidates,
+            'high_conf_crossing_admitted':hi_admitted,
+            'ambiguous_crossing_admitted':amb_admitted,
+            'admission_diff_vs_old':{'same':same,'added':added,'removed':removed},
+            'missing_price_listings':int(missing),
+            'important':'This is a FULL dynamic Control replay after price-scale normalization. Cash, 10-slot occupancy and admission are re-decided from scratch; it does NOT freeze the old 232 admissions.',
+            'benchmark_policy':'28.25% is retired. If ambiguous_crossing_admitted == 0, this corrected replay becomes the new baseline for all future A/B. If ambiguous admitted trades remain, reconcile them first.',
+            'next_step':(
+                'Promote this corrected result as the new benchmark, then rerun only benchmark-sensitive diagnostics using existing caches; do not resurrect old 28.25% results.'
+                if amb_admitted==0 else
+                'Inspect only the ambiguous admitted corporate-action events, resolve their scale, then rerun this same corrected replay.'
+            ),
+            'cache_note':'V6.69 candidates + V6.17 Historical Cache only; 0 Tiingo; 0 universe rescan.'
+        }
+        V6894_DIR.mkdir(parents=True,exist_ok=True)
+        V6894_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        admitted.to_csv(V6894_DIR/'corrected_admitted_trades.csv.gz',index=False,compression='gzip')
+
+        _v6894_write(status='done',phase='done',message=f'V6.89.4 完成：{verdict}',
+                     processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6894_write(status='error',phase='error',
+                     message=f'V6.89.4 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6894_thread=None
+
+def _v6894_start():
+    global v6894_thread
+    if _v6894_alive():return False
+    _v6894_write(status='starting',phase='starting',message='V6.89.4 正在启动',
+                 processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v6894_thread=threading.Thread(target=_v6894_run,daemon=True);v6894_thread.start();return True
+
+@APP.route('/v6894/run',methods=['GET','POST'])
+def v6894_run():_v6894_start();return redirect('/v6894/corrected-control-replay')
+
+@APP.get('/api/v6894/status')
+def v6894_status_api():return jsonify(_v6894_status())
+
+@APP.get('/v6894/corrected-control-replay')
+def v6894_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6894_status();R={}
+    if V6894_RESULT.exists():
+        try:R=json.loads(V6894_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('corrected_benchmark') if isinstance(R.get('corrected_benchmark'),dict) else {}
+    D=R.get('admission_diff_vs_old') if isinstance(R.get('admission_diff_vs_old'),dict) else {}
+    btn='' if _v6894_alive() else '<a href="/v6894/run"><button>▶ 开始 V6.89.4 Corrected Replay</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.warn{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.ok{{background:#ecfdf5;border:1px solid #10b981;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧮 V6.89.4 Corporate-Action-Safe Full Control Replay</h1>
+<div class="warn"><b>28.25% 已作废。</b> 这版用修正后的价格尺度重新动态决定 cash / 10-slot / admission；不是冻结旧 232 笔。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),6)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Old invalid CAGR: <b>28.25%</b></p></div>
+<div class="c"><h2>✅ Corrected Benchmark</h2>
+<table><tr><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Return</th><th>Avg Loss</th><th>Avg Exposure</th></tr>
+<tr><td><b>{num(B.get('cagr'))*100:.2f}%</b></td><td>{num(B.get('maxdd'))*100:.2f}%</td><td>{num(B.get('calmar')):.3f}</td><td>{num(B.get('profit_factor')):.2f}</td><td>{num(B.get('win_rate'))*100:.1f}%</td><td>{num(B.get('avg_return'))*100:.2f}%</td><td>{num(B.get('avg_loss'))*100:.2f}%</td><td>{num(B.get('avg_exposure'))*100:.1f}%</td></tr></table></div>
+<div class="c"><h2>Admission / Integrity Audit</h2>
+<p>Admitted: <b>{integer(R.get('admitted_count'))}</b> · same old={integer(D.get('same'))} · added={integer(D.get('added'))} · removed={integer(D.get('removed'))}</p>
+<p>High-conf scale listings={integer(R.get('high_conf_scale_listings'))} · ambiguous scale listings={integer(R.get('ambiguous_scale_listings'))}</p>
+<p>Admitted trades crossing HIGH-conf events={integer(R.get('high_conf_crossing_admitted'))} · crossing ambiguous events=<b>{integer(R.get('ambiguous_crossing_admitted'))}</b></p></div>
+</div></body></html>"""
+
+_v6894_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6894_home_base is not None:
+    def _v6894_home_wrap(*args,**kwargs):
+        resp=_v6894_home_base(*args,**kwargs)
+        card="""<div id="v6894-corrected-control-card" style="background:#ecfdf5;border:5px solid #059669;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧮 V6.89.4 Corporate-Action-Safe Full Control Replay</h2>
+        <p>Retire 28.25% · corrected price scale · dynamic 10-slot/cash/admission · cache-only</p>
+        <a href="/v6894/corrected-control-replay"><button>打开 V6.89.4</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6894-corrected-control-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6894-corrected-control-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6894_home_base:APP.view_functions[ep]=_v6894_home_wrap
