@@ -38437,3 +38437,224 @@ if _v686_home_base is not None:
         body=str(resp);return body if 'id="v686-entry-dna-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v686_home_base:APP.view_functions[ep]=_v686_home_wrap
+
+
+# ========================= V6.87 RESEARCH DEDUP / NEXT-EDGE PRIORITY GATE =========================
+V687_DIR=DATA_DIR/'v687_research_dedup_next_edge_priority_gate'
+V687_STATUS=V687_DIR/'status.json'; V687_RESULT=V687_DIR/'result.json'
+v687_thread=None
+
+def _v687_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V687_STATUS.exists():
+        try:x.update(json.loads(V687_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v687_write(**kw):
+    V687_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v687_status();x.update(kw)
+    V687_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v687_alive():return v687_thread is not None and v687_thread.is_alive()
+
+def _v687_jload(p):
+    try:
+        if p is not None and Path(p).exists():
+            z=json.loads(Path(p).read_text(encoding='utf-8'))
+            return z if isinstance(z,dict) else {}
+    except Exception:pass
+    return {}
+
+def _v687_run():
+    global v687_thread
+    t0=time.time()
+    try:
+        _v687_write(status='running',phase='load_current',
+                     message='读取 V6.86 与历史实验记录，先做查重，不重复旧 Setup DNA…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        r86=_v687_jload(V686_RESULT)
+        if not r86:raise RuntimeError('找不到 V6.86 result.json')
+        if not bool(r86.get('benchmark_ok')):raise RuntimeError('V6.86 benchmark 未通过')
+        v86ver=str(r86.get('verdict',''))
+
+        _v687_write(status='running',phase='dedup_setup',
+                     message='对账旧 Big Winner DNA / Entry Location / Capital Ranking 分支…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        # These are historical branches already present in the current codebase/repository.
+        historical=[
+            {
+                'branch':'V6.15D/E/F Big Winner DNA',
+                'question':'Leader momentum / volume dry-up / contraction / base quality / pivot readiness / near-high / multi-factor DNA / strict OOS',
+                'status':'ALREADY_EXPLORED',
+                'repeat':False
+            },
+            {
+                'branch':'V6.16A Entry Location',
+                'question':'Pivot / Pullback / Re-strength / Power Play entry location',
+                'status':'ALREADY_EXPLORED',
+                'repeat':False
+            },
+            {
+                'branch':'V6.16B/F/G Winner Hold & Stop',
+                'question':'Fixed/structural stops, hold eligibility, adaptive hold',
+                'status':'ALREADY_EXPLORED',
+                'repeat':False
+            },
+            {
+                'branch':'V6.16H/I Capital / Admission / Ranking',
+                'question':'Portfolio capital timeline, same-day signal ranking, low-memory ranking',
+                'status':'TECHNICALLY_EXPLORED_BUT_NOT_CURRENTLY_STABLE_FOR_REOPEN',
+                'repeat':False
+            },
+            {
+                'branch':'V6.70-74 Market Exposure',
+                'question':'Cautious sizing / market-regime attribution / continuous warning',
+                'status':'PRODUCTION_RULE_REJECTED_OR_UNSTABLE',
+                'repeat':False
+            },
+            {
+                'branch':'V6.75-86 STOP / Entry / Winner Preservation',
+                'question':'STOP7 decomposition, quick profit, washout, delayed entry, event classifier, winner path, source reconciliation, entry DNA',
+                'status':'CURRENTLY_CLOSED_OR_NO_STABLE_EDGE',
+                'repeat':False
+            }
+        ]
+
+        # Identify what is actually still missing and non-duplicative.
+        # Key observation: old Setup DNA used generic proxies; V6.86 used entry-day price/volume.
+        # A genuinely new question must use source-derived, named setup semantics from actual JLaw buy/review material,
+        # not re-score the same momentum/dry-up/base proxies.
+        gaps=[
+            {
+                'priority':1,
+                'name':'ACTUAL_BUY_SOURCE_SETUP_SEMANTICS',
+                'novel':True,
+                'why':'Historical Big-Winner DNA relied on generic quantitative proxies. JLaw actual-buy / breakout-review corpus can contain named qualitative setup reasons not represented in those proxies.',
+                'allowed_next_test':'Source extraction / taxonomy only. No A/B until a concrete, repeated, point-in-time setup semantic is found.'
+            },
+            {
+                'priority':2,
+                'name':'POST_BREAKOUT_EXECUTION_QUALITY',
+                'novel':False,
+                'why':'Already substantially covered by prior post-breakout / confirmation / pullback / entry-delay branches.',
+                'allowed_next_test':'Do not reopen unless new source evidence changes the hypothesis.'
+            },
+            {
+                'priority':3,
+                'name':'CAPITAL_ADMISSION_RANKING',
+                'novel':False,
+                'why':'V6.16I already explored same-day ranking, with known low-memory / stability issues. User explicitly asked not to reopen this branch casually.',
+                'allowed_next_test':'Keep closed until a genuinely new stable signal exists.'
+            }
+        ]
+
+        chosen=gaps[0]
+        verdict='SETUP_DNA_PROXY_BRANCH_DUPLICATE_CLOSE_AND_SWITCH_TO_ACTUAL_BUY_SOURCE_SEMANTICS'
+
+        _v687_write(status='running',phase='permission_gate',
+                     message='锁定唯一非重复方向：Actual-Buy Source Setup Semantics；暂不 A/B…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.87 Research Dedup / Next-Edge Priority Gate',
+            'verdict':verdict,
+            'v686_verdict':v86ver,
+            'historical_branch_audit':historical,
+            'candidate_gaps':gaps,
+            'chosen_next_direction':chosen,
+            'ab_ready':False,
+            'important':'Do NOT build another generic setup-quality model from leader momentum / dry-up / base-quality / pivot-ready proxies. That family already exists in V6.15D/E/F and related branches.',
+            'next_step':'Build V6.88 Actual-Buy Setup Semantic Extraction: use existing JLaw actual-buy / breakout-review / daily-note source corpus to extract repeated first-person setup reasons that were known at buy time, map them to code-visible fields only after the taxonomy is stable, then decide whether one novel semantic deserves an A/B.',
+            'cache_note':'No historical replay, no Tiingo, no universe scan. Reads current results and historical branch definitions only.'
+        }
+        V687_DIR.mkdir(parents=True,exist_ok=True)
+        V687_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v687_write(status='done',phase='done',message=f'V6.87 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v687_write(status='error',phase='error',
+                     message=f'V6.87 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v687_thread=None
+
+def _v687_start():
+    global v687_thread
+    if _v687_alive():return False
+    _v687_write(status='starting',phase='starting',message='V6.87 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v687_thread=threading.Thread(target=_v687_run,daemon=True);v687_thread.start();return True
+
+@APP.route('/v687/run',methods=['GET','POST'])
+def v687_run():_v687_start();return redirect('/v687/research-dedup-priority')
+
+@APP.get('/api/v687/status')
+def v687_status_api():return jsonify(_v687_status())
+
+@APP.get('/v687/research-dedup-priority')
+def v687_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v687_status();R={}
+    if V687_RESULT.exists():
+        try:
+            z=json.loads(V687_RESULT.read_text(encoding='utf-8'))
+            if isinstance(z,dict):R=z
+        except Exception:pass
+
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+
+    hist=R.get('historical_branch_audit') if isinstance(R.get('historical_branch_audit'),list) else []
+    hrs=''
+    for x in hist:
+        hrs+=f"<tr><td><b>{e(x.get('branch'))}</b></td><td>{e(x.get('question'))}</td><td>{e(x.get('status'))}</td><td>{'YES' if x.get('repeat') else 'NO'}</td></tr>"
+    chosen=R.get('chosen_next_direction') if isinstance(R.get('chosen_next_direction'),dict) else {}
+
+    btn='' if _v687_alive() else '<a href="/v687/run"><button>▶ 开始 V6.87 Dedup Gate</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧹 V6.87 Research Dedup / Next-Edge Priority Gate</h1>
+<div class="info">先查重再继续。V6.15D/E/F 已经做过 Leader / Dry-up / Base / Pivot / Near-high 等 Big Winner DNA，不能把旧测试换名字再跑一次。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>A/B Ready: <b>{e(R.get('ab_ready','—'))}</b></p>
+<p>Next: <b>{e(chosen.get('name','—'))}</b></p><p>{e(chosen.get('why',''))}</p></div>
+<div class="c"><h2>Do-Not-Repeat Audit</h2>
+<table><tr><th>Branch</th><th>Question</th><th>Status</th><th>Repeat?</th></tr>{hrs or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v687_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v687_home_base is not None:
+    def _v687_home_wrap(*args,**kwargs):
+        resp=_v687_home_base(*args,**kwargs)
+        card="""<div id="v687-dedup-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧹 V6.87 Research Dedup / Next-Edge Priority Gate</h2>
+        <p>Close duplicate setup-DNA branch · choose only genuinely new research direction · no replay</p>
+        <a href="/v687/research-dedup-priority"><button>打开 V6.87</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v687-dedup-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v687-dedup-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v687_home_base:APP.view_functions[ep]=_v687_home_wrap
