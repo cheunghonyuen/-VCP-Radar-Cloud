@@ -34702,17 +34702,13 @@ def v678_page():
 <div class="c"><h2>By Stop Timing</h2><table><tr><th>Group</th><th>N</th><th>Median MFE</th><th>Post +20</th><th>Post +50</th><th>Post +100</th></tr>{dr or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
 </div></body></html>"""
 
-_v678_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
-if _v678_home_base is not None:
-    def _v678_home_wrap(*args,**kwargs):
-        resp=_v678_home_base(*args,**kwargs)
-        card="""<div id="v678-washout" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🛡️ V6.78 Proven-Strength STOP7 Washout Autopsy</h2><p>Big Winner mainline · proven strength -> STOP7 -> recovery</p><a href="/v678/proven-strength-stop7-autopsy"><button>打开 V6.78</button></a></div>"""
-        if hasattr(resp,'get_data'):
-            body=resp.get_data(as_text=True);pos=body.find('<body')
-            if pos>=0:
-                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:]
-            else:body=card+body
-            resp.set_data(body);return resp
-        return card+str(resp)
-    for ep,vf in list(APP.view_functions.items()):
-        if vf is _v678_home_base:APP.view_functions[ep]=_v678_home_wrap
+
+# V6.78.1 stability fix:
+# Do NOT monkey-patch the existing homepage view. The production app has accumulated
+# multiple historical homepage wrappers; adding another wrapper can make "/" fail
+# even though the V6.78 audit route itself is valid.
+# Open directly at: /v678/proven-strength-stop7-autopsy
+
+@APP.get('/v678')
+def v678_launcher():
+    return redirect('/v678/proven-strength-stop7-autopsy')
