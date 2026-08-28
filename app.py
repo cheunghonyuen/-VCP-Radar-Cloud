@@ -37987,3 +37987,453 @@ if _v685_home_base is not None:
         body=str(resp);return body if 'id="v685-state-machine-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v685_home_base:APP.view_functions[ep]=_v685_home_wrap
+
+
+# ========================= V6.86 BIG-WINNER ENTRY DNA / STOP7 CONTRAST AUDIT =========================
+V686_DIR=DATA_DIR/'v686_big_winner_entry_dna_stop7_contrast'
+V686_STATUS=V686_DIR/'status.json'; V686_RESULT=V686_DIR/'result.json'
+v686_thread=None
+
+def _v686_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V686_STATUS.exists():
+        try:x.update(json.loads(V686_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v686_write(**kw):
+    V686_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v686_status();x.update(kw)
+    V686_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v686_alive(): return v686_thread is not None and v686_thread.is_alive()
+
+def _v686_auc_rank(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(x,errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v686_smd(a,b):
+    a=pd.to_numeric(pd.Series(a),errors='coerce').dropna()
+    b=pd.to_numeric(pd.Series(b),errors='coerce').dropna()
+    if len(a)<20 or len(b)<20:return np.nan
+    va=float(a.var(ddof=1));vb=float(b.var(ddof=1))
+    sp=np.sqrt(max(1e-12,((len(a)-1)*va+(len(b)-1)*vb)/(len(a)+len(b)-2)))
+    return float((a.mean()-b.mean())/sp) if sp>0 else np.nan
+
+def _v686_fit_logit(X,y,l2=.08,iters=250,lr=.08):
+    X=np.asarray(X,dtype=float);y=np.asarray(y,dtype=float)
+    n,p=X.shape;b=np.zeros(p+1,dtype=float)
+    for _ in range(int(iters)):
+        z=np.clip(b[0]+X.dot(b[1:]),-30,30)
+        pr=1.0/(1.0+np.exp(-z))
+        err=pr-y
+        b[0]-=lr*float(err.mean())
+        g=np.asarray(X.T.dot(err)/n + l2*b[1:],dtype=float)
+        b[1:]-=lr*g
+    return b
+
+def _v686_predict_logit(X,b):
+    X=np.asarray(X,dtype=float)
+    z=np.clip(float(b[0])+X.dot(np.asarray(b[1:])), -30,30)
+    return 1.0/(1.0+np.exp(-z))
+
+def _v686_leave_one_era(F,features,target):
+    eras=[x for x in ['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'] if x in set(F.era.astype(str))]
+    folds=[];allp=[];ally=[]
+    for hold in eras:
+        tr=F[F.era.astype(str)!=hold].copy()
+        te=F[F.era.astype(str)==hold].copy()
+        cols=[c for c in features if c in F.columns]
+        if len(cols)<2 or len(tr)<100 or len(te)<50:continue
+        med={c:float(pd.to_numeric(tr[c],errors='coerce').median()) for c in cols}
+        Xtr=[];Xte=[]
+        for c in cols:
+            a=pd.to_numeric(tr[c],errors='coerce').fillna(med[c]).to_numpy(dtype=float)
+            b=pd.to_numeric(te[c],errors='coerce').fillna(med[c]).to_numpy(dtype=float)
+            mu=float(np.nanmean(a));sd=float(np.nanstd(a))
+            if not np.isfinite(sd) or sd<1e-9:sd=1.0
+            Xtr.append((a-mu)/sd);Xte.append((b-mu)/sd)
+        Xtr=np.column_stack(Xtr);Xte=np.column_stack(Xte)
+        ytr=tr[target].astype(int).to_numpy();yte=te[target].astype(int).to_numpy()
+        if len(np.unique(ytr))<2 or len(np.unique(yte))<2:continue
+        coef=_v686_fit_logit(Xtr,ytr)
+        pr=_v686_predict_logit(Xte,coef)
+        auc=_v686_auc_rank(pr,yte)
+        folds.append({'holdout':hold,'n':int(len(te)),'auc':float(auc) if np.isfinite(auc) else None})
+        allp.extend(pr.tolist());ally.extend(yte.tolist())
+    pooled=_v686_auc_rank(allp,ally) if allp else np.nan
+    vals=[x['auc'] for x in folds if x.get('auc') is not None]
+    return {
+        'features':features,'folds':folds,
+        'pooled_oos_auc':float(pooled) if np.isfinite(pooled) else None,
+        'min_era_auc':float(min(vals)) if vals else None,
+        'max_era_auc':float(max(vals)) if vals else None,
+        'era_consistency':float(sum(1 for x in vals if x>=.5)/len(vals)) if vals else None
+    }
+
+def _v686_run():
+    global v686_thread
+    t0=time.time()
+    try:
+        _v686_write(status='running',phase='control_parity',
+                     message='先复现 V6.70F 28.25% Control，冻结 exact admitted schedule…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        Z=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px','exit_date','exit_px']).copy()
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY point-in-time regime cache 不可用')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        Z=pd.merge_asof(Z.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        Z['regime']=Z.regime.fillna('UNKNOWN')
+        Z=Z.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        ids=sorted(set(Z.listing_id.astype(str)));price={};date_set=set();tot=len(ids)
+        for n,lid in enumerate(ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','close']):continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                            'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date')
+            q=q[(q.date>=V624_START)&(q.date<=V624_END)]
+            if q.empty:continue
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%250==0 or n==tot:
+                _v686_write(status='running',phase='control_parity',
+                             message=f'Control cache {n}/{tot}',
+                             processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        cal=sorted(date_set)
+        if not cal:raise RuntimeError('交易日历为空')
+        B,whitelist=_v670f_replay_core(Z,price,cal,'CONTROL_V669_CACHE',t0,None,False,heartbeat=False)
+        target=.2825;gap=float(B['cagr']-target);ok=abs(gap)<=.0015
+        if not ok:
+            result={'version':'V6.86 Big-Winner Entry DNA / STOP7 Contrast Audit',
+                    'verdict':'CONTROL_BENCHMARK_MISMATCH_STOP_HERE',
+                    'benchmark_ok':False,'control':B,'target_cagr':target,'benchmark_gap':gap}
+            V686_DIR.mkdir(parents=True,exist_ok=True)
+            V686_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v686_write(status='done',phase='blocked',message=f'Control {B["cagr"]*100:.2f}% != 28.25%',
+                         processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+            return
+
+        S=Z.loc[sorted(whitelist)].copy()
+        S['schedule_id']=S.index.astype(str)
+        S=S.sort_values(['entry_date','listing_id','schedule_id']).reset_index(drop=True)
+        admitted_ids=sorted(set(S.listing_id.astype(str)))
+
+        _v686_write(status='running',phase='entry_features',
+                     message=f'只读取 exact admitted OHLCV，构建 Entry 当日/之前 DNA · {len(admitted_ids):,} listings',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        oh={};tot2=len(admitted_ids)
+        for n,lid in enumerate(admitted_ids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:continue
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+            if not q.empty:oh[lid]=q
+            if n==1 or n%100==0 or n==tot2:
+                _v686_write(status='running',phase='entry_features',
+                             message=f'Admitted OHLCV {n}/{tot2}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[];total=len(S)
+        for k,r in S.iterrows():
+            q=oh.get(str(r.listing_id))
+            if q is None or q.empty:continue
+            dates=list(q.date)
+            try:i0=dates.index(pd.Timestamp(r.entry_date).normalize())
+            except ValueError:continue
+            ep=float(r.entry_px)
+            pre=q.iloc[:i0+1].copy()  # Entry date included; no future info.
+            if len(pre)<25:continue
+
+            c=pd.to_numeric(pre.close,errors='coerce');v=pd.to_numeric(pre.volume,errors='coerce')
+            ma10=float(c.tail(10).mean());ma20=float(c.tail(20).mean());ma50=float(c.tail(50).mean()) if len(c)>=50 else np.nan
+            medv20=float(v.tail(20).median()) if v.notna().sum()>=10 else np.nan
+            today=pre.iloc[-1];prev=pre.iloc[-2]
+            entry_close=float(today.close);entry_open=float(today.open);entry_high=float(today.high);entry_low=float(today.low)
+            entry_vol=float(today.volume) if pd.notna(today.volume) else np.nan
+
+            # Future labels from frozen opportunity path, but never used as features.
+            future=q.iloc[i0:min(len(q),i0+1261)].copy()
+            mfe=float((pd.to_numeric(future.high,errors='coerce')/ep-1).max()) if len(future) else np.nan
+            mae=float((pd.to_numeric(future.low,errors='coerce')/ep-1).min()) if len(future) else np.nan
+            orig_stop=bool('STOP' in str(r.exit_reason).upper())
+            orig_ret=float(r.exit_px)/ep-1
+
+            rows.append({
+                'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
+                'entry_date':r.entry_date,'entry_px':ep,
+                'regime':str(r.regime),
+                'orig_stop':orig_stop,'orig_ret':orig_ret,
+                'future_mfe':mfe,'future_mae':mae,
+                'winner20':bool(np.isfinite(mfe) and mfe>=.20),
+                'winner50':bool(np.isfinite(mfe) and mfe>=.50),
+                'winner100':bool(np.isfinite(mfe) and mfe>=1.0),
+                'true_failure':bool(orig_stop and (not (np.isfinite(mfe) and mfe>=.20))),
+                'ret1':float(entry_close/float(prev.close)-1) if float(prev.close)>0 else np.nan,
+                'ret5':float(entry_close/float(c.iloc[-6])-1) if len(c)>=6 and float(c.iloc[-6])>0 else np.nan,
+                'ret20':float(entry_close/float(c.iloc[-21])-1) if len(c)>=21 and float(c.iloc[-21])>0 else np.nan,
+                'dist_ma10':float(entry_close/ma10-1) if ma10>0 else np.nan,
+                'dist_ma20':float(entry_close/ma20-1) if ma20>0 else np.nan,
+                'dist_ma50':float(entry_close/ma50-1) if np.isfinite(ma50) and ma50>0 else np.nan,
+                'entry_gap':float(entry_open/float(prev.close)-1) if float(prev.close)>0 else np.nan,
+                'entry_range':float((entry_high-entry_low)/float(prev.close)) if float(prev.close)>0 else np.nan,
+                'entry_close_location':float((entry_close-entry_low)/(entry_high-entry_low)) if entry_high>entry_low else np.nan,
+                'entry_body':float(entry_close/entry_open-1) if entry_open>0 else np.nan,
+                'vol_ratio20':float(entry_vol/medv20) if np.isfinite(entry_vol) and np.isfinite(medv20) and medv20>0 else np.nan,
+                'price_up_vol_down_20':float((entry_close>float(prev.close)) and (np.isfinite(entry_vol) and np.isfinite(medv20) and entry_vol<medv20)),
+            })
+
+            if k==0 or (k+1)%100==0 or k+1==total:
+                _v686_write(status='running',phase='entry_features',
+                             message=f'Entry DNA {k+1}/{total}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=pd.DataFrame(rows)
+        if F.empty:raise RuntimeError('Entry DNA rows 为空')
+        F['era']=pd.cut(pd.to_datetime(F.entry_date).dt.year,bins=[1995,2005,2015,2026],
+                        labels=['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'],include_lowest=True).astype(str)
+
+        _v686_write(status='running',phase='contrast',
+                     message='Big Winner vs True Failure：单变量 AUC/SMD + 跨年代方向一致性…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        features=['ret1','ret5','ret20','dist_ma10','dist_ma20','dist_ma50',
+                  'entry_gap','entry_range','entry_close_location','entry_body',
+                  'vol_ratio20','price_up_vol_down_20']
+
+        uni=[]
+        for target in ['winner20','winner50','winner100']:
+            sub=F[F[target] | F.true_failure].copy()
+            y=sub[target].astype(int)
+            for f in features:
+                auc=_v686_auc_rank(sub[f],y)
+                smd=_v686_smd(sub.loc[y.eq(1),f],sub.loc[y.eq(0),f])
+                eras=[]
+                for er,g in sub.groupby('era'):
+                    yy=g[target].astype(int)
+                    if len(g)<30 or yy.nunique()<2:continue
+                    a=_v686_auc_rank(g[f],yy)
+                    eras.append({'era':str(er),'auc':float(a) if np.isfinite(a) else None,'n':int(len(g))})
+                vals=[x['auc'] for x in eras if x['auc'] is not None]
+                oriented=max(auc,1-auc) if np.isfinite(auc) else np.nan
+                consistency=float(max(sum(1 for x in vals if x>=.5),sum(1 for x in vals if x<.5))/len(vals)) if vals else np.nan
+                uni.append({
+                    'target':target,'feature':f,
+                    'auc':float(auc) if np.isfinite(auc) else None,
+                    'oriented_auc':float(oriented) if np.isfinite(oriented) else None,
+                    'smd':float(smd) if np.isfinite(smd) else None,
+                    'era_consistency':float(consistency) if np.isfinite(consistency) else None,
+                    'coverage':float(pd.to_numeric(sub[f],errors='coerce').notna().mean()),
+                    'era':eras
+                })
+
+        _v686_write(status='running',phase='composite_oos',
+                     message='4 个预定义 Entry DNA family 做 leave-one-era-out；不做阈值 grid…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        families={
+            'MOMENTUM_LOCATION':['ret5','ret20','dist_ma20','dist_ma50'],
+            'BREAKOUT_DAY_QUALITY':['entry_gap','entry_range','entry_close_location','entry_body','vol_ratio20'],
+            'DEMAND_EXTENSION':['vol_ratio20','dist_ma10','dist_ma20','ret20'],
+            'COMBINED_ENTRY_DNA':['ret5','ret20','dist_ma20','entry_close_location','entry_body','vol_ratio20']
+        }
+
+        models=[]
+        for target in ['winner20','winner50','winner100']:
+            sub=F[F[target] | F.true_failure].copy()
+            for name,cols in families.items():
+                rr=_v686_leave_one_era(sub,cols,target)
+                rr.update({'target':target,'family':name,'n':int(len(sub))})
+                models.append(rr)
+
+        mdf=pd.DataFrame([{
+            'target':r['target'],'family':r['family'],
+            'pooled_oos_auc':r.get('pooled_oos_auc'),
+            'min_era_auc':r.get('min_era_auc'),
+            'max_era_auc':r.get('max_era_auc'),
+            'era_consistency':r.get('era_consistency'),
+            'n':r.get('n')
+        } for r in models])
+
+        # Promotion gate focuses on +50/+100 winners, not merely +20.
+        qual=mdf[mdf.target.isin(['winner50','winner100'])].copy()
+        qual['score']=pd.to_numeric(qual.pooled_oos_auc,errors='coerce')
+        qual=qual.sort_values('score',ascending=False)
+        best=qual.iloc[0].to_dict() if len(qual) else None
+
+        pooled=float(best.get('pooled_oos_auc')) if best and pd.notna(best.get('pooled_oos_auc')) else np.nan
+        minauc=float(best.get('min_era_auc')) if best and pd.notna(best.get('min_era_auc')) else np.nan
+        strong=bool(np.isfinite(pooled) and pooled>=.65 and np.isfinite(minauc) and minauc>=.58)
+        moderate=bool(np.isfinite(pooled) and pooled>=.60 and np.isfinite(minauc) and minauc>=.55)
+
+        verdict=('ENTRY_DNA_STRONG_ENOUGH_FOR_ONE_CONTROLLED_AB'
+                 if strong else
+                 'ENTRY_DNA_WEAK_BUT_REAL' if moderate else
+                 'NO_STABLE_ENTRY_DNA_EDGE_YET')
+
+        result={
+            'version':'V6.86 Big-Winner Entry DNA / STOP7 Contrast Audit',
+            'verdict':verdict,'benchmark_ok':True,'control_benchmark':B,
+            'rows':int(len(F)),
+            'class_rates':{
+                'true_failure':float(F.true_failure.mean()),
+                'winner20':float(F.winner20.mean()),
+                'winner50':float(F.winner50.mean()),
+                'winner100':float(F.winner100.mean())
+            },
+            'best_big_winner_family':best,
+            'models':models,
+            'top_univariate':sorted(
+                [x for x in uni if x['target'] in ['winner50','winner100'] and x.get('oriented_auc') is not None],
+                key=lambda x:x['oriented_auc'],reverse=True
+            )[:16],
+            'important':'Features use only entry-day or pre-entry information. Future MFE is label-only. No V6.67 post-entry 1-5 day information is allowed into features.',
+            'history_dedup':'Does not retest old weighted scoring, pullback windows, entry delays, stop relaxation, fixed take-profit, or winner-management branches. This is entry-time attribution only.',
+            'decision_rule':'Only pooled leave-one-era-out AUC >=0.65 with weakest-era AUC >=0.58 on winner50/winner100 may advance to ONE V6.87 controlled A/B. 0.60-0.65 is recorded but not promoted.',
+            'next_step':('Build exactly ONE benchmark-first A/B from the winning semantic family, preserving entry stream identity except for the single predeclared admission filter/rank change.'
+                         if strong else
+                         'Do not change entry rules. If weak-but-real, source-reconcile richer setup/breakout-quality context; if no edge, close entry-DNA branch and revisit capital allocation/ranking rather than threshold tuning.'),
+            'cache_note':'Exact V6.70F Control admission + V6.69 exits + V6.17 admitted-only OHLCV; 0 Tiingo; no universe rebuild.'
+        }
+        V686_DIR.mkdir(parents=True,exist_ok=True)
+        V686_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:F.to_csv(V686_DIR/'entry_dna_rows.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v686_write(status='done',phase='done',message=f'V6.86 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v686_write(status='error',phase='error',
+                     message=f'V6.86 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v686_thread=None
+
+def _v686_start():
+    global v686_thread
+    if _v686_alive():return False
+    _v686_write(status='starting',phase='starting',message='V6.86 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v686_thread=threading.Thread(target=_v686_run,daemon=True);v686_thread.start();return True
+
+@APP.route('/v686/run',methods=['GET','POST'])
+def v686_run():_v686_start();return redirect('/v686/big-winner-entry-dna')
+
+@APP.get('/api/v686/status')
+def v686_status_api():return jsonify(_v686_status())
+
+@APP.get('/v686/big-winner-entry-dna')
+def v686_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v686_status();R={}
+    if V686_RESULT.exists():
+        try:
+            obj=json.loads(V686_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('control_benchmark') if isinstance(R.get('control_benchmark'),dict) else {}
+    best=R.get('best_big_winner_family') if isinstance(R.get('best_big_winner_family'),dict) else {}
+    models=R.get('models') if isinstance(R.get('models'),list) else []
+    trs=''
+    for x in models:
+        if x.get('target') not in ['winner50','winner100']:continue
+        trs+=f"<tr><td><b>{e(x.get('target'))}</b></td><td>{e(x.get('family'))}</td><td>{num(x.get('pooled_oos_auc')):.3f}</td><td>{num(x.get('min_era_auc')):.3f}</td><td>{num(x.get('max_era_auc')):.3f}</td><td>{num(x.get('era_consistency'))*100:.0f}%</td><td>{integer(x.get('n'))}</td></tr>"
+
+    btn='' if _v686_alive() else '<a href="/v686/run"><button>▶ 开始 V6.86 Entry DNA Audit</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #10b981;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V6.86 Big-Winner Entry DNA / STOP7 Contrast Audit</h1>
+<div class="info">只用 Entry 当日或之前信息，对比 +50/+100 Big Winner 与 True Failure。V6.67 的 post-entry 1–5 日信息禁止进入特征。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>V6.70F Control CAGR: <b>{num(B.get('cagr'))*100:.2f}%</b> · Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b></p>
+<p>Best family: <b>{e(best.get('family','—'))}</b> · Target: <b>{e(best.get('target','—'))}</b> · pooled OOS AUC=<b>{num(best.get('pooled_oos_auc')):.3f}</b> · weakest era=<b>{num(best.get('min_era_auc')):.3f}</b></p></div>
+<div class="c"><h2>Big Winner vs True Failure · Cross-Era OOS</h2>
+<table><tr><th>Target</th><th>Family</th><th>Pooled OOS AUC</th><th>Weakest Era</th><th>Best Era</th><th>Consistency</th><th>N</th></tr>
+{trs or '<tr><td colspan=7>运行后显示</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v686_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v686_home_base is not None:
+    def _v686_home_wrap(*args,**kwargs):
+        resp=_v686_home_base(*args,**kwargs)
+        card="""<div id="v686-entry-dna-card" style="background:#ecfdf5;border:5px solid #059669;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧬 V6.86 Big-Winner Entry DNA / STOP7 Contrast Audit</h2>
+        <p>Entry-time features only · +50/+100 vs True Failure · leave-one-era-out · cache-only</p>
+        <a href="/v686/big-winner-entry-dna"><button>打开 V6.86</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v686-entry-dna-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v686-entry-dna-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v686_home_base:APP.view_functions[ep]=_v686_home_wrap
