@@ -43898,3 +43898,361 @@ if _v6961_home_base is not None:
         body=str(resp);return body if 'id="v6961-d91-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6961_home_base:APP.view_functions[ep]=_v6961_home_wrap
+
+
+# ========================= V6.97 CLEAN CAPACITY / WINNER-DISPLACEMENT AUDIT =========================
+V697_DIR=DATA_DIR/'v697_clean_capacity_winner_displacement'
+V697_STATUS=V697_DIR/'status.json'; V697_RESULT=V697_DIR/'result.json'
+v697_thread=None
+
+def _v697_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V697_STATUS.exists():
+        try:x.update(json.loads(V697_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v697_write(**kw):
+    V697_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v697_status();x.update(kw)
+    V697_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v697_alive(): return v697_thread is not None and v697_thread.is_alive()
+
+def _v697_run():
+    global v697_thread
+    t0=time.time()
+    try:
+        _v697_write(status='running',phase='load_clean_stream',
+                    message='读取 clean candidate stream + 原 V6.69 顺序；只做容量机会成本诊断，不重开 ranking/replacement…',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists():raise RuntimeError('找不到 V6.94 clean candidate feature store')
+        F=pd.read_csv(ffp,compression='gzip')
+        F['listing_id']=F.listing_id.astype(str)
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        F['is_stop']=F.is_stop.astype(bool)
+        F=F.dropna(subset=['entry_date','exit_date','ret']).copy()
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        P['listing_id']=P.listing_id.astype(str)
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+
+        order_map=P[['listing_id','entry_date','candidate_order']].drop_duplicates(
+            ['listing_id','entry_date'],keep='first'
+        )
+        F=F.merge(order_map,on=['listing_id','entry_date'],how='left')
+        # Fallback deterministic order only if old row-order cannot be recovered.
+        F['candidate_order']=pd.to_numeric(F.candidate_order,errors='coerce')
+        miss_order=F.candidate_order.isna()
+        if miss_order.any():
+            base=float(P.candidate_order.max()+1 if len(P) else 10**9)
+            F.loc[miss_order,'candidate_order']=base+np.arange(int(miss_order.sum()))
+        F=F.sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        F['cid']=np.arange(len(F),dtype=int)
+
+        # Join V6.95 hold-burden label for STOP blockers.
+        bfp=V695_DIR/'clean_stop_burden_rows.csv.gz'
+        B=pd.read_csv(bfp,compression='gzip') if bfp.exists() else pd.DataFrame()
+        if not B.empty:
+            B['listing_id']=B.listing_id.astype(str)
+            B['entry_date']=pd.to_datetime(B.entry_date,errors='coerce').dt.normalize()
+            hb=B[['listing_id','entry_date','hold_bucket','slot_days']].drop_duplicates(
+                ['listing_id','entry_date'],keep='first'
+            )
+            F=F.merge(hb,on=['listing_id','entry_date'],how='left')
+        else:
+            F['hold_bucket']=np.nan;F['slot_days']=np.nan
+
+        _v697_write(status='running',phase='reconstruct_first_come',
+                    message='重建 clean FIRST_COME 10-slot admission；只用 entry/exit 日期和原 candidate 顺序…',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        by_entry={}
+        for idx,r in F.iterrows():
+            by_entry.setdefault(pd.Timestamp(r.entry_date),[]).append(int(idx))
+
+        dates=sorted(by_entry.keys())
+        active={}  # idx -> row
+        admitted=[];skipped=[];skip_context=[]
+        contest_days=0;full_book_days=0
+
+        for di,dt in enumerate(dates,1):
+            # exits on/before this entry date free a slot before new admissions
+            for idx in list(active):
+                if pd.Timestamp(active[idx].exit_date) <= dt:
+                    active.pop(idx,None)
+
+            cand=by_entry.get(dt,[])
+            capacity=max(0,10-len(active))
+            if len(cand)>capacity:
+                contest_days+=1
+            if capacity==0 and cand:
+                full_book_days+=1
+
+            for rank,idx in enumerate(cand):
+                r=F.loc[idx]
+                if len(active)<10:
+                    active[idx]=r
+                    admitted.append(idx)
+                else:
+                    skipped.append(idx)
+                    blockers=[]
+                    for j,p in active.items():
+                        blockers.append({
+                            'cid':int(j),
+                            'listing_id':str(p.listing_id),
+                            'entry_date':str(pd.Timestamp(p.entry_date).date()),
+                            'exit_date':str(pd.Timestamp(p.exit_date).date()),
+                            'ret':float(p.ret),
+                            'is_stop':bool(p.is_stop),
+                            'winner50':bool(float(p.ret)>=.50),
+                            'winner100':bool(float(p.ret)>=1.0),
+                            'hold_bucket':str(p.get('hold_bucket','')) if pd.notna(p.get('hold_bucket',np.nan)) else ''
+                        })
+                    skip_context.append({
+                        'skipped_idx':int(idx),
+                        'date':str(dt.date()),
+                        'blockers':blockers
+                    })
+
+            if di==1 or di%250==0 or di==len(dates):
+                _v697_write(status='running',phase='reconstruct_first_come',
+                            message=f'FIRST_COME dates {di}/{len(dates)} · admitted={len(admitted)} · skipped={len(skipped)}',
+                            processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        A=F.loc[admitted].copy() if admitted else F.iloc[0:0].copy()
+        K=F.loc[skipped].copy() if skipped else F.iloc[0:0].copy()
+
+        _v697_write(status='running',phase='displacement_attribution',
+                    message='给每个 capacity-skipped Winner 归因：当时 10 个 incumbent 里有多少最终 STOP / D91+ STOP…',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        ctx_map={int(x['skipped_idx']):x for x in skip_context}
+        skipped_rows=[]
+        blocker_counter={}
+        blocker_super_counter={}
+        blocker_d91_counter={}
+        for idx in skipped:
+            r=F.loc[idx]
+            ctx=ctx_map.get(int(idx),{})
+            blockers=ctx.get('blockers',[])
+            nstop=sum(1 for b in blockers if b['is_stop'])
+            nd91=sum(1 for b in blockers if b['is_stop'] and b.get('hold_bucket')=='D91_PLUS_VERY_SLOW_STOP')
+            nw50=sum(1 for b in blockers if b['winner50'])
+            nw100=sum(1 for b in blockers if b['winner100'])
+
+            is50=bool(float(r.ret)>=.50);is100=bool(float(r.ret)>=1.0);is20=bool(float(r.ret)>=.20)
+            skipped_rows.append({
+                'listing_id':str(r.listing_id),'entry_date':pd.Timestamp(r.entry_date),
+                'ret':float(r.ret),'winner20':is20,'winner50':is50,'winner100':is100,
+                'blocker_stop_n':nstop,'blocker_d91_n':nd91,
+                'blocker_w50_n':nw50,'blocker_w100_n':nw100,
+                'has_stop_blocker':bool(nstop>0),'has_d91_blocker':bool(nd91>0)
+            })
+
+            # Attribute one "blocked opportunity" to every incumbent STOP that occupied a slot.
+            if is50 or is100:
+                for b in blockers:
+                    if b['is_stop']:
+                        key=(b['listing_id'],b['entry_date'])
+                        blocker_counter[key]=blocker_counter.get(key,0)+(2 if is100 else 1)
+                        if is100:blocker_super_counter[key]=blocker_super_counter.get(key,0)+1
+                        if b.get('hold_bucket')=='D91_PLUS_VERY_SLOW_STOP':
+                            blocker_d91_counter[key]=blocker_d91_counter.get(key,0)+(2 if is100 else 1)
+
+        SK=pd.DataFrame(skipped_rows)
+
+        def disp(target_col):
+            if SK.empty:return {}
+            g=SK[SK[target_col]].copy()
+            if g.empty:return {'n':0}
+            return {
+                'n':int(len(g)),
+                'share_with_any_stop_blocker':float(g.has_stop_blocker.mean()),
+                'share_with_d91_stop_blocker':float(g.has_d91_blocker.mean()),
+                'median_stop_blockers':float(g.blocker_stop_n.median()),
+                'median_d91_blockers':float(g.blocker_d91_n.median()),
+                'avg_return':float(g.ret.mean()),
+                'median_return':float(g.ret.median())
+            }
+
+        d20=disp('winner20');d50=disp('winner50');d100=disp('winner100')
+
+        _v697_write(status='running',phase='blocker_concentration',
+                    message='找 admitted STOP 中真正长期挡住 Big Winners 的 blocker；仅事后归因，不生成交易规则…',
+                    processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        blocker_rows=[]
+        if blocker_counter:
+            amap={(str(r.listing_id),str(pd.Timestamp(r.entry_date).date())):r for _,r in A.iterrows()}
+            for key,units in blocker_counter.items():
+                r=amap.get(key)
+                if r is None:continue
+                blocker_rows.append({
+                    'listing_id':key[0],'entry_date':key[1],
+                    'final_ret':float(r.ret),'hold_bucket':str(r.get('hold_bucket','')),
+                    'blocked_winner_units':int(units),
+                    'blocked_plus100_count':int(blocker_super_counter.get(key,0)),
+                    'is_d91':bool(str(r.get('hold_bucket',''))=='D91_PLUS_VERY_SLOW_STOP')
+                })
+            blocker_rows=sorted(blocker_rows,
+                                key=lambda x:(x['blocked_plus100_count'],x['blocked_winner_units']),
+                                reverse=True)
+
+        top20=blocker_rows[:20]
+        total_units=sum(x['blocked_winner_units'] for x in blocker_rows) or 1
+        d91_units=sum(x['blocked_winner_units'] for x in blocker_rows if x['is_d91'])
+        top20_units=sum(x['blocked_winner_units'] for x in top20)
+
+        # Diagnostic gate only: prove/disprove that capacity displacement is materially tied to loser incumbents.
+        # This does NOT authorize reopening old V6.16I ranking/replacement rules.
+        material=bool(
+            d100.get('n',0)>=50 and
+            (d100.get('share_with_any_stop_blocker') or 0)>=.70 and
+            (d50.get('share_with_any_stop_blocker') or 0)>=.70
+        )
+        concentrated_d91=bool(
+            d100.get('n',0)>=50 and
+            (d100.get('share_with_d91_stop_blocker') or 0)>=.30
+        )
+
+        verdict='CLEAN_CAPACITY_DISPLACEMENT_CONFIRMED__LOSER_OCCUPANCY_MATERIAL' if material else 'CLEAN_CAPACITY_DISPLACEMENT_NOT_PRIMARY_BOTTLENECK'
+
+        # Benchmark parity is deliberately informational; this audit should not pretend
+        # to be the corrected portfolio replay if candidate ordering cannot exactly match.
+        benchmark_admitted=None
+        try:
+            if V6894_RESULT.exists():
+                rr=json.loads(V6894_RESULT.read_text(encoding='utf-8'))
+                benchmark_admitted=int((rr.get('admission_integrity') or {}).get('admitted')) if (rr.get('admission_integrity') or {}).get('admitted') is not None else None
+        except Exception:benchmark_admitted=None
+
+        result={
+            'version':'V6.97 Clean Capacity / Winner-Displacement Audit',
+            'verdict':verdict,
+            'reconstruction':{
+                'candidates':int(len(F)),
+                'admitted_first_come':int(len(A)),
+                'capacity_skipped':int(len(K)),
+                'contest_days':int(contest_days),
+                'full_book_entry_days':int(full_book_days),
+                'corrected_benchmark_admitted_reference':benchmark_admitted
+            },
+            'skipped_outcomes':{
+                'plus20':d20,'plus50':d50,'plus100':d100
+            },
+            'blocker_attribution':{
+                'stop_blockers':int(len(blocker_rows)),
+                'd91_blocked_winner_unit_share':float(d91_units/total_units),
+                'top20_blocker_unit_share':float(top20_units/total_units),
+                'top20':top20
+            },
+            'gate':{
+                'loser_occupancy_material':material,
+                'd91_displacement_material':concentrated_d91
+            },
+            'history_dedup':'V6.16H/I already tested admission ranking, opportunity gates and full-book replacement; production later kept FIRST_COME because those variants were unstable or did not improve. V6.97 does NOT test a ranking score, gate, or replacement. It only re-attributes the corrected clean stream: when a candidate was capacity-skipped, what eventual outcomes occupied the ten slots?',
+            'important':'All winner/STOP labels here are hindsight attribution only. They are never used to make a trading decision. A positive result proves a capital-allocation bottleneck exists; it does NOT prove we know how to identify which incumbent to remove in real time.',
+            'next_step':(
+                'If displacement is material, do NOT reopen old V6.16I ranking blindly. First audit whether any already-validated point-in-time signal (source-supported setup semantics / market permission / incumbent weakness) can explain the displaced-vs-admitted contest under clean data.'
+                if material else
+                'Capacity displacement is not the primary bottleneck; return to candidate-generation quality rather than portfolio ranking/replacement.'
+            ),
+            'cache_note':'V6.94 clean stream + original V6.69 row order + V6.95 burden labels only; 0 Tiingo; 0 universe scan; 0 price reread; 0 MTM replay.'
+        }
+
+        V697_DIR.mkdir(parents=True,exist_ok=True)
+        V697_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        SK.to_csv(V697_DIR/'capacity_skipped_context.csv.gz',index=False,compression='gzip')
+        pd.DataFrame(blocker_rows).to_csv(V697_DIR/'stop_blocker_attribution.csv.gz',index=False,compression='gzip')
+
+        _v697_write(status='done',phase='done',message=f'V6.97 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v697_write(status='error',phase='error',message=f'V6.97 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v697_thread=None
+
+def _v697_start():
+    global v697_thread
+    if _v697_alive():return False
+    _v697_write(status='starting',phase='starting',message='V6.97 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v697_thread=threading.Thread(target=_v697_run,daemon=True);v697_thread.start();return True
+
+@APP.route('/v697/run',methods=['GET','POST'])
+def v697_run():_v697_start();return redirect('/v697/capacity-winner-displacement')
+
+@APP.get('/api/v697/status')
+def v697_status_api():return jsonify(_v697_status())
+
+@APP.get('/v697/capacity-winner-displacement')
+def v697_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v697_status();R={}
+    if V697_RESULT.exists():
+        try:R=json.loads(V697_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    RC=R.get('reconstruction',{}) if isinstance(R.get('reconstruction'),dict) else {}
+    SO=R.get('skipped_outcomes',{}) if isinstance(R.get('skipped_outcomes'),dict) else {}
+    BA=R.get('blocker_attribution',{}) if isinstance(R.get('blocker_attribution'),dict) else {}
+    G=R.get('gate',{}) if isinstance(R.get('gate'),dict) else {}
+
+    rows=''
+    for name in ['plus20','plus50','plus100']:
+        x=SO.get(name,{}) or {}
+        rows+=f"<tr><td><b>{e(name)}</b></td><td>{integer(x.get('n')):,}</td><td>{num(x.get('share_with_any_stop_blocker'))*100:.1f}%</td><td>{num(x.get('share_with_d91_stop_blocker'))*100:.1f}%</td><td>{num(x.get('median_stop_blockers')):.1f}</td><td>{num(x.get('avg_return'))*100:+.1f}%</td></tr>"
+
+    top=BA.get('top20',[]) if isinstance(BA.get('top20'),list) else []
+    trows=''.join(
+        f"<tr><td>{e(x.get('listing_id'))}</td><td>{e(x.get('entry_date'))}</td><td>{num(x.get('final_ret'))*100:+.1f}%</td><td>{e(x.get('hold_bucket'))}</td><td>{integer(x.get('blocked_plus100_count'))}</td><td>{integer(x.get('blocked_winner_units'))}</td></tr>"
+        for x in top
+    )
+
+    btn='' if _v697_alive() else '<a href="/v697/run"><button>▶ 开始 V6.97 Capacity Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🚦 V6.97 Clean Capacity / Winner-Displacement Audit</h1><div class="info">不重开 V6.16I ranking/replacement。只做 clean hindsight attribution：当 Big Winner 因 10-slot 满仓被跳过时，当时占着位置的究竟是 Winner 还是最终 STOP / D91+ STOP？</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>loser occupancy material=<b>{e(G.get('loser_occupancy_material','—'))}</b> · D91 displacement material=<b>{e(G.get('d91_displacement_material','—'))}</b></p></div>
+<div class="c"><h2>FIRST_COME Reconstruction</h2><p>Candidates={integer(RC.get('candidates')):,} · admitted={integer(RC.get('admitted_first_come')):,} · capacity skipped={integer(RC.get('capacity_skipped')):,} · contest days={integer(RC.get('contest_days')):,} · full-book entry days={integer(RC.get('full_book_entry_days')):,}</p>
+<p>Corrected benchmark admitted reference={e(RC.get('corrected_benchmark_admitted_reference','—'))}</p></div>
+<div class="c"><h2>Skipped Winner Displacement</h2><table><tr><th>Target</th><th>Skipped N</th><th>Any STOP blocker</th><th>D91 blocker</th><th>Median STOP blockers</th><th>Avg eventual return</th></tr>{rows}</table></div>
+<div class="c"><h2>Top STOP Blockers · Hindsight Attribution Only</h2><p>D91 share of blocked-winner units={num(BA.get('d91_blocked_winner_unit_share'))*100:.1f}% · Top20 concentration={num(BA.get('top20_blocker_unit_share'))*100:.1f}%</p>
+<table><tr><th>Listing</th><th>Entry</th><th>Final Ret</th><th>Hold Bucket</th><th>Blocked +100</th><th>Winner Units</th></tr>{trows or '<tr><td colspan=6>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v697_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v697_home_base is not None:
+    def _v697_home_wrap(*args,**kwargs):
+        resp=_v697_home_base(*args,**kwargs)
+        card="""<div id="v697-capacity-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🚦 V6.97 Clean Capacity / Winner-Displacement Audit</h2><p>10-slot FIRST_COME · skipped Big Winners · STOP/D91 blockers · diagnostic only</p><a href="/v697/capacity-winner-displacement"><button>打开 V6.97</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v697-capacity-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v697-capacity-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v697_home_base:APP.view_functions[ep]=_v697_home_wrap
