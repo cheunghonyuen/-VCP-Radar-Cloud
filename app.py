@@ -36043,3 +36043,319 @@ if _v679g_home_base is not None:
         body=str(resp);return body if 'id="v679g-exit-only-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v679g_home_base:APP.view_functions[ep]=_v679g_home_wrap
+
+
+# ========================= V6.80 STOP7 EVENT CLASSIFIER DIAGNOSTIC =========================
+V680_DIR=DATA_DIR/'v680_stop7_event_classifier_diagnostic'
+V680_STATUS=V680_DIR/'status.json'; V680_RESULT=V680_DIR/'result.json'
+v680_thread=None
+
+def _v680_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V680_STATUS.exists():
+        try:x.update(json.loads(V680_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v680_write(**kw):
+    V680_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v680_status();x.update(kw)
+    V680_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v680_alive(): return v680_thread is not None and v680_thread.is_alive()
+
+def _v680_smd(a,b):
+    a=pd.to_numeric(pd.Series(a),errors='coerce').dropna()
+    b=pd.to_numeric(pd.Series(b),errors='coerce').dropna()
+    if len(a)<20 or len(b)<20:return np.nan
+    va=float(a.var(ddof=1));vb=float(b.var(ddof=1))
+    sp=np.sqrt(max(1e-12,((len(a)-1)*va+(len(b)-1)*vb)/(len(a)+len(b)-2)))
+    return float((a.mean()-b.mean())/sp) if sp>0 else np.nan
+
+def _v680_auc_rank(x,y):
+    # rank-based AUC, no sklearn dependency
+    z=pd.DataFrame({'x':pd.to_numeric(x,errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum()); n0=int((z.y==0).sum())
+    s1=float(r[z.y==1].sum())
+    return float((s1-n1*(n1+1)/2)/(n1*n0)) if n1 and n0 else np.nan
+
+def _v680_run():
+    global v680_thread
+    t0=time.time()
+    try:
+        _v680_write(status='running',phase='load_v678',
+                     message='读取 V6.78 已保存 Proven-Strength STOP7 cohort…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        src_csv=V678_DIR/'proven_strength_stop7_rows.csv.gz'
+        if not src_csv.exists():
+            raise RuntimeError('找不到 V6.78 proven_strength_stop7_rows.csv.gz')
+        A=pd.read_csv(src_csv,compression='gzip')
+        need=['listing_id','entry_date','stop_date','pre_stop_mfe','post_hit_20','post_hit_50','post_hit_100']
+        miss=[c for c in need if c not in A.columns]
+        if miss: raise RuntimeError('V6.78 rows 缺字段: '+','.join(miss))
+        A['listing_id']=A.listing_id.astype(str)
+        A['entry_date']=pd.to_datetime(A.entry_date,errors='coerce').dt.normalize()
+        A['stop_date']=pd.to_datetime(A.stop_date,errors='coerce').dt.normalize()
+        for c in ['post_hit_20','post_hit_50','post_hit_100']:
+            A[c]=A[c].astype(bool)
+        A=A.dropna(subset=['listing_id','entry_date','stop_date']).copy()
+        if A.empty:raise RuntimeError('V6.78 cohort 为空')
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        groups={str(k):g.copy() for k,g in A.groupby('listing_id')}
+        lids=sorted(groups.keys())
+
+        _v680_write(status='running',phase='stop_event_features',
+                     message=f'只重建 STOP7 当天/之前特征 · {len(lids):,} listings',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        total=len(lids)
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            base=['date','open','high','low','close']
+            if not all(k in lc for k in base):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+            if q.empty:continue
+            idx={pd.Timestamp(x).normalize():i for i,x in enumerate(q.date)}
+
+            for _,r in groups[lid].iterrows():
+                sd=pd.Timestamp(r.stop_date).normalize()
+                j=idx.get(sd)
+                if j is None or j<1:continue
+                ep=None
+                # use V6.69 entry price when exact row can be recovered later; fallback from V6.78 impossible
+                # infer from pre-stop STOP7 geometry is not allowed, so fetch exact entry from V6.69 cache by lid/date.
+                ep=np.nan
+                # lazy exact lookup from V6.69 cache added below via entry map
+                rows.append({
+                    'listing_id':lid,'entry_date':r.entry_date,'stop_date':sd,'q_index':j,
+                    'open':float(q.open.iloc[j]),'high':float(q.high.iloc[j]),'low':float(q.low.iloc[j]),'close':float(q.close.iloc[j]),
+                    'prev_close':float(q.close.iloc[j-1]),
+                    'ret1_before':float(q.close.iloc[j-1]/q.close.iloc[j-2]-1) if j>=2 and q.close.iloc[j-2]>0 else np.nan,
+                    'ret5_before':float(q.close.iloc[j-1]/q.close.iloc[max(0,j-6)]-1) if q.close.iloc[max(0,j-6)]>0 else np.nan,
+                    'ret20_before':float(q.close.iloc[j-1]/q.close.iloc[max(0,j-21)]-1) if q.close.iloc[max(0,j-21)]>0 else np.nan,
+                    'ma20_dist_pre':float(q.close.iloc[j-1]/q.close.iloc[max(0,j-20):j].mean()-1) if len(q.close.iloc[max(0,j-20):j])>=5 and q.close.iloc[max(0,j-20):j].mean()>0 else np.nan,
+                    'range_pct':float((q.high.iloc[j]-q.low.iloc[j])/q.close.iloc[j-1] if 'prev_close' in q.columns else np.nan),
+                    'gap_pct':float(q.open.iloc[j]/q.close.iloc[j-1]-1) if q.close.iloc[j-1]>0 else np.nan,
+                    'close_vs_low':float(q.close.iloc[j]/q.low.iloc[j]-1) if q.low.iloc[j]>0 else np.nan,
+                    'close_location':float((q.close.iloc[j]-q.low.iloc[j])/(q.high.iloc[j]-q.low.iloc[j])) if q.high.iloc[j]>q.low.iloc[j] else np.nan,
+                    'volume_ratio20':float(q.volume.iloc[j]/q.volume.iloc[max(0,j-20):j].median()) if 'volume' in q.columns and np.isfinite(q.volume.iloc[j]) and len(pd.to_numeric(q.volume.iloc[max(0,j-20):j],errors='coerce').dropna())>=5 and q.volume.iloc[max(0,j-20):j].median()>0 else np.nan,
+                    'pre_stop_mfe':float(r.pre_stop_mfe),
+                    'days_to_stop_calendar':float(r.get('days_to_stop_calendar',np.nan)),
+                    'wash20':bool(r.post_hit_20),'wash50':bool(r.post_hit_50),'wash100':bool(r.post_hit_100)
+                })
+            if n==1 or n%250==0 or n==total:
+                _v680_write(status='running',phase='stop_event_features',
+                             message=f'STOP7 event features {n:,}/{total:,}',
+                             processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=pd.DataFrame(rows)
+        if F.empty:raise RuntimeError('STOP7 event feature rows 为空')
+
+        # exact entry price map from V6.69 cache, point-in-time safe
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        P['listing_id']=P.listing_id.astype(str)
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        emap={(str(r.listing_id),pd.Timestamp(r.entry_date).normalize()):float(r.entry_px)
+              for r in P.dropna(subset=['listing_id','entry_date','entry_px']).itertuples(index=False)}
+        F['entry_px']=[emap.get((str(a),pd.Timestamp(b).normalize()),np.nan) for a,b in zip(F.listing_id,F.entry_date)]
+        F=F.dropna(subset=['entry_px']).copy()
+        F['stop_close_ret']=F.close/F.entry_px-1
+        F['stop_open_ret']=F.open/F.entry_px-1
+        F['stop_low_ret']=F.low/F.entry_px-1
+        F['intraday_recovery_from_low']=(F.close-F.low)/F.entry_px
+        F['stop_body_ret']=F.close/F.open-1
+        F['era']=pd.cut(F.stop_date.dt.year,bins=[1995,2005,2015,2026],
+                        labels=['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'],include_lowest=True)
+
+        features=['gap_pct','stop_close_ret','stop_open_ret','stop_low_ret',
+                  'intraday_recovery_from_low','close_location','stop_body_ret',
+                  'ret1_before','ret5_before','ret20_before','ma20_dist_pre',
+                  'volume_ratio20','pre_stop_mfe','days_to_stop_calendar']
+
+        _v680_write(status='running',phase='univariate_attribution',
+                     message='Washout vs True Failure：单变量 SMD / AUC / era consistency…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        out=[]
+        for target in ['wash20','wash50','wash100']:
+            for f in features:
+                g1=F.loc[F[target],f];g0=F.loc[~F[target],f]
+                smd=_v680_smd(g1,g0)
+                auc=_v680_auc_rank(F[f],F[target])
+                era_signs=[];era_aucs=[]
+                for era,g in F.groupby('era',observed=True):
+                    if len(g)<100 or g[target].nunique()<2:continue
+                    a=_v680_auc_rank(g[f],g[target]);era_aucs.append(a)
+                    if np.isfinite(a):era_signs.append(1 if a>=.5 else -1)
+                consistency=(max(era_signs.count(1),era_signs.count(-1))/len(era_signs)) if era_signs else np.nan
+                out.append({
+                    'target':target,'feature':f,
+                    'wash_median':float(pd.to_numeric(g1,errors='coerce').median()) if pd.to_numeric(g1,errors='coerce').notna().any() else None,
+                    'fail_median':float(pd.to_numeric(g0,errors='coerce').median()) if pd.to_numeric(g0,errors='coerce').notna().any() else None,
+                    'smd':float(smd) if np.isfinite(smd) else None,
+                    'auc':float(auc) if np.isfinite(auc) else None,
+                    'era_consistency':float(consistency) if np.isfinite(consistency) else None,
+                    'coverage':float(pd.to_numeric(F[f],errors='coerce').notna().mean())
+                })
+        O=pd.DataFrame(out)
+
+        _v680_write(status='running',phase='candidate_screen',
+                     message='筛选跨年代稳定候选；不做 threshold grid、不生成交易规则…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        C=O[(O.target=='wash20') &
+            (pd.to_numeric(O.auc,errors='coerce').sub(.5).abs()>=.04) &
+            (pd.to_numeric(O.era_consistency,errors='coerce')>=.67) &
+            (pd.to_numeric(O.coverage,errors='coerce')>=.75)].copy()
+        C['strength']=pd.to_numeric(C.auc,errors='coerce').sub(.5).abs()
+        C=C.sort_values(['strength','coverage'],ascending=[False,False])
+
+        # simple predeclared event-rate panels using economically interpretable fixed bins only
+        panels=[]
+        for f,bins in {
+            'intraday_recovery_from_low':[-9,-.005,.0,.01,.02,.04,9],
+            'close_location':[-1,.2,.4,.6,.8,2],
+            'gap_pct':[-9,-.10,-.07,-.04,0,.04,9],
+            'ret5_before':[-9,-.10,-.05,0,.05,.10,9],
+            'pre_stop_mfe':[-9,.10,.20,.30,.50,1.0,9]
+        }.items():
+            x=pd.to_numeric(F[f],errors='coerce')
+            b=pd.cut(x,bins=bins,include_lowest=True,duplicates='drop')
+            for k,g in F.assign(_bin=b).dropna(subset=['_bin']).groupby('_bin',observed=True):
+                panels.append({'feature':f,'bin':str(k),'n':int(len(g)),
+                               'wash20_rate':float(g.wash20.mean()),
+                               'wash50_rate':float(g.wash50.mean()),
+                               'wash100_rate':float(g.wash100.mean()),
+                               'median_loss_if_fail':float(pd.to_numeric(g.loc[~g.wash20,'stop_close_ret'],errors='coerce').median()) if (~g.wash20).any() else None})
+
+        # no promotion gate from this diagnostic
+        strong=bool(len(C)>=2)
+        verdict='STOP7_EVENT_SEPARATION_FOUND_DIAGNOSTIC_ONLY' if strong else 'NO_STABLE_STOP7_EVENT_SEPARATOR_YET'
+
+        result={
+            'version':'V6.80 STOP7 Event Classifier Diagnostic',
+            'verdict':verdict,
+            'rows':int(len(F)),
+            'washout_rates':{'plus20':float(F.wash20.mean()),'plus50':float(F.wash50.mean()),'plus100':float(F.wash100.mean())},
+            'top_candidates':C.head(12).replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'attribution':O.sort_values(['target','auc'],ascending=[True,False]).replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'event_rate_panels':panels,
+            'important':'Diagnostic only. Labels use future recovery, but every feature is computed using information available on or before the first STOP7 event. No threshold fitting, no grid search, no stop rule change.',
+            'next_step':('If stable separators exist, build ONE predeclared two-stage defense rule from the strongest source-supported semantics and validate on exact V6.70F admitted trades.'
+                         if strong else
+                         'Do not alter STOP7. Investigate richer source-supported event features before any classifier A/B.'),
+            'cache_note':'V6.78 saved STOP7 cohort + V6.69 exact entry prices + V6.17 cached OHLCV only; 0 Tiingo; no universe rebuild.'
+        }
+        V680_DIR.mkdir(parents=True,exist_ok=True)
+        V680_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:F.to_csv(V680_DIR/'stop7_event_features.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v680_write(status='done',phase='done',message=f'V6.80 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v680_write(status='error',phase='error',
+                     message=f'V6.80 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v680_thread=None
+
+def _v680_start():
+    global v680_thread
+    if _v680_alive():return False
+    _v680_write(status='starting',phase='starting',message='V6.80 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v680_thread=threading.Thread(target=_v680_run,daemon=True);v680_thread.start();return True
+
+@APP.route('/v680/run',methods=['GET','POST'])
+def v680_run():_v680_start();return redirect('/v680/stop7-event-classifier')
+
+@APP.get('/api/v680/status')
+def v680_status_api():return jsonify(_v680_status())
+
+@APP.get('/v680/stop7-event-classifier')
+def v680_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v680_status();R={}
+    if V680_RESULT.exists():
+        try:
+            obj=json.loads(V680_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    wr=R.get('washout_rates') if isinstance(R.get('washout_rates'),dict) else {}
+    cand=R.get('top_candidates') if isinstance(R.get('top_candidates'),list) else []
+    cr=''
+    for x in cand:
+        auc=num(x.get('auc')); direction='HIGHER→WASHOUT' if auc>=.5 else 'LOWER→WASHOUT'
+        cr+=f"<tr><td><b>{e(x.get('feature','—'))}</b></td><td>{auc:.3f}</td><td>{num(x.get('smd')):+.3f}</td><td>{num(x.get('era_consistency'))*100:.0f}%</td><td>{num(x.get('coverage'))*100:.0f}%</td><td>{direction}</td></tr>"
+    btn='' if _v680_alive() else '<a href="/v680/run"><button>▶ 开始 V6.80 STOP7 Event Diagnostic</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fff7ed;border:1px solid #f97316;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🔬 V6.80 STOP7 Event Classifier Diagnostic</h1>
+<div class="info">问题只剩一个：首次触发 STOP7 的那一刻，能否只用当时已知信息区分 <b>Washout</b> 与 <b>True Failure</b>？本版不改 Stop、不拟合阈值。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>N={integer(R.get('rows')):,} · later +20={num(wr.get('plus20'))*100:.1f}% · +50={num(wr.get('plus50'))*100:.1f}% · +100={num(wr.get('plus100'))*100:.1f}%</p></div>
+<div class="c"><h2>Stable STOP7-Event Candidates · target = later +20%</h2>
+<table><tr><th>Feature</th><th>AUC</th><th>SMD</th><th>Era consistency</th><th>Coverage</th><th>Direction</th></tr>
+{cr or '<tr><td colspan=6>运行后显示；若为空，表示没有稳定 separator。</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v680_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v680_home_base is not None:
+    def _v680_home_wrap(*args,**kwargs):
+        resp=_v680_home_base(*args,**kwargs)
+        card="""<div id="v680-stop7-classifier-card" style="background:#fff7ed;border:5px solid #ea580c;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🔬 V6.80 STOP7 Event Classifier Diagnostic</h2>
+        <p>Washout vs True Failure · point-in-time features only · no rule change · cache-only</p>
+        <a href="/v680/stop7-event-classifier"><button>打开 V6.80</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v680-stop7-classifier-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v680-stop7-classifier-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v680_home_base:APP.view_functions[ep]=_v680_home_wrap
