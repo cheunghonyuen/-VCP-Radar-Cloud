@@ -39571,3 +39571,229 @@ if _v6891_home_base is not None:
         body=str(resp);return body if 'id="v6891-integrity-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6891_home_base:APP.view_functions[ep]=_v6891_home_wrap
+
+
+# ========================= V6.89.2 FAST DOMINANT-WINNER INTEGRITY AUDIT =========================
+V6892_DIR=DATA_DIR/'v6892_fast_dominant_winner_integrity'
+V6892_STATUS=V6892_DIR/'status.json'; V6892_RESULT=V6892_DIR/'result.json'
+v6892_thread=None
+
+def _v6892_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6892_STATUS.exists():
+        try:x.update(json.loads(V6892_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6892_write(**kw):
+    V6892_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6892_status();x.update(kw)
+    V6892_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6892_alive(): return v6892_thread is not None and v6892_thread.is_alive()
+
+def _v6892_stats(g):
+    r=pd.to_numeric(g.get('ret'),errors='coerce').dropna()
+    if r.empty:return {'n':0}
+    return {'n':int(len(r)),
+            'sum_return_units':float(r.sum()),
+            'gross_gain_units':float(r[r>0].sum()),
+            'gross_loss_units':float((-r[r<0]).sum()),
+            'avg_return':float(r.mean()),
+            'median_return':float(r.median())}
+
+def _v6892_run():
+    global v6892_thread
+    t0=time.time()
+    try:
+        _v6892_write(status='running',phase='read_frozen_v689',
+                     message='直接读取 V6.89 已保存的 232 笔 exact admitted trades；不重建 Control…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        r89=json.loads(V689_RESULT.read_text(encoding='utf-8')) if V689_RESULT.exists() else {}
+        if not isinstance(r89,dict) or not r89.get('benchmark_ok'):
+            raise RuntimeError('V6.89 benchmark result 不存在或未通过')
+        cagr=float((r89.get('control_benchmark') or {}).get('cagr',0) or 0)
+        if abs(cagr-.2825)>.0015:
+            raise RuntimeError(f'V6.89 frozen benchmark != 28.25% ({cagr*100:.2f}%)')
+
+        fp=V689_DIR/'control_attribution_trades.csv.gz'
+        if not fp.exists():
+            raise RuntimeError('找不到 V6.89 control_attribution_trades.csv.gz')
+        S=pd.read_csv(fp,compression='gzip')
+        need=['listing_id','entry_date','entry_px','exit_date','exit_px','ret']
+        miss=[c for c in need if c not in S.columns]
+        if miss:raise RuntimeError('V6.89 frozen trade file 缺字段: '+','.join(miss))
+        S['ret']=pd.to_numeric(S.ret,errors='coerce')
+        S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
+        S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
+        S=S.dropna(subset=['ret','entry_date','exit_date']).sort_values('ret',ascending=False).reset_index(drop=True)
+        top=S.iloc[0].copy()
+
+        _v6892_write(status='running',phase='read_one_listing',
+                     message=f'已锁定 Top1：{float(top.ret)*100:+.1f}%；只读取这一只历史 OHLCV…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        hits=M[M[lidcol].astype(str).eq(str(top.listing_id))]
+        if hits.empty:raise RuntimeError('Top1 listing_id 在 Historical manifest 找不到')
+        mr=hits.iloc[0]
+
+        meta={}
+        for c in ['ticker','symbol','name','companyName','exchange','startDate','endDate','assetType']:
+            if c in M.columns:
+                try:meta[c]=mr[c]
+                except Exception:pass
+
+        d=_v617fv1_read_price(mr)
+        lc={str(c).lower():c for c in d.columns}
+        if not all(k in lc for k in ['date','open','high','low','close']):
+            raise RuntimeError('Top1 OHLC 缺字段')
+        q=pd.DataFrame({
+            'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+            'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+            'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+            'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+            'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+            'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+        }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+
+        ed=pd.Timestamp(top.entry_date).normalize();xd=pd.Timestamp(top.exit_date).normalize()
+        path=q[(q.date>=ed)&(q.date<=xd)].copy().reset_index(drop=True)
+        if path.empty:raise RuntimeError('Top1 entry→exit path 为空')
+
+        _v6892_write(status='running',phase='integrity_scan',
+                     message='检查 entry/exit price scale 与 split-like discontinuity…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        path['prev_close']=path.close.shift(1)
+        path['close_ratio']=path.close/path.prev_close
+        path['open_ratio_prev_close']=path.open/path.prev_close
+        jumps=path[(path.close_ratio>=3)|(path.close_ratio<=1/3)|
+                   (path.open_ratio_prev_close>=3)|(path.open_ratio_prev_close<=1/3)].copy()
+
+        jump_rows=[]
+        for _,r in jumps.iterrows():
+            jump_rows.append({'date':str(pd.Timestamp(r.date).date()),
+                              'prev_close':float(r.prev_close) if pd.notna(r.prev_close) else None,
+                              'open':float(r.open),'close':float(r.close),
+                              'open_ratio_prev_close':float(r.open_ratio_prev_close) if pd.notna(r.open_ratio_prev_close) else None,
+                              'close_ratio':float(r.close_ratio) if pd.notna(r.close_ratio) else None})
+
+        er=path[path.date.eq(ed)];xr=path[path.date.eq(xd)]
+        entry_close=float(er.close.iloc[0]) if len(er) else None
+        exit_close=float(xr.close.iloc[0]) if len(xr) else None
+        entry_px=float(top.entry_px);exit_px=float(top.exit_px)
+        entry_ratio=entry_px/entry_close if entry_close not in [None,0] else None
+        exit_ratio=exit_px/exit_close if exit_close not in [None,0] else None
+
+        flags={'return_ge_20x':bool(float(top.ret)>=20),
+               'split_like_discontinuity':bool(len(jumps)>0),
+               'entry_price_mismatch':bool(entry_ratio is not None and (entry_ratio>=2 or entry_ratio<=.5)),
+               'exit_price_mismatch':bool(exit_ratio is not None and (exit_ratio>=2 or exit_ratio<=.5))}
+
+        _v6892_write(status='running',phase='sensitivity',
+                     message='计算 All / Ex-Top1 / Ex-Top3 sensitivity；不删除任何交易…',
+                     processed=3,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        sens={'all':_v6892_stats(S),
+              'exclude_top1':_v6892_stats(S.iloc[1:].copy()),
+              'exclude_top3':_v6892_stats(S.iloc[3:].copy())}
+
+        bad=flags['split_like_discontinuity'] or flags['entry_price_mismatch'] or flags['exit_price_mismatch']
+        verdict='TOP1_PRICE_SCALE_INTEGRITY_PROBLEM_FOUND' if bad else 'TOP1_NO_OBVIOUS_SCALE_BREAK_BUT_EXTREME_RETURN_REQUIRES_CORPORATE_ACTION_RECONCILIATION'
+
+        result={'version':'V6.89.2 Fast Dominant-Winner Integrity Audit',
+                'verdict':verdict,'benchmark_ok':True,'control_cagr':cagr,
+                'top_trade':{'listing_id':str(top.listing_id),'meta':meta,
+                             'entry_date':str(ed.date()),'exit_date':str(xd.date()),
+                             'entry_px':entry_px,'exit_px':exit_px,'return':float(top.ret),
+                             'entry_day_close':entry_close,'exit_day_close':exit_close,
+                             'entry_px_vs_close_ratio':entry_ratio,'exit_px_vs_close_ratio':exit_ratio,
+                             'path_rows':int(len(path))},
+                'flags':flags,'jump_events':jump_rows,'sensitivity':sens,
+                'important':'No replay. Reads the already-validated V6.89 exact-admitted trade file and audits only the dominant listing. It does not auto-delete the winner.',
+                'cache_note':'Reads frozen V6.89 232 trades + ONE listing OHLCV. 0 Control replay, 0 Tiingo, 0 universe rebuild.'}
+        V6892_DIR.mkdir(parents=True,exist_ok=True)
+        V6892_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        path.to_csv(V6892_DIR/'top1_path.csv.gz',index=False,compression='gzip')
+
+        _v6892_write(status='done',phase='done',message=f'V6.89.2 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v6892_write(status='error',phase='error',
+                     message=f'V6.89.2 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v6892_thread=None
+
+def _v6892_start():
+    global v6892_thread
+    if _v6892_alive():return False
+    _v6892_write(status='starting',phase='starting',message='V6.89.2 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v6892_thread=threading.Thread(target=_v6892_run,daemon=True);v6892_thread.start();return True
+
+@APP.route('/v6892/run',methods=['GET','POST'])
+def v6892_run():_v6892_start();return redirect('/v6892/fast-dominant-winner-integrity')
+
+@APP.get('/api/v6892/status')
+def v6892_status_api():return jsonify(_v6892_status())
+
+@APP.get('/v6892/fast-dominant-winner-integrity')
+def v6892_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6892_status();R={}
+    if V6892_RESULT.exists():
+        try:R=json.loads(V6892_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    T=R.get('top_trade',{}) if isinstance(R.get('top_trade'),dict) else {}
+    F=R.get('flags',{}) if isinstance(R.get('flags'),dict) else {}
+    J=R.get('jump_events',[]) if isinstance(R.get('jump_events'),list) else []
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    jrows=''.join(f"<tr><td>{e(x.get('date'))}</td><td>{num(x.get('prev_close')):.6g}</td><td>{num(x.get('open')):.6g}</td><td>{num(x.get('close')):.6g}</td><td>{num(x.get('open_ratio_prev_close')):.2f}x</td><td>{num(x.get('close_ratio')):.2f}x</td></tr>" for x in J[:30])
+    btn='' if _v6892_alive() else '<a href="/v6892/run"><button>▶ 开始 V6.89.2 Fast Integrity</button></a>'
+    err=f"<div style='background:#fff1f2;padding:14px'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>⚡ V6.89.2 Fast Dominant-Winner Integrity Audit</h1><p>直接读 V6.89 已保存的 232 笔交易，只查 Top1；<b>0 Control replay</b>。</p></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Frozen Control CAGR: <b>{num(R.get('control_cagr'))*100:.2f}%</b></p></div>
+<div class="c"><h2>Top1</h2><p>Listing: <b>{e(T.get('listing_id','—'))}</b> · {e(T.get('meta',{}))}</p>
+<p>{e(T.get('entry_date','—'))} @ {num(T.get('entry_px')):.6g} → {e(T.get('exit_date','—'))} @ {num(T.get('exit_px')):.6g} · <b>{num(T.get('return'))*100:+.1f}%</b></p>
+<p>Flags: split-like={e(F.get('split_like_discontinuity'))} · entry mismatch={e(F.get('entry_price_mismatch'))} · exit mismatch={e(F.get('exit_price_mismatch'))}</p></div>
+<div class="c"><h2>Scale Discontinuities</h2><table><tr><th>Date</th><th>Prev Close</th><th>Open</th><th>Close</th><th>Open/Prev</th><th>Close/Prev</th></tr>{jrows or '<tr><td colspan=6>未发现 ≥3x / ≤1/3x 单日尺度跳变</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6892_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6892_home_base is not None:
+    def _v6892_home_wrap(*args,**kwargs):
+        resp=_v6892_home_base(*args,**kwargs)
+        card="""<div id="v6892-fast-integrity-card" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>⚡ V6.89.2 Fast Dominant-Winner Integrity</h2>
+        <p>Frozen V6.89 232 trades + ONE listing OHLCV · 0 Control replay</p>
+        <a href="/v6892/fast-dominant-winner-integrity"><button>打开 V6.89.2</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6892-fast-integrity-card"' not in body:
+                p=body.find('<body'); g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp); return body if 'id="v6892-fast-integrity-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6892_home_base:APP.view_functions[ep]=_v6892_home_wrap
