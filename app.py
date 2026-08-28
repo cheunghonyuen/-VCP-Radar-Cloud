@@ -36359,3 +36359,329 @@ if _v680_home_base is not None:
         body=str(resp);return body if 'id="v680-stop7-classifier-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v680_home_base:APP.view_functions[ep]=_v680_home_wrap
+
+
+# ========================= V6.81 RICH STOP7 EVENT ANATOMY / CROSS-ERA COMPOSITES =========================
+V681_DIR=DATA_DIR/'v681_rich_stop7_event_anatomy'
+V681_STATUS=V681_DIR/'status.json'; V681_RESULT=V681_DIR/'result.json'
+v681_thread=None
+
+def _v681_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':0,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V681_STATUS.exists():
+        try:x.update(json.loads(V681_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v681_write(**kw):
+    V681_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v681_status();x.update(kw)
+    V681_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v681_alive(): return v681_thread is not None and v681_thread.is_alive()
+
+def _v681_auc_rank(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(x,errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average');n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v681_fit_logit(X,y,l2=.05,iters=250,lr=.08):
+    X=np.asarray(X,dtype=float);y=np.asarray(y,dtype=float)
+    n,p=X.shape
+    b=np.zeros(p+1,dtype=float)
+    for _ in range(int(iters)):
+        z=np.clip(b[0]+X.dot(b[1:]),-30,30)
+        pr=1.0/(1.0+np.exp(-z))
+        err=pr-y
+        g0=float(err.mean())
+        g=np.asarray(X.T.dot(err)/n + l2*b[1:],dtype=float)
+        b[0]-=lr*g0
+        b[1:]-=lr*g
+    return b
+
+def _v681_predict_logit(X,b):
+    X=np.asarray(X,dtype=float)
+    z=np.clip(float(b[0])+X.dot(np.asarray(b[1:])), -30,30)
+    return 1.0/(1.0+np.exp(-z))
+
+def _v681_cv_family(F,features,target):
+    eras=[x for x in ['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'] if x in set(F.era.astype(str))]
+    folds=[];pred_all=[];y_all=[]
+    for hold in eras:
+        tr=F[F.era.astype(str)!=hold].copy()
+        te=F[F.era.astype(str)==hold].copy()
+        cols=[f for f in features if f in F.columns]
+        if len(cols)<2 or len(tr)<100 or len(te)<50:continue
+
+        med={c:float(pd.to_numeric(tr[c],errors='coerce').median()) for c in cols}
+        mu={};sd={}
+        Xtr=[];Xte=[]
+        for c in cols:
+            a=pd.to_numeric(tr[c],errors='coerce').fillna(med[c]).to_numpy(dtype=float)
+            b=pd.to_numeric(te[c],errors='coerce').fillna(med[c]).to_numpy(dtype=float)
+            m=float(np.nanmean(a));ss=float(np.nanstd(a))
+            if not np.isfinite(ss) or ss<1e-9:ss=1.0
+            mu[c]=m;sd[c]=ss
+            Xtr.append((a-m)/ss);Xte.append((b-m)/ss)
+        Xtr=np.column_stack(Xtr);Xte=np.column_stack(Xte)
+        ytr=tr[target].astype(int).to_numpy();yte=te[target].astype(int).to_numpy()
+        if len(np.unique(ytr))<2 or len(np.unique(yte))<2:continue
+        coef=_v681_fit_logit(Xtr,ytr,l2=.05,iters=250,lr=.08)
+        pr=_v681_predict_logit(Xte,coef)
+        auc=_v681_auc_rank(pr,yte)
+        folds.append({'holdout':hold,'n':int(len(te)),'auc':float(auc) if np.isfinite(auc) else None})
+        pred_all.extend(pr.tolist());y_all.extend(yte.tolist())
+    pooled=_v681_auc_rank(pred_all,y_all) if pred_all else np.nan
+    vals=[x['auc'] for x in folds if x.get('auc') is not None]
+    return {
+        'features':features,'folds':folds,
+        'pooled_oos_auc':float(pooled) if np.isfinite(pooled) else None,
+        'min_era_auc':float(min(vals)) if vals else None,
+        'max_era_auc':float(max(vals)) if vals else None,
+        'era_consistency':float(sum(1 for x in vals if x>=.5)/len(vals)) if vals else None
+    }
+
+def _v681_run():
+    global v681_thread
+    t0=time.time()
+    try:
+        _v681_write(status='running',phase='load_v680_features',
+                     message='直接复用 V6.80 已保存 STOP7 event features；不重读全历史…',
+                     processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        fp=V680_DIR/'stop7_event_features.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.80 stop7_event_features.csv.gz')
+        F=pd.read_csv(fp,compression='gzip')
+        if F.empty:raise RuntimeError('V6.80 feature store 为空')
+        F['stop_date']=pd.to_datetime(F.stop_date,errors='coerce').dt.normalize()
+        if 'era' not in F.columns:
+            F['era']=pd.cut(F.stop_date.dt.year,bins=[1995,2005,2015,2026],
+                            labels=['ERA1_1996_2005','ERA2_2006_2015','ERA3_2016_2026'],
+                            include_lowest=True)
+        else:
+            F['era']=F['era'].astype(str)
+
+        # Rich derived anatomy, all based only on data already available at STOP7 event.
+        eps=1e-6
+        F['recovery_from_low_pct']=pd.to_numeric(F.get('intraday_recovery_from_low'),errors='coerce')
+        F['damage_from_entry']=(-pd.to_numeric(F.get('stop_close_ret'),errors='coerce')).clip(lower=0)
+        F['low_damage_from_entry']=(-pd.to_numeric(F.get('stop_low_ret'),errors='coerce')).clip(lower=0)
+        F['recovery_fraction_of_damage']=F['recovery_from_low_pct']/(F['low_damage_from_entry'].abs()+eps)
+        F['mfe_to_stop_drawdown']=pd.to_numeric(F.get('pre_stop_mfe'),errors='coerce')-pd.to_numeric(F.get('stop_close_ret'),errors='coerce')
+        F['mfe_retention_at_stop']=pd.to_numeric(F.get('stop_close_ret'),errors='coerce')/(pd.to_numeric(F.get('pre_stop_mfe'),errors='coerce').abs()+eps)
+        F['recent_vs_medium_momentum']=pd.to_numeric(F.get('ret5_before'),errors='coerce')-pd.to_numeric(F.get('ret20_before'),errors='coerce')
+        F['stop_reversal_strength']=(
+            pd.to_numeric(F.get('stop_close_ret'),errors='coerce') +
+            pd.to_numeric(F.get('intraday_recovery_from_low'),errors='coerce') +
+            .03*pd.to_numeric(F.get('close_location'),errors='coerce')
+        )
+        F['shock_recovery_balance']=(
+            pd.to_numeric(F.get('intraday_recovery_from_low'),errors='coerce') -
+            pd.to_numeric(F.get('gap_pct'),errors='coerce').abs()
+        )
+        F['time_scaled_drawdown']=(F['mfe_to_stop_drawdown']/
+                                  (pd.to_numeric(F.get('days_to_stop_calendar'),errors='coerce').clip(lower=1)))
+
+        required_targets=['wash20','wash50','wash100']
+        miss=[c for c in required_targets if c not in F.columns]
+        if miss:raise RuntimeError('V6.80 feature store 缺 target: '+','.join(miss))
+        for c in required_targets:F[c]=F[c].astype(bool)
+
+        _v681_write(status='running',phase='predeclared_families',
+                     message='评估 4 个预先定义的弱信号组合；不做模型/阈值 grid search…',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        families={
+            'RECLAIM_ONLY':[
+                'stop_close_ret','close_location','intraday_recovery_from_low','stop_body_ret'
+            ],
+            'PATH_ONLY':[
+                'pre_stop_mfe','days_to_stop_calendar','ret5_before','ret20_before','ma20_dist_pre'
+            ],
+            'SHOCK_RECOVERY':[
+                'gap_pct','volume_ratio20','close_location','intraday_recovery_from_low','shock_recovery_balance'
+            ],
+            'RECLAIM_PLUS_PATH':[
+                'stop_close_ret','close_location','intraday_recovery_from_low',
+                'pre_stop_mfe','ret5_before','ret20_before',
+                'mfe_to_stop_drawdown','time_scaled_drawdown'
+            ]
+        }
+
+        model_rows=[]
+        for target in ['wash20','wash50','wash100']:
+            for name,features in families.items():
+                r=_v681_cv_family(F,features,target)
+                r.update({'target':target,'family':name})
+                model_rows.append(r)
+
+        _v681_write(status='running',phase='single_feature_audit',
+                     message='同时审计 Rich anatomy 单变量，确认组合是否真的超越 stop_close_ret…',
+                     processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rich_features=[
+            'stop_close_ret','close_location','intraday_recovery_from_low','stop_body_ret',
+            'gap_pct','volume_ratio20','pre_stop_mfe','days_to_stop_calendar',
+            'ret5_before','ret20_before','ma20_dist_pre',
+            'recovery_fraction_of_damage','mfe_to_stop_drawdown','mfe_retention_at_stop',
+            'recent_vs_medium_momentum','stop_reversal_strength',
+            'shock_recovery_balance','time_scaled_drawdown'
+        ]
+        uni=[]
+        for target in ['wash20','wash50','wash100']:
+            for f in rich_features:
+                if f not in F.columns:continue
+                overall=_v681_auc_rank(F[f],F[target])
+                era=[]
+                for er,g in F.groupby('era'):
+                    if len(g)<50 or g[target].nunique()<2:continue
+                    a=_v681_auc_rank(g[f],g[target])
+                    era.append({'era':str(er),'auc':float(a) if np.isfinite(a) else None,'n':int(len(g))})
+                vals=[x['auc'] for x in era if x['auc'] is not None]
+                best_oriented=max(overall,1-overall) if np.isfinite(overall) else np.nan
+                uni.append({'target':target,'feature':f,
+                            'auc':float(overall) if np.isfinite(overall) else None,
+                            'oriented_auc':float(best_oriented) if np.isfinite(best_oriented) else None,
+                            'era':era,
+                            'era_consistency':float(max(sum(1 for x in vals if x>=.5),sum(1 for x in vals if x<.5))/len(vals)) if vals else None})
+
+        _v681_write(status='running',phase='interpret',
+                     message='生成跨年代 out-of-sample verdict；仍不生成交易规则…',
+                     processed=3,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        mdf=pd.DataFrame([{
+            'target':r['target'],'family':r['family'],
+            'pooled_oos_auc':r.get('pooled_oos_auc'),
+            'min_era_auc':r.get('min_era_auc'),
+            'max_era_auc':r.get('max_era_auc'),
+            'era_consistency':r.get('era_consistency')
+        } for r in model_rows])
+
+        w20=mdf[mdf.target.eq('wash20')].copy()
+        best=None
+        if len(w20):
+            w20['score']=pd.to_numeric(w20.pooled_oos_auc,errors='coerce')
+            w20=w20.sort_values('score',ascending=False)
+            if len(w20):best=w20.iloc[0].to_dict()
+
+        pooled=float(best.get('pooled_oos_auc')) if best and pd.notna(best.get('pooled_oos_auc')) else np.nan
+        minauc=float(best.get('min_era_auc')) if best and pd.notna(best.get('min_era_auc')) else np.nan
+        strong=bool(np.isfinite(pooled) and pooled>=.65 and np.isfinite(minauc) and minauc>=.58)
+        moderate=bool(np.isfinite(pooled) and pooled>=.60 and np.isfinite(minauc) and minauc>=.55)
+
+        verdict=('RICH_STOP7_COMPOSITE_STRONG_ENOUGH_FOR_ONE_CONTROLLED_AB'
+                 if strong else
+                 'RICH_STOP7_COMPOSITE_WEAK_BUT_REAL' if moderate else
+                 'RICH_STOP7_PRICE_VOLUME_ANATOMY_NOT_ENOUGH')
+
+        result={
+            'version':'V6.81 Rich STOP7 Event Anatomy',
+            'verdict':verdict,
+            'rows':int(len(F)),
+            'best_wash20_family':best,
+            'model_families':model_rows,
+            'top_univariate':sorted(
+                [x for x in uni if x['target']=='wash20' and x.get('oriented_auc') is not None],
+                key=lambda x:x['oriented_auc'],reverse=True
+            )[:12],
+            'decision_rule':'Only if pooled out-of-sample AUC >=0.65 and weakest era AUC >=0.58 may ONE controlled two-stage defense A/B be built. 0.60-0.65 is recorded as weak-but-real, not promoted.',
+            'important':'No threshold fitting, no family grid search beyond four predeclared semantic families, no stop change. Each family is evaluated leave-one-era-out.',
+            'next_step':(
+                'Build exactly ONE controlled two-stage defense A/B from the winning semantic family; preserve fixed -7% for all non-qualified STOP7 events.'
+                if strong else
+                'Do not alter STOP7 yet. If weak-but-real, source-reconcile richer non-price context before another A/B; if not enough, accept that price/volume anatomy alone cannot safely rescue washouts.'
+            ),
+            'cache_note':'Reads V6.80 stop7_event_features.csv.gz only; no OHLC rescan, 0 Tiingo, no universe rebuild.'
+        }
+        V681_DIR.mkdir(parents=True,exist_ok=True)
+        V681_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v681_write(status='done',phase='done',message=f'V6.81 完成：{verdict}',
+                     processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v681_write(status='error',phase='error',
+                     message=f'V6.81 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v681_thread=None
+
+def _v681_start():
+    global v681_thread
+    if _v681_alive():return False
+    _v681_write(status='starting',phase='starting',message='V6.81 正在启动',
+                 processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v681_thread=threading.Thread(target=_v681_run,daemon=True);v681_thread.start();return True
+
+@APP.route('/v681/run',methods=['GET','POST'])
+def v681_run():_v681_start();return redirect('/v681/rich-stop7-event-anatomy')
+
+@APP.get('/api/v681/status')
+def v681_status_api():return jsonify(_v681_status())
+
+@APP.get('/v681/rich-stop7-event-anatomy')
+def v681_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v681_status();R={}
+    if V681_RESULT.exists():
+        try:
+            obj=json.loads(V681_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    best=R.get('best_wash20_family') if isinstance(R.get('best_wash20_family'),dict) else {}
+    fam=R.get('model_families') if isinstance(R.get('model_families'),list) else []
+    rows=''
+    for x in fam:
+        if x.get('target')!='wash20':continue
+        rows+=f"<tr><td><b>{e(x.get('family'))}</b></td><td>{num(x.get('pooled_oos_auc')):.3f}</td><td>{num(x.get('min_era_auc')):.3f}</td><td>{num(x.get('max_era_auc')):.3f}</td><td>{num(x.get('era_consistency'))*100:.0f}%</td></tr>"
+    btn='' if _v681_alive() else '<a href="/v681/run"><button>▶ 开始 V6.81 Rich Anatomy</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfeff;border:1px solid #06b6d4;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧠 V6.81 Rich STOP7 Event Anatomy</h1>
+<div class="info">直接复用 V6.80 Feature Store。4 个预定义语义组合做 leave-one-era-out 验证，不再重扫历史，不拟合止损阈值。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>Best wash20 family: <b>{e(best.get('family','—'))}</b> · pooled OOS AUC=<b>{num(best.get('pooled_oos_auc')):.3f}</b> · weakest era=<b>{num(best.get('min_era_auc')):.3f}</b></p></div>
+<div class="c"><h2>Washout +20 · Cross-Era Out-of-Sample</h2>
+<table><tr><th>Family</th><th>Pooled OOS AUC</th><th>Weakest Era</th><th>Best Era</th><th>Direction Consistency</th></tr>
+{rows or '<tr><td colspan=5>运行后显示</td></tr>'}
+</table></div>
+</div></body></html>"""
+
+_v681_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v681_home_base is not None:
+    def _v681_home_wrap(*args,**kwargs):
+        resp=_v681_home_base(*args,**kwargs)
+        card="""<div id="v681-rich-stop7-card" style="background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧠 V6.81 Rich STOP7 Event Anatomy</h2>
+        <p>4 predeclared composite families · leave-one-era-out · no rescan · no threshold fitting</p>
+        <a href="/v681/rich-stop7-event-anatomy"><button>打开 V6.81</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v681-rich-stop7-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v681-rich-stop7-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v681_home_base:APP.view_functions[ep]=_v681_home_wrap
