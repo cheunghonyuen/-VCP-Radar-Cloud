@@ -34197,3 +34197,278 @@ if _v676_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v676_home_base: APP.view_functions[ep]=_v676_home_wrap
+
+
+# ========================= V6.77 QUICK PROFIT VIABILITY AUDIT =========================
+V677_DIR=DATA_DIR/'v677_quick_profit_viability_audit'
+V677_STATUS=V677_DIR/'status.json'; V677_RESULT=V677_DIR/'result.json'
+v677_thread=None
+
+def _v677_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V677_STATUS.exists():
+        try:x.update(json.loads(V677_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v677_write(**kw):
+    V677_DIR.mkdir(parents=True,exist_ok=True); x=_v677_status(); x.update(kw)
+    V677_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v677_alive(): return v677_thread is not None and v677_thread.is_alive()
+
+def _v677_day_first(a, cond):
+    import numpy as np
+    idx=np.where(cond(a))[0]
+    return int(idx[0]+1) if len(idx) else None
+
+def _v677_smd(a,b):
+    a=pd.to_numeric(a,errors='coerce').dropna(); b=pd.to_numeric(b,errors='coerce').dropna()
+    if len(a)<50 or len(b)<50:return None
+    den=((float(a.var(ddof=1))+float(b.var(ddof=1)))/2.0)**0.5
+    return float((a.mean()-b.mean())/den) if den>0 else 0.0
+
+def _v677_run():
+    global v677_thread
+    t0=time.time()
+    try:
+        _v677_write(status='running',phase='load',message='读取 V6.69 Entry + V6.17 cached price paths…',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists(): raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px']
+        miss=[c for c in need if c not in P.columns]
+        if miss: raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        P=P.copy()
+        P['listing_id']=P.listing_id.astype(str)
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P=P.dropna(subset=['listing_id','entry_date','entry_px']).reset_index(drop=True)
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty: raise RuntimeError('找不到 V6.17 Historical Cache manifest')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None: raise RuntimeError('Historical manifest 缺 listing_id')
+        needed=set(P.listing_id.astype(str))
+        M=M[M[lidcol].astype(str).isin(needed)].copy()
+        if M.empty: raise RuntimeError('Historical manifest 与 Entry 没有匹配')
+
+        _v677_write(status='running',phase='price_cache',message=f'读取所需 cached price paths · {len(M):,} listings',processed=1,total=5,elapsed_sec=round(time.time()-t0,1))
+        price={}
+        total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            lid=str(mr[lidcol])
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if not q.empty: price[lid]=q.reset_index(drop=True)
+            if n==1 or n%500==0 or n==total:
+                _v677_write(status='running',phase='price_cache',message=f'cached paths {n:,}/{total:,}',processed=1,total=5,elapsed_sec=round(time.time()-t0,1))
+        if not price: raise RuntimeError('cached price paths 为空')
+
+        # Pre-entry Feature Store enrichment; if unavailable, path audit still proceeds.
+        F=None
+        try:F=_v665_load_feature_store()
+        except Exception:F=None
+
+        _v677_write(status='running',phase='path_order',message='检查 Quick Profit 是否在不先承受明显回撤的情况下触达…',processed=2,total=5,elapsed_sec=round(time.time()-t0,1))
+        horizons=[3,5,10]
+        targets=[.02,.03,.05]
+        risks=[-.02,-.03,-.05]
+        rows=[]
+        feature_rows=[]
+        trade_rows=[]
+
+        for i,r in P.iterrows():
+            g=price.get(str(r.listing_id))
+            if g is None:continue
+            q=g[g.date>=r.entry_date].head(10)
+            if q.empty:continue
+            ep=float(r.entry_px)
+            hi=q.high.to_numpy(dtype=float)/ep-1.0
+            lo=q.low.to_numpy(dtype=float)/ep-1.0
+            cl=q.close.to_numpy(dtype=float)/ep-1.0
+
+            tr={'listing_id':str(r.listing_id),'entry_date':r.entry_date}
+            for h in horizons:
+                m=min(h,len(q))
+                if m<=0:continue
+                for t in targets:
+                    tday=_v677_day_first(hi[:m],lambda a:a>=t)
+                    cday=_v677_day_first(cl[:m],lambda a:a>=t)
+                    tr[f'h{h}_t{int(t*100)}_high_day']=tday
+                    tr[f'h{h}_t{int(t*100)}_close_day']=cday
+                    for risk in risks:
+                        rday=_v677_day_first(lo[:m],lambda a:a<=risk)
+                        key=f'h{h}_t{int(t*100)}_r{int(abs(risk)*100)}'
+                        if tday is None:
+                            outcome='NO_TARGET'
+                        elif rday is None or tday<rday:
+                            outcome='CLEAN_TARGET_FIRST'
+                        elif rday<tday:
+                            outcome='RISK_FIRST'
+                        else:
+                            outcome='SAME_DAY_AMBIGUOUS'
+                        tr[key]=outcome
+            trade_rows.append(tr)
+
+        A=pd.DataFrame(trade_rows)
+        if A.empty: raise RuntimeError('Quick Profit path audit 无有效交易')
+
+        # Aggregate path-order viability.
+        for h in horizons:
+            for t in targets:
+                highcol=f'h{h}_t{int(t*100)}_high_day'; closecol=f'h{h}_t{int(t*100)}_close_day'
+                for risk in risks:
+                    key=f'h{h}_t{int(t*100)}_r{int(abs(risk)*100)}'
+                    o=A[key].astype(str)
+                    n=len(o)
+                    rows.append({
+                        'horizon_sessions':h,'target':t,'risk_marker':risk,'n':n,
+                        'high_touch_rate':float(A[highcol].notna().mean()),
+                        'close_touch_rate':float(A[closecol].notna().mean()),
+                        'clean_target_first_rate':float((o=='CLEAN_TARGET_FIRST').mean()),
+                        'risk_first_rate':float((o=='RISK_FIRST').mean()),
+                        'same_day_ambiguous_rate':float((o=='SAME_DAY_AMBIGUOUS').mean()),
+                        'no_target_rate':float((o=='NO_TARGET').mean()),
+                        'median_sessions_to_high_touch':float(pd.to_numeric(A.loc[A[highcol].notna(),highcol],errors='coerce').median()) if A[highcol].notna().any() else None
+                    })
+
+        _v677_write(status='running',phase='entry_attribution',message='比较“干净快速触达”与未触达的入场前特征…',processed=3,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        # Focus attribution on three predeclared cells, no grid optimization:
+        # 3d +2%, 5d +3%, 10d +5%, each against -3% adverse marker.
+        focus=[(3,.02),(5,.03),(10,.05)]
+        if F is not None:
+            J=P[['listing_id','entry_date']].drop_duplicates().copy()
+            J=_v665_join(J,F)
+            keep=[c for c in ['listing_id','_entry_date','ret60','ret120','ret252','vol_vs20','delay_sessions'] if c in J.columns]
+            J=J[keep].rename(columns={'_entry_date':'entry_date'})
+            A=A.merge(J,on=['listing_id','entry_date'],how='left')
+            feats=[c for c in ['ret60','ret120','ret252','vol_vs20','delay_sessions'] if c in A.columns]
+            A['_year']=pd.to_datetime(A.entry_date).dt.year
+            for h,t in focus:
+                key=f'h{h}_t{int(t*100)}_r3'
+                clean=A[A[key].eq('CLEAN_TARGET_FIRST')]
+                miss=A[~A[key].eq('CLEAN_TARGET_FIRST')]
+                for f in feats:
+                    smd=_v677_smd(clean[f],miss[f])
+                    if smd is None:continue
+                    # era direction stability
+                    signs=[]
+                    for lo,hi in [(1996,2005),(2006,2015),(2016,2026)]:
+                        c=clean[(clean._year>=lo)&(clean._year<=hi)]
+                        m=miss[(miss._year>=lo)&(miss._year<=hi)]
+                        es=_v677_smd(c[f],m[f])
+                        if es is not None: signs.append(1 if es>0 else -1 if es<0 else 0)
+                    target_sign=1 if smd>0 else -1
+                    consist=(sum(1 for x in signs if x==target_sign)/len(signs)) if signs else None
+                    feature_rows.append({
+                        'focus':f'{h}d_+{int(t*100)}_before_-3','feature':f,
+                        'clean_n':int(len(clean)),'miss_n':int(len(miss)),
+                        'clean_median':float(pd.to_numeric(clean[f],errors='coerce').median()) if pd.to_numeric(clean[f],errors='coerce').notna().any() else None,
+                        'miss_median':float(pd.to_numeric(miss[f],errors='coerce').median()) if pd.to_numeric(miss[f],errors='coerce').notna().any() else None,
+                        'smd':float(smd),'abs_smd':abs(float(smd)),
+                        'direction':'HIGHER_IN_CLEAN_QUICK' if smd>0 else 'LOWER_IN_CLEAN_QUICK',
+                        'era_consistency':consist
+                    })
+
+        feature_rows=sorted(feature_rows,key=lambda x:-x['abs_smd'])
+
+        _v677_write(status='running',phase='interpret',message='生成 Quick Profit 独立可行性结论；不影响 Big Winner 主线。',processed=4,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        # Read three focus cells at -3% marker.
+        focus_summary=[]
+        for h,t in focus:
+            x=next((r for r in rows if r['horizon_sessions']==h and abs(r['target']-t)<1e-9 and abs(r['risk_marker']+0.03)<1e-9),None)
+            if x:focus_summary.append(x)
+
+        # Diagnostic promotion gate only: not a trading-rule promotion.
+        # We require meaningful clean-target probability and limited same-day ambiguity.
+        promising=[x for x in focus_summary if x['clean_target_first_rate']>=0.45 and x['same_day_ambiguous_rate']<=0.10]
+        verdict='QUICK_PROFIT_OPPORTUNITY_DESERVES_CONTROLLED_STRATEGY_TEST' if promising else 'QUICK_PROFIT_EDGE_NOT_YET_CLEAR'
+
+        R={
+            'version':'V6.77 Quick Profit Viability Audit',
+            'verdict':verdict,
+            'focus_summary':focus_summary,
+            'full_path_order_matrix':rows,
+            'entry_feature_attribution':feature_rows[:30],
+            'critical_note':'High-touch is optimistic because daily OHLC cannot reveal high-vs-low ordering inside the same session. CLEAN_TARGET_FIRST excludes cases where target and adverse marker first occur on the same day.',
+            'focus_cells':['3 sessions +2% before -3%','5 sessions +3% before -3%','10 sessions +5% before -3%'],
+            'important':'Diagnostic only. No profit target, stop, time exit or entry filter is promoted in V6.77.',
+            'next_step':('Run ONE controlled Quick-Profit portfolio replay on the strongest predeclared focus cell, with same-day ambiguous bars handled conservatively.'
+                         if promising else
+                         'Do not create a Quick-Profit strategy yet. Keep it as a research branch and return priority to Big Winner washout preservation.'),
+            'cache_note':'V6.69 entries + V6.17 manifest/cached OHLC + optional existing V6.17 Feature Store only; 0 Tiingo; no universe rebuild.'
+        }
+        V677_DIR.mkdir(parents=True,exist_ok=True)
+        V677_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:A.to_csv(V677_DIR/'quick_profit_trade_paths.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+        _v677_write(status='done',phase='done',message=f'V6.77 完成：{verdict}',processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v677_write(status='error',phase='error',message=f'V6.77 失败：{type(ex).__name__}: {ex}',processed=0,total=5,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v677_thread=None
+
+def _v677_start():
+    global v677_thread
+    if _v677_alive():return False
+    _v677_write(status='starting',phase='starting',message='V6.77 正在启动',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v677_thread=threading.Thread(target=_v677_run,daemon=True);v677_thread.start();return True
+
+@APP.route('/v677/run',methods=['GET','POST'])
+def v677_run():_v677_start();return redirect('/v677/quick-profit-viability')
+
+@APP.get('/api/v677/status')
+def v677_status_api():return jsonify(_v677_status())
+
+@APP.get('/v677/quick-profit-viability')
+def v677_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v677_status();R={}
+    if V677_RESULT.exists():
+        try:R=json.loads(V677_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    btn='' if _v677_alive() else '<a href="/v677/run"><button>▶ 开始 V6.77 Quick Profit Audit</button></a>'
+    trs=''
+    for x in R.get('focus_summary',[]):
+        trs+=f"<tr><td>{int(x['horizon_sessions'])}d</td><td>+{x['target']*100:.0f}%</td><td>{x['risk_marker']*100:.0f}%</td><td>{x['high_touch_rate']*100:.1f}%</td><td>{x['close_touch_rate']*100:.1f}%</td><td><b>{x['clean_target_first_rate']*100:.1f}%</b></td><td>{x['risk_first_rate']*100:.1f}%</td><td>{x['same_day_ambiguous_rate']*100:.1f}%</td><td>{x['median_sessions_to_high_touch'] or 0:.1f}</td></tr>"
+    fr=''
+    for x in R.get('entry_feature_attribution',[])[:12]:
+        cons='—' if x.get('era_consistency') is None else ('%.0f%%' % (x.get('era_consistency')*100))
+        fr+=f"<tr><td>{e(x.get('focus'))}</td><td><b>{e(x.get('feature'))}</b></td><td>{float(x.get('smd',0)):+.3f}</td><td>{e(x.get('direction'))}</td><td>{cons}</td></tr>"
+    err=''
+    if st.get('error'):err=f"<div class='err'><b>具体错误：</b>{e(st['error'])}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #22c55e;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.err{{background:#fff1f2;border:1px solid #fb7185;padding:15px;border-radius:12px}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>⚡ V6.77 Quick Profit Viability Audit</h1><div class="info">短线支线独立研究：不只看“摸到目标”，还检查目标是否在 -3% adverse move 之前出现，并把同日 High/Low 顺序不明的情况单独列为 Ambiguous。</div></div>
+<div class="c"><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2></div>
+<div class="c"><h2>Predeclared Focus Cells</h2><table><tr><th>Horizon</th><th>Target</th><th>Risk marker</th><th>High touch</th><th>Close touch</th><th>Clean target first</th><th>Risk first</th><th>Same-day ambiguous</th><th>Median touch day</th></tr>{trs or '<tr><td colspan=9>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Entry Feature Attribution</h2><table><tr><th>Focus</th><th>Feature</th><th>SMD</th><th>Direction</th><th>Era consistency</th></tr>{fr or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v677_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v677_home_base is not None:
+    def _v677_home_wrap(*args,**kwargs):
+        resp=_v677_home_base(*args,**kwargs)
+        card="""<div id="v677-quick-profit" style="background:#ecfdf5;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0"><h2>⚡ V6.77 Quick Profit Viability Audit</h2><p>3d +2% / 5d +3% / 10d +5% · target-before-risk · diagnostic only</p><a href="/v677/quick-profit-viability"><button>打开 V6.77</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:]
+            else:body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v677_home_base:APP.view_functions[ep]=_v677_home_wrap
