@@ -42640,3 +42640,374 @@ if _v6933_home_base is not None:
         body=str(resp);return body if 'id="v6933-temporal-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6933_home_base:APP.view_functions[ep]=_v6933_home_wrap
+
+
+# ========================= V6.94 CLEAN-UNIVERSE PATH-DNA WALK-FORWARD VALIDATION =========================
+V694_DIR=DATA_DIR/'v694_clean_universe_path_dna_walkforward'
+V694_STATUS=V694_DIR/'status.json'; V694_RESULT=V694_DIR/'result.json'
+v694_thread=None
+
+def _v694_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V694_STATUS.exists():
+        try:x.update(json.loads(V694_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v694_write(**kw):
+    V694_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v694_status();x.update(kw)
+    V694_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v694_alive(): return v694_thread is not None and v694_thread.is_alive()
+
+def _v694_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(pd.Series(x),errors='coerce'),
+                    'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum()); n0=int((z.y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v694_oriented_percentile(train, value, higher_better):
+    arr=np.asarray(pd.to_numeric(pd.Series(train),errors='coerce').dropna(),dtype=float)
+    arr=arr[np.isfinite(arr)]
+    if len(arr)<30 or not np.isfinite(value): return np.nan
+    p=float(np.searchsorted(np.sort(arr),float(value),side='right')/len(arr))
+    return p if higher_better else 1-p
+
+def _v694_score_row(row, ref, specs):
+    ps=[]
+    for col,higher in specs:
+        if col not in ref.columns:continue
+        v=float(row[col]) if pd.notna(row.get(col)) else np.nan
+        p=_v694_oriented_percentile(ref[col],v,higher)
+        if np.isfinite(p):ps.append(float(p))
+    return float(np.mean(ps)) if len(ps)>=3 else np.nan
+
+def _v694_run():
+    global v694_thread
+    t0=time.time()
+    try:
+        _v694_write(status='running',phase='load_candidate_cache',
+                    message='读取 V6.69 全候选 cache；构建 clean candidate labels，不重跑 Universe…',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+
+        C=pd.DataFrame({
+            'listing_id':P.listing_id.astype(str),
+            'entry_date':pd.to_datetime(P.entry_date,errors='coerce').dt.normalize(),
+            'entry_px_raw':pd.to_numeric(P.entry_px,errors='coerce'),
+            'exit_date':pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize(),
+            'exit_px_raw':pd.to_numeric(P.control_exit_px,errors='coerce'),
+            'exit_reason':P.control_reason.astype(str)
+        }).dropna(subset=['entry_date','entry_px_raw','exit_date','exit_px_raw']).copy()
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        lids=sorted(set(C.listing_id.astype(str)))
+        _v694_write(status='running',phase='build_clean_features',
+                    message=f'按 listing 分组读取 Historical Cache · 0/{len(lids)}',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rows=[]
+        ambiguous_rows=0
+        missing_rows=0
+
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(lid)
+            if mr is None:
+                missing_rows += int((C.listing_id==lid).sum()); continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:
+                missing_rows += int((C.listing_id==lid).sum()); continue
+            if d is None or d.empty:
+                missing_rows += int((C.listing_id==lid).sum()); continue
+
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):
+                missing_rows += int((C.listing_id==lid).sum()); continue
+
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce'),
+                'volume':pd.to_numeric(d[lc['volume']],errors='coerce') if 'volume' in lc else np.nan
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+            if len(q)<100:
+                missing_rows += int((C.listing_id==lid).sum()); continue
+
+            ev=_v6894_detect_events(q[['date','open','close']].copy())
+            hi=[x for x in ev if x['high_confidence']]
+            amb=[x for x in ev if not x['high_confidence']]
+
+            for col in ['open','high','low','close']:
+                q[col]=[float(v)*_v6894_factor_for_date(hi,dt) for v,dt in zip(q[col],q.date)]
+
+            cg=C[C.listing_id==lid].copy()
+            for _,r in cg.iterrows():
+                ed=pd.Timestamp(r.entry_date).normalize()
+                xd=pd.Timestamp(r.exit_date).normalize()
+
+                # If an ambiguous scale event lies inside this trade path, exclude the row rather than guess.
+                crosses_amb=any(ed < x['date'] <= xd for x in amb)
+                if crosses_amb:
+                    ambiguous_rows += 1
+                    continue
+
+                ef=_v6894_factor_for_date(hi,ed)
+                xf=_v6894_factor_for_date(hi,xd)
+                ep=float(r.entry_px_raw)*ef
+                xp=float(r.exit_px_raw)*xf
+                if ep<=0 or xp<=0:continue
+                ret=float(xp/ep-1)
+
+                pre=q[q.date<=ed].copy().tail(100).reset_index(drop=True)
+                if len(pre)<80:continue
+                f=_v693_shape_features(pre)
+                if not f:continue
+
+                row={
+                    'listing_id':lid,'entry_date':ed,'exit_date':xd,
+                    'ret':ret,'exit_reason':str(r.exit_reason),
+                    'is_stop':bool('STOP' in str(r.exit_reason).upper()),
+                    'winner50':bool(ret>=.50),'winner100':bool(ret>=1.00)
+                }
+                row.update(f)
+                rows.append(row)
+
+            if n==1 or n%100==0 or n==len(lids):
+                _v694_write(status='running',phase='build_clean_features',
+                            message=f'Clean Path-DNA {n}/{len(lids)} listings · rows={len(rows)}',
+                            processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=pd.DataFrame(rows)
+        if len(F)<500:raise RuntimeError(f'Clean candidate feature rows 太少: {len(F)}')
+
+        # Freeze the four sequence features already validated in V6.93.1.
+        specs=[
+            ('contraction_3stage',False),
+            ('contraction_20v20',False),
+            ('updown_ratio_40',True),
+            ('ret_20',True),
+        ]
+        for c,_ in specs:
+            if c not in F.columns:raise RuntimeError(f'缺 frozen feature: {c}')
+
+        _v694_write(status='running',phase='strict_yearly_walkforward',
+                    message='Strict yearly walk-forward：每个测试年只用更早年份分布计算 Path score…',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        F=F.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+        years=sorted(int(y) for y in F.entry_date.dt.year.unique())
+        test_parts=[]; year_rows=[]
+
+        for y in years:
+            tr=F[F.entry_date.dt.year<y].copy()
+            te=F[F.entry_date.dt.year==y].copy()
+            if len(tr)<300 or len(te)<30:continue
+
+            te=te.copy()
+            te['path_score']=te.apply(lambda r:_v694_score_row(r,tr,specs),axis=1)
+            te=te[te.path_score.notna()].copy()
+            if len(te)<20:continue
+
+            # Evaluate only STOP vs winner cohorts, preserving all intermediate outcomes outside AUC cohorts.
+            def eval_target(target):
+                sub=te[(te.is_stop==True)|(te[target]==True)].copy()
+                if len(sub)<20 or sub[target].nunique()<2:return None
+                auc=_v694_auc(sub.path_score,sub[target].astype(int))
+                return {
+                    'n':int(len(sub)),
+                    'winner_n':int(sub[target].sum()),
+                    'stop_n':int(sub.is_stop.sum()),
+                    'auc':float(auc) if np.isfinite(auc) else None,
+                    'oriented_auc':float(max(auc,1-auc)) if np.isfinite(auc) else None
+                }
+
+            e50=eval_target('winner50'); e100=eval_target('winner100')
+            year_rows.append({
+                'year':y,'train_n':int(len(tr)),'test_n':int(len(te)),
+                'winner50':e50,'winner100':e100
+            })
+            te['test_year']=y
+            test_parts.append(te)
+
+        if not test_parts:raise RuntimeError('没有可用 strict walk-forward 测试年')
+        O=pd.concat(test_parts,ignore_index=True)
+
+        _v694_write(status='running',phase='pooled_oos',
+                    message='汇总 pooled OOS + year consistency；不调 cutoff、不做 portfolio…',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        def pooled_target(target):
+            sub=O[(O.is_stop==True)|(O[target]==True)].copy()
+            auc=_v694_auc(sub.path_score,sub[target].astype(int)) if len(sub) else np.nan
+            per=[]
+            for yr,g in sub.groupby('test_year'):
+                if len(g)<20 or g[target].nunique()<2:continue
+                a=_v694_auc(g.path_score,g[target].astype(int))
+                if np.isfinite(a):per.append({'year':int(yr),'auc':float(a),'oriented_auc':float(max(a,1-a)),'n':int(len(g))})
+            vals=[x['oriented_auc'] for x in per]
+            return {
+                'n':int(len(sub)),
+                'winner_n':int(sub[target].sum()),
+                'stop_n':int(sub.is_stop.sum()),
+                'auc':float(auc) if np.isfinite(auc) else None,
+                'oriented_auc':float(max(auc,1-auc)) if np.isfinite(auc) else None,
+                'year_count':int(len(vals)),
+                'mean_year_oriented_auc':float(np.mean(vals)) if vals else None,
+                'weakest_year_oriented_auc':float(np.min(vals)) if vals else None,
+                'year_pass_0_60_share':float(np.mean([v>=.60 for v in vals])) if vals else None,
+                'yearly':per
+            }
+
+        p50=pooled_target('winner50')
+        p100=pooled_target('winner100')
+
+        # Gate emphasizes +100 preservation target and cross-year stability.
+        pass100=bool(
+            (p100.get('oriented_auc') or 0)>=.62 and
+            (p100.get('year_count') or 0)>=5 and
+            (p100.get('year_pass_0_60_share') or 0)>=.70
+        )
+        pass50=bool(
+            (p50.get('oriented_auc') or 0)>=.60 and
+            (p50.get('year_count') or 0)>=5 and
+            (p50.get('year_pass_0_60_share') or 0)>=.60
+        )
+        verdict='CLEAN_UNIVERSE_PATH_DNA_GENERALIZES__ONE_ADMISSION_AB_ALLOWED' if (pass100 and pass50) else 'CLEAN_UNIVERSE_PATH_DNA_NOT_STABLE_ENOUGH'
+
+        _v694_write(status='running',phase='finalize',
+                    message=f'V6.94: +50 AUC={p50.get("oriented_auc")} · +100 AUC={p100.get("oriented_auc")}',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        result={
+            'version':'V6.94 Clean-Universe Path-DNA Walk-Forward Validation',
+            'verdict':verdict,
+            'candidate_rows':int(len(F)),
+            'oos_rows':int(len(O)),
+            'ambiguous_rows_excluded':int(ambiguous_rows),
+            'missing_rows':int(missing_rows),
+            'frozen_features':[
+                {'feature':c,'direction':'HIGHER_BETTER' if h else 'LOWER_BETTER'} for c,h in specs
+            ],
+            'winner50_oos':p50,
+            'winner100_oos':p100,
+            'yearly':year_rows,
+            'gate':{
+                'winner100_pooled_auc_ge_0_62_and_crossyear':pass100,
+                'winner50_pooled_auc_ge_0_60_and_crossyear':pass50
+            },
+            'history_dedup':'This is not V6.15 static DNA and not V6.93 five-winner rescue. It expands the already-frozen V6.93.1 sequence features to the full clean V6.69 candidate stream and validates them strictly year-forward. No new features, no cutoff sweep, no portfolio optimization.',
+            'important':'This test asks only whether the four sequence features generalize as a Big-Winner-vs-STOP discriminator across the clean candidate universe. It does not yet change admission.',
+            'next_step':(
+                'If both gates pass, run ONE dynamic corrected-candidate portfolio A/B using a single past-only Path-DNA admission/ranking overlay. If they fail, close this sequence-DNA branch.'
+                if (pass100 and pass50) else
+                'Close sequence-DNA branch. Do not tune these four features or thresholds further.'
+            ),
+            'cache_note':'V6.69 candidate cache + V6.17 Historical Cache only; 0 Tiingo; 0 universe rescan; 0 portfolio replay.'
+        }
+
+        V694_DIR.mkdir(parents=True,exist_ok=True)
+        V694_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        O.to_csv(V694_DIR/'strict_walkforward_oos_rows.csv.gz',index=False,compression='gzip')
+        F.to_csv(V694_DIR/'clean_candidate_path_features.csv.gz',index=False,compression='gzip')
+
+        _v694_write(status='done',phase='done',message=f'V6.94 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v694_write(status='error',phase='error',
+                    message=f'V6.94 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v694_thread=None
+
+def _v694_start():
+    global v694_thread
+    if _v694_alive():return False
+    _v694_write(status='starting',phase='starting',message='V6.94 正在启动',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v694_thread=threading.Thread(target=_v694_run,daemon=True);v694_thread.start();return True
+
+@APP.route('/v694/run',methods=['GET','POST'])
+def v694_run():_v694_start();return redirect('/v694/clean-universe-path-dna')
+
+@APP.get('/api/v694/status')
+def v694_status_api():return jsonify(_v694_status())
+
+@APP.get('/v694/clean-universe-path-dna')
+def v694_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v694_status();R={}
+    if V694_RESULT.exists():
+        try:R=json.loads(V694_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    P50=R.get('winner50_oos',{}) if isinstance(R.get('winner50_oos'),dict) else {}
+    P100=R.get('winner100_oos',{}) if isinstance(R.get('winner100_oos'),dict) else {}
+    G=R.get('gate',{}) if isinstance(R.get('gate'),dict) else {}
+    yrs=R.get('yearly',[]) if isinstance(R.get('yearly'),list) else []
+
+    yrows=''
+    for x in yrs:
+        a=x.get('winner50') or {}; b=x.get('winner100') or {}
+        yrows+=f"<tr><td>{integer(x.get('year'))}</td><td>{integer(x.get('train_n'))}</td><td>{integer(x.get('test_n'))}</td><td>{num(a.get('oriented_auc')):.3f}</td><td>{integer(a.get('winner_n'))}</td><td>{num(b.get('oriented_auc')):.3f}</td><td>{integer(b.get('winner_n'))}</td></tr>"
+
+    checks=' · '.join([f"{e(k)}=<b>{e(v)}</b>" for k,v in G.items()])
+    btn='' if _v694_alive() else '<a href="/v694/run"><button>▶ 开始 V6.94 Full Clean Path-DNA</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1550px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🌐 V6.94 Clean-Universe Path-DNA Walk-Forward</h1><div class="info">不再只看 5 个错杀 Winner。把 V6.93.1 已确认的 4 个 Path-DNA 特征扩到整个 clean candidate stream，严格逐年 past-only 验证 +50/+100 Winner vs STOP。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),6)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{checks}</p></div>
+<div class="c"><h2>Pooled Strict OOS</h2><table><tr><th>Target</th><th>N</th><th>Winners</th><th>STOP</th><th>AUC</th><th>Years</th><th>Mean Year AUC</th><th>Weakest</th><th>Year ≥0.60</th></tr>
+<tr><td><b>+50</b></td><td>{integer(P50.get('n'))}</td><td>{integer(P50.get('winner_n'))}</td><td>{integer(P50.get('stop_n'))}</td><td>{num(P50.get('oriented_auc')):.3f}</td><td>{integer(P50.get('year_count'))}</td><td>{num(P50.get('mean_year_oriented_auc')):.3f}</td><td>{num(P50.get('weakest_year_oriented_auc')):.3f}</td><td>{num(P50.get('year_pass_0_60_share'))*100:.0f}%</td></tr>
+<tr><td><b>+100</b></td><td>{integer(P100.get('n'))}</td><td>{integer(P100.get('winner_n'))}</td><td>{integer(P100.get('stop_n'))}</td><td>{num(P100.get('oriented_auc')):.3f}</td><td>{integer(P100.get('year_count'))}</td><td>{num(P100.get('mean_year_oriented_auc')):.3f}</td><td>{num(P100.get('weakest_year_oriented_auc')):.3f}</td><td>{num(P100.get('year_pass_0_60_share'))*100:.0f}%</td></tr></table></div>
+<div class="c"><h2>Year-by-Year Strict OOS</h2><table><tr><th>Year</th><th>Train N</th><th>Test N</th><th>+50 AUC</th><th>+50 W</th><th>+100 AUC</th><th>+100 W</th></tr>{yrows or '<tr><td colspan=7>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v694_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v694_home_base is not None:
+    def _v694_home_wrap(*args,**kwargs):
+        resp=_v694_home_base(*args,**kwargs)
+        card="""<div id="v694-full-path-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🌐 V6.94 Clean-Universe Path-DNA Walk-Forward</h2>
+        <p>Full clean candidate stream · strict year-forward · frozen 4-feature sequence DNA · no replay</p>
+        <a href="/v694/clean-universe-path-dna"><button>打开 V6.94</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v694-full-path-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v694-full-path-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v694_home_base:APP.view_functions[ep]=_v694_home_wrap
