@@ -42127,3 +42127,257 @@ if _v6931_home_base is not None:
         body=str(resp);return body if 'id="v6931-metric-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v6931_home_base:APP.view_functions[ep]=_v6931_home_wrap
+
+
+# ========================= V6.93.2 LEAVE-ONE-SUPERWINNER-OUT ASYMMETRIC RESCUE OOS =========================
+V6932_DIR=DATA_DIR/'v6932_superwinner_rescue_oos'
+V6932_STATUS=V6932_DIR/'status.json'; V6932_RESULT=V6932_DIR/'result.json'
+v6932_thread=None
+
+def _v6932_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V6932_STATUS.exists():
+        try:x.update(json.loads(V6932_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v6932_write(**kw):
+    V6932_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v6932_status();x.update(kw)
+    V6932_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v6932_alive(): return v6932_thread is not None and v6932_thread.is_alive()
+
+def _v6932_oriented_percentile(train, value, higher_better):
+    arr=np.asarray(pd.to_numeric(pd.Series(train),errors='coerce').dropna(),dtype=float)
+    arr=arr[np.isfinite(arr)]
+    if len(arr)<20 or not np.isfinite(value): return np.nan
+    p=float(np.searchsorted(np.sort(arr),float(value),side='right')/len(arr))
+    return p if higher_better else 1-p
+
+def _v6932_run():
+    global v6932_thread
+    t0=time.time()
+    try:
+        _v6932_write(status='running',phase='load_v6931',
+                     message='读取 V6.93.1 已确认的 Path-DNA effect；冻结 4 个候选，不新增特征…',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V6931_RESULT.exists(): raise RuntimeError('找不到 V6.93.1 result.json')
+        r31=json.loads(V6931_RESULT.read_text(encoding='utf-8'))
+        if 'PATH_DNA_EFFECT_CONFIRMED_WORTH_ONE_RESCUE_OOS' not in str(r31.get('verdict','')):
+            raise RuntimeError('V6.93.1 未授权 rescue OOS')
+
+        fp=V693_DIR/'rejected_path_dna.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.93 rejected_path_dna.csv.gz')
+        F=pd.read_csv(fp,compression='gzip')
+        if F.empty:raise RuntimeError('V6.93 path DNA rows 为空')
+
+        F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+        W=F[F.label.astype(str).eq('REJECTED_SUPERWINNER')].copy()
+        S=F[F.label.astype(str).eq('REJECTED_STOP')].copy()
+        if len(W)!=5 or len(S)<50:raise RuntimeError(f'样本不符：Winner={len(W)} STOP={len(S)}')
+
+        # Frozen from V6.93.1 result. No feature expansion, no grid.
+        specs=[
+            ('contraction_3stage',False),
+            ('contraction_20v20',False),
+            ('updown_ratio_40',True),
+            ('ret_20',True),
+        ]
+        for c,_ in specs:
+            if c not in F.columns:raise RuntimeError(f'缺 Path feature: {c}')
+
+        _v6932_write(status='running',phase='leave_one_winner_out',
+                     message='5-fold leave-one-superwinner-out：每轮完全隐藏 1 个 +100 Winner…',
+                     processed=1,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        fold_rows=[]
+        all_test_rows=[]
+        for fold,(idx,held) in enumerate(W.reset_index(drop=True).iterrows(),1):
+            held_lid=str(held.listing_id)
+            trainW=W[W.listing_id.astype(str).ne(held_lid)].copy()
+            # STOPs stay as negative reference, but rescue cutoff is derived without held winner.
+            train=pd.concat([trainW,S],ignore_index=True)
+
+            # score all rows using training distributions only
+            def score_row(r):
+                ps=[]
+                for col,higher in specs:
+                    p=_v6932_oriented_percentile(train[col],float(r[col]) if pd.notna(r[col]) else np.nan,higher)
+                    if np.isfinite(p):ps.append(float(p))
+                return float(np.mean(ps)) if len(ps)>=3 else np.nan
+
+            train_scores=train.apply(score_row,axis=1)
+            trainW_scores=trainW.apply(score_row,axis=1)
+            stop_scores=S.apply(score_row,axis=1)
+
+            # No threshold search: rescue cut is the weakest score among the 4 training superwinners.
+            # This directly encodes "preserve all observed training superwinners" without grid tuning.
+            if trainW_scores.notna().sum()<4:
+                raise RuntimeError(f'Fold {fold} training winner score 不完整')
+            cut=float(trainW_scores.min())
+
+            held_score=score_row(held)
+            held_rescued=bool(np.isfinite(held_score) and held_score>=cut)
+
+            stop_rescued=int((stop_scores>=cut).sum())
+            stop_rescue_rate=float(stop_rescued/len(S)) if len(S) else 0.0
+            stop_rejection_remaining=float(1-stop_rescue_rate)
+
+            fold_rows.append({
+                'fold':fold,
+                'held_listing':held_lid,
+                'held_entry':str(pd.Timestamp(held.entry_date).date()),
+                'held_final_return':float(held.ret),
+                'cut':cut,
+                'held_score':float(held_score) if np.isfinite(held_score) else None,
+                'held_rescued':held_rescued,
+                'stop_rescued':stop_rescued,
+                'stop_total':int(len(S)),
+                'stop_rescue_rate':stop_rescue_rate,
+                'stop_rejection_remaining':stop_rejection_remaining
+            })
+            all_test_rows.append({
+                'listing_id':held_lid,'label':'HELD_SUPERWINNER','score':held_score,'cut':cut,
+                'rescued':held_rescued,'fold':fold
+            })
+
+        _v6932_write(status='running',phase='aggregate_economics',
+                     message='汇总 Winner rescue 与 STOP leakage；不跑 portfolio…',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rescued_count=int(sum(1 for x in fold_rows if x['held_rescued']))
+        winner_rescue_rate=float(rescued_count/len(fold_rows))
+        avg_stop_rescue=float(np.mean([x['stop_rescue_rate'] for x in fold_rows]))
+        avg_stop_rejection_remaining=float(np.mean([x['stop_rejection_remaining'] for x in fold_rows]))
+
+        # Strong gate: preserve at least 4/5 hidden superwinners while allowing back <35% of rejected STOPs on average.
+        pass_winner=winner_rescue_rate>=.80
+        pass_stop=avg_stop_rescue<=.35
+        verdict='ASYMMETRIC_RESCUE_OOS_PROMISING_WORTH_FULL_CANDIDATE_REPLAY' if (pass_winner and pass_stop) else 'ASYMMETRIC_RESCUE_OOS_NOT_ECONOMIC_ENOUGH'
+
+        _v6932_write(status='running',phase='stress_checks',
+                     message='检查是否被单一 fold 支配，以及最坏 STOP leakage…',
+                     processed=3,total=5,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        worst_stop=max([x['stop_rescue_rate'] for x in fold_rows]) if fold_rows else None
+        min_margin=min([
+            (x['held_score']-x['cut']) if x.get('held_score') is not None else -999
+            for x in fold_rows
+        ]) if fold_rows else None
+
+        result={
+            'version':'V6.93.2 Leave-One-Superwinner-Out Asymmetric Rescue OOS',
+            'verdict':verdict,
+            'frozen_features':[
+                {'feature':c,'direction':'HIGHER_BETTER' if h else 'LOWER_BETTER'} for c,h in specs
+            ],
+            'rule':'For each fold, score = mean past-distribution oriented percentiles. Rescue cut = weakest score among the 4 visible training superwinners. No grid, no percentile sweep, no held-winner leakage.',
+            'folds':fold_rows,
+            'aggregate':{
+                'held_superwinners':int(len(fold_rows)),
+                'rescued_superwinners':rescued_count,
+                'winner_rescue_rate':winner_rescue_rate,
+                'avg_stop_rescue_rate':avg_stop_rescue,
+                'avg_stop_rejection_remaining':avg_stop_rejection_remaining,
+                'worst_fold_stop_rescue_rate':float(worst_stop) if worst_stop is not None else None,
+                'minimum_held_score_minus_cut':float(min_margin) if min_margin is not None else None
+            },
+            'gate':{
+                'winner_rescue_ge_80pct':pass_winner,
+                'avg_stop_rescue_le_35pct':pass_stop
+            },
+            'important':'This is a false-negative rescue test layered on top of the failed BASE_QUALITY filter. It does not replace BASE_QUALITY and does not claim a production rule. With only five superwinners, the only acceptable next step is a full corrected-candidate replay if this strict LOO gate passes.',
+            'history_dedup':'V6.91 hard filter failed by killing winners. V6.92 static rescue failed. V6.93/93.1 found sequence-path effect. V6.93.2 is the single permitted asymmetric rescue OOS test; no further threshold tuning is allowed if it fails.',
+            'next_step':(
+                'Run one full corrected-candidate dynamic portfolio replay: BASE_QUALITY reject unless Path-DNA rescue passes, using a past-only implementation equivalent to this fold logic.'
+                if (pass_winner and pass_stop) else
+                'Close Path-DNA rescue. Do not tune cutoffs or add more path features.'
+            ),
+            'cache_note':'Reads V6.93 path feature store only; 0 Tiingo; 0 universe scan; 0 portfolio replay.'
+        }
+
+        V6932_DIR.mkdir(parents=True,exist_ok=True)
+        V6932_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v6932_write(status='done',phase='done',message=f'V6.93.2 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v6932_write(status='error',phase='error',
+                     message=f'V6.93.2 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v6932_thread=None
+
+def _v6932_start():
+    global v6932_thread
+    if _v6932_alive():return False
+    _v6932_write(status='starting',phase='starting',message='V6.93.2 正在启动',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v6932_thread=threading.Thread(target=_v6932_run,daemon=True);v6932_thread.start();return True
+
+@APP.route('/v6932/run',methods=['GET','POST'])
+def v6932_run():_v6932_start();return redirect('/v6932/asymmetric-rescue-oos')
+
+@APP.get('/api/v6932/status')
+def v6932_status_api():return jsonify(_v6932_status())
+
+@APP.get('/v6932/asymmetric-rescue-oos')
+def v6932_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v6932_status();R={}
+    if V6932_RESULT.exists():
+        try:R=json.loads(V6932_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    A=R.get('aggregate',{}) if isinstance(R.get('aggregate'),dict) else {}
+    G=R.get('gate',{}) if isinstance(R.get('gate'),dict) else {}
+    FOLDS=R.get('folds',[]) if isinstance(R.get('folds'),list) else []
+    rows=''.join(
+        f"<tr><td>{integer(x.get('fold'))}</td><td>{e(x.get('held_listing'))}</td><td>{e(x.get('held_entry'))}</td><td>{num(x.get('held_final_return'))*100:+.1f}%</td><td>{num(x.get('held_score')):.3f}</td><td>{num(x.get('cut')):.3f}</td><td><b>{e(x.get('held_rescued'))}</b></td><td>{num(x.get('stop_rescue_rate'))*100:.1f}%</td></tr>"
+        for x in FOLDS
+    )
+
+    btn='' if _v6932_alive() else '<a href="/v6932/run"><button>▶ 开始 V6.93.2 Rescue OOS</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdf4;border:1px solid #16a34a;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🛟 V6.93.2 Asymmetric Rescue OOS</h1><div class="info">严格 leave-one-superwinner-out：每轮完全隐藏一个 +100 Winner；只用另外 4 个 Winner + STOP 定 rescue cut。没有 grid、没有调阈值。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),5)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>winner rescue ≥80%: <b>{e(G.get('winner_rescue_ge_80pct','—'))}</b> · avg STOP rescue ≤35%: <b>{e(G.get('avg_stop_rescue_le_35pct','—'))}</b></p></div>
+<div class="c"><h2>Aggregate</h2><p>Rescued super-winners: <b>{integer(A.get('rescued_superwinners'))}/{integer(A.get('held_superwinners'))}</b> ({num(A.get('winner_rescue_rate'))*100:.1f}%)</p>
+<p>Avg STOP rescued back in: <b>{num(A.get('avg_stop_rescue_rate'))*100:.1f}%</b> · STOP rejection remaining: <b>{num(A.get('avg_stop_rejection_remaining'))*100:.1f}%</b> · worst fold STOP rescue={num(A.get('worst_fold_stop_rescue_rate'))*100:.1f}%</p></div>
+<div class="c"><h2>LOO Folds</h2><table><tr><th>Fold</th><th>Held Winner</th><th>Entry</th><th>Return</th><th>Score</th><th>Cut</th><th>Rescued?</th><th>STOP rescued</th></tr>{rows or '<tr><td colspan=8>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v6932_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6932_home_base is not None:
+    def _v6932_home_wrap(*args,**kwargs):
+        resp=_v6932_home_base(*args,**kwargs)
+        card="""<div id="v6932-rescue-card" style="background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🛟 V6.93.2 Asymmetric Rescue OOS</h2>
+        <p>Leave-one-superwinner-out · 4 frozen Path-DNA features · no threshold grid · no replay</p>
+        <a href="/v6932/asymmetric-rescue-oos"><button>打开 V6.93.2</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6932-rescue-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v6932-rescue-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6932_home_base:APP.view_functions[ep]=_v6932_home_wrap
