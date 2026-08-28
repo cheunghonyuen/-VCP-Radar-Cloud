@@ -34855,3 +34855,463 @@ def v6783_run():
 @APP.get('/api/v6783/status')
 def v6783_status_api():
     return jsonify(_v678_status())
+
+
+# ========================= V6.78.3 HOMEPAGE CARD =========================
+_v6783_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v6783_home_base is not None:
+    def _v6783_home_wrap(*args,**kwargs):
+        resp=_v6783_home_base(*args,**kwargs)
+        card="""<div id="v6783-washout-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🛡️ V6.78.3 Proven-Strength STOP7 Washout Autopsy</h2>
+        <p>Big Winner mainline · proven strength → STOP7 → recovery · cache-only</p>
+        <a href="/v6783/proven-strength-stop7-autopsy"><button>打开 V6.78.3</button></a>
+        </div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v6783-washout-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos)
+                    body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:
+                    body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp)
+        return body if 'id="v6783-washout-card"' in body else card+body
+
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v6783_home_base:
+            APP.view_functions[ep]=_v6783_home_wrap
+
+
+# ========================= V6.79 PROVEN-STRENGTH CLOSE-CONFIRMED STOP A/B =========================
+V679_DIR=DATA_DIR/'v679_proven_strength_close_confirmed_stop_ab'
+V679_STATUS=V679_DIR/'status.json'; V679_RESULT=V679_DIR/'result.json'
+v679_thread=None
+
+def _v679_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V679_STATUS.exists():
+        try:x.update(json.loads(V679_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v679_write(**kw):
+    V679_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v679_status();x.update(kw)
+    V679_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v679_alive():
+    return v679_thread is not None and v679_thread.is_alive()
+
+def _v679_close_confirmed_exit(d,entry_date,entry_px,horizon=1260):
+    """
+    MODEL-DIAGNOSTIC challenger, NOT claimed as an exact JLaw rule.
+
+    Before proof of strength: identical fixed -7% stop.
+    Proof of strength: any of first 5 completed sessions trades >= +5% intraday.
+    After proof:
+      - opening gap <= -7%: exit at opening price (gap risk is never ignored)
+      - intraday low <= -7% but close > -7%: do NOT exit on that touch
+      - close <= -7%: exit at close
+      - otherwise HOLD1260
+    """
+    ed=pd.Timestamp(entry_date).normalize(); ep=float(entry_px); stop=ep*0.93
+    z=d[d.date>=ed].copy().head(int(horizon)+1).reset_index(drop=True)
+    if z.empty:return None
+
+    proof=False
+    for j,r in z.iterrows():
+        if j==0:continue
+        o,h,l,c=map(float,[r.open,r.high,r.low,r.close])
+
+        # proof uses only information available by that completed session
+        if j<=5 and h>=ep*1.05:
+            proof=True
+
+        if o<=stop:
+            return pd.Timestamp(r.date).normalize(),float(o),'PS_CLOSECONF_GAP',int(j),proof
+
+        if not proof:
+            if l<=stop:
+                return pd.Timestamp(r.date).normalize(),float(stop),'CONTROL_STOP7_PRE_PROOF',int(j),proof
+        else:
+            if c<=stop:
+                return pd.Timestamp(r.date).normalize(),float(c),'PS_CLOSE_CONFIRMED_STOP',int(j),proof
+            # if low pierced stop but close recovered, intentionally continue.
+
+    rr=z.iloc[-1]
+    return pd.Timestamp(rr.date).normalize(),float(rr.close),'HOLD1260',int(len(z)-1),proof
+
+def _v679_replay(Z,price,cal,label,t0,heartbeat=True):
+    """Independent 10-slot, self-financing replay; returns admitted IDs so path divergence is explicit."""
+    Z=Z.sort_values(['entry_date','listing_id','trade_id']).reset_index(drop=True)
+    rec=Z.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+
+    cash=1.0;pos={};last={};ledger=[];eqrows=[];admitted_trade_ids=[]
+    skipcap=0;skipcash=0;step=max(1,len(cal)//20)
+
+    for di,dt in enumerate(cal,1):
+        dt=pd.Timestamp(dt).normalize()
+
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            ledger.append({'trade_id':rec[i]['trade_id'],'ret':xp/p['entry_px']-1.0,
+                           'pnl':proceeds-p['cost'],'reason':str(rec[i]['exit_reason']),
+                           'entry_date':p['entry_date'],'exit_date':dt})
+            last.pop(i,None)
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=float(cp) if cp is not None and np.isfinite(cp) and cp>0 else float(last.get(i,p['entry_px']))
+            last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:
+                skipcap+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.0
+            if not np.isfinite(ep) or ep<=0 or cash+1e-12<target:
+                skipcash+=1;continue
+            cash-=target
+            pos[i]={'listing_id':str(r['listing_id']),'shares':target/ep,'entry_px':ep,
+                    'cost':target,'entry_date':dt}
+            last[i]=ep;admitted_trade_ids.append(str(r['trade_id']))
+
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            cp=float(cp) if cp is not None and np.isfinite(cp) and cp>0 else float(last.get(i,p['entry_px']))
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv
+        if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+        eqrows.append((dt,eq,hv/eq))
+
+        if heartbeat and (di%step==0 or di==len(cal)):
+            _v679_write(status='running',phase='account_replay',
+                         message=f'{label} replay {int(round(di/len(cal)*100))}%',
+                         processed=5,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure'])
+    L=pd.DataFrame(ledger)
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1])
+    yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0
+    dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum())
+        pf=gp/gl if gl>0 else np.inf
+        wr=float((L.ret>0).mean())
+        avg_ret=float(L.ret.mean())
+        avg_win=float(L.loc[L.ret>0,'ret'].mean()) if (L.ret>0).any() else np.nan
+        avg_loss=float(L.loc[L.ret<=0,'ret'].mean()) if (L.ret<=0).any() else np.nan
+        w20=int((L.ret>=.20).sum());w50=int((L.ret>=.50).sum());w100=int((L.ret>=1.0).sum())
+        stops=int(L.reason.astype(str).str.contains('STOP|GAP',case=False,regex=True).sum())
+    else:
+        pf=wr=avg_ret=avg_win=avg_loss=np.nan;w20=w50=w100=stops=0
+
+    return ({
+        'strategy':label,'cagr':float(cagr),'maxdd':maxdd,
+        'calmar':float(cagr/abs(maxdd)) if maxdd<0 else np.nan,
+        'profit_factor':float(pf),'win_rate':wr,'avg_return':avg_ret,
+        'avg_win':avg_win,'avg_loss':avg_loss,'winner20':w20,'winner50':w50,'winner100':w100,
+        'stop_count':stops,'avg_exposure':float(C.exposure.mean()),
+        'admitted_positions':len(admitted_trade_ids),'skipped_capacity':skipcap,'skipped_cash':skipcash,
+        'final_multiple':float(end/start)
+    },set(admitted_trade_ids))
+
+def _v679_run():
+    global v679_thread
+    t0=time.time()
+    try:
+        _v679_write(status='running',phase='precheck',
+                     message='Precheck V6.69 + V6.17 cache；0 Tiingo；不重扫 Universe…',
+                     processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
+        P=P[need].copy()
+        P['listing_id']=P.listing_id.astype(str)
+        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce')
+        P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+        P=P.dropna(subset=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px']).copy()
+        P=P.sort_values(['entry_date','listing_id']).reset_index(drop=True)
+        P['trade_id']=[f'{i}|{r.listing_id}|{pd.Timestamp(r.entry_date).date()}' for i,r in P.iterrows()]
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical Cache manifest 不存在')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        M=M[M[lidcol].astype(str).isin(set(P.listing_id))].copy()
+        if M.empty:raise RuntimeError('Historical manifest 与 V6.69 trades 无匹配')
+
+        _v679_write(status='running',phase='cache_paths',
+                     message=f'读取 cached paths · {len(M):,} listings',
+                     processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        paths={};price={};date_set=set();total=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            lid=str(mr[lidcol])
+            try:d=_v617fv1_read_price(mr)
+            except Exception:d=None
+            if d is None or d.empty:continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if q.empty:continue
+            paths[lid]=q.reset_index(drop=True)
+            price[lid]=dict(zip(q.date,q.close.astype(float)));date_set.update(q.date.tolist())
+            if n==1 or n%500==0 or n==total:
+                _v679_write(status='running',phase='cache_paths',
+                             message=f'cached paths {n:,}/{total:,}',
+                             processed=1,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+        if not paths:raise RuntimeError('cached paths 读取为空')
+        cal=sorted(date_set)
+
+        _v679_write(status='running',phase='build_paired_exits',
+                     message='构建 Control -7% 与单一 Challenger：Proven Strength 后 close-confirmed stop…',
+                     processed=2,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        control_rows=[];chall_rows=[];paired=[];proof_n=0;changed_n=0
+        for n,r in P.iterrows():
+            lid=str(r.listing_id);d=paths.get(lid)
+            if d is None:continue
+
+            control_rows.append({
+                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                'exit_date':r.control_exit_date,'exit_px':float(r.control_exit_px),'exit_reason':str(r.control_reason)
+            })
+
+            ex=_v679_close_confirmed_exit(d,r.entry_date,float(r.entry_px),1260)
+            if ex is None:continue
+            xd,xp,reason,hold,proof=ex
+            if proof:proof_n+=1
+            if pd.Timestamp(xd).normalize()!=pd.Timestamp(r.control_exit_date).normalize() or abs(float(xp)-float(r.control_exit_px))>1e-8:
+                changed_n+=1
+            chall_rows.append({
+                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                'exit_date':xd,'exit_px':float(xp),'exit_reason':reason,'proof':bool(proof),'hold_sessions':int(hold)
+            })
+            paired.append({
+                'trade_id':r.trade_id,'control_ret':float(r.control_exit_px)/float(r.entry_px)-1.0,
+                'challenger_ret':float(xp)/float(r.entry_px)-1.0,'proof':bool(proof),
+                'control_reason':str(r.control_reason),'challenger_reason':reason
+            })
+
+        C=pd.DataFrame(control_rows);H=pd.DataFrame(chall_rows);D=pd.DataFrame(paired)
+        if len(C)!=len(H):raise RuntimeError(f'paired exit count mismatch control={len(C)} challenger={len(H)}')
+
+        _v679_write(status='running',phase='trade_pair',
+                     message='Paired trade attribution + benchmark guardrail…',
+                     processed=3,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        p=D[D.proof].copy()
+        trade_pair={
+            'paired_n':int(len(D)),'proven_strength_n':int(len(p)),'changed_exit_n':int(changed_n),
+            'control_avg_return_proven':float(p.control_ret.mean()) if len(p) else None,
+            'challenger_avg_return_proven':float(p.challenger_ret.mean()) if len(p) else None,
+            'control_win_rate_proven':float((p.control_ret>0).mean()) if len(p) else None,
+            'challenger_win_rate_proven':float((p.challenger_ret>0).mean()) if len(p) else None,
+            'control_plus20_proven':float((p.control_ret>=.20).mean()) if len(p) else None,
+            'challenger_plus20_proven':float((p.challenger_ret>=.20).mean()) if len(p) else None,
+            'control_plus50_proven':float((p.control_ret>=.50).mean()) if len(p) else None,
+            'challenger_plus50_proven':float((p.challenger_ret>=.50).mean()) if len(p) else None,
+            'control_plus100_proven':float((p.control_ret>=1.0).mean()) if len(p) else None,
+            'challenger_plus100_proven':float((p.challenger_ret>=1.0).mean()) if len(p) else None,
+            'challenger_loss_le_minus10_proven':float((p.challenger_ret<=-.10).mean()) if len(p) else None
+        }
+
+        _v679_write(status='running',phase='account_replay',
+                     message='30Y 10-slot independent replay；同时检查 admission path divergence…',
+                     processed=4,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        bm,bids=_v679_replay(C,price,cal,'CONTROL_STOP7',t0,True)
+        ch,hids=_v679_replay(H,price,cal,'PS_CLOSE_CONFIRMED',t0,True)
+
+        # hard benchmark reconciliation
+        benchmark_ok=abs(float(bm['cagr'])-0.2825)<=0.0035
+
+        union=len(bids|hids);inter=len(bids&hids)
+        jacc=float(inter/union) if union else 1.0
+        control_retention=float(inter/len(bids)) if bids else 1.0
+        challenger_retention=float(inter/len(hids)) if hids else 1.0
+        path_diverged=bool(jacc<0.95)
+
+        # We do not pretend direct CAGR is a clean causal A/B if exits changed later slot admissions.
+        if not benchmark_ok:
+            verdict='CONTROL_BENCHMARK_MISMATCH_DO_NOT_INTERPRET'
+        elif path_diverged:
+            verdict='TRADE_EDGE_FOUND_BUT_PORTFOLIO_ADMISSION_PATH_DIVERGED' if (
+                trade_pair.get('challenger_avg_return_proven') is not None and
+                trade_pair['challenger_avg_return_proven']>trade_pair['control_avg_return_proven']
+            ) else 'CHALLENGER_FAILS_AND_ADMISSION_PATH_DIVERGED'
+        else:
+            pass_core=(ch['cagr']>=bm['cagr'] and ch['maxdd']>=bm['maxdd'] and ch['calmar']>=bm['calmar'])
+            verdict='PROVEN_STRENGTH_CLOSE_CONFIRMATION_PASSES_CONTROLLED_AB' if pass_core else 'PROVEN_STRENGTH_CLOSE_CONFIRMATION_FAILS_CONTROLLED_AB'
+
+        result={
+            'version':'V6.79 Proven-Strength Close-Confirmed Stop Controlled A/B',
+            'verdict':verdict,
+            'benchmark_ok':benchmark_ok,
+            'control':bm,'challenger':ch,
+            'delta':{
+                'cagr_pp':float((ch['cagr']-bm['cagr'])*100),
+                'maxdd_pp':float((ch['maxdd']-bm['maxdd'])*100),
+                'calmar':float(ch['calmar']-bm['calmar']),
+                'pf':float(ch['profit_factor']-bm['profit_factor']) if np.isfinite(ch['profit_factor']) and np.isfinite(bm['profit_factor']) else None,
+                'avg_return_pp':float((ch['avg_return']-bm['avg_return'])*100) if np.isfinite(ch['avg_return']) and np.isfinite(bm['avg_return']) else None
+            },
+            'admission_identity':{
+                'control_admitted':len(bids),'challenger_admitted':len(hids),'intersection':inter,
+                'jaccard':jacc,'control_retention':control_retention,
+                'challenger_retention':challenger_retention,'path_diverged':path_diverged
+            },
+            'trade_pair':trade_pair,
+            'challenger_semantic':{
+                'proof':'first 5 completed sessions touched +5% intraday',
+                'before_proof':'same fixed -7% intraday stop as Control',
+                'after_proof':'gap below -7% exits at open; otherwise only a CLOSE at/below -7% confirms exit',
+                'status':'MODEL_DIAGNOSTIC_PROXY_NOT_CLAIMED_AS_EXACT_JLAW_RULE'
+            },
+            'important':'This is ONE predeclared challenger, not a threshold grid. No stop widening, no half-exit, no re-entry, no Quick-Profit mixing.',
+            'interpretation_guardrail':'Changing exits can change later 10-slot admissions. If admission Jaccard <95%, portfolio CAGR is reported but not treated as a clean causal paired A/B; paired trade-path evidence remains interpretable.',
+            'next_step':(
+                'If PASS with admission identity preserved: source-reconcile this defense semantic before promotion.'
+                if 'PASSES_CONTROLLED_AB' in verdict else
+                'If trade-level edge exists but admissions diverge: build a fixed-capital shadow ledger / event-level attribution before any promotion. If it fails outright, reject close-confirmed stop and test no neighboring thresholds.'
+            ),
+            'cache_note':'V6.69 paired cache + V6.17 manifest/cached OHLC only; 0 Tiingo; no universe rebuild.'
+        }
+        V679_DIR.mkdir(parents=True,exist_ok=True)
+        V679_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:D.to_csv(V679_DIR/'paired_trade_counterfactual.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+
+        _v679_write(status='done',phase='done',message=f'V6.79 完成：{verdict}',
+                     processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v679_write(status='error',phase='error',
+                     message=f'V6.79 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v679_thread=None
+
+def _v679_start():
+    global v679_thread
+    if _v679_alive():return False
+    _v679_write(status='starting',phase='starting',message='V6.79 正在启动',
+                 processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v679_thread=threading.Thread(target=_v679_run,daemon=True);v679_thread.start();return True
+
+@APP.route('/v679/run',methods=['GET','POST'])
+def v679_run():
+    _v679_start();return redirect('/v679/proven-strength-stop-ab')
+
+@APP.get('/api/v679/status')
+def v679_status_api():return jsonify(_v679_status())
+
+@APP.get('/v679/proven-strength-stop-ab')
+def v679_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v679_status();R={}
+    if V679_RESULT.exists():
+        try:
+            obj=json.loads(V679_RESULT.read_text(encoding='utf-8'))
+            if isinstance(obj,dict):R=obj
+        except Exception:pass
+
+    def num(v,d=0.0):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    B=R.get('control') if isinstance(R.get('control'),dict) else {}
+    H=R.get('challenger') if isinstance(R.get('challenger'),dict) else {}
+    A=R.get('admission_identity') if isinstance(R.get('admission_identity'),dict) else {}
+    T=R.get('trade_pair') if isinstance(R.get('trade_pair'),dict) else {}
+    btn='' if _v679_alive() else '<a href="/v679/run"><button>▶ 开始 V6.79 Controlled A/B</button></a>'
+    err=''
+    if st.get('error'):
+        err=f"<div class='err'><b>具体错误：</b>{e(st.get('error'))}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#f0fdfa;border:1px solid #14b8a6;border-radius:14px;padding:16px}}.warn{{background:#fffbeb;border:1px solid #f59e0b;border-radius:14px;padding:16px}}.err{{background:#fff1f2;border:1px solid #fb7185;border-radius:14px;padding:16px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧪 V6.79 Proven-Strength Close-Confirmed Stop A/B</h1>
+<div class="info"><b>只测一个 Challenger。</b> 未证明强势时完全沿用 -7%；前5个完成交易日曾 +5% 后，Gap 仍立即止损，但普通 intraday -7% touch 需要收盘仍 ≤ -7% 才确认退出。<br><b>这是 MODEL DIAGNOSTIC PROXY，不声称是 JLaw 原规则。</b></div></div>
+
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),6)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>Benchmark OK: <b>{e(R.get('benchmark_ok','—'))}</b> · Admission Jaccard: <b>{num(A.get('jaccard'))*100:.1f}%</b> · Path diverged: <b>{e(A.get('path_diverged','—'))}</b></p></div>
+
+<div class="c"><h2>30Y · 10-slot Portfolio</h2>
+<table><tr><th>Strategy</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>WR</th><th>Avg Return</th><th>Avg Loss</th><th>+20</th><th>+50</th><th>+100</th><th>Stops</th><th>Exposure</th></tr>
+<tr><td><b>CONTROL_STOP7</b></td><td>{num(B.get('cagr'))*100:.2f}%</td><td>{num(B.get('maxdd'))*100:.2f}%</td><td>{num(B.get('calmar')):.3f}</td><td>{num(B.get('profit_factor')):.2f}</td><td>{num(B.get('win_rate'))*100:.1f}%</td><td>{num(B.get('avg_return'))*100:.2f}%</td><td>{num(B.get('avg_loss'))*100:.2f}%</td><td>{integer(B.get('winner20'))}</td><td>{integer(B.get('winner50'))}</td><td>{integer(B.get('winner100'))}</td><td>{integer(B.get('stop_count'))}</td><td>{num(B.get('avg_exposure'))*100:.1f}%</td></tr>
+<tr><td><b>PS_CLOSE_CONFIRMED</b></td><td>{num(H.get('cagr'))*100:.2f}%</td><td>{num(H.get('maxdd'))*100:.2f}%</td><td>{num(H.get('calmar')):.3f}</td><td>{num(H.get('profit_factor')):.2f}</td><td>{num(H.get('win_rate'))*100:.1f}%</td><td>{num(H.get('avg_return'))*100:.2f}%</td><td>{num(H.get('avg_loss'))*100:.2f}%</td><td>{integer(H.get('winner20'))}</td><td>{integer(H.get('winner50'))}</td><td>{integer(H.get('winner100'))}</td><td>{integer(H.get('stop_count'))}</td><td>{num(H.get('avg_exposure'))*100:.1f}%</td></tr>
+</table></div>
+
+<div class="c"><h2>Paired Proven-Strength Trades</h2>
+<table><tr><th>Metric</th><th>Control</th><th>Challenger</th></tr>
+<tr><td>Avg return</td><td>{num(T.get('control_avg_return_proven'))*100:.2f}%</td><td>{num(T.get('challenger_avg_return_proven'))*100:.2f}%</td></tr>
+<tr><td>Win rate</td><td>{num(T.get('control_win_rate_proven'))*100:.1f}%</td><td>{num(T.get('challenger_win_rate_proven'))*100:.1f}%</td></tr>
+<tr><td>+20%</td><td>{num(T.get('control_plus20_proven'))*100:.1f}%</td><td>{num(T.get('challenger_plus20_proven'))*100:.1f}%</td></tr>
+<tr><td>+50%</td><td>{num(T.get('control_plus50_proven'))*100:.1f}%</td><td>{num(T.get('challenger_plus50_proven'))*100:.1f}%</td></tr>
+<tr><td>+100%</td><td>{num(T.get('control_plus100_proven'))*100:.1f}%</td><td>{num(T.get('challenger_plus100_proven'))*100:.1f}%</td></tr>
+</table>
+<p>Proven strength N={integer(T.get('proven_strength_n')):,} · changed exits={integer(T.get('changed_exit_n')):,} · Challenger ≤ -10% loss={num(T.get('challenger_loss_le_minus10_proven'))*100:.1f}%</p></div>
+
+<div class="c warn"><b>解释护栏：</b>改变 Exit 会改变之后 10-slot 能否接纳新交易。如果 Admission Jaccard &lt;95%，页面仍显示两个 Portfolio 结果，但不能把 CAGR 差异当成严格的 paired causal effect；这时优先看同一批 trade 的 paired counterfactual，再决定下一步。</div>
+</div></body></html>"""
+
+# V6.79 homepage card
+_v679_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v679_home_base is not None:
+    def _v679_home_wrap(*args,**kwargs):
+        resp=_v679_home_base(*args,**kwargs)
+        card="""<div id="v679-stop-ab-card" style="background:#f0fdfa;border:5px solid #0f766e;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🧪 V6.79 Proven-Strength Stop Controlled A/B</h2>
+        <p>Control -7% vs one close-confirmed challenger · Big Winner mainline · cache-only</p>
+        <a href="/v679/proven-strength-stop-ab"><button>打开 V6.79</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v679-stop-ab-card"' not in body:
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp)
+        return body if 'id="v679-stop-ab-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v679_home_base:
+            APP.view_functions[ep]=_v679_home_wrap
