@@ -41257,3 +41257,245 @@ if _v691_home_base is not None:
         body=str(resp); return body if 'id="v691-bq-ab-card"' in body else card+body
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v691_home_base:APP.view_functions[ep]=_v691_home_wrap
+
+
+# ========================= V6.92 FALSE-NEGATIVE WINNER PRESERVATION COUNTERFACTUAL =========================
+V692_DIR=DATA_DIR/'v692_false_negative_winner_preservation'
+V692_STATUS=V692_DIR/'status.json'; V692_RESULT=V692_DIR/'result.json'
+v692_thread=None
+
+def _v692_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V692_STATUS.exists():
+        try:x.update(json.loads(V692_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v692_write(**kw):
+    V692_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v692_status();x.update(kw)
+    V692_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v692_alive(): return v692_thread is not None and v692_thread.is_alive()
+
+def _v692_group_stats(g,features):
+    out={'n':int(len(g))}
+    if len(g)==0:return out
+    for f in features:
+        x=pd.to_numeric(g[f],errors='coerce').dropna()
+        out[f]={'median':float(x.median()) if len(x) else None,
+                'mean':float(x.mean()) if len(x) else None,
+                'n':int(len(x))}
+    return out
+
+def _v692_run():
+    global v692_thread
+    t0=time.time()
+    try:
+        _v692_write(status='running',phase='load_v691_oos',
+                    message='读取 V6.91 真正 OOS rows；只研究被 BASE_QUALITY 错杀的 Winners…',
+                    processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V691_RESULT.exists():raise RuntimeError('找不到 V6.91 result.json')
+        r91=json.loads(V691_RESULT.read_text(encoding='utf-8'))
+        if str(r91.get('verdict',''))!='BASE_QUALITY_OOS_EDGE_NOT_ECONOMIC_ENOUGH':
+            raise RuntimeError('V6.91 不是预期失败结论，先不要做 false-negative audit')
+        fp=V691_DIR/'walkforward_rows.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.91 walkforward_rows.csv.gz')
+
+        W=pd.read_csv(fp,compression='gzip')
+        W['entry_date']=pd.to_datetime(W.entry_date,errors='coerce').dt.normalize()
+        W['ret']=pd.to_numeric(W.ret,errors='coerce')
+        W['keep']=W.keep.astype(bool)
+        W['is_stop']=W.is_stop.astype(bool)
+        W['winner50']=W.winner50.astype(bool)
+        W['winner100']=W.winner100.astype(bool)
+
+        features=['near_52w_high','atr20','range20','range50','vol_vs20','vol20_vs50',
+                  'ret60','ret120','ret252','dist_ma10','dist_ma20','dist_ma50','trend_template']
+
+        _v692_write(status='running',phase='build_false_negative_cohorts',
+                    message='建立 Rejected +100 / Rejected +50 / Rejected STOP / Kept Winner 四组…',
+                    processed=1,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        rej100=W[(~W.keep)&W.winner100].copy()
+        rej50=W[(~W.keep)&W.winner50].copy()
+        rejstop=W[(~W.keep)&W.is_stop].copy()
+        kept100=W[W.keep&W.winner100].copy()
+        kept50=W[W.keep&W.winner50].copy()
+
+        # For each rejected winner, diagnose which BASE_QUALITY components were below its
+        # year-specific cut context. We don't invent thresholds; use its already-computed
+        # walk-forward score and rank component values against rejected STOPs of same year.
+        detail=[]
+        for _,r in rej50.sort_values(['winner100','ret'],ascending=[False,False]).iterrows():
+            yr=int(pd.Timestamp(r.entry_date).year)
+            rs=rejstop[rejstop.entry_date.dt.year.eq(yr)].copy()
+            comps={}
+            for f in ['near_52w_high','atr20','range20','range50','vol_vs20','vol20_vs50']:
+                v=float(r[f]) if pd.notna(r.get(f)) else None
+                if v is None or rs.empty:
+                    comps[f]={'value':v,'vs_rejected_stop_percentile':None}
+                    continue
+                arr=pd.to_numeric(rs[f],errors='coerce').dropna().values
+                if len(arr)==0:
+                    p=None
+                else:
+                    p=float((arr<=v).mean())
+                comps[f]={'value':v,'vs_rejected_stop_percentile':p}
+            detail.append({
+                'listing_id':str(r.listing_id),
+                'entry_date':str(pd.Timestamp(r.entry_date).date()),
+                'ret':float(r.ret),
+                'winner100':bool(r.winner100),
+                'bq_score':float(r.bq_score) if pd.notna(r.bq_score) else None,
+                'components':comps
+            })
+
+        _v692_write(status='running',phase='contrast',
+                    message='比较错杀 Winner 与被正确拒绝 STOP：找“为什么 Winner 看起来也像坏票”…',
+                    processed=2,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+
+        contrasts=[]
+        for f in features:
+            a=pd.to_numeric(rej50[f],errors='coerce').dropna()
+            b=pd.to_numeric(rejstop[f],errors='coerce').dropna()
+            c=pd.to_numeric(kept50[f],errors='coerce').dropna()
+            if len(a)<3 or len(b)<10:continue
+            smd_rej=_v690_smd(a,b)
+            smd_kept=_v690_smd(c,b) if len(c)>=3 else np.nan
+            contrasts.append({
+                'feature':f,
+                'rejected_winner_median':float(a.median()),
+                'rejected_stop_median':float(b.median()),
+                'kept_winner_median':float(c.median()) if len(c) else None,
+                'rejected_winner_vs_stop_smd':float(smd_rej) if np.isfinite(smd_rej) else None,
+                'kept_winner_vs_stop_smd':float(smd_kept) if np.isfinite(smd_kept) else None,
+                'false_negative_overlap':float(1-abs(smd_rej)) if np.isfinite(smd_rej) and abs(smd_rej)<=1 else 0.0
+            })
+
+        # A useful "preservation clue" is a feature where rejected winners differ from rejected STOPs
+        # even though BASE_QUALITY threw both away, and direction is not simply one of the BQ gates.
+        # Avoid reopening the same base-quality variables as rescue rules.
+        non_bq=[x for x in contrasts if x['feature'] not in
+                ['near_52w_high','atr20','range20','range50','vol_vs20','vol20_vs50']]
+        clues=sorted(
+            [x for x in non_bq if x.get('rejected_winner_vs_stop_smd') is not None],
+            key=lambda x:abs(x['rejected_winner_vs_stop_smd']),reverse=True
+        )
+
+        top_clue=clues[0] if clues else None
+        actionable=bool(top_clue and abs(top_clue['rejected_winner_vs_stop_smd'])>=0.50)
+
+        verdict='FALSE_NEGATIVE_WINNER_PRESERVATION_CLUE_FOUND' if actionable else 'FALSE_NEGATIVE_WINNERS_NOT_SEPARABLE_WITH_EXISTING_NON_BQ_FEATURES'
+
+        result={
+            'version':'V6.92 False-Negative Winner Preservation Counterfactual',
+            'verdict':verdict,
+            'cohorts':{
+                'rejected_plus50':int(len(rej50)),
+                'rejected_plus100':int(len(rej100)),
+                'rejected_stops':int(len(rejstop)),
+                'kept_plus50':int(len(kept50)),
+                'kept_plus100':int(len(kept100))
+            },
+            'group_stats':{
+                'rejected_plus50':_v692_group_stats(rej50,features),
+                'rejected_stops':_v692_group_stats(rejstop,features),
+                'kept_plus50':_v692_group_stats(kept50,features)
+            },
+            'contrasts':contrasts,
+            'top_non_bq_preservation_clues':clues[:10],
+            'best_clue':top_clue,
+            'rejected_winner_examples':detail[:30],
+            'important':'This is admission false-negative analysis, not exit winner-preservation. It does not reuse V6.79G/V6.83 exit logic. It asks why a BASE_QUALITY filter rejected future +50/+100 winners at entry time.',
+            'history_dedup':'V6.79G/V6.83 studied post-entry winner preservation and STOP paths. V6.92 is different: it studies pre-entry false negatives caused by V6.91 admission filtering. BASE_QUALITY components themselves are not allowed to become rescue rules again.',
+            'next_step':(
+                'If one non-BASE_QUALITY pre-entry clue is strong, build one asymmetric rescue overlay: BASE_QUALITY may reject a candidate unless the preservation clue is present. Validate OOS winner retention first; no portfolio replay yet.'
+                if actionable else
+                'Close asymmetric rescue using existing price/volume features. Do not tune BASE_QUALITY again; move to genuinely new source-supported information.'
+            ),
+            'cache_note':'Reads V6.91 walk-forward rows only. 0 replay, 0 Tiingo, 0 universe scan.'
+        }
+
+        V692_DIR.mkdir(parents=True,exist_ok=True)
+        V692_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v692_write(status='done',phase='done',message=f'V6.92 完成：{verdict}',
+                    processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v692_write(status='error',phase='error',
+                    message=f'V6.92 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v692_thread=None
+
+def _v692_start():
+    global v692_thread
+    if _v692_alive():return False
+    _v692_write(status='starting',phase='starting',message='V6.92 正在启动',
+                processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v692_thread=threading.Thread(target=_v692_run,daemon=True);v692_thread.start();return True
+
+@APP.route('/v692/run',methods=['GET','POST'])
+def v692_run():_v692_start();return redirect('/v692/false-negative-winner-preservation')
+
+@APP.get('/api/v692/status')
+def v692_status_api():return jsonify(_v692_status())
+
+@APP.get('/v692/false-negative-winner-preservation')
+def v692_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v692_status();R={}
+    if V692_RESULT.exists():
+        try:R=json.loads(V692_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=0.):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def integer(v,d=0):
+        try:return int(float(v))
+        except Exception:return d
+
+    C=R.get('cohorts',{}) if isinstance(R.get('cohorts'),dict) else {}
+    clues=R.get('top_non_bq_preservation_clues',[]) if isinstance(R.get('top_non_bq_preservation_clues'),list) else []
+    exs=R.get('rejected_winner_examples',[]) if isinstance(R.get('rejected_winner_examples'),list) else []
+    crows=''.join(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{num(x.get('rejected_winner_median')):.4f}</td><td>{num(x.get('rejected_stop_median')):.4f}</td><td>{num(x.get('kept_winner_median')):.4f}</td><td>{num(x.get('rejected_winner_vs_stop_smd')):+.3f}</td></tr>" for x in clues[:10])
+    erows=''.join(f"<tr><td>{e(x.get('listing_id'))}</td><td>{e(x.get('entry_date'))}</td><td>{num(x.get('ret'))*100:+.1f}%</td><td>{e(x.get('winner100'))}</td><td>{num(x.get('bq_score')):.3f}</td></tr>" for x in exs[:20])
+
+    btn='' if _v692_alive() else '<a href="/v692/run"><button>▶ 开始 V6.92 False-Negative Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#fdf4ff;border:1px solid #c026d3;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head>
+<body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🛟 V6.92 False-Negative Winner Preservation</h1><div class="info">不是改 Exit。专门研究 V6.91 被 BASE_QUALITY 错杀的未来 +50/+100 Winner：它们为什么在买入时看起来也像“坏票”？</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {integer(st.get('processed'))}/{integer(st.get('total'),4)} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2></div>
+<div class="c"><h2>Cohorts</h2><p>Rejected +50=<b>{integer(C.get('rejected_plus50'))}</b> · Rejected +100=<b>{integer(C.get('rejected_plus100'))}</b> · Rejected STOP=<b>{integer(C.get('rejected_stops'))}</b> · Kept +50=<b>{integer(C.get('kept_plus50'))}</b> · Kept +100=<b>{integer(C.get('kept_plus100'))}</b></p></div>
+<div class="c"><h2>Non-BASE_QUALITY Preservation Clues</h2><table><tr><th>Feature</th><th>Rejected Winner Median</th><th>Rejected STOP Median</th><th>Kept Winner Median</th><th>SMD</th></tr>{crows or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>Rejected Winner Examples</h2><table><tr><th>Listing</th><th>Entry</th><th>Return</th><th>+100?</th><th>BQ Score</th></tr>{erows or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v692_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v692_home_base is not None:
+    def _v692_home_wrap(*args,**kwargs):
+        resp=_v692_home_base(*args,**kwargs)
+        card="""<div id="v692-fn-winner-card" style="background:#fdf4ff;border:5px solid #c026d3;border-radius:24px;padding:28px;margin:22px 0">
+        <h2>🛟 V6.92 False-Negative Winner Preservation</h2>
+        <p>Why BASE_QUALITY killed future +50/+100 winners · entry-time only · no replay</p>
+        <a href="/v692/false-negative-winner-preservation"><button>打开 V6.92</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'id="v692-fn-winner-card"' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        body=str(resp);return body if 'id="v692-fn-winner-card"' in body else card+body
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v692_home_base:APP.view_functions[ep]=_v692_home_wrap
