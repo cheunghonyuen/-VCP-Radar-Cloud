@@ -33999,7 +33999,7 @@ if _v675_home_base is not None:
         if vf is _v675_home_base:APP.view_functions[ep]=_v675_home_wrap
 
 
-# ========================= V6.76A/B DUAL PATH AUDIT =========================
+# ========================= V6.76C DUAL PATH AUDIT =========================
 V676_DIR=DATA_DIR/'v676_dual_path_audit'
 V676_STATUS=V676_DIR/'status.json'; V676_RESULT=V676_DIR/'result.json'
 v676_thread=None
@@ -34038,44 +34038,51 @@ def _v676_run():
         P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
         P=P.dropna(subset=['entry_date','entry_px']).copy()
 
-        # Prefer historical cache already used by prior versions.
-        hist_path=None
-        for cand in [globals().get('V617_HISTORICAL_CACHE'), globals().get('HIST_CACHE'), globals().get('HISTORICAL_CACHE')]:
-            if cand is not None and Path(cand).exists():
-                hist_path=Path(cand); break
-        if hist_path is None:
-            # discover only inside DATA_DIR; never scan raw universe
-            pats=list(DATA_DIR.glob('**/*historical*cache*.csv.gz'))+list(DATA_DIR.glob('**/*historical*cache*.parquet'))
-            if pats: hist_path=pats[0]
-        if hist_path is None:
-            raise RuntimeError('找不到 V6.17 Historical Cache；为防止误扫 Universe，V6.76 已立即阻断。')
+        # Use the same V6.17 manifest + per-listing cached-price reader already proven by V6.67/V6.70F.
+        M=_v615b_read_manifest()
+        if M is None or M.empty:
+            raise RuntimeError('找不到 Historical Cache manifest')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:
+            raise RuntimeError('Historical Cache manifest 缺 listing_id')
+        needed=set(P.listing_id.astype(str))
+        M=M[M[lidcol].astype(str).isin(needed)].copy()
+        if M.empty:
+            raise RuntimeError('Historical Cache manifest 与当前 Entry 没有可匹配 listing_id')
 
-        _v676_write(status='running',phase='historical_cache',message=f'使用 Historical Cache: {hist_path.name}',processed=1,total=4,elapsed_sec=round(time.time()-t0,1))
-        if hist_path.suffix=='.parquet':
-            H=pd.read_parquet(hist_path)
-        else:
-            H=pd.read_csv(hist_path,compression='infer')
-        # Normalize common schemas
-        cmap={}
-        for c in H.columns:
-            lc=c.lower()
-            if lc in ('listing_id','ticker_id','symbol_id'): cmap[c]='listing_id'
-            elif lc in ('date','trade_date','session_date'): cmap[c]='date'
-            elif lc in ('open','adj_open'): cmap[c]='open'
-            elif lc in ('high','adj_high'): cmap[c]='high'
-            elif lc in ('low','adj_low'): cmap[c]='low'
-            elif lc in ('close','adj_close'): cmap[c]='close'
-        H=H.rename(columns=cmap)
-        req=['listing_id','date','high','low','close']
-        miss=[c for c in req if c not in H.columns]
-        if miss: raise RuntimeError('Historical Cache 缺字段: '+','.join(miss))
-        H['listing_id']=H.listing_id.astype(str); H['date']=pd.to_datetime(H.date,errors='coerce').dt.normalize()
-        for c in ['high','low','close']:
-            H[c]=pd.to_numeric(H[c],errors='coerce')
-        H=H.dropna(subset=['listing_id','date','high','low','close']).sort_values(['listing_id','date'])
+        _v676_write(status='running',phase='historical_cache',
+                     message=f'使用 V6.17 manifest + cached price reader · listings {len(M):,}',
+                     processed=1,total=4,elapsed_sec=round(time.time()-t0,1))
 
-        # Restrict to actual entry IDs/dates and build post-entry path without raw rescan.
-        grouped={k:g[['date','high','low','close']].reset_index(drop=True) for k,g in H.groupby('listing_id',sort=False)}
+        # Build only needed cached paths. This is a cache read, not a universe rescan.
+        grouped={}
+        total_m=len(M)
+        for n,(_,mr) in enumerate(M.iterrows(),1):
+            lid=str(mr[lidcol])
+            try:
+                d=_v617fv1_read_price(mr)
+            except Exception:
+                d=None
+            if d is None or d.empty:
+                continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','high','low','close']):
+                continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'high':pd.to_numeric(d[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(d[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna(subset=['date','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
+            if q.empty:
+                continue
+            grouped[lid]=q.reset_index(drop=True)
+            if n==1 or n%500==0 or n==total_m:
+                _v676_write(status='running',phase='historical_cache',
+                             message=f'读取 cached price paths {n:,}/{total_m:,}',
+                             processed=1,total=4,elapsed_sec=round(time.time()-t0,1))
+        if not grouped:
+            raise RuntimeError('V6.17 cached price paths 读取结果为空')
         levels=[.02,.03,.05,.07,.10,.20,.30,.50,1.00]
         horizons=[1,2,3,5,10]
         quick={h:{lv:{'n':0,'touch':0,'mae':[]} for lv in levels[:5]} for h in horizons}
@@ -34083,7 +34090,7 @@ def _v676_run():
         wash_n=0
 
         # identify V6.75 washout cohort using source-neutral path definition: STOP7 + reached +5% within first 5 sessions
-        _v676_write(status='running',phase='paths',message='V6.76A/B：同时计算全体 Entry quick-profit 与 STOP7 washout recovery…',processed=2,total=4,elapsed_sec=round(time.time()-t0,1))
+        _v676_write(status='running',phase='paths',message='V6.76C：同时计算全体 Entry quick-profit 与 STOP7 washout recovery…',processed=2,total=4,elapsed_sec=round(time.time()-t0,1))
         nproc=0
         for r in P.itertuples(index=False):
             g=grouped.get(str(r.listing_id))
@@ -34130,31 +34137,31 @@ def _v676_run():
                              'median_sessions_to_touch':float(np.median(z['days'])) if z['days'] else None})
 
         _v676_write(status='running',phase='interpret',message='生成 A/B 两份独立结论；不混合策略。',processed=3,total=4,elapsed_sec=round(time.time()-t0,1))
-        R={'version':'V6.76A/B Dual Path Audit',
+        R={'version':'V6.76C Dual Path Cache-Reader Fix',
            'A_big_winner_washout_recovery':{'cohort':'STOP7 that reached +5% within first 5 sessions','n':wash_n,'recovery':rec_rows},
            'B_quick_profit_opportunity':{'cohort':'ALL actual V6.44/V6.69 entries','quick_profit':quick_rows},
            'guardrails':['Diagnostic only','No profit-taking rule is promoted','No stop/entry change','No Tiingo','No universe rebuild','A and B remain separate strategy tracks'],
-           'cache_note':f'V6.69 paired trades + {hist_path.name}'}
+           'cache_note':'V6.69 paired trades + V6.17 manifest + _v617fv1_read_price cached paths'}
         V676_DIR.mkdir(parents=True,exist_ok=True); V676_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-        _v676_write(status='done',phase='done',message='V6.76A/B 完成',processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+        _v676_write(status='done',phase='done',message='V6.76C 完成',processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
     except Exception as ex:
-        _v676_write(status='error',phase='error',message=f'V6.76 失败：{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+        _v676_write(status='error',phase='error',message=f'V6.76C 失败：{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
     finally:v676_thread=None
 
 def _v676_start():
     global v676_thread
     if _v676_alive(): return False
-    _v676_write(status='starting',phase='starting',message='V6.76 正在启动',processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    _v676_write(status='starting',phase='starting',message='V6.76C 正在启动',processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
     v676_thread=threading.Thread(target=_v676_run,daemon=True);v676_thread.start();return True
 
-@APP.route('/v676/run',methods=['GET','POST'])
-def v676_run(): _v676_start(); return redirect('/v676/dual-path-audit')
+@APP.route('/v676c/run',methods=['GET','POST'])
+def v676c_run(): _v676_start(); return redirect('/v676c/dual-path-audit')
 
-@APP.get('/api/v676/status')
-def v676_status_api(): return jsonify(_v676_status())
+@APP.get('/api/v676c/status')
+def v676c_status_api(): return jsonify(_v676_status())
 
-@APP.get('/v676/dual-path-audit')
-def v676_page():
+@APP.get('/v676c/dual-path-audit')
+def v676c_page():
     import html
     e=lambda x:html.escape(str(x)); st=_v676_status(); R={}
     if V676_RESULT.exists():
@@ -34168,9 +34175,9 @@ def v676_page():
     btr=''.join(f"<tr><td>{x['horizon_sessions']}d</td><td>+{x['target']*100:.0f}%</td><td>{x['n']:,}</td><td>{x['touch_rate']*100:.1f}%</td><td>{x['median_mae']*100:.2f}%</td></tr>" for x in B.get('quick_profit',[]))
     err=''
     if st.get('error'): err=f"<div class='err'><b>具体错误：</b>{e(st['error'])}<details><summary>traceback</summary><pre>{e(st.get('traceback',''))}</pre></details></div>"
-    btn='' if _v676_alive() else '<a href="/v676/run"><button>▶ 开始 V6.76A/B</button></a>'
+    btn='' if _v676_alive() else '<a href="/v676c/run"><button>▶ 开始 V6.76C</button></a>'
     return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:white;padding:26px;border-radius:22px;margin:16px 0}}.a{{border:4px solid #2563eb}}.b{{border:4px solid #16a34a}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}.err{{background:#fff1f2;border:1px solid #fb7185;padding:15px;border-radius:12px}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>🧬 V6.76A/B Dual Path Audit</h1><p><b>两条线完全分开：</b>A = Big Winner Washout Recovery；B = Quick Profit Opportunity。共享 Entry/Cache，不共享 Exit 结论。</p></div>
+<div class="c"><h1>🧬 V6.76C Dual Path Cache-Reader Fix</h1><p><b>两条线完全分开：</b>A = Big Winner Washout Recovery；B = Quick Profit Opportunity。共享 Entry/Cache，不共享 Exit 结论。</p></div>
 <div class="c"><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',4)} · {float(st.get('elapsed_sec',0) or 0):.1f}s</p>{btn}{err}</div>
 <div class="c a"><h2>🔵 V6.76A — Big Winner Washout Recovery</h2><p>Cohort: STOP7 + first 5 sessions reached +5% · N={int(A.get('n',0)):,}</p><table><tr><th>Later target</th><th>N</th><th>Touch rate</th><th>Median sessions</th></tr>{atr or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div>
 <div class="c b"><h2>🟢 V6.76B — Quick Profit Opportunity</h2><p><b>全部真实 Entry</b>，避免只看事后赢家。</p><table><tr><th>Horizon</th><th>Target</th><th>N</th><th>Touch rate</th><th>Median MAE</th></tr>{btr or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div>
@@ -34180,7 +34187,7 @@ _v676_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v676_home_base is not None:
     def _v676_home_wrap(*args,**kwargs):
         resp=_v676_home_base(*args,**kwargs)
-        card="""<div id="v676-dual" style="background:#fff;border:5px solid #7c3aed;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V6.76A/B Dual Path Audit</h2><p>A: Big Winner Washout Recovery · B: Quick Profit Opportunity</p><a href="/v676/dual-path-audit"><button>打开 V6.76A/B</button></a></div>"""
+        card="""<div id="v676c-dual" style="background:#fff;border:5px solid #7c3aed;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V6.76C Dual Path Cache-Reader Fix</h2><p>A: Big Winner Washout Recovery · B: Quick Profit Opportunity</p><a href="/v676c/dual-path-audit"><button>打开 V6.76C</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True); pos=body.find('<body')
             if pos>=0:
