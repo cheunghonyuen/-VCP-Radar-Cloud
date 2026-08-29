@@ -45812,8 +45812,17 @@ def _v703_run():
         A=A.dropna(subset=['listing_id','entry_date','ret']).copy()
         if len(A)!=expected:
             raise RuntimeError(f'Exact B admission ledger parity mismatch {len(A)} != {expected}; rerun V7.02 before V7.03')
-        if A.duplicated(['listing_id','entry_date']).any():
-            raise RuntimeError('Exact B admission ledger contains duplicate listing_id/entry_date')
+        # Exact identity is the executable V7.02 candidate row, NOT listing_id/entry_date.
+        # The same listing can legitimately have multiple candidate rows on the same date.
+        # Never dedupe these rows: downstream analysis must preserve all 280 Actual Buys exactly.
+        if 'v702_row_id' not in A.columns:
+            raise RuntimeError('Exact B admission ledger missing v702_row_id; rerun V7.02 with the exact-ledger build')
+        A['v702_row_id']=pd.to_numeric(A['v702_row_id'],errors='coerce')
+        if A['v702_row_id'].isna().any():
+            raise RuntimeError('Exact B admission ledger has invalid v702_row_id')
+        if int(A['v702_row_id'].nunique())!=expected:
+            raise RuntimeError(f'Exact B candidate identity parity mismatch unique={A["v702_row_id"].nunique()} expected={expected}')
+        A['v702_row_id']=A['v702_row_id'].astype(int)
         A['year']=A.entry_date.dt.year.astype(int);A['block5']=A.year.map(_v703_block5)
 
         _v703_write(status='running',phase='feature_cache',message=f'Parity OK {len(A)}。只读这批 Actual Buy 的 Historical Cache…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
@@ -45837,7 +45846,7 @@ def _v703_run():
             def rpct(k):
                 g=pre.tail(k);return float((g.high.max()-g.low.min())/pc) if len(g)>=k and pc>0 else np.nan
             p5,p10,p20=rpct(5),rpct(10),rpct(20);pr20=float(pre.tail(20).high.max());pr50=float(pre.tail(50).high.max());avg20=float(((pre.tail(20).high-pre.tail(20).low)/pre.tail(20).close).mean());dr=float((hi-lo)/pc)
-            rows.append({'listing_id':str(r.listing_id),'entry_date':ed,'ret':float(r.ret),'is_stop':bool(r.is_stop),'year':int(r.year),'block5':str(r.block5),'range20':float(r.range20),
+            rows.append({'v702_row_id':int(r.v702_row_id),'listing_id':str(r.listing_id),'entry_date':ed,'ret':float(r.ret),'is_stop':bool(r.is_stop),'year':int(r.year),'block5':str(r.block5),'range20':float(r.range20),
                          'pre5_range_pct':p5,'pre10_range_pct':p10,'pre5_over_pre20':p5/p20 if np.isfinite(p5) and np.isfinite(p20) and p20>0 else np.nan,'pre10_over_pre20':p10/p20 if np.isfinite(p10) and np.isfinite(p20) and p20>0 else np.nan,
                          'breakout_margin20':cl/pr20-1 if pr20>0 else np.nan,'breakout_margin50':cl/pr50-1 if pr50>0 else np.nan,'entry_clv':(cl-lo)/(hi-lo) if hi>lo else np.nan,'entry_gap_pct':op/pc-1 if pc>0 else np.nan,'entry_body_pct':cl/op-1 if op>0 else np.nan,'entry_range_expansion20':dr/avg20 if avg20>0 else np.nan})
             if (n+1)%50==0 or n+1==len(A):_v703_write(status='running',phase='feature_cache',message=f'Trigger geometry {n+1}/{len(A)} · missing={missing}',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
