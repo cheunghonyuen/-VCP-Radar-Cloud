@@ -45924,3 +45924,232 @@ if _v703_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v703_home_base:APP.view_functions[ep]=_v703_home_wrap
+
+
+# ========================= V7.04 RANGE20 + BREAKOUT_MARGIN50 TWO-STAGE ECONOMIC A/B =========================
+V704_DIR=DATA_DIR/'v704_range20_breakout50_two_stage_ab'
+V704_STATUS=V704_DIR/'status.json'; V704_RESULT=V704_DIR/'result.json'
+V704_BREAKOUT_CACHE=V704_DIR/'candidate_breakout_margin50_cache.csv.gz'
+V704_LEDGER=V704_DIR/'challenger_actual_buy_ledger.csv.gz'
+v704_thread=None
+
+def _v704_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':8,'elapsed_sec':0,'error':None,'traceback':None}
+    if V704_STATUS.exists():
+        try:x.update(json.loads(V704_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v704_write(**kw):
+    V704_DIR.mkdir(parents=True,exist_ok=True);x=_v704_status();x.update(kw)
+    V704_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v704_alive():return v704_thread is not None and v704_thread.is_alive()
+
+def _v704_breakout50(pack,dt):
+    if pack is None:return np.nan
+    dns=pack.get('date_ns');hi=pack.get('high');cl=pack.get('close')
+    if dns is None or hi is None or cl is None or len(dns)<51:return np.nan
+    x=np.int64(pd.Timestamp(dt).normalize().value);j=int(np.searchsorted(dns,x,side='right')-1)
+    if j<50:return np.nan
+    prior50=float(np.nanmax(hi[j-50:j]));cur=float(cl[j])
+    if not (np.isfinite(prior50) and prior50>0 and np.isfinite(cur) and cur>0):return np.nan
+    return float(cur/prior50-1.0)
+
+def _v704_run():
+    global v704_thread
+    t0=time.time()
+    try:
+        _v704_write(status='running',phase='precheck',message='冻结 V7.02 range20 + V7.03 breakout_margin50；只做一个 two-stage contest A/B，无 cutoff/无第三特征…',processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+        if not V702_RESULT.exists() or not V703_RESULT.exists():raise RuntimeError('缺 V7.02/V7.03 result.json')
+        r702=json.loads(V702_RESULT.read_text(encoding='utf-8'));r703=json.loads(V703_RESULT.read_text(encoding='utf-8'))
+        if r702.get('verdict')!='RANGE20_CONTEST_RANKING_PASSES_ECONOMIC_AB':raise RuntimeError('V7.02 未 PASS')
+        if r703.get('verdict')!='SECOND_LAYER_TRIGGER_DNA_FOUND':raise RuntimeError('V7.03 未 PASS')
+        shared=r703.get('shared_stable_trigger_dna') or []
+        top=(shared[0].get('feature') if shared else None)
+        if top!='breakout_margin50':raise RuntimeError(f'V7.03 top shared feature is {top}, not breakout_margin50; V7.04 blocked')
+        for target in ['win50','win100']:
+            a=(shared[0].get(target) or {}).get('pooled_auc')
+            if a is None or float(a)<=.5:raise RuntimeError(f'breakout_margin50 direction not HIGHER_BETTER for {target}: {a}')
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists() or not V669_TRADES.exists() or not V702_RANGE20_CACHE.exists():raise RuntimeError('缺 V6.94/V6.69/V7.02 candidate cache')
+        F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'});C=pd.read_csv(V702_RANGE20_CACHE,compression='gzip')
+        F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize();C['listing_id']=C.listing_id.astype(str);C['entry_date']=pd.to_datetime(C.entry_date,errors='coerce').dt.normalize();C['range20']=pd.to_numeric(C.range20,errors='coerce')
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left').merge(C[['listing_id','entry_date','range20']],on=['listing_id','entry_date'],how='left')
+        Z['candidate_order']=pd.to_numeric(Z.candidate_order,errors='coerce');Z['entry_px_raw']=pd.to_numeric(Z.entry_px,errors='coerce');Z['exit_px_raw']=pd.to_numeric(Z.control_exit_px,errors='coerce')
+        Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        Z['v704_row_id']=np.arange(len(Z),dtype=int)
+        if len(Z)<500:raise RuntimeError(f'candidate rows too small: {len(Z)}')
+        r20cov=float(pd.to_numeric(Z.range20,errors='coerce').notna().mean());
+        if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
+
+        _v704_write(status='running',phase='historical_cache',message=f'Candidate={len(Z):,} · 只读 V6.17 Historical Cache，构建 breakout_margin50 + compact prices…',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};factors={};missing=0;lids=list(spans.keys())
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=180);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10);q=q[(q.date>=lo)&(q.date<=hi)].copy()
+            if len(q)<51:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
+            for c in ['open','high','low','close']:q['safe_'+c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
+            packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),'open':q.safe_open.to_numpy(dtype='float32'),'high':q.safe_high.to_numpy(dtype='float32'),'low':q.safe_low.to_numpy(dtype='float32'),'close':q.safe_close.to_numpy(dtype='float32')}
+            if n==1 or n%100==0 or n==len(lids):_v704_write(status='running',phase='historical_cache',message=f'Historical Cache {n}/{len(lids)} · missing={missing}',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        eps=[];xps=[];b50s=[];keep=[]
+        for _,r in Z.iterrows():
+            lid=str(r.listing_id);hev=factors.get(lid,[]);pack=packs.get(lid);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date));b50=_v704_breakout50(pack,pd.Timestamp(r.entry_date))
+            eps.append(ep);xps.append(xp);b50s.append(b50);keep.append(pack is not None and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        Z['entry_px_safe']=eps;Z['exit_px_safe']=xps;Z['breakout_margin50']=b50s;Z=Z[np.asarray(keep,dtype=bool)].reset_index(drop=True)
+        b50cov=float(pd.to_numeric(Z.breakout_margin50,errors='coerce').notna().mean()) if len(Z) else 0.
+        if b50cov<.90:raise RuntimeError(f'breakout_margin50 coverage too low {b50cov:.1%}')
+        V704_DIR.mkdir(parents=True,exist_ok=True);Z[['v704_row_id','listing_id','entry_date','candidate_order','range20','breakout_margin50']].to_csv(V704_BREAKOUT_CACHE,index=False,compression='gzip')
+
+        _v704_write(status='running',phase='calendar',message=f'Coverage range20={r20cov:.1%}, breakout50={b50cov:.1%} · 构建账户 replay…',processed=3,total=8,elapsed_sec=round(time.time()-t0,1))
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY PIT calendar unavailable')
+        R=rg.reset_index();
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        cal=set(pd.to_datetime(R.date,errors='coerce').dropna().dt.normalize().tolist());cal.update(Z.entry_date.tolist());cal.update(Z.exit_date.tolist());cal=sorted(cal)
+        rec=Z.to_dict('index');entries={};exits={}
+        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+        future={i:float(r['ret']) for i,r in rec.items()};denoms={t:sum(v>=t for v in future.values()) for t in [.20,.30,.50,1.0]}
+
+        # Frozen design: range20 remains first layer. For a contest with k free slots,
+        # shortlist exactly min(candidate_n, 2*k) candidates by lower range20; then select
+        # k by higher breakout_margin50. No numeric cutoff, no grid, no incumbent replacement.
+        def sim(label,two_stage=False):
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];admitted=[];skipcap=0;skipcash=0;contest_days=0;changed=0;events=[];step=max(1,len(cal)//20)
+            for di,dt in enumerate(cal,1):
+                dt=pd.Timestamp(dt).normalize()
+                for i in exits.get(dt,[]):
+                    p=pos.pop(i,None)
+                    if p is None:continue
+                    xp=float(rec[i]['exit_px_safe']);proceeds=p['shares']*xp;cash+=proceeds;ledger.append({'id':i,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],'reason':str(rec[i].get('control_reason',rec[i].get('exit_reason',''))),'entry_date':p['entry_date'],'exit_date':dt});last.pop(i,None)
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0;todays=list(entries.get(dt,[]));free=max(0,10-len(pos))
+                orig=sorted(todays,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
+                todays=orig
+                if free>0 and len(orig)>free:
+                    contest_days+=1
+                    if two_stage:
+                        pool_n=min(len(orig),max(free,2*free));pool=orig[:pool_n]
+                        chosen=sorted(pool,key=lambda i:(-(float(rec[i].get('breakout_margin50')) if np.isfinite(rec[i].get('breakout_margin50',np.nan)) else -np.inf),float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf))))[:free]
+                        chosen_set=set(chosen);rest=[i for i in orig if i not in chosen_set];todays=chosen+rest
+                        changed+=len(set(chosen)-set(orig[:free]));events.append({'date':dt,'free_slots':free,'candidate_n':len(orig),'finalist_n':pool_n,'range20_selected':orig[:free],'two_stage_selected':chosen})
+                for i in todays:
+                    r=rec[i];ep=float(r['entry_px_safe'])
+                    if not np.isfinite(ep) or ep<=0:skipcash+=1;continue
+                    if len(pos)<10 and target>0:
+                        invest=min(float(target),float(cash))
+                        if invest>1e-12:
+                            cash-=invest;pos[i]={'listing_id':str(r['listing_id']),'shares':invest/ep,'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep;admitted.append(i);continue
+                        skipcash+=1;continue
+                    skipcap+=1
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+                eqrows.append((dt,float(eq),float(hv/eq) if eq>0 else np.nan,len(pos)))
+                if di%step==0 or di==len(cal):_v704_write(status='running',phase='account_replay',message=f'{label} {int(round(di/len(cal)*100))}%',processed=5,total=8,elapsed_sec=round(time.time()-t0,1))
+            st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st.update({'skipped_capacity':int(skipcap),'skipped_cash':int(skipcash),'contest_days':int(contest_days),'changed_admissions':int(changed)});return st,pd.DataFrame(events),set(admitted)
+
+        _v704_write(status='running',phase='account_replay',message='A=V7.02 Range20 Rank；B=Range20 finalist → Breakout50 select；完整 10-slot A/B…',processed=4,total=8,elapsed_sec=round(time.time()-t0,1))
+        A,_,admA=sim('A_V702_RANGE20',False);B,EV,admB=sim('B_RANGE20_THEN_BREAKOUT50',True)
+        savedB=r702.get('B') or {};expected=int(savedB.get('admitted_positions') or 0)
+        if expected and int(A.get('admitted_positions',0))!=expected:raise RuntimeError(f'V7.02 executable parity failed A={A.get("admitted_positions")} expected={expected}')
+        # Strong metric parity guard against accidental replay drift.
+        for k,tol in [('cagr',0.002),('profit_factor',0.03),('maxdd',0.01)]:
+            sv=savedB.get(k);av=A.get(k)
+            if sv is not None and av is not None and np.isfinite(float(sv)) and np.isfinite(float(av)) and abs(float(sv)-float(av))>tol:
+                raise RuntimeError(f'V7.02 metric parity failed {k}: rerun={av} saved={sv}')
+
+        _v704_write(status='running',phase='economic_audit',message='经济审计：能否把 7.68% CAGR / 2.01 PF 再往上推，同时压 STOP/MaxDD…',processed=6,total=8,elapsed_sec=round(time.time()-t0,1))
+        keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate','winner20_capture','winner30_capture','winner50_capture','winner100_capture'];delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
+        annA=A.get('annual',{});annB=B.get('annual',{});ys=sorted(set(annA)&set(annB));beats=sum(annB[y]>annA[y] for y in ys);share=float(beats/len(ys)) if ys else np.nan
+        displaced=list(admA-admB);added=list(admB-admA)
+        def diag(ids):
+            vals=[future.get(int(i),np.nan) for i in ids];vals=[float(v) for v in vals if np.isfinite(v)];b=[rec[int(i)].get('breakout_margin50',np.nan) for i in ids if int(i) in rec];b=[float(v) for v in b if np.isfinite(v)]
+            return {'n':len(ids),'stop':int(sum(bool(rec[int(i)].get('is_stop',False)) for i in ids if int(i) in rec)),'plus50':int(sum(v>=.5 for v in vals)),'plus100':int(sum(v>=1. for v in vals)),'median_future_ret':float(np.median(vals)) if vals else None,'median_breakout50':float(np.median(b)) if b else None}
+        swaps={'displaced_from_range20':diag(displaced),'added_by_two_stage':diag(added)}
+        pass_econ=bool(
+            (delta.get('cagr',-999)>=.02 or delta.get('profit_factor',-999)>=.20 or delta.get('calmar',-999)>=.05) and
+            B.get('maxdd',-1)>=A.get('maxdd',-1)-.03 and
+            B.get('stop_rate',1)<=A.get('stop_rate',1)+1e-12 and
+            B.get('winner50_capture',0)>=A.get('winner50_capture',0)-1e-12 and
+            B.get('winner100_capture',0)>=A.get('winner100_capture',0)-1e-12 and
+            (not ys or share>=.55) and int(B.get('changed_admissions',0))>0)
+        verdict='RANGE20_BREAKOUT50_TWO_STAGE_PASSES_ECONOMIC_AB' if pass_econ else 'RANGE20_BREAKOUT50_TWO_STAGE_FAILS_ECONOMIC_AB'
+        result={'version':'V7.04 Range20 + BreakoutMargin50 Two-Stage Economic A/B','verdict':verdict,
+                'rule':{'scope':'same-day capacity contests only','layer1':'rank all candidates by range20 ascending; shortlist min(candidate_n, 2*free_slots)','layer2':'within finalists, select free_slots by breakout_margin50 descending; ties by range20 then original candidate_order','finalist_multiplier':2,'incumbent_replacement':False,'hard_numeric_cutoff':False,'threshold_sweep':False,'third_feature':False},
+                'A':A,'B':B,'delta':delta,'year_stability':{'comparable_years':len(ys),'B_beats_A_years':int(beats),'share':share,'A':annA,'B':annB},'admission_swap_diagnostics':swaps,
+                'candidate_rows':int(len(Z)),'range20_coverage':r20cov,'breakout50_coverage':b50cov,'missing_price_listings':int(missing),
+                'acceptance':'PASS only if vs frozen V7.02 Range20: CAGR +2pp OR PF +0.20 OR Calmar +0.05; MaxDD not worse >3pp; STOP not worse; +50/+100 capture not reduced; challenger beats control in >=55% comparable years; admissions actually change.',
+                'history_dedup':'V6.91 hard admission remains closed; V6.16I ranking/replacement grids remain closed. V7.04 tests exactly one hierarchical economic use of V7.03 top shared trigger DNA. No numeric cutoff, no feature-weight grid, no ATR20, no third feature.',
+                'important':'V7.03 was discovered on V7.02 Actual Buys, so V7.04 is still post-selection research, not untouched production validation. If this fails, do not tune the finalist multiplier or neighboring rules.',
+                'next_step':('If PASS, freeze V7.04 and run one untouched forward-chained confirmation before production promotion.' if pass_econ else 'Close breakout_margin50 second-layer economic branch; do not tune 2x pool/cutoffs. Return to source-semantic candidate quality or a genuinely new mechanism.'),
+                'cache_note':'V6.94 candidate outcomes + V6.69 candidate order/exits + V7.02 range20 cache + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
+        V704_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        if len(EV):EV.to_csv(V704_DIR/'two_stage_contest_events.csv.gz',index=False,compression='gzip')
+        if admB:
+            cols=[c for c in ['v704_row_id','listing_id','entry_date','exit_date','ret','is_stop','candidate_order','range20','breakout_margin50'] if c in Z.columns];Z.loc[sorted(admB),cols].to_csv(V704_LEDGER,index=False,compression='gzip')
+        _v704_write(status='done',phase='done',message=f'V7.04 完成：{verdict}',processed=8,total=8,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v704_write(status='error',phase='error',message=f'V7.04 失败：{type(ex).__name__}: {ex}',processed=0,total=8,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v704_thread=None
+
+def _v704_start():
+    global v704_thread
+    if _v704_alive():return False
+    _v704_write(status='starting',phase='starting',message='V7.04 正在启动',processed=0,total=8,elapsed_sec=0,error=None,traceback=None);v704_thread=threading.Thread(target=_v704_run,daemon=True);v704_thread.start();return True
+
+@APP.route('/v704/run',methods=['GET','POST'])
+def v704_run():_v704_start();return redirect('/v704/range20-breakout50-two-stage-ab')
+@APP.get('/api/v704/status')
+def v704_status_api():return jsonify(_v704_status())
+@APP.get('/v704/range20-breakout50-two-stage-ab')
+def v704_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v704_status();R={}
+    if V704_RESULT.exists():
+        try:R=json.loads(V704_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    def num(v,d=0.):
+        try:return float(v)
+        except Exception:return d
+    def pct(v):
+        try:return f'{float(v)*100:.2f}%'
+        except Exception:return '—'
+    def row(label,x):
+        return f"<tr><td><b>{e(label)}</b></td><td>{pct(x.get('cagr'))}</td><td>{num(x.get('profit_factor')):.2f}</td><td>{pct(x.get('maxdd'))}</td><td>{num(x.get('calmar')):.2f}</td><td>{pct(x.get('win_rate'))}</td><td>{pct(x.get('avg_trade'))}</td><td>{pct(x.get('stop_rate'))}</td><td>{pct(x.get('winner50_capture'))}</td><td>{pct(x.get('winner100_capture'))}</td><td>{int(x.get('admitted_positions',0) or 0)}</td></tr>"
+    A=R.get('A',{});B=R.get('B',{});D=R.get('delta',{});Y=R.get('year_stability',{});S=R.get('admission_swap_diagnostics',{});SA=S.get('displaced_from_range20',{});SB=S.get('added_by_two_stage',{})
+    btn='' if _v704_alive() else '<a href="/v704/run"><button>▶ 开始 V7.04 Economic A/B</button></a>';err=f"<pre>{e(st.get('traceback',''))}</pre>" if st.get('error') else ''
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:white;padding:24px;border-radius:20px;margin:16px 0}}.info{{background:#ecfdf5;border:1px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7df;border:1px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🚀 V7.04 Range20 + BreakoutMargin50 Economic A/B</h1><div class='info'><b>直接打账户成绩：</b>Range20 先做第一层 shortlist；BreakoutMargin50（HIGHER_BETTER）只在 shortlist 内争夺空位。无 numeric cutoff、无第三特征、无 incumbent replacement。</div></div><div class='c'><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {e(st.get('processed'))}/{e(st.get('total'))} · {num(st.get('elapsed_sec')):.1f}s</p>{btn}{err}</div><div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{e(R.get('acceptance',''))}</p></div><div class='c'><h2>Full 10-Slot Account A/B</h2><table><tr><th></th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>Avg Trade</th><th>STOP%</th><th>+50 Cap</th><th>+100 Cap</th><th>Admissions</th></tr>{row('A V7.02 Range20',A)}{row('B Range20→Breakout50',B)}</table><p>ΔCAGR={pct(D.get('cagr'))} · ΔPF={num(D.get('profit_factor')):+.2f} · ΔMaxDD={pct(D.get('maxdd'))} · ΔSTOP={pct(D.get('stop_rate'))}</p></div><div class='c'><h2>Second-Layer Leverage</h2><p>Changed admissions={int(B.get('changed_admissions',0) or 0)} · Comparable years={int(Y.get('comparable_years',0) or 0)} · B beats A={int(Y.get('B_beats_A_years',0) or 0)} · share={pct(Y.get('share'))}</p><p>Displaced: N={int(SA.get('n',0) or 0)} · STOP={int(SA.get('stop',0) or 0)} · +50={int(SA.get('plus50',0) or 0)} · +100={int(SA.get('plus100',0) or 0)} · median breakout50={num(SA.get('median_breakout50')):.3f}</p><p>Added: N={int(SB.get('n',0) or 0)} · STOP={int(SB.get('stop',0) or 0)} · +50={int(SB.get('plus50',0) or 0)} · +100={int(SB.get('plus100',0) or 0)} · median breakout50={num(SB.get('median_breakout50')):.3f}</p></div><div class='c'><div class='warn'><b>边界：</b>{e(R.get('history_dedup',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div></div><script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v704/status',{{cache:'no-store'}})).json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></body></html>"""
+
+_v704_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v704_home_base is not None:
+    def _v704_home_wrap(*args,**kwargs):
+        resp=_v704_home_base(*args,**kwargs);card='<div id="v704-card" style="background:#ecfdf5;border:5px solid #10b981;border-radius:24px;padding:28px;margin:22px 0"><h2>🚀 V7.04 Range20 + Breakout50 Economic A/B</h2><p>Two-stage same-day capacity contest · full 10-slot account · no cutoff/grid</p><a href="/v704/range20-breakout50-two-stage-ab"><button>打开 V7.04</button></a></div>'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v704-card' not in body:
+                p0=body.find('<body');g=body.find('>',p0) if p0>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v704_home_base:APP.view_functions[ep]=_v704_home_wrap
