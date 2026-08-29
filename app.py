@@ -47799,3 +47799,265 @@ A=原生 V7.04 Range20→Breakout50；B=同一 native engine + CLV rescue。无 
 <div class='c'><div class='warn'><b>边界：</b>{e(R.get('history_dedup',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v708/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ========================= V7.09 RESIDUAL RESCUE DNA AUDIT =========================
+V709_DIR=DATA_DIR/'v709_residual_rescue_dna_audit'
+V709_STATUS=V709_DIR/'status.json'
+V709_RESULT=V709_DIR/'result.json'
+v709_thread=None
+
+def _v709_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':4,'elapsed_sec':0,'error':None,'traceback':None}
+    if V709_STATUS.exists():
+        try:x.update(json.loads(V709_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v709_write(**kw):
+    V709_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v709_status();x.update(kw)
+    V709_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v709_alive():
+    return v709_thread is not None and v709_thread.is_alive()
+
+def _v709_auc_oriented(v):
+    try:
+        v=float(v)
+        return max(v,1-v) if np.isfinite(v) else None
+    except Exception:return None
+
+def _v709_run():
+    global v709_thread
+    t0=time.time()
+    try:
+        _v709_write(status='running',phase='preflight',
+                    message='V7.09 Preflight：只读取 V7.07 已保存的 102 笔 TRUE DEFENSIVE geometry；不跑账户、不读全 universe…',
+                    processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+
+        if not V707_RESULT.exists():raise RuntimeError('缺 V7.07 result.json')
+        if not V707_ROWS.exists():raise RuntimeError('缺 V7.07 defensive_entry_geometry.csv.gz')
+        if not V708_RESULT.exists():raise RuntimeError('缺 V7.08 result.json')
+
+        r707=json.loads(V707_RESULT.read_text(encoding='utf-8'))
+        r708=json.loads(V708_RESULT.read_text(encoding='utf-8'))
+        if r707.get('verdict')!='DEFENSIVE_RESCUE_DNA_FOUND':
+            raise RuntimeError(f'V7.07 verdict drift: {r707.get("verdict")}')
+        if r708.get('verdict')!='ENTRY_CLV_DEFENSIVE_RESCUE_FAILS_NATIVE_ECONOMIC_AB':
+            raise RuntimeError(f'V7.08 verdict drift: {r708.get("verdict")}')
+
+        G=pd.read_csv(V707_ROWS,compression='gzip')
+        req=['v704_row_id','ret','is_stop','entry_clv','entry_body_pct','entry_range_expansion20',
+             'breakout_margin20','breakout_margin50','range20','pre5_over_pre20','pre10_range_pct']
+        miss=[c for c in req if c not in G.columns]
+        if miss:raise RuntimeError('V7.07 geometry 缺字段: '+','.join(miss))
+        if len(G)!=102:raise RuntimeError(f'V7.07 geometry rows {len(G)} != 102')
+        G['ret']=pd.to_numeric(G['ret'],errors='coerce')
+        G['entry_clv']=pd.to_numeric(G['entry_clv'],errors='coerce')
+        G['is_stop']=G['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        if int(G.is_stop.sum())!=93 or int((G.ret>=.50).sum())!=7 or int((G.ret>=1.0).sum())!=5:
+            raise RuntimeError('V7.07 geometry outcome parity failed')
+
+        # Residual sample = the pure DEFENSIVE trades that the V7.08 CLV<0.75 rule rejects.
+        R=G[(G.entry_clv<.75)|(~np.isfinite(G.entry_clv))].copy().reset_index(drop=True)
+        if len(R)<20:raise RuntimeError(f'CLV<0.75 residual sample too small: {len(R)}')
+        residual_counts={
+            'n':int(len(R)),
+            'stop':int(R.is_stop.sum()),
+            '+50':int((R.ret>=.50).sum()),
+            '+100':int((R.ret>=1.0).sum()),
+            'nonstop':int((~R.is_stop).sum())
+        }
+
+        _v709_write(status='running',phase='audit',
+                    message=f'Residual sample={residual_counts} · 只做第二层 DNA 诊断，不设 cutoff、不组合回测…',
+                    processed=1,total=4,elapsed_sec=round(time.time()-t0,1))
+
+        # Exclude entry_clv itself. We want residual DNA AFTER CLV failed to rescue.
+        feats=['entry_body_pct','entry_range_expansion20','breakout_margin20','breakout_margin50',
+               'range20','pre5_over_pre20','pre10_range_pct']
+        defs=[('NONSTOP',None),('WIN50',.50),('WIN100',1.0)]
+        audits={}
+        for name,thr in defs:
+            if name=='NONSTOP':
+                S=R.copy();S['y']=(~S.is_stop).astype(int)
+            else:
+                S=R[(R.is_stop)|(R.ret>=thr)].copy();S['y']=(S.ret>=thr).astype(int)
+            rows=[]
+            for f in feats:
+                z=S[[f,'y'] + (['block5'] if 'block5' in S.columns else [])].copy()
+                z[f]=pd.to_numeric(z[f],errors='coerce');z=z.dropna(subset=[f,'y'])
+                if len(z)<15 or z.y.nunique()<2:continue
+                auc=_v703_auc(z[f],z.y)
+                direction='HIGHER_BETTER' if np.isfinite(auc) and auc>=.5 else 'LOWER_BETTER'
+                oa=_v709_auc_oriented(auc)
+                smd=_v703_smd(z.loc[z.y.eq(1),f],z.loc[z.y.eq(0),f])
+
+                blocks=[]
+                if 'block5' in z.columns:
+                    sign=1 if direction=='HIGHER_BETTER' else -1
+                    for bk,bg in z.groupby('block5'):
+                        if len(bg)<8 or bg.y.nunique()<2 or int(bg.y.sum())<1:continue
+                        ba=_v703_auc(bg[f],bg.y)
+                        if np.isfinite(ba):
+                            blocks.append({
+                                'block':str(bk),'n':int(len(bg)),'positive_n':int(bg.y.sum()),
+                                'oriented_auc':float(max(ba,1-ba)),
+                                'same_direction':bool((ba-.5)*sign>=0)
+                            })
+                rows.append({
+                    'feature':f,'direction':direction,'n':int(len(z)),'positive_n':int(z.y.sum()),
+                    'coverage':float(pd.to_numeric(S[f],errors='coerce').notna().mean()),
+                    'pooled_auc':float(auc) if np.isfinite(auc) else None,
+                    'oriented_auc':oa,
+                    'smd':float(smd) if np.isfinite(smd) else None,
+                    'positive_median':float(z.loc[z.y.eq(1),f].median()),
+                    'stop_median':float(z.loc[z.y.eq(0),f].median()),
+                    'block_count':len(blocks),
+                    'direction_consistency':float(np.mean([x['same_direction'] for x in blocks])) if blocks else None,
+                    'weakest_block_auc':float(np.min([x['oriented_auc'] for x in blocks])) if blocks else None
+                })
+            audits[name]=sorted(rows,key=lambda x:((x.get('oriented_auc') or 0),
+                                                  abs(x.get('smd') or 0)),reverse=True)
+
+        maps={k:{x['feature']:x for x in v} for k,v in audits.items()}
+        shared=[]
+        for f in feats:
+            a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+            if not a or not b or not c:continue
+            same=len({a['direction'],b['direction'],c['direction']})==1
+            aucs=[a.get('oriented_auc') or 0,b.get('oriented_auc') or 0,c.get('oriented_auc') or 0]
+            cov=min(a.get('coverage',0),b.get('coverage',0),c.get('coverage',0))
+            robust=bool(same and min(aucs)>=.62 and cov>=.90)
+            shared.append({
+                'feature':f,'direction':a['direction'] if same else 'MIXED',
+                'mean_oriented_auc':float(np.mean(aucs)),
+                'min_oriented_auc':float(min(aucs)),
+                'coverage':float(cov),
+                'robust_shared':robust
+            })
+        shared=sorted(shared,key=lambda x:(x['robust_shared'],x['mean_oriented_auc'],x['min_oriented_auc']),reverse=True)
+        robust=[x for x in shared if x['robust_shared']]
+        verdict='RESIDUAL_RESCUE_DNA_FOUND' if robust else 'NO_ROBUST_RESIDUAL_RESCUE_DNA'
+
+        result={
+            'version':'V7.09 Residual Rescue DNA Audit',
+            'verdict':verdict,
+            'source':'V7.07 exact 102 TRUE DEFENSIVE geometry rows; no account replay',
+            'conditioning_rule':'entry_clv < 0.75 only; entry_clv itself excluded from candidate features',
+            'residual_counts':residual_counts,
+            'audits':audits,
+            'shared_candidates':shared,
+            'top_robust':robust[:3],
+            'acceptance':'Promote only if the same residual feature has the same direction for Non-STOP, +50, +100; min oriented AUC >=0.62; >=90% coverage. No cutoff is selected here.',
+            'history_dedup':'Does not rerun V7.07 global DEFENSIVE DNA, does not reopen CLV threshold sweep, does not run V6.16 ranking grids, and does not replay the account.',
+            'next_step':('If robust residual DNA exists, V7.10 will test exactly ONE top residual feature as a rescue gate inside CLV<0.75 DEFENSIVE entries using the native V7.04 engine.' if robust else
+                         'If none exists, close residual rescue. Keep V7.06 hard-block as the cleaner risk-control result and move to a genuinely new mechanism.')
+        }
+        V709_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v709_write(status='done',phase='done',message=f'V7.09 完成：{verdict}',
+                    processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v709_write(status='error',phase='error',message=f'V7.09 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=4,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v709_thread=None
+
+def _v709_start():
+    global v709_thread
+    if _v709_alive():return False
+    _v709_write(status='starting',phase='starting',message='V7.09 starting',processed=0,total=4,elapsed_sec=0,error=None,traceback=None)
+    v709_thread=threading.Thread(target=_v709_run,daemon=True)
+    v709_thread.start();return True
+
+@APP.route('/v709/run',methods=['GET','POST'])
+def v709_run():
+    _v709_start();return redirect('/v709')
+
+@APP.get('/api/v709/status')
+def v709_status():
+    return jsonify(_v709_status())
+
+@APP.get('/v709')
+def v709_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v709_status();R={}
+    if V709_RESULT.exists():
+        try:R=json.loads(V709_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    C=R.get('shared_candidates',[]) or [];RC=R.get('residual_counts',{}) or {};A=R.get('audits',{}) or {}
+    def num(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    def pct(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    cand=''.join(
+        f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td>"
+        f"<td>{num(x.get('mean_oriented_auc'))}</td><td>{num(x.get('min_oriented_auc'))}</td>"
+        f"<td>{pct(x.get('coverage'))}</td><td>{'✅' if x.get('robust_shared') else '—'}</td></tr>" for x in C
+    ) or "<tr><td colspan='6'>—</td></tr>"
+    def audit_rows(name):
+        return ''.join(
+            f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td>"
+            f"<td>{num(x.get('oriented_auc'))}</td><td>{num(x.get('smd'))}</td>"
+            f"<td>{x.get('positive_n','—')}</td><td>{pct(x.get('direction_consistency'))}</td></tr>"
+            for x in (A.get(name) or [])[:8]
+        ) or "<tr><td colspan='6'>—</td></tr>"
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v709/run'><button>▶ Run V7.09 Residual DNA</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}
+.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}
+.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}
+button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}
+pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V7.09 Residual Rescue DNA Audit</h1>
+<div class='ok'><b>研究对象：</b>TRUE DEFENSIVE 中被 V7.08 的 CLV&lt;0.75 拒绝的 residual trades。<br>
+只找“误杀 Winner vs 正确拦截 STOP”的第二层 DNA；不跑账户、不扫 universe、不调 CLV threshold。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p>
+<p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',4)} · {st.get('elapsed_sec',0)}s</p>{btn}
+{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>Residual N={RC.get('n','—')} · STOP={RC.get('stop','—')} · Non-STOP={RC.get('nonstop','—')} · +50={RC.get('+50','—')} · +100={RC.get('+100','—')}</p></div>
+<div class='c'><h2>Shared Residual Rescue Candidates</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Direction</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Robust</th></tr>{cand}
+</table></div></div>
+<div class='c'><h2>Non-STOP vs STOP</h2><table><tr><th>Feature</th><th>Dir</th><th>AUC</th><th>SMD</th><th>N+</th><th>Dir Cons.</th></tr>{audit_rows('NONSTOP')}</table></div>
+<div class='c'><h2>+50 vs STOP</h2><table><tr><th>Feature</th><th>Dir</th><th>AUC</th><th>SMD</th><th>N+</th><th>Dir Cons.</th></tr>{audit_rows('WIN50')}</table></div>
+<div class='c'><h2>+100 vs STOP</h2><table><tr><th>Feature</th><th>Dir</th><th>AUC</th><th>SMD</th><th>N+</th><th>Dir Cons.</th></tr>{audit_rows('WIN100')}</table></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('history_dedup',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v709/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script>
+</div></body></html>"""
+
+# Safe homepage card injection. Does not replace or wrap the existing home view.
+@APP.after_request
+def _v709_home_card(response):
+    try:
+        from flask import request
+        if request.path=='/' and response.status_code==200 and response.mimetype=='text/html':
+            body=response.get_data(as_text=True)
+            if 'v709-home-card' not in body:
+                card="""<div id='v709-home-card' style='background:#fff;border:4px solid #7c3aed;border-radius:22px;padding:20px;margin:18px'>
+                <h2>🧬 V7.09 Residual Rescue DNA Audit</h2>
+                <p>CLV&lt;0.75 residual：误杀 Winner vs 正确拦截 STOP。纯诊断，秒级。</p>
+                <a href='/v709'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800'>打开 V7.09</button></a>
+                </div>"""
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos)
+                    if gt>=0:body=body[:gt+1]+card+body[gt+1:]
+                    else:body=card+body
+                else:body=card+body
+                response.set_data(body)
+                response.headers['Content-Length']=str(len(response.get_data()))
+    except Exception:
+        pass
+    return response
