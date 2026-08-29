@@ -45275,3 +45275,240 @@ if _v700_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v700_home_base:APP.view_functions[ep]=_v700_home_wrap
+
+
+# ========================= V7.01 CLEAN SOURCE-SUPPORTED ENTRY FEATURE REVALIDATION =========================
+V701_DIR=DATA_DIR/'v701_clean_source_entry_revalidation'
+V701_STATUS=V701_DIR/'status.json'; V701_RESULT=V701_DIR/'result.json'
+v701_thread=None
+
+def _v701_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':5,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V701_STATUS.exists():
+        try:x.update(json.loads(V701_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v701_write(**kw):
+    V701_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v701_status();x.update(kw)
+    V701_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v701_alive(): return v701_thread is not None and v701_thread.is_alive()
+
+def _v701_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(pd.Series(x),errors='coerce'),
+                    'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average')
+    n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    if not n1 or not n0:return np.nan
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v701_run():
+    global v701_thread
+    t0=time.time()
+    try:
+        _v701_write(status='running',phase='dedup',
+                    message='查重完成：V6.90 已构建 Actual-Buy Entry features；V7.01 只复用保存结果做 STOP vs Big-Winner DNA 稳定性审计…',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V700_RESULT.exists():raise RuntimeError('找不到 V7.00 result.json')
+        r700=json.loads(V700_RESULT.read_text(encoding='utf-8'))
+        if 'FAILS' not in str(r700.get('verdict','')):
+            raise RuntimeError('V7.00 未确认失败；不应切换到 Entry DNA Audit')
+
+        # CRITICAL DEDUP: V6.90 already built point-in-time features for the exact
+        # corrected ACTUAL-BUY ledger. Reuse that artifact verbatim. Do not rebuild
+        # Historical Cache features and do not touch the full candidate universe.
+        fp=V690_DIR/'clean_admission_features.csv.gz'
+        if not fp.exists():raise RuntimeError('找不到 V6.90 clean_admission_features.csv.gz')
+        J=pd.read_csv(fp,compression='gzip')
+        J['listing_id']=J.listing_id.astype(str)
+        J['entry_date']=pd.to_datetime(J.entry_date,errors='coerce').dt.normalize()
+        J['ret']=pd.to_numeric(J.ret,errors='coerce')
+        J['is_stop']=J.is_stop.astype(bool)
+        if 'winner50' not in J.columns:J['winner50']=J.ret>=.50
+        else:J['winner50']=J.winner50.astype(bool)
+        if 'winner100' not in J.columns:J['winner100']=J.ret>=1.00
+        else:J['winner100']=J.winner100.astype(bool)
+        J=J.dropna(subset=['listing_id','entry_date','ret']).copy()
+        J['year']=J.entry_date.dt.year.astype(int)
+        J['block5']=(J['year']//5)*5
+
+        # Only features already materialized by V6.90. No new feature engineering.
+        features=[c for c in [
+            'ret60','ret120','ret252','near_52w_high','off_52w_low',
+            'atr20','range20','range50','vol_vs20','vol20_vs50',
+            'dist_ma10','dist_ma20','dist_ma50','trend_template'
+        ] if c in J.columns]
+        if not features:raise RuntimeError('V6.90 Actual-Buy feature columns missing')
+
+        _v701_write(status='running',phase='actual_buy_integrity',
+                    message=f'Actual Buy={len(J):,} · STOP={int(J.is_stop.sum()):,} · +50={int(J.winner50.sum()):,} · +100={int(J.winner100.sum()):,}；0 feature rebuild…',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        def smd(a,b):
+            a=pd.to_numeric(pd.Series(a),errors='coerce').dropna(); b=pd.to_numeric(pd.Series(b),errors='coerce').dropna()
+            if len(a)<5 or len(b)<5:return np.nan
+            va=float(a.var(ddof=1));vb=float(b.var(ddof=1))
+            den=np.sqrt(max(1e-12,((len(a)-1)*va+(len(b)-1)*vb)/(len(a)+len(b)-2)))
+            return float((a.mean()-b.mean())/den) if den>0 else np.nan
+
+        def q(v,p):
+            x=pd.to_numeric(pd.Series(v),errors='coerce').dropna()
+            return float(x.quantile(p)) if len(x) else None
+
+        audits={}
+        for target_name,target_col in [('WIN50','winner50'),('WIN100','winner100')]:
+            cohort=J[(J.is_stop==True)|(J[target_col]==True)].copy()
+            cohort['y']=cohort[target_col].astype(int)
+            rows=[]
+            for f in features:
+                z=cohort[[f,'y','block5']].copy();z[f]=pd.to_numeric(z[f],errors='coerce');z=z.dropna(subset=[f])
+                auc=_v701_auc(z[f],z.y)
+                winners=z[z.y==1][f];stops=z[z.y==0][f]
+                d=smd(winners,stops)
+                direction=1 if np.isfinite(auc) and auc>=.5 else -1
+                blocks=[]
+                for b,g in z.groupby('block5'):
+                    if len(g)<8 or g.y.nunique()<2 or int(g.y.sum())<2:continue
+                    a=_v701_auc(g[f],g.y)
+                    if not np.isfinite(a):continue
+                    blocks.append({'block':f'{int(b)}-{int(b)+4}','n':int(len(g)),'winner_n':int(g.y.sum()),'auc':float(a),'oriented_auc':float(max(a,1-a)),'same_direction':bool((a-.5)*direction>=0)})
+                valid=[x for x in blocks]
+                dir_cons=float(np.mean([x['same_direction'] for x in valid])) if valid else None
+                rows.append({
+                    'feature':f,
+                    'coverage':float(pd.to_numeric(cohort[f],errors='coerce').notna().mean()),
+                    'n':int(len(z)),'winner_n':int(z.y.sum()),'stop_n':int((z.y==0).sum()),
+                    'pooled_auc':float(auc) if np.isfinite(auc) else None,
+                    'pooled_oriented_auc':float(max(auc,1-auc)) if np.isfinite(auc) else None,
+                    'winner_median':q(winners,.5),'stop_median':q(stops,.5),
+                    'winner_q25':q(winners,.25),'winner_q75':q(winners,.75),
+                    'stop_q25':q(stops,.25),'stop_q75':q(stops,.75),
+                    'smd_winner_minus_stop':float(d) if np.isfinite(d) else None,
+                    'block_count':int(len(valid)),
+                    'block_direction_consistency':dir_cons,
+                    'blocks':valid
+                })
+            rows=sorted(rows,key=lambda x:((x.get('block_direction_consistency') or 0),(x.get('pooled_oriented_auc') or 0),abs(x.get('smd_winner_minus_stop') or 0)),reverse=True)
+            audits[target_name]=rows
+
+        _v701_write(status='running',phase='shared_dna',
+                    message='寻找同时区分 STOP vs +50 与 STOP vs +100 的稳定 Entry DNA；只判证据，不生成新 filter/rank…',
+                    processed=3,total=5,elapsed_sec=round(time.time()-t0,1))
+
+        shared=[]
+        for f in features:
+            a=next((x for x in audits['WIN50'] if x['feature']==f),None)
+            b=next((x for x in audits['WIN100'] if x['feature']==f),None)
+            if not a or not b:continue
+            def ok(x):
+                return bool((x.get('coverage') or 0)>=.80 and
+                            (x.get('pooled_oriented_auc') or 0)>=.60 and
+                            abs(x.get('smd_winner_minus_stop') or 0)>=.35 and
+                            (x.get('block_count') or 0)>=3 and
+                            (x.get('block_direction_consistency') or 0)>=.67)
+            if ok(a) and ok(b):shared.append({'feature':f,'win50':a,'win100':b})
+
+        verdict=('ACTUAL_BUY_ENTRY_DNA_SIGNAL_FOUND' if shared else
+                 'ACTUAL_BUY_ENTRY_DNA_NOT_STRONG_ENOUGH')
+        result={
+            'version':'V7.01 Actual-Buy STOP vs Big-Winner Entry DNA Audit',
+            'verdict':verdict,
+            'actual_buy_n':int(len(J)),
+            'class_counts':{'stop':int(J.is_stop.sum()),'winner50':int(J.winner50.sum()),'winner100':int(J.winner100.sum())},
+            'tested_features':features,
+            'win50_audit':audits['WIN50'],'win100_audit':audits['WIN100'],
+            'shared_stable_dna':shared,
+            'history_dedup':[
+                'V6.90 already built these point-in-time features on the corrected Actual-Buy ledger; V7.01 reuses its saved rows verbatim and does not rebuild features.',
+                'V6.91 already tested BASE_QUALITY as an admission rule; V7.01 does not rerun that A/B or any family ranking.',
+                'V6.94 already tested Path-DNA on the full clean candidate universe; V7.01 does not use that candidate universe.',
+                'V6.95-V7.00 early-exit/capital-recycling work is closed and not reopened.'
+            ],
+            'anti_leakage':'All features come from the already-saved V6.90 point-in-time Actual-Buy feature ledger. V7.01 reads no post-entry path, MFE, MAE, exit-derived feature, or future price as an input feature; future return is label only.',
+            'acceptance':'Descriptive promotion gate only: the same feature must pass both +50 and +100 contrasts with coverage>=80%, oriented AUC>=0.60, |SMD|>=0.35, >=3 valid 5-year blocks, and >=67% block direction consistency. No cutoff, score combination, admission A/B, or threshold sweep in V7.01.',
+            'next_step':('V7.02 may test ONE source-consistent use of the strongest shared DNA, predeclared before replay.' if shared else 'Close generic numeric Actual-Buy Entry-DNA branch; do not retune V6.90/V6.91 or search neighboring thresholds.'),
+            'cache_note':'V6.90 clean_admission_features.csv.gz only; 0 Tiingo; 0 universe rescan; 0 Historical Cache reread; 0 Feature Store rebuild; 0 portfolio replay.'
+        }
+        V701_DIR.mkdir(parents=True,exist_ok=True)
+        V701_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        try:J.to_csv(V701_DIR/'actual_buy_audit_source_rows.csv.gz',index=False,compression='gzip')
+        except Exception:pass
+        _v701_write(status='done',phase='done',message=f'V7.01 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v701_write(status='error',phase='error',message=f'V7.01 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v701_thread=None
+
+def _v701_start():
+    global v701_thread
+    if _v701_alive():return False
+    _v701_write(status='starting',phase='starting',message='V7.01 正在启动',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v701_thread=threading.Thread(target=_v701_run,daemon=True);v701_thread.start();return True
+
+@APP.route('/v701/run',methods=['GET','POST'])
+def v701_run():
+    _v701_start();return redirect('/v701/clean-entry-revalidation')
+
+@APP.get('/api/v701/status')
+def v701_status_api():
+    return jsonify(_v701_status())
+
+@APP.get('/v701/clean-entry-revalidation')
+def v701_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v701_status();R={}
+    if V701_RESULT.exists():
+        try:R=json.loads(V701_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def num(v,d=np.nan):
+        try:
+            x=float(v);return x if np.isfinite(x) else d
+        except Exception:return d
+    def pct(v):
+        x=num(v);return '—' if not np.isfinite(x) else f'{x*100:.1f}%'
+    def f3(v):
+        x=num(v);return '—' if not np.isfinite(x) else f'{x:.3f}'
+
+    SH=((R.get('shared_stable_dna') or [{}])[0] if (R.get('shared_stable_dna') or []) else {})
+    def table_rows(xs):
+        out=''
+        for x in (xs or []):
+            out+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{pct(x.get('coverage'))}</td><td>{int(x.get('n',0) or 0):,}</td><td>{int(x.get('winner_n',0) or 0):,}</td><td>{f3(x.get('pooled_oriented_auc'))}</td><td>{int(x.get('year_count',0) or 0)}</td><td>{f3(x.get('mean_year_oriented_auc'))}</td><td>{f3(x.get('weakest_year_oriented_auc'))}</td><td>{pct(x.get('year_ge_0_60_share'))}</td><td>{e(x.get('old_v665_robust'))}</td></tr>"
+        return out
+
+    btn='' if _v701_alive() else '<a href="/v701/run"><button>▶ 开始 V7.01 Actual-Buy DNA Audit</button></a>'
+    err=f"<div class='err'><b>{e(st.get('error'))}</b><pre>{e(st.get('traceback',''))}</pre></div>" if st.get('error') else ''
+
+    return f"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1600px;margin:auto}}.c{{background:#fff;padding:26px;border-radius:22px;margin:16px 0}}.info{{background:#eef2ff;border:1px solid #6366f1;border-radius:14px;padding:16px}}.err{{background:#fff1f2;padding:14px;border-radius:12px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V7.01 Actual-Buy STOP vs Big-Winner Entry DNA Audit</h1><div class="info">只分析真正 Actual Buy。直接复用 V6.90 已保存的 point-in-time Entry features；不重建特征、不碰 full candidate universe、不重做 V6.91 A/B。目标是找 STOP 与 +50/+100 Big Winner 在买入当刻是否存在稳定 DNA 差异。</div></div>
+<div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',5) or 5)} · {num(st.get('elapsed_sec'),0):.1f}s</p>{btn}{err}</div>
+<div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Actual Buy N=<b>{int(R.get('actual_buy_n',0) or 0):,}</b> · shared stable DNA=<b>{e(SH.get('feature','—'))}</b></p></div>
+<div class="c"><h2>+50 Winner vs STOP · Strict OOS</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Years</th><th>Mean Year</th><th>Weakest</th><th>Year ≥.60</th><th>Old V6.65 robust?</th></tr>{table_rows(R.get('win50_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>+100 Winner vs STOP · Strict OOS</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Years</th><th>Mean Year</th><th>Weakest</th><th>Year ≥.60</th><th>Old V6.65 robust?</th></tr>{table_rows(R.get('win100_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
+</div></body></html>"""
+
+_v701_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v701_home_base is not None:
+    def _v701_home_wrap(*args,**kwargs):
+        resp=_v701_home_base(*args,**kwargs)
+        card="""<div id="v701-clean-entry-card" style="background:#eef2ff;border:5px solid #4f46e5;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V7.01 Actual-Buy Entry DNA Audit</h2><p>Actual Buy only · STOP vs +50/+100 · reuse V6.90 cache</p><a href="/v701/clean-entry-revalidation"><button>打开 V7.01</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v701-clean-entry-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+                resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v701_home_base:APP.view_functions[ep]=_v701_home_wrap
