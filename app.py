@@ -45380,6 +45380,10 @@ def _v701_run():
                     blocks.append({'block':f'{int(b)}-{int(b)+4}','n':int(len(g)),'winner_n':int(g.y.sum()),'auc':float(a),'oriented_auc':float(max(a,1-a)),'same_direction':bool((a-.5)*direction>=0)})
                 valid=[x for x in blocks]
                 dir_cons=float(np.mean([x['same_direction'] for x in valid])) if valid else None
+                block_aucs=[float(x['oriented_auc']) for x in valid if x.get('oriented_auc') is not None]
+                mean_block_auc=float(np.mean(block_aucs)) if block_aucs else None
+                weakest_block_auc=float(np.min(block_aucs)) if block_aucs else None
+                block_ge_060=float(np.mean([a>=.60 for a in block_aucs])) if block_aucs else None
                 rows.append({
                     'feature':f,
                     'coverage':float(pd.to_numeric(cohort[f],errors='coerce').notna().mean()),
@@ -45391,6 +45395,9 @@ def _v701_run():
                     'stop_q25':q(stops,.25),'stop_q75':q(stops,.75),
                     'smd_winner_minus_stop':float(d) if np.isfinite(d) else None,
                     'block_count':int(len(valid)),
+                    'mean_block_oriented_auc':mean_block_auc,
+                    'weakest_block_oriented_auc':weakest_block_auc,
+                    'block_ge_0_60_share':block_ge_060,
                     'block_direction_consistency':dir_cons,
                     'blocks':valid
                 })
@@ -45417,7 +45424,7 @@ def _v701_run():
         verdict=('ACTUAL_BUY_ENTRY_DNA_SIGNAL_FOUND' if shared else
                  'ACTUAL_BUY_ENTRY_DNA_NOT_STRONG_ENOUGH')
         result={
-            'version':'V7.01 Actual-Buy STOP vs Big-Winner Entry DNA Audit',
+            'version':'V7.01 Actual-Buy STOP vs Big-Winner Entry DNA Audit · Block Display Fix',
             'verdict':verdict,
             'actual_buy_n':int(len(J)),
             'class_counts':{'stop':int(J.is_stop.sum()),'winner50':int(J.winner50.sum()),'winner100':int(J.winner100.sum())},
@@ -45482,7 +45489,7 @@ def v701_page():
     def table_rows(xs):
         out=''
         for x in (xs or []):
-            out+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{pct(x.get('coverage'))}</td><td>{int(x.get('n',0) or 0):,}</td><td>{int(x.get('winner_n',0) or 0):,}</td><td>{f3(x.get('pooled_oriented_auc'))}</td><td>{int(x.get('year_count',0) or 0)}</td><td>{f3(x.get('mean_year_oriented_auc'))}</td><td>{f3(x.get('weakest_year_oriented_auc'))}</td><td>{pct(x.get('year_ge_0_60_share'))}</td><td>{e(x.get('old_v665_robust'))}</td></tr>"
+            out+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{pct(x.get('coverage'))}</td><td>{int(x.get('n',0) or 0):,}</td><td>{int(x.get('winner_n',0) or 0):,}</td><td>{f3(x.get('pooled_oriented_auc'))}</td><td>{int(x.get('block_count',0) or 0)}</td><td>{f3(x.get('mean_block_oriented_auc'))}</td><td>{f3(x.get('weakest_block_oriented_auc'))}</td><td>{pct(x.get('block_ge_0_60_share'))}</td><td>{pct(x.get('block_direction_consistency'))}</td></tr>"
         return out
 
     btn='' if _v701_alive() else '<a href="/v701/run"><button>▶ 开始 V7.01 Actual-Buy DNA Audit</button></a>'
@@ -45493,8 +45500,8 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class="c"><h1>🧬 V7.01 Actual-Buy STOP vs Big-Winner Entry DNA Audit</h1><div class="info">只分析真正 Actual Buy。直接复用 V6.90 已保存的 point-in-time Entry features；不重建特征、不碰 full candidate universe、不重做 V6.91 A/B。目标是找 STOP 与 +50/+100 Big Winner 在买入当刻是否存在稳定 DNA 差异。</div></div>
 <div class="c"><h2>状态：{e(st.get('status','idle'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {int(st.get('processed',0) or 0)}/{int(st.get('total',5) or 5)} · {num(st.get('elapsed_sec'),0):.1f}s</p>{btn}{err}</div>
 <div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Actual Buy N=<b>{int(R.get('actual_buy_n',0) or 0):,}</b> · shared stable DNA=<b>{e(SH.get('feature','—'))}</b></p></div>
-<div class="c"><h2>+50 Winner vs STOP · Strict OOS</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Years</th><th>Mean Year</th><th>Weakest</th><th>Year ≥.60</th><th>Old V6.65 robust?</th></tr>{table_rows(R.get('win50_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
-<div class="c"><h2>+100 Winner vs STOP · Strict OOS</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Years</th><th>Mean Year</th><th>Weakest</th><th>Year ≥.60</th><th>Old V6.65 robust?</th></tr>{table_rows(R.get('win100_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>+50 Winner vs STOP · 5-Year Block Stability</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Blocks</th><th>Mean Block AUC</th><th>Weakest</th><th>Block ≥.60</th><th>Direction Consistency</th></tr>{table_rows(R.get('win50_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
+<div class="c"><h2>+100 Winner vs STOP · 5-Year Block Stability</h2><table><tr><th>Feature</th><th>Coverage</th><th>N</th><th>Winners</th><th>Pooled AUC</th><th>Blocks</th><th>Mean Block AUC</th><th>Weakest</th><th>Block ≥.60</th><th>Direction Consistency</th></tr>{table_rows(R.get('win100_audit')) or '<tr><td colspan=10>运行后显示</td></tr>'}</table></div>
 </div></body></html>"""
 
 _v701_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
