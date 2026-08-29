@@ -46758,3 +46758,426 @@ if _v7pf_home_base is not None:
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v7pf_home_base:
             APP.view_functions[ep]=_v7pf_home_wrap
+
+
+# ========================= V7.06 DEFENSIVE NEW-ADMISSION CAUSAL A/B =========================
+V706_DIR=DATA_DIR/'v706_defensive_new_admission_causal_ab'
+V706_STATUS=V706_DIR/'status.json'; V706_RESULT=V706_DIR/'result.json'
+V706_LEDGER_A=V706_DIR/'control_ledger.csv.gz'; V706_LEDGER_B=V706_DIR/'defensive_block_ledger.csv.gz'
+V706_EQ_A=V706_DIR/'control_equity.csv.gz'; V706_EQ_B=V706_DIR/'defensive_block_equity.csv.gz'
+v706_thread=None
+
+def _v706_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V706_STATUS.exists():
+        try:x.update(json.loads(V706_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v706_write(**kw):
+    V706_DIR.mkdir(parents=True,exist_ok=True);x=_v706_status();x.update(kw)
+    V706_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v706_alive():return v706_thread is not None and v706_thread.is_alive()
+
+def _v706_metrics(eqrows,ledger,label):
+    E=pd.DataFrame(eqrows).sort_values('date').reset_index(drop=True)
+    if E.empty:raise RuntimeError(f'{label}: empty equity')
+    s=E.equity.astype(float)
+    peak=s.cummax();dd=s/peak-1.0;maxdd=float(dd.min())
+    days=max(1,(pd.Timestamp(E.date.iloc[-1])-pd.Timestamp(E.date.iloc[0])).days)
+    yrs=days/365.25
+    cagr=float((s.iloc[-1]/s.iloc[0])**(1/max(yrs,1e-9))-1) if s.iloc[0]>0 and s.iloc[-1]>0 else np.nan
+    L=pd.DataFrame(ledger)
+    if len(L):
+        rr=pd.to_numeric(L.ret,errors='coerce').dropna()
+        wins=rr[rr>0];loss=rr[rr<=0]
+        gp=float(wins.sum()) if len(wins) else 0.0
+        gl=float(-loss.sum()) if len(loss) else 0.0
+        pf=float(gp/gl) if gl>0 else np.inf
+        wr=float((rr>0).mean()) if len(rr) else np.nan
+        avg=float(rr.mean()) if len(rr) else np.nan
+        stop=float(L.is_stop.mean()) if 'is_stop' in L.columns and len(L) else np.nan
+        p50=int((rr>=.50).sum());p100=int((rr>=1.0).sum())
+    else:
+        pf=wr=avg=stop=np.nan;p50=p100=0
+    calmar=float(cagr/abs(maxdd)) if np.isfinite(cagr) and maxdd<0 else np.nan
+    annual={}
+    E['year']=pd.to_datetime(E.date).dt.year
+    for y,g in E.groupby('year'):
+        g=g.sort_values('date')
+        if len(g)>=2 and float(g.equity.iloc[0])>0:
+            annual[str(int(y))]=float(g.equity.iloc[-1]/g.equity.iloc[0]-1)
+    return {'label':label,'cagr':cagr,'maxdd':maxdd,'calmar':calmar,'profit_factor':pf,'win_rate':wr,
+            'avg_trade':avg,'stop_rate':stop,'plus50_realized':p50,'plus100_realized':p100,
+            'realized_trades':int(len(L)),'final_multiple':float(s.iloc[-1]/s.iloc[0]),'annual':annual},E,L
+
+def _v706_run():
+    global v706_thread
+    t0=time.time()
+    try:
+        # ---------- 0. Runtime preflight: MUST be sub-5s / no Historical Cache ----------
+        _v706_write(status='running',phase='preflight',
+                    message='V7.06 Preflight：先验证 exact ledger / v704_row_id / regime cache；不过不准长跑…',
+                    processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+
+        if not V705_RESULT.exists():
+            raise RuntimeError('缺 V7.05 result.json')
+        r705=json.loads(V705_RESULT.read_text(encoding='utf-8'))
+        if r705.get('verdict')!='DRAWDOWN_SOURCE_CONCENTRATED_AND_ACTIONABLE_FOR_ONE_CAUSAL_TEST':
+            raise RuntimeError(f'V7.05 verdict 不允许 causal test: {r705.get("verdict")}')
+        if not V704_RESULT.exists() or not V704_LEDGER.exists() or not V704_BREAKOUT_CACHE.exists():
+            raise RuntimeError('缺 V7.04 result/ledger/cache')
+        r704=json.loads(V704_RESULT.read_text(encoding='utf-8'));ref=(r704.get('B') or {})
+        expected=int(ref.get('admitted_positions') or 0)
+        if expected!=291:
+            raise RuntimeError(f'V7.04 expected admissions drift: {expected} != 291')
+
+        if 'V7PF_RESULT' not in globals() or not V7PF_RESULT.exists():
+            raise RuntimeError('Runtime Preflight result missing')
+        pf=json.loads(V7PF_RESULT.read_text(encoding='utf-8'))
+        if pf.get('verdict')!='PREFLIGHT_READY_FOR_UNIFIED_ADAPTER':
+            raise RuntimeError(f'Runtime Preflight not ready: {pf.get("verdict")}')
+
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
+        for d in (L,C):
+            if 'v704_row_id' not in d.columns:raise RuntimeError('v704_row_id missing')
+            d['v704_row_id']=pd.to_numeric(d['v704_row_id'],errors='coerce')
+            if d['v704_row_id'].isna().any() or not d['v704_row_id'].is_unique:
+                raise RuntimeError('v704_row_id identity invalid')
+        if len(L)!=expected:raise RuntimeError(f'V7.04 ledger parity {len(L)} != {expected}')
+        lidset=set(L.v704_row_id.astype(int));cidset=set(C.v704_row_id.astype(int))
+        if not lidset.issubset(cidset):raise RuntimeError(f'V7.04 cache missing exact IDs: {len(lidset-cidset)}')
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY PIT regime cache unavailable')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        if 'regime' not in R.columns:raise RuntimeError('SPY regime column missing')
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize()
+        R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+
+        preflight_elapsed=time.time()-t0
+        if preflight_elapsed>8:
+            # informational only; do not fail for slow storage, but preserve the timing.
+            pass
+
+        # ---------- 1. Unified adapter exact join ----------
+        _v706_write(status='running',phase='adapter',
+                    message=f'Preflight PASS {preflight_elapsed:.2f}s · exact V7.04 Actual Buy={expected} · canonical key=v704_row_id…',
+                    processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        enrich=[c for c in ['v704_row_id','v702_row_id','range20','breakout_margin50'] if c in C.columns]
+        X=L.merge(C[enrich],on='v704_row_id',how='left',validate='one_to_one',suffixes=('','_cache'))
+        X['listing_id']=X['listing_id'].astype(str)
+        X['entry_date']=pd.to_datetime(X['entry_date'],errors='coerce').dt.normalize()
+        X['exit_date']=pd.to_datetime(X['exit_date'],errors='coerce').dt.normalize()
+        X['ret']=pd.to_numeric(X['ret'],errors='coerce')
+        if len(X)!=expected or X[['listing_id','entry_date','exit_date','ret']].isna().any().any():
+            raise RuntimeError('Unified adapter ledger schema/parity failed')
+
+        # Point-in-time entry regime, backward asof only.
+        X=pd.merge_asof(
+            X.sort_values('entry_date'),
+            R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+            on='entry_date',direction='backward'
+        )
+        X['regime']=X['regime'].fillna('UNKNOWN').astype(str).str.upper()
+        if int((X.regime=='DEFENSIVE').sum())<=0:
+            raise RuntimeError('No DEFENSIVE entries found; causal test blocked')
+
+        # ---------- 2. Recover exact V7.04 execution source fields by v704_row_id ----------
+        _v706_write(status='running',phase='source_fields',
+                    message='恢复 291 笔 exact source fields；只按 v704_row_id，不重建 admission…',
+                    processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 source cache')
+        F=pd.read_csv(ffp,compression='gzip')
+        P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        F['listing_id']=F['listing_id'].astype(str);F['entry_date']=pd.to_datetime(F['entry_date'],errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F['exit_date'],errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order']
+        miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 source fields missing: '+','.join(miss))
+        meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize()
+        meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        S=F.merge(meta,on=['listing_id','entry_date'],how='left')
+        S['candidate_order']=pd.to_numeric(S.candidate_order,errors='coerce')
+        S['entry_px_raw']=pd.to_numeric(S.entry_px,errors='coerce');S['exit_px_raw']=pd.to_numeric(S.control_exit_px,errors='coerce')
+        S=S.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']) \
+             .sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        S['v704_row_id']=np.arange(len(S),dtype=int)
+        SRC=S[S.v704_row_id.isin(set(X.v704_row_id.astype(int)))][
+            ['v704_row_id','listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','control_reason']
+        ].copy()
+        if len(SRC)!=expected or not SRC.v704_row_id.is_unique:
+            raise RuntimeError(f'Exact source recovery parity {len(SRC)} != {expected}')
+        X=X.merge(SRC,on='v704_row_id',how='left',validate='one_to_one',suffixes=('_ledger','_src'))
+        bad=(X.listing_id_ledger.astype(str)!=X.listing_id_src.astype(str))
+        bad|=(pd.to_datetime(X.entry_date_ledger).dt.normalize()!=pd.to_datetime(X.entry_date_src).dt.normalize())
+        bad|=(pd.to_datetime(X.exit_date_ledger).dt.normalize()!=pd.to_datetime(X.exit_date_src).dt.normalize())
+        if bad.any():raise RuntimeError(f'Exact source identity mismatch rows={int(bad.sum())}')
+        X['listing_id']=X.listing_id_ledger.astype(str)
+        X['entry_date']=pd.to_datetime(X.entry_date_ledger).dt.normalize()
+        X['exit_date']=pd.to_datetime(X.exit_date_ledger).dt.normalize()
+        X['entry_px_raw']=pd.to_numeric(X.entry_px_raw,errors='coerce');X['exit_px_raw']=pd.to_numeric(X.exit_px_raw,errors='coerce')
+        X['is_stop']=X['is_stop'].astype(bool) if 'is_stop' in X.columns else X.control_reason.astype(str).str.upper().str.contains('STOP')
+
+        # ---------- 3. Historical Cache ONLY for actual admitted listings ----------
+        _v706_write(status='running',phase='actual_buy_cache',
+                    message=f'只读 {X.listing_id.nunique()} 个 Actual-Buy listings 的 Historical Cache…',
+                    processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        spans=X.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index')
+        packs={};factors={};missing=0;lids=list(spans.keys())
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','close']):missing+=1;continue
+            q=pd.DataFrame({
+                'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(d[lc['open']],errors='coerce'),
+                'close':pd.to_numeric(d[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=10);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10)
+            q=q[(q.date>=lo)&(q.date<=hi)].copy()
+            if q.empty:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[z for z in ev if z['high_confidence']]
+            factors[str(lid)]=hev
+            q['safe_open']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.open,q.date)]
+            q['safe_close']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.close,q.date)]
+            packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),
+                             'open':q.safe_open.to_numpy(dtype='float32'),
+                             'close':q.safe_close.to_numpy(dtype='float32')}
+            if n==1 or n%50==0 or n==len(lids):
+                _v706_write(status='running',phase='actual_buy_cache',
+                            message=f'Actual-Buy cache {n}/{len(lids)} · missing={missing}',
+                            processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        eps=[];xps=[];ok=[]
+        for _,r in X.iterrows():
+            lid=str(r.listing_id);hev=factors.get(lid,[])
+            ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date))
+            xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date))
+            eps.append(ep);xps.append(xp);ok.append(lid in packs and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        X['entry_px_safe']=eps;X['exit_px_safe']=xps
+        X=X[np.asarray(ok,dtype=bool)].copy().reset_index(drop=True)
+        if len(X)<expected:
+            raise RuntimeError(f'Executable coverage must be exact for causal test: {len(X)} != {expected}')
+
+        # ---------- 4. Fixed-schedule causal A/B ----------
+        _v706_write(status='running',phase='causal_ab',
+                    message='A=291 exact schedule；B=只阻断 DEFENSIVE 新买入，不补 replacement…',
+                    processed=4,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        cal=set(R.date.tolist());cal.update(X.entry_date.tolist());cal.update(X.exit_date.tolist());cal=sorted(cal)
+        rec=X.to_dict('index');entries={};exits={}
+        for i,r in rec.items():
+            entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i)
+            exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+
+        def sim(label,block_defensive):
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];blocked=[];clipped=0
+            for dt in cal:
+                dt=pd.Timestamp(dt).normalize()
+                for i in exits.get(dt,[]):
+                    p=pos.pop(i,None)
+                    if p is None:continue
+                    xp=float(rec[i]['exit_px_safe']);proceeds=p['shares']*xp;cash+=proceeds
+                    ledger.append({'id':int(i),'v704_row_id':int(rec[i]['v704_row_id']),
+                                   'listing_id':str(rec[i]['listing_id']),'entry_date':p['entry_date'],
+                                   'exit_date':dt,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],
+                                   'is_stop':bool(rec[i].get('is_stop',False)),'entry_regime':str(rec[i].get('regime','UNKNOWN'))})
+                    last.pop(i,None)
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close')
+                    cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0
+                for i in entries.get(dt,[]):
+                    if block_defensive and str(rec[i].get('regime','UNKNOWN')).upper()=='DEFENSIVE':
+                        blocked.append(int(i));continue
+                    ep=float(rec[i]['entry_px_safe']);invest=min(float(target),float(cash)) if target>0 else 0.0
+                    if invest<=1e-12:clipped+=1;continue
+                    cash-=invest;pos[i]={'listing_id':str(rec[i]['listing_id']),'shares':invest/ep,
+                                        'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close')
+                    cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                if eq<=0 or not np.isfinite(eq):raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+                eqrows.append({'date':dt,'equity':float(eq),'exposure':float(hv/eq) if eq>0 else np.nan,'positions':int(len(pos))})
+            M,E,Lg=_v706_metrics(eqrows,ledger,label);M['blocked_defensive_entries']=int(len(blocked));M['clipped_entries']=int(clipped)
+            return M,E,Lg,blocked
+
+        A,EA,LA,_=sim('A_V704_EXACT_SCHEDULE',False)
+        B,EB,LB,blocked=sim('B_BLOCK_DEFENSIVE_NEW_ADMISSION',True)
+
+        # Hard parity with V7.04/V7.05 control before interpreting challenger.
+        if A['realized_trades']!=expected:
+            raise RuntimeError(f'Control schedule parity {A["realized_trades"]} != {expected}')
+        for k,tol in [('cagr',0.015),('maxdd',0.015),('profit_factor',0.10)]:
+            refv=ref.get(k);av=A.get(k)
+            if refv is not None and np.isfinite(float(refv)) and np.isfinite(float(av)) and abs(float(refv)-float(av))>tol:
+                raise RuntimeError(f'Control metric parity failed {k}: fixed={av} V7.04={refv}')
+
+        # ---------- 5. Economic / winner-preservation audit ----------
+        _v706_write(status='running',phase='audit',
+                    message='审计 MaxDD / CAGR / PF / Calmar / Big-Winner retention / yearly behavior…',
+                    processed=5,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        delta={k:float(B[k]-A[k]) for k in ['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate']
+               if k in A and k in B and np.isfinite(A[k]) and np.isfinite(B[k])}
+        blocked_df=X.loc[blocked].copy() if blocked else X.iloc[0:0].copy()
+        blocked_ret=pd.to_numeric(blocked_df.ret,errors='coerce') if len(blocked_df) else pd.Series(dtype=float)
+        blocked_diag={
+            'n':int(len(blocked_df)),
+            'stops':int(blocked_df.is_stop.sum()) if len(blocked_df) else 0,
+            'stop_rate':float(blocked_df.is_stop.mean()) if len(blocked_df) else None,
+            'plus50':int((blocked_ret>=.50).sum()) if len(blocked_df) else 0,
+            'plus100':int((blocked_ret>=1.0).sum()) if len(blocked_df) else 0,
+            'avg_ret':float(blocked_ret.mean()) if len(blocked_ret) else None
+        }
+
+        # Since the challenger deliberately blocks scheduled entries, winner retention is measured
+        # against realized control winners on the exact schedule.
+        p50_ret=float(B['plus50_realized']/A['plus50_realized']) if A['plus50_realized'] else 1.0
+        p100_ret=float(B['plus100_realized']/A['plus100_realized']) if A['plus100_realized'] else 1.0
+
+        ys=sorted(set(A['annual'])&set(B['annual']))
+        changed_years=[y for y in ys if abs(A['annual'][y]-B['annual'][y])>1e-12]
+        beats=sum(B['annual'][y]>A['annual'][y] for y in changed_years)
+        beat_share=float(beats/len(changed_years)) if changed_years else np.nan
+
+        # Predeclared causal gate: material DD repair, better risk-adjusted return,
+        # and no destruction of the right tail.
+        passes=bool(
+            delta.get('maxdd',-999)>=.15 and
+            B.get('calmar',-999)>A.get('calmar',-999) and
+            B.get('cagr',-999)>=A.get('cagr',-999)-.02 and
+            p50_ret>=.85 and p100_ret>=.85 and
+            blocked_diag['n']>0 and
+            (not changed_years or beat_share>=.50)
+        )
+        verdict='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_CAUSAL_SHADOW_AB' if passes else 'DEFENSIVE_NEW_ADMISSION_BLOCK_FAILS_CAUSAL_SHADOW_AB'
+
+        result={
+            'version':'V7.06 Defensive New-Admission Risk-Permission Causal Shadow A/B',
+            'verdict':verdict,
+            'preflight':{'runtime_preflight':pf.get('verdict'),'elapsed_sec':round(preflight_elapsed,3),
+                         'canonical_key':'v704_row_id','actual_buy_n':expected},
+            'frozen':{'entry_ranking':'V7.04 Range20→BreakoutMargin50 exact schedule',
+                      'stop':'unchanged','winner_exit':'unchanged','position_sizing':'10-slot target unchanged'},
+            'causal_change':'B skips a scheduled NEW entry only when its point-in-time SPY regime at entry is DEFENSIVE. Existing positions are untouched. No replacement candidate is inserted.',
+            'A':A,'B':B,'delta':delta,
+            'blocked_defensive':blocked_diag,
+            'winner_retention':{'+50':p50_ret,'+100':p100_ret},
+            'year_stability':{'comparable_years':len(ys),'changed_years':len(changed_years),
+                              'B_beats_A_changed_years':int(beats),'beat_share':beat_share,
+                              'A':A['annual'],'B':B['annual']},
+            'acceptance':'PASS only if MaxDD improves >=15pp; Calmar improves; CAGR no worse by >2pp; realized +50 and +100 winner retention >=85%; at least one DEFENSIVE entry is blocked; and B wins >=50% of years actually changed.',
+            'important':'This is a fixed-schedule causal shadow test, deliberately conservative: blocked DEFENSIVE trades are NOT replaced by candidates that might have become available. A PASS is strong evidence for market risk-permission value; a FAIL does not prove a fully dynamic replacement replay would fail.',
+            'history_dedup':'Does not reopen V6.95 broad regime burden, V6.16I ranking/replacement grids, or V6.95–V7.00 early-exit/capital-recycling. Exactly one mechanism is tested: DEFENSIVE new-admission permission.',
+            'next_step':('If PASS, promote only this single market-permission rule to one exact dynamic candidate-stream confirmation using the existing V7.04 feature cache; no new thresholds.' if passes else
+                         'Close DEFENSIVE hard-block shadow rule. Do not sweep regimes/thresholds; return to source-semantic candidate quality or another genuinely new mechanism.'),
+            'cache_note':'Runtime Preflight + V7.04 exact 291 ledger/cache + Historical Cache only for admitted listings + SPY PIT regime. 0 Tiingo; 0 universe rescan; 0 admission reconstruction; 0 replacement search.'
+        }
+        V706_DIR.mkdir(parents=True,exist_ok=True)
+        V706_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        EA.to_csv(V706_EQ_A,index=False,compression='gzip');EB.to_csv(V706_EQ_B,index=False,compression='gzip')
+        LA.to_csv(V706_LEDGER_A,index=False,compression='gzip');LB.to_csv(V706_LEDGER_B,index=False,compression='gzip')
+        _v706_write(status='done',phase='done',message=f'V7.06 完成：{verdict}',
+                    processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v706_write(status='error',phase='error',message=f'V7.06 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=7,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v706_thread=None
+
+def _v706_start():
+    global v706_thread
+    if _v706_alive():return False
+    _v706_write(status='starting',phase='starting',message='V7.06 正在启动',processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+    v706_thread=threading.Thread(target=_v706_run,daemon=True);v706_thread.start();return True
+
+@APP.route('/v706/run',methods=['GET','POST'])
+def v706_run():_v706_start();return redirect('/v706/defensive-new-admission-causal-ab')
+
+@APP.get('/api/v706/status')
+def v706_status_api():return jsonify(_v706_status())
+
+@APP.get('/v706/defensive-new-admission-causal-ab')
+def v706_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v706_status();R={}
+    if V706_RESULT.exists():
+        try:R=json.loads(V706_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    A=R.get('A',{}) or {};B=R.get('B',{}) or {};D=R.get('delta',{}) or {};BD=R.get('blocked_defensive',{}) or {};WR=R.get('winner_retention',{}) or {};Y=R.get('year_stability',{}) or {}
+    def pct(x):
+        try:return f'{float(x)*100:.2f}%'
+        except:return '—'
+    def num(x):
+        try:return f'{float(x):.2f}'
+        except:return '—'
+    def row(name,z):
+        return f"<tr><td><b>{e(name)}</b></td><td>{pct(z.get('cagr'))}</td><td>{num(z.get('profit_factor'))}</td><td>{pct(z.get('maxdd'))}</td><td>{num(z.get('calmar'))}</td><td>{pct(z.get('win_rate'))}</td><td>{pct(z.get('avg_trade'))}</td><td>{pct(z.get('stop_rate'))}</td><td>{z.get('plus50_realized','—')}</td><td>{z.get('plus100_realized','—')}</td><td>{z.get('realized_trades','—')}</td></tr>"
+    btn="<form method='post' action='/v706/run'><button>▶ 开始 V7.06 Causal A/B</button></form>" if st.get('status') not in ['running','starting'] else ''
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:20px;margin:15px 0}}
+.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}
+.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}
+button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}
+pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
+</style></head><body><div class='w'>
+<a href='/'>← 首页</a>
+<div class='c'><h1>🛡️ V7.06 Defensive New-Admission Causal A/B</h1>
+<div class='ok'><b>唯一改动：</b>entry 当天 SPY PIT regime=DEFENSIVE 时，不开新仓。已有仓位、Range20→Breakout50、Stop、Winner Exit 全部冻结。<br>固定 291 exact schedule；blocked trade 不补 replacement。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p>{btn}
+{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' and st.get('traceback') else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{e(R.get('acceptance',''))}</p></div>
+<div class='c'><h2>Fixed-Schedule Account A/B</h2><div style='overflow:auto'><table>
+<tr><th></th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>Avg Trade</th><th>STOP%</th><th>+50</th><th>+100</th><th>Trades</th></tr>
+{row('A V7.04 Exact',A)}{row('B Block DEFENSIVE',B)}
+</table></div>
+<p>ΔCAGR={pct(D.get('cagr'))} · ΔPF={num(D.get('profit_factor'))} · ΔMaxDD={pct(D.get('maxdd'))} · ΔCalmar={num(D.get('calmar'))}</p></div>
+<div class='c'><h2>DEFENSIVE Block Diagnostics</h2>
+<p>Blocked N=<b>{BD.get('n','—')}</b> · STOP={BD.get('stops','—')} · STOP%={pct(BD.get('stop_rate'))} · +50={BD.get('plus50','—')} · +100={BD.get('plus100','—')} · AvgRet={pct(BD.get('avg_ret'))}</p>
+<p>Winner retention: +50=<b>{pct(WR.get('+50'))}</b> · +100=<b>{pct(WR.get('+100'))}</b></p>
+<p>Changed years={Y.get('changed_years','—')} · B beats A={Y.get('B_beats_A_changed_years','—')} · share={pct(Y.get('beat_share'))}</p></div>
+<div class='c'><div class='warn'><b>解释边界：</b>{e(R.get('important','固定 schedule shadow；不补 replacement，故偏保守。'))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let q=await fetch('/api/v706/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+_v706_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v706_home_base is not None:
+    def _v706_home_wrap(*args,**kwargs):
+        resp=_v706_home_base(*args,**kwargs)
+        card="""<div id='v706-card' style='background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🛡️ V7.06 Defensive New-Admission Causal A/B</h2><p>Preflight first · fixed 291 exact schedule · one causal permission rule only</p>
+        <a href='/v706/defensive-new-admission-causal-ab'><button>打开 V7.06</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v706-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1
+                body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v706_home_base:APP.view_functions[ep]=_v706_home_wrap
