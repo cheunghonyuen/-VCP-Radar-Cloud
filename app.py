@@ -45985,14 +45985,14 @@ def _v704_run():
             if a is None or float(a)<=.5:raise RuntimeError(f'breakout_margin50 direction not HIGHER_BETTER for {target}: {a}')
 
         ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
-        if not ffp.exists() or not V669_TRADES.exists() or not V702_RANGE20_CACHE.exists():raise RuntimeError('缺 V6.94/V6.69/V7.02 candidate cache')
-        F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'});C=pd.read_csv(V702_RANGE20_CACHE,compression='gzip')
+        if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
+        F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize();C['listing_id']=C.listing_id.astype(str);C['entry_date']=pd.to_datetime(C.entry_date,errors='coerce').dt.normalize();C['range20']=pd.to_numeric(C.range20,errors='coerce')
+        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
-        Z=F.merge(meta,on=['listing_id','entry_date'],how='left').merge(C[['listing_id','entry_date','range20']],on=['listing_id','entry_date'],how='left')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left')
         Z['candidate_order']=pd.to_numeric(Z.candidate_order,errors='coerce');Z['entry_px_raw']=pd.to_numeric(Z.entry_px,errors='coerce');Z['exit_px_raw']=pd.to_numeric(Z.control_exit_px,errors='coerce')
         Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
         Z['v704_row_id']=np.arange(len(Z),dtype=int)
@@ -46000,10 +46000,10 @@ def _v704_run():
         r20cov=float(pd.to_numeric(Z.range20,errors='coerce').notna().mean());
         if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
 
-        _v704_write(status='running',phase='historical_cache',message=f'Candidate={len(Z):,} · 只读 V6.17 Historical Cache，构建 breakout_margin50 + compact prices…',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+        _v704_write(status='running',phase='historical_cache',message=f'Candidate={len(Z):,} · 严格复刻 V7.02 execution pack；Breakout50 用独立 feature-only pack…',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
         M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
         if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
-        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};factors={};missing=0;lids=list(spans.keys())
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};feature_packs={};factors={};missing=0;lids=list(spans.keys())
         for n,lid in enumerate(lids,1):
             mr=mmap.get(str(lid))
             if mr is None:missing+=1;continue
@@ -46012,22 +46012,44 @@ def _v704_run():
             if d is None or d.empty:missing+=1;continue
             lc={str(c).lower():c for c in d.columns}
             if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
-            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
-            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=180);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10);q=q[(q.date>=lo)&(q.date<=hi)].copy()
-            if len(q)<51:missing+=1;continue
+            qall=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            # CRITICAL PARITY: execution pack is byte-for-byte semantic equivalent of V7.02:
+            # 120 calendar-day lookback and >=20 rows. Breakout50 gets a SEPARATE feature-only
+            # 180-day pack and is never allowed to change execution eligibility or price factors.
+            lo_exec=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=120);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10)
+            q=qall[(qall.date>=lo_exec)&(qall.date<=hi)].copy()
+            if len(q)<20:missing+=1;continue
             ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
             for c in ['open','high','low','close']:q['safe_'+c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
             packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),'open':q.safe_open.to_numpy(dtype='float32'),'high':q.safe_high.to_numpy(dtype='float32'),'low':q.safe_low.to_numpy(dtype='float32'),'close':q.safe_close.to_numpy(dtype='float32')}
+            lo_feat=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=180)
+            qf=qall[(qall.date>=lo_feat)&(qall.date<=hi)].copy()
+            if len(qf)>=51:
+                # breakout_margin50 is a ratio, so use raw split-consistent OHLC window only as
+                # feature geometry; it does not participate in execution-price normalization.
+                feature_packs[str(lid)]={'date_ns':qf.date.astype('int64').to_numpy(dtype='int64'),'high':qf.high.to_numpy(dtype='float32'),'close':qf.close.to_numpy(dtype='float32')}
             if n==1 or n%100==0 or n==len(lids):_v704_write(status='running',phase='historical_cache',message=f'Historical Cache {n}/{len(lids)} · missing={missing}',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
 
-        eps=[];xps=[];b50s=[];keep=[]
+        eps=[];xps=[];r20s=[];b50s=[];keep=[]
         for _,r in Z.iterrows():
-            lid=str(r.listing_id);hev=factors.get(lid,[]);pack=packs.get(lid);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date));b50=_v704_breakout50(pack,pd.Timestamp(r.entry_date))
-            eps.append(ep);xps.append(xp);b50s.append(b50);keep.append(pack is not None and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
-        Z['entry_px_safe']=eps;Z['exit_px_safe']=xps;Z['breakout_margin50']=b50s;Z=Z[np.asarray(keep,dtype=bool)].reset_index(drop=True)
-        b50cov=float(pd.to_numeric(Z.breakout_margin50,errors='coerce').notna().mean()) if len(Z) else 0.
+            lid=str(r.listing_id);hev=factors.get(lid,[]);pack=packs.get(lid);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date));r20=_v702_range20_from_pack(pack,pd.Timestamp(r.entry_date));b50=_v704_breakout50(feature_packs.get(lid),pd.Timestamp(r.entry_date))
+            eps.append(ep);xps.append(xp);r20s.append(r20);b50s.append(b50);keep.append(pack is not None and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        Z['entry_px_safe']=eps;Z['exit_px_safe']=xps;Z['range20']=r20s;Z['breakout_margin50']=b50s;Z=Z[np.asarray(keep,dtype=bool)].reset_index(drop=True)
+        # After the exact V7.02 keep/reset step, dataframe index IS the V7.02 row identity.
+        Z['v702_row_id']=np.arange(len(Z),dtype=int);Z['v704_row_id']=Z['v702_row_id']
+        # Hard identity match to the persisted 280 ledger before replay.
+        live_ids=set(Z['v702_row_id'].astype(int));saved_ids=set(_ids.astype(int))
+        if not saved_ids.issubset(live_ids):
+            raise RuntimeError(f'V7.02 exact ledger IDs missing from V7.04 candidate set: {len(saved_ids-live_ids)}')
+        # Verify identifying fields for every saved Actual Buy, not only the count.
+        chk=_L[['v702_row_id','listing_id','entry_date','candidate_order']].copy();chk['v702_row_id']=pd.to_numeric(chk.v702_row_id,errors='raise').astype(int);chk['listing_id']=chk.listing_id.astype(str);chk['entry_date']=pd.to_datetime(chk.entry_date,errors='coerce').dt.normalize();chk['candidate_order']=pd.to_numeric(chk.candidate_order,errors='coerce')
+        cur=Z[['v702_row_id','listing_id','entry_date','candidate_order']].copy();mm=chk.merge(cur,on='v702_row_id',how='left',suffixes=('_saved','_cur'))
+        bad=((mm.listing_id_saved!=mm.listing_id_cur)|(mm.entry_date_saved!=mm.entry_date_cur)|(pd.to_numeric(mm.candidate_order_saved,errors='coerce')!=pd.to_numeric(mm.candidate_order_cur,errors='coerce')))
+        if bool(bad.any()):raise RuntimeError(f'V7.02 candidate identity content mismatch rows={int(bad.sum())}')
+        r20cov=float(pd.to_numeric(Z.range20,errors='coerce').notna().mean()) if len(Z) else 0.;b50cov=float(pd.to_numeric(Z.breakout_margin50,errors='coerce').notna().mean()) if len(Z) else 0.
+        if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
         if b50cov<.90:raise RuntimeError(f'breakout_margin50 coverage too low {b50cov:.1%}')
-        V704_DIR.mkdir(parents=True,exist_ok=True);Z[['v704_row_id','listing_id','entry_date','candidate_order','range20','breakout_margin50']].to_csv(V704_BREAKOUT_CACHE,index=False,compression='gzip')
+        V704_DIR.mkdir(parents=True,exist_ok=True);Z[['v702_row_id','v704_row_id','listing_id','entry_date','candidate_order','range20','breakout_margin50']].to_csv(V704_BREAKOUT_CACHE,index=False,compression='gzip')
 
         _v704_write(status='running',phase='calendar',message=f'Coverage range20={r20cov:.1%}, breakout50={b50cov:.1%} · 构建账户 replay…',processed=3,total=8,elapsed_sec=round(time.time()-t0,1))
         rg=_v42_spy_regimes()
@@ -46118,7 +46140,7 @@ def _v704_run():
                 'history_dedup':'V6.91 hard admission remains closed; V6.16I ranking/replacement grids remain closed. V7.04 tests exactly one hierarchical economic use of V7.03 top shared trigger DNA. No numeric cutoff, no feature-weight grid, no ATR20, no third feature.',
                 'important':'V7.03 was discovered on V7.02 Actual Buys, so V7.04 is still post-selection research, not untouched production validation. If this fails, do not tune the finalist multiplier or neighboring rules.',
                 'next_step':('If PASS, freeze V7.04 and run one untouched forward-chained confirmation before production promotion.' if pass_econ else 'Close breakout_margin50 second-layer economic branch; do not tune 2x pool/cutoffs. Return to source-semantic candidate quality or a genuinely new mechanism.'),
-                'cache_note':'V7.02 exact 280 admission ledger identity precheck + V6.94 candidate outcomes + V6.69 original order/exits + V7.02 range20 cache + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
+                'cache_note':'V7.02 exact 280 admission ledger + exact V7.02 execution-pack semantics (120d/20-row) + separate Breakout50 feature-only pack + V6.94/V6.69 + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
         V704_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
         if len(EV):EV.to_csv(V704_DIR/'two_stage_contest_events.csv.gz',index=False,compression='gzip')
         if admB:
