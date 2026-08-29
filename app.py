@@ -46199,3 +46199,177 @@ if _v704_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v704_home_base:APP.view_functions[ep]=_v704_home_wrap
+
+
+# ========================= V7.05 DRAWDOWN REGIME AUTOPSY =========================
+V705_DIR=DATA_DIR/'v705_drawdown_regime_autopsy'
+V705_STATUS=V705_DIR/'status.json'; V705_RESULT=V705_DIR/'result.json'
+V705_EQUITY=V705_DIR/'equity_curve.csv.gz'; V705_DD_TRADES=V705_DIR/'maxdd_window_trades.csv.gz'
+v705_thread=None
+
+def _v705_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V705_STATUS.exists():
+        try:x.update(json.loads(V705_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v705_write(**kw):
+    V705_DIR.mkdir(parents=True,exist_ok=True);x=_v705_status();x.update(kw)
+    V705_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v705_alive():return v705_thread is not None and v705_thread.is_alive()
+
+def _v705_run():
+    global v705_thread
+    t0=time.time()
+    try:
+        _v705_write(status='running',phase='precheck',message='V7.05：只诊断 V7.04 B 的固定 Actual Buys；不改规则、不筛选、不重放 admission…',processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+        if not V704_RESULT.exists():raise RuntimeError('找不到 V7.04 result.json')
+        r704=json.loads(V704_RESULT.read_text(encoding='utf-8'));B=(r704.get('B') or {});expected=int(B.get('admitted_positions') or 0)
+        if expected<=0:raise RuntimeError('V7.04 B admitted_positions 无效')
+        if not V704_LEDGER.exists():raise RuntimeError('找不到 V7.04 challenger actual-buy ledger')
+        L=pd.read_csv(V704_LEDGER,compression='gzip');L['entry_date']=pd.to_datetime(L.entry_date,errors='coerce').dt.normalize();L['exit_date']=pd.to_datetime(L.exit_date,errors='coerce').dt.normalize()
+        if len(L)!=expected:raise RuntimeError(f'V7.04 exact ledger parity {len(L)} != {expected}')
+        if 'v704_row_id' not in L.columns or L['v704_row_id'].duplicated().any():raise RuntimeError('V7.04 ledger v704_row_id identity invalid')
+
+        _v705_write(status='running',phase='recover_exact_rows',message=f'固定 Actual Buy={expected}；恢复 raw execution fields（不做 candidate replay）…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+        fp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 cache')
+        F=pd.read_csv(fp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        for d in (F,P):d['listing_id']=d.listing_id.astype(str);d['entry_date']=pd.to_datetime(d.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        meta=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first');meta['candidate_order']=pd.to_numeric(meta.candidate_order,errors='coerce')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left');Z=Z.dropna(subset=['entry_date','exit_date','ret','candidate_order']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True);Z['v704_row_id']=np.arange(len(Z),dtype=int)
+        need=set(pd.to_numeric(L.v704_row_id,errors='coerce').dropna().astype(int));X=Z[Z.v704_row_id.isin(need)].copy()
+        if len(X)!=expected:raise RuntimeError(f'Fixed-row recovery parity {len(X)} != {expected}')
+        req=['v704_row_id','listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','ret'];miss=[c for c in req if c not in X.columns]
+        if miss:raise RuntimeError('Recovered rows missing: '+','.join(miss))
+
+        _v705_write(status='running',phase='price_cache',message=f'只读取 {X.listing_id.nunique()} 个实际持仓 listing 的 Historical Cache…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=X.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};factors={};missing=0;lids=list(spans.keys())
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','close']):missing+=1;continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            lo=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=10);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10);q=q[(q.date>=lo)&(q.date<=hi)].copy()
+            if q.empty:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
+            q['safe_open']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.open,q.date)];q['safe_close']=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q.close,q.date)]
+            packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),'open':q.safe_open.to_numpy(dtype='float32'),'close':q.safe_close.to_numpy(dtype='float32')}
+            if n==1 or n%50==0 or n==len(lids):_v705_write(status='running',phase='price_cache',message=f'Actual-Buy cache {n}/{len(lids)} · missing={missing}',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        eps=[];xps=[];keep=[]
+        for _,r in X.iterrows():
+            lid=str(r.listing_id);hev=factors.get(lid,[]);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date));eps.append(ep);xps.append(xp);keep.append(lid in packs and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        X['entry_px_safe']=eps;X['exit_px_safe']=xps;X=X[np.asarray(keep,dtype=bool)].copy().reset_index(drop=True)
+        if len(X)<int(expected*.95):raise RuntimeError(f'Executable fixed-ledger coverage too low {len(X)}/{expected}')
+
+        _v705_write(status='running',phase='fixed_schedule_mtm',message='固定 V7.04 B schedule 做 MTM；只为了定位 Peak→Trough 回撤…',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+        rg=_v42_spy_regimes();R=rg.reset_index();
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        R['date']=pd.to_datetime(R.date,errors='coerce').dt.normalize();R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+        cal=set(R.date.tolist());cal.update(X.entry_date.tolist());cal.update(X.exit_date.tolist());cal=sorted(cal);rec=X.to_dict('index');entries={};exits={}
+        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+        cash=1.0;pos={};last={};eqrows=[];ledger=[];clipped=0
+        for dt in cal:
+            dt=pd.Timestamp(dt).normalize()
+            for i in exits.get(dt,[]):
+                p=pos.pop(i,None)
+                if p is None:continue
+                xp=float(rec[i]['exit_px_safe']);proceeds=p['shares']*xp;cash+=proceeds;ledger.append({'id':i,'listing_id':rec[i]['listing_id'],'entry_date':p['entry_date'],'exit_date':dt,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],'is_stop':bool(rec[i].get('is_stop',False))});last.pop(i,None)
+            hv=0.0
+            for i,p in pos.items():
+                cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+            eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0
+            for i in entries.get(dt,[]):
+                ep=float(rec[i]['entry_px_safe']);invest=min(float(target),float(cash)) if target>0 else 0.0
+                if invest<=1e-12:clipped+=1;continue
+                cash-=invest;pos[i]={'listing_id':str(rec[i]['listing_id']),'shares':invest/ep,'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep
+            hv=0.0
+            for i,p in pos.items():
+                cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+            eq=cash+hv
+            if eq<=0 or not np.isfinite(eq):raise RuntimeError(f'invalid equity {eq} @ {dt}')
+            eqrows.append({'date':dt,'equity':float(eq),'exposure':float(hv/eq),'positions':int(len(pos))})
+        E=pd.DataFrame(eqrows).sort_values('date').reset_index(drop=True);E['peak']=E.equity.cummax();E['drawdown']=E.equity/E.peak-1.0
+        trough_i=int(E.drawdown.idxmin());trough=E.iloc[trough_i];peak_eq=float(trough['peak']);peak_i=int((E.loc[:trough_i].equity-peak_eq).abs().idxmin());peak=E.iloc[peak_i];peak_date=pd.Timestamp(peak.date);trough_date=pd.Timestamp(trough.date);maxdd=float(trough.drawdown)
+        after=E.iloc[trough_i+1:];recov=after[after.equity>=peak_eq];recovery_date=pd.Timestamp(recov.iloc[0].date) if len(recov) else None
+
+        _v705_write(status='running',phase='attribution',message=f'MaxDD {maxdd:.1%}：{peak_date.date()} → {trough_date.date()}；拆 STOP cluster / regime / yearly burden…',processed=5,total=7,elapsed_sec=round(time.time()-t0,1))
+        T=pd.DataFrame(ledger);W=T[(T.entry_date<=trough_date)&(T.exit_date>=peak_date)].copy() if len(T) else pd.DataFrame();exitW=T[(T.exit_date>=peak_date)&(T.exit_date<=trough_date)].copy() if len(T) else pd.DataFrame()
+        clusters=[]
+        if len(exitW):
+            Q=exitW.sort_values(['exit_date','entry_date']).reset_index(drop=True);cur=[]
+            for _,rr in Q.iterrows():
+                if bool(rr.get('is_stop',False)):cur.append(rr)
+                elif cur:clusters.append(cur);cur=[]
+            if cur:clusters.append(cur)
+        cluster_rows=[]
+        for c in clusters:
+            rr=pd.DataFrame(c);cluster_rows.append({'n':int(len(rr)),'start':str(pd.Timestamp(rr.exit_date.min()).date()),'end':str(pd.Timestamp(rr.exit_date.max()).date()),'pnl':float(pd.to_numeric(rr.pnl,errors='coerce').sum()),'avg_ret':float(pd.to_numeric(rr.ret,errors='coerce').mean())})
+        cluster_rows=sorted(cluster_rows,key=lambda z:(z['n'],-z['pnl']),reverse=True)[:10]
+        regime_rows=[]
+        if len(T):
+            TT=pd.merge_asof(T.sort_values('entry_date'),R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),on='entry_date',direction='backward');TT['regime']=TT.regime.fillna('UNKNOWN');DW=TT[(TT.exit_date>=peak_date)&(TT.exit_date<=trough_date)].copy()
+            for rgm,g in DW.groupby('regime'):regime_rows.append({'regime':str(rgm),'trades':int(len(g)),'stops':int(g.is_stop.sum()),'stop_rate':float(g.is_stop.mean()) if len(g) else None,'pnl':float(pd.to_numeric(g.pnl,errors='coerce').sum()),'avg_ret':float(pd.to_numeric(g.ret,errors='coerce').mean())})
+            regime_rows=sorted(regime_rows,key=lambda z:z['pnl'])
+        yearly=[]
+        if len(T):
+            Y=T.copy();Y['year']=pd.to_datetime(Y.exit_date).dt.year
+            for y,g in Y.groupby('year'):yearly.append({'year':int(y),'trades':int(len(g)),'stops':int(g.is_stop.sum()),'stop_rate':float(g.is_stop.mean()),'pnl':float(pd.to_numeric(g.pnl,errors='coerce').sum()),'plus50':int((pd.to_numeric(g.ret,errors='coerce')>=.5).sum()),'plus100':int((pd.to_numeric(g.ret,errors='coerce')>=1.0).sum())})
+            yearly=sorted(yearly,key=lambda z:z['pnl'])
+        dd_stop_rate=float(exitW.is_stop.mean()) if len(exitW) else None;all_stop_rate=float(T.is_stop.mean()) if len(T) else None;dd_plus50=int((pd.to_numeric(exitW.ret,errors='coerce')>=.5).sum()) if len(exitW) else 0;dd_plus100=int((pd.to_numeric(exitW.ret,errors='coerce')>=1.0).sum()) if len(exitW) else 0
+        dominant_regime=regime_rows[0] if regime_rows else None;largest_cluster=cluster_rows[0] if cluster_rows else None;total_loss=abs(float(pd.to_numeric(exitW.pnl,errors='coerce').sum())) if len(exitW) else 0.0
+        concentrated=bool((dominant_regime and abs(float(dominant_regime.get('pnl',0)))>=.25*max(1e-12,total_loss)) or (largest_cluster and largest_cluster['n']>=5));verdict='DRAWDOWN_SOURCE_CONCENTRATED_AND_ACTIONABLE_FOR_ONE_CAUSAL_TEST' if concentrated else 'DRAWDOWN_DIFFUSE_NO_SINGLE_ACTIONABLE_SOURCE'
+        result={'version':'V7.05 V7.04-B Drawdown Regime Autopsy','verdict':verdict,'frozen_strategy':'V7.04 B Range20→BreakoutMargin50; diagnosis only; no rule changes','account_reference':{'v704_reported_cagr':B.get('cagr'),'v704_reported_maxdd':B.get('maxdd'),'v704_reported_pf':B.get('profit_factor'),'fixed_ledger_n':int(expected),'fixed_schedule_executable_n':int(len(X)),'clipped_entries':int(clipped)},'maxdd_window':{'peak_date':str(peak_date.date()),'peak_equity':peak_eq,'trough_date':str(trough_date.date()),'trough_equity':float(trough.equity),'maxdd':maxdd,'recovery_date':str(recovery_date.date()) if recovery_date is not None else None,'calendar_days':int((trough_date-peak_date).days)},'drawdown_trade_burden':{'overlapping_positions':int(len(W)),'exits_in_window':int(len(exitW)),'stop_rate_in_window':dd_stop_rate,'all_sample_stop_rate':all_stop_rate,'plus50_exits':dd_plus50,'plus100_exits':dd_plus100,'realized_pnl_sum':float(pd.to_numeric(exitW.pnl,errors='coerce').sum()) if len(exitW) else 0.0},'stop_clusters':cluster_rows,'regime_attribution':regime_rows,'worst_years':yearly[:10],'best_years':sorted(yearly,key=lambda z:z['pnl'],reverse=True)[:10],'history_dedup':'V6.95 already measured broad STOP capital burden. V7.05 does NOT reopen STOP classifiers or early-exit/capital-recycling. It isolates the exact V7.04 challenger max-drawdown episode on its fixed Actual-Buy schedule and asks whether the damage is concentrated in a regime/cluster.','next_step':('If concentrated, run exactly ONE causal risk-permission test against the single dominant drawdown source while preserving V7.04 entry ranking and winner capture.' if concentrated else 'Do not invent a risk overlay. Close this repair route and return to candidate-generation quality, because V7.04 drawdown is diffuse.'),'cache_note':'V7.04 exact challenger ledger + V6.94/V6.69 structural rows + Historical Cache for admitted listings only + SPY PIT regime cache; 0 Tiingo; 0 universe rescan; 0 candidate replay.'}
+        V705_DIR.mkdir(parents=True,exist_ok=True);V705_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');E.to_csv(V705_EQUITY,index=False,compression='gzip');
+        if len(exitW):exitW.to_csv(V705_DD_TRADES,index=False,compression='gzip')
+        _v705_write(status='done',phase='done',message=f'V7.05 完成：{verdict}',processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v705_write(status='error',phase='error',message=f'V7.05 失败：{type(ex).__name__}: {ex}',processed=0,total=7,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v705_thread=None
+
+def _v705_start():
+    global v705_thread
+    if _v705_alive():return False
+    _v705_write(status='starting',phase='starting',message='V7.05 正在启动',processed=0,total=7,elapsed_sec=0,error=None,traceback=None);v705_thread=threading.Thread(target=_v705_run,daemon=True);v705_thread.start();return True
+
+@APP.route('/v705/run',methods=['GET','POST'])
+def v705_run():_v705_start();return redirect('/v705/drawdown-regime-autopsy')
+@APP.get('/api/v705/status')
+def v705_status_api():return jsonify(_v705_status())
+@APP.get('/v705/drawdown-regime-autopsy')
+def v705_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v705_status();R={}
+    if V705_RESULT.exists():
+        try:R=json.loads(V705_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pct(v):
+        try:return f'{float(v)*100:.2f}%'
+        except:return '—'
+    M=R.get('maxdd_window',{});D=R.get('drawdown_trade_burden',{});A=R.get('account_reference',{});btn='' if _v705_alive() else '<a href="/v705/run"><button>▶ 开始 V7.05 Drawdown Autopsy</button></a>';err=f"<pre>{e(st.get('traceback',''))}</pre>" if st.get('error') else ''
+    rg=''.join(f"<tr><td>{e(x.get('regime'))}</td><td>{x.get('trades',0)}</td><td>{x.get('stops',0)}</td><td>{pct(x.get('stop_rate'))}</td><td>{x.get('pnl',0):.3f}</td></tr>" for x in R.get('regime_attribution',[]))
+    cl=''.join(f"<tr><td>{x.get('n',0)}</td><td>{e(x.get('start'))}</td><td>{e(x.get('end'))}</td><td>{x.get('pnl',0):.3f}</td></tr>" for x in R.get('stop_clusters',[]))
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px;margin:0}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:22px;margin:16px 0}}.warn{{background:#fff7ed;border:1px solid #fb923c;border-radius:14px;padding:14px}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:14px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px 5px;border-bottom:1px solid #e2e8f0;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class="w"><a href="/">← 首页</a><div class="c"><h1>🧯 V7.05 Drawdown Regime Autopsy</h1><div class="warn">固定 V7.04 B Actual Buys，只找 MaxDD 根因；不改策略。</div></div><div class="c"><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message',''))}</p>{btn}{err}</div><div class="c"><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Fixed ledger={A.get('fixed_ledger_n','—')} · executable={A.get('fixed_schedule_executable_n','—')} · clipped={A.get('clipped_entries','—')}</p></div><div class="c"><h2>MaxDD Window</h2><p>{e(M.get('peak_date','—'))} → {e(M.get('trough_date','—'))} · MaxDD={pct(M.get('maxdd'))} · Recovery={e(M.get('recovery_date','—'))}</p><p>Exits={D.get('exits_in_window','—')} · STOP={pct(D.get('stop_rate_in_window'))} vs all {pct(D.get('all_sample_stop_rate'))} · +50={D.get('plus50_exits','—')} · +100={D.get('plus100_exits','—')}</p></div><div class="c"><h2>Regime Attribution</h2><table><tr><th>Regime</th><th>Trades</th><th>STOP</th><th>STOP%</th><th>PnL</th></tr>{rg or '<tr><td colspan=5>运行后显示</td></tr>'}</table></div><div class="c"><h2>STOP Clusters</h2><table><tr><th>N</th><th>Start</th><th>End</th><th>PnL</th></tr>{cl or '<tr><td colspan=4>运行后显示</td></tr>'}</table></div><div class="c"><div class="warn"><b>下一步：</b>{e(R.get('next_step','运行后决定。'))}</div></div></div></body></html>'''
+
+_v705_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v705_home_base is not None:
+    def _v705_home_wrap(*args,**kwargs):
+        resp=_v705_home_base(*args,**kwargs);card='<div id="v705-card" style="background:#fff7ed;border:5px solid #f97316;border-radius:24px;padding:28px;margin:22px 0"><h2>🧯 V7.05 Drawdown Regime Autopsy</h2><p>固定 V7.04 B Actual Buys · 0 universe rescan</p><a href="/v705/drawdown-regime-autopsy"><button>打开 V7.05</button></a></div>'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v705-card' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v705_home_base:APP.view_functions[ep]=_v705_home_wrap
