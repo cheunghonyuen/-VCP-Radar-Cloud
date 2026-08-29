@@ -48061,3 +48061,470 @@ def _v709_home_card(response):
     except Exception:
         pass
     return response
+
+
+# ================= V7.10 PRE5_OVER_PRE20 RESIDUAL RESCUE =================
+V710_DIR=DATA_DIR/'v710_pre5_over_pre20_residual_rescue'
+V710_STATUS=V710_DIR/'status.json'
+V710_RESULT=V710_DIR/'result.json'
+v710_thread=None
+
+def _v710_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':8,'elapsed_sec':0,'error':None,'traceback':None}
+    if V710_STATUS.exists():
+        try:x.update(json.loads(V710_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v710_write(**kw):
+    V710_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v710_status();x.update(kw)
+    V710_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v710_alive():return v710_thread is not None and v710_thread.is_alive()
+
+def _v710_run():
+    global v710_thread
+    t0=time.time()
+    try:
+        _v710_write(status='running',phase='precheck',message='冻结 V7.02 range20 + V7.03 breakout_margin50；只做一个 two-stage contest A/B，无 cutoff/无第三特征…',processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+        if not V702_RESULT.exists() or not V703_RESULT.exists():raise RuntimeError('缺 V7.02/V7.03 result.json')
+        r702=json.loads(V702_RESULT.read_text(encoding='utf-8'));r703=json.loads(V703_RESULT.read_text(encoding='utf-8'))
+        if r702.get('verdict')!='RANGE20_CONTEST_RANKING_PASSES_ECONOMIC_AB':raise RuntimeError('V7.02 未 PASS')
+        if r703.get('verdict')!='SECOND_LAYER_TRIGGER_DNA_FOUND':raise RuntimeError('V7.03 未 PASS')
+        if not V704_RESULT.exists():raise RuntimeError('缺 V7.04 result.json')
+        if not V706_RESULT.exists():raise RuntimeError('缺 V7.06 result.json')
+        if not V707_RESULT.exists():raise RuntimeError('缺 V7.07 result.json')
+        _r704=json.loads(V704_RESULT.read_text(encoding='utf-8'))
+        _r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
+        _r707=json.loads(V707_RESULT.read_text(encoding='utf-8'))
+        _ref704=_r704.get('B') or {}
+        if _r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
+            raise RuntimeError(f'V7.06 未 PASS: {_r706.get("verdict")}')
+        if _r707.get('verdict')!='DEFENSIVE_RESCUE_DNA_FOUND':
+            raise RuntimeError(f'V7.07 未找到 rescue DNA: {_r707.get("verdict")}')
+        _pf707=_r707.get('preflight') or {}
+        _got707=(int(_pf707.get('derived_defensive_n') or 0),int(_pf707.get('stop') or 0),
+                 int(_pf707.get('+50') or 0),int(_pf707.get('+100') or 0))
+        if _got707!=(102,93,7,5):
+            raise RuntimeError(f'V7.07 true DEFENSIVE sample drift: {_got707} != (102,93,7,5)')
+        _rob=_r707.get('top_robust') or []
+        if not _rob or _rob[0].get('feature')!='entry_clv' or _rob[0].get('direction')!='HIGHER_BETTER':
+            raise RuntimeError(f'V7.07 top rescue DNA drift: {_rob[:1]}')
+        ENTRY_CLV_RESCUE_THRESHOLD=0.75
+        if not V709_RESULT.exists():raise RuntimeError('缺 V7.09 result.json')
+        _r709=json.loads(V709_RESULT.read_text(encoding='utf-8'))
+        if _r709.get('verdict')!='RESIDUAL_RESCUE_DNA_FOUND':
+            raise RuntimeError(f'V7.09 未找到 residual rescue DNA: {_r709.get("verdict")}')
+        _top709=(_r709.get('top_robust') or [])
+        if not _top709 or _top709[0].get('feature')!='pre5_over_pre20' or _top709[0].get('direction')!='HIGHER_BETTER':
+            raise RuntimeError(f'V7.09 top residual DNA drift: {_top709[:1]}')
+        _w50={x.get('feature'):x for x in ((_r709.get('audits') or {}).get('WIN50') or [])}
+        _p5=_w50.get('pre5_over_pre20')
+        if not _p5:raise RuntimeError('V7.09 WIN50 pre5_over_pre20 audit missing')
+        _wm=float(_p5.get('positive_median'));_sm=float(_p5.get('stop_median'))
+        if not np.isfinite(_wm) or not np.isfinite(_sm) or _wm<=_sm:
+            raise RuntimeError(f'V7.09 pre5_over_pre20 median ordering invalid winner={_wm} stop={_sm}')
+        PRE5_OVER_PRE20_RESCUE_THRESHOLD=float((_wm+_sm)/2.0)
+        # Fail-fast exact V7.02 identity check BEFORE the expensive Historical Cache pass.
+        savedB=r702.get('B') or {}; expected=int(savedB.get('admitted_positions') or 0)
+        if not V702_B_ADMISSION_LEDGER.exists():
+            raise RuntimeError('缺 V7.02 exact B admission ledger; 不允许重建 control')
+        _L=pd.read_csv(V702_B_ADMISSION_LEDGER,compression='gzip')
+        if len(_L)!=expected:
+            raise RuntimeError(f'V7.02 exact ledger row parity failed {len(_L)} != {expected}')
+        if 'v702_row_id' not in _L.columns:
+            raise RuntimeError('V7.02 exact ledger missing v702_row_id')
+        _ids=pd.to_numeric(_L['v702_row_id'],errors='coerce')
+        if _ids.isna().any() or int(_ids.nunique())!=expected:
+            raise RuntimeError(f'V7.02 exact identity parity failed unique={_ids.nunique()} expected={expected}')
+        shared=r703.get('shared_stable_trigger_dna') or []
+        top=(shared[0].get('feature') if shared else None)
+        if top!='breakout_margin50':raise RuntimeError(f'V7.03 top shared feature is {top}, not breakout_margin50; V7.04 blocked')
+        for target in ['win50','win100']:
+            a=(shared[0].get(target) or {}).get('pooled_auc')
+            if a is None or float(a)<=.5:raise RuntimeError(f'breakout_margin50 direction not HIGHER_BETTER for {target}: {a}')
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
+        F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
+        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
+        if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
+        meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left')
+        Z['candidate_order']=pd.to_numeric(Z.candidate_order,errors='coerce');Z['entry_px_raw']=pd.to_numeric(Z.entry_px,errors='coerce');Z['exit_px_raw']=pd.to_numeric(Z.control_exit_px,errors='coerce')
+        Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        Z['v704_row_id']=np.arange(len(Z),dtype=int)
+        if len(Z)<500:raise RuntimeError(f'candidate rows too small: {len(Z)}')
+        # FIX4: fail-fast schema guard. range20/breakout_margin50 do NOT exist yet;
+        # they are computed from Historical Cache below. Validate only source columns here.
+        _req_pre={'listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret','v704_row_id'}
+        _miss_pre=sorted(_req_pre-set(Z.columns))
+        if _miss_pre:
+            raise RuntimeError('V7.04 pre-cache schema missing: '+','.join(_miss_pre))
+
+        _v710_write(status='running',phase='historical_cache',message=f'Candidate={len(Z):,} · 严格复刻 V7.02 execution pack；Breakout50 用独立 feature-only pack…',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};spans=Z.groupby('listing_id').agg(lo=('entry_date','min'),hi=('exit_date','max')).to_dict('index');packs={};feature_packs={};factors={};missing=0;lids=list(spans.keys())
+        for n,lid in enumerate(lids,1):
+            mr=mmap.get(str(lid))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
+            qall=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            # CRITICAL PARITY: execution pack is byte-for-byte semantic equivalent of V7.02:
+            # 120 calendar-day lookback and >=20 rows. Breakout50 gets a SEPARATE feature-only
+            # 180-day pack and is never allowed to change execution eligibility or price factors.
+            lo_exec=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=120);hi=pd.Timestamp(spans[lid]['hi'])+pd.Timedelta(days=10)
+            q=qall[(qall.date>=lo_exec)&(qall.date<=hi)].copy()
+            if len(q)<20:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']];factors[str(lid)]=hev
+            for c in ['open','high','low','close']:q['safe_'+c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
+            packs[str(lid)]={'date_ns':q.date.astype('int64').to_numpy(dtype='int64'),'open':q.safe_open.to_numpy(dtype='float32'),'high':q.safe_high.to_numpy(dtype='float32'),'low':q.safe_low.to_numpy(dtype='float32'),'close':q.safe_close.to_numpy(dtype='float32')}
+            lo_feat=pd.Timestamp(spans[lid]['lo'])-pd.Timedelta(days=180)
+            qf=qall[(qall.date>=lo_feat)&(qall.date<=hi)].copy()
+            if len(qf)>=51:
+                # breakout_margin50 is a ratio, so use raw split-consistent OHLC window only as
+                # feature geometry; it does not participate in execution-price normalization.
+                feature_packs[str(lid)]={'date_ns':qf.date.astype('int64').to_numpy(dtype='int64'),'high':qf.high.to_numpy(dtype='float32'),'close':qf.close.to_numpy(dtype='float32')}
+            if n==1 or n%100==0 or n==len(lids):_v710_write(status='running',phase='historical_cache',message=f'Historical Cache {n}/{len(lids)} · missing={missing}',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        def _v710_entry_clv(pack,dt):
+            if pack is None:return np.nan
+            try:
+                x=np.int64(pd.Timestamp(dt).normalize().value)
+                arr=pack['date_ns'];j=int(np.searchsorted(arr,x,side='left'))
+                if j>=len(arr) or int(arr[j])!=int(x):return np.nan
+                hi=float(pack['high'][j]);lo=float(pack['low'][j]);cl=float(pack['close'][j])
+                return float((cl-lo)/(hi-lo)) if np.isfinite(hi) and np.isfinite(lo) and np.isfinite(cl) and hi>lo else np.nan
+            except Exception:return np.nan
+
+        def _v710_pre5_over_pre20(pack,dt):
+            if pack is None:return np.nan
+            try:
+                x=np.int64(pd.Timestamp(dt).normalize().value)
+                arr=pack['date_ns'];j=int(np.searchsorted(arr,x,side='left'))
+                if j<=0 or j>len(arr):return np.nan
+                # Exact V7.07 semantics: use PRE-entry bars only.
+                hi=np.asarray(pack['high'][:j],dtype=float)
+                lo=np.asarray(pack['low'][:j],dtype=float)
+                cl=np.asarray(pack['close'][:j],dtype=float)
+                if len(cl)<20:return np.nan
+                pc=float(cl[-1])
+                if not np.isfinite(pc) or pc<=0:return np.nan
+                p5=float((np.nanmax(hi[-5:])-np.nanmin(lo[-5:]))/pc)
+                p20=float((np.nanmax(hi[-20:])-np.nanmin(lo[-20:]))/pc)
+                return float(p5/p20) if np.isfinite(p5) and np.isfinite(p20) and p20>0 else np.nan
+            except Exception:return np.nan
+
+        eps=[];xps=[];r20s=[];b50s=[];clvs=[];p5ratios=[];keep=[]
+        for _,r in Z.iterrows():
+            lid=str(r.listing_id);hev=factors.get(lid,[]);pack=packs.get(lid);ep=float(r.entry_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.entry_date));xp=float(r.exit_px_raw)*_v6894_factor_for_date(hev,pd.Timestamp(r.exit_date));r20=_v702_range20_from_pack(pack,pd.Timestamp(r.entry_date));b50=_v704_breakout50(feature_packs.get(lid),pd.Timestamp(r.entry_date));clv=_v710_entry_clv(pack,pd.Timestamp(r.entry_date));p5r=_v710_pre5_over_pre20(pack,pd.Timestamp(r.entry_date))
+            eps.append(ep);xps.append(xp);r20s.append(r20);b50s.append(b50);clvs.append(clv);p5ratios.append(p5r);keep.append(pack is not None and np.isfinite(ep) and ep>0 and np.isfinite(xp) and xp>0)
+        Z['entry_px_safe']=eps;Z['exit_px_safe']=xps;Z['range20']=r20s;Z['breakout_margin50']=b50s;Z['entry_clv']=clvs;Z['pre5_over_pre20']=p5ratios;Z=Z[np.asarray(keep,dtype=bool)].reset_index(drop=True)
+        # After the exact V7.02 keep/reset step, dataframe index IS the V7.02 row identity.
+        Z['v702_row_id']=np.arange(len(Z),dtype=int);Z['v704_row_id']=Z['v702_row_id']
+        # Hard identity match to the persisted 280 ledger before replay.
+        live_ids=set(Z['v702_row_id'].astype(int));saved_ids=set(_ids.astype(int))
+        if not saved_ids.issubset(live_ids):
+            raise RuntimeError(f'V7.02 exact ledger IDs missing from V7.04 candidate set: {len(saved_ids-live_ids)}')
+        # Verify identifying fields for every saved Actual Buy, not only the count.
+        chk=_L[['v702_row_id','listing_id','entry_date','candidate_order']].copy();chk['v702_row_id']=pd.to_numeric(chk.v702_row_id,errors='raise').astype(int);chk['listing_id']=chk.listing_id.astype(str);chk['entry_date']=pd.to_datetime(chk.entry_date,errors='coerce').dt.normalize();chk['candidate_order']=pd.to_numeric(chk.candidate_order,errors='coerce')
+        cur=Z[['v702_row_id','listing_id','entry_date','candidate_order']].copy();mm=chk.merge(cur,on='v702_row_id',how='left',suffixes=('_saved','_cur'))
+        bad=((mm.listing_id_saved!=mm.listing_id_cur)|(mm.entry_date_saved!=mm.entry_date_cur)|(pd.to_numeric(mm.candidate_order_saved,errors='coerce')!=pd.to_numeric(mm.candidate_order_cur,errors='coerce')))
+        if bool(bad.any()):raise RuntimeError(f'V7.02 candidate identity content mismatch rows={int(bad.sum())}')
+        _req_post={'range20','breakout_margin50','entry_clv','pre5_over_pre20','v702_row_id'}
+        _miss_post=sorted(_req_post-set(Z.columns))
+        if _miss_post:
+            raise RuntimeError('V7.04 post-cache schema missing: '+','.join(_miss_post))
+        r20cov=float(pd.to_numeric(Z['range20'],errors='coerce').notna().mean()) if len(Z) else 0.
+        b50cov=float(pd.to_numeric(Z['breakout_margin50'],errors='coerce').notna().mean()) if len(Z) else 0.
+        clvcov=float(pd.to_numeric(Z['entry_clv'],errors='coerce').notna().mean()) if len(Z) else 0.
+        p5cov=float(pd.to_numeric(Z['pre5_over_pre20'],errors='coerce').notna().mean()) if len(Z) else 0.
+        if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
+        if b50cov<.90:raise RuntimeError(f'breakout_margin50 coverage too low {b50cov:.1%}')
+        if clvcov<.90:raise RuntimeError(f'entry_clv coverage too low {clvcov:.1%}')
+        if p5cov<.90:raise RuntimeError(f'pre5_over_pre20 coverage too low {p5cov:.1%}')
+        V710_DIR.mkdir(parents=True,exist_ok=True)
+        Z[['v702_row_id','v704_row_id','listing_id','entry_date','candidate_order','range20','breakout_margin50','entry_clv','pre5_over_pre20']].to_csv(V710_DIR/'candidate_snapshot.csv.gz',index=False,compression='gzip')
+
+        _v710_write(status='running',phase='calendar',message=f'Coverage range20={r20cov:.1%}, breakout50={b50cov:.1%} · 构建账户 replay…',processed=3,total=8,elapsed_sec=round(time.time()-t0,1))
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY PIT calendar unavailable')
+        R=rg.reset_index();
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        if 'regime' not in R.columns:raise RuntimeError('SPY PIT regime column missing')
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+        _rdates=R['date'].astype('int64').to_numpy(dtype='int64')
+        _rvals=R['regime'].astype(str).str.upper().to_numpy()
+        def _v708_regime(dt):
+            x=np.int64(pd.Timestamp(dt).normalize().value)
+            j=int(np.searchsorted(_rdates,x,side='right')-1)
+            return str(_rvals[j]) if j>=0 else 'UNKNOWN'
+        Z['entry_regime']=[_v708_regime(x) for x in Z['entry_date']]
+        cal=set(R.date.tolist());cal.update(Z.entry_date.tolist());cal.update(Z.exit_date.tolist());cal=sorted(cal)
+        rec=Z.to_dict('index');entries={};exits={}
+        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
+        future={i:float(r['ret']) for i,r in rec.items()};denoms={t:sum(v>=t for v in future.values()) for t in [.20,.30,.50,1.0]}
+
+        # Frozen design: range20 remains first layer. For a contest with k free slots,
+        # shortlist exactly min(candidate_n, 2*k) candidates by lower range20; then select
+        # k by higher breakout_margin50. No numeric cutoff, no grid, no incumbent replacement.
+        def sim(label,two_stage=False,rescue_defensive=False,residual_rescue=False):
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];admitted=[];skipcap=0;skipcash=0;skipdef=0;rescu_def=0;contest_days=0;changed=0;events=[];step=max(1,len(cal)//20)
+            for di,dt in enumerate(cal,1):
+                dt=pd.Timestamp(dt).normalize()
+                for i in exits.get(dt,[]):
+                    p=pos.pop(i,None)
+                    if p is None:continue
+                    xp=float(rec[i]['exit_px_safe']);proceeds=p['shares']*xp;cash+=proceeds;ledger.append({'id':i,'ret':xp/p['entry_px']-1.0,'pnl':proceeds-p['cost'],'reason':str(rec[i].get('control_reason',rec[i].get('exit_reason',''))),'entry_date':p['entry_date'],'exit_date':dt});last.pop(i,None)
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0
+                original=list(entries.get(dt,[])); todays=list(original); free=max(0,10-len(pos))
+                # EXACT V7.02 CONTROL SEMANTICS: preserve original V6.69 order on non-contest days.
+                # Range20 ordering is activated ONLY when same-day candidates exceed available slots.
+                if free>0 and len(original)>free:
+                    contest_days+=1
+                    range_ranked=sorted(original,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
+                    if not two_stage:
+                        todays=range_ranked
+                    else:
+                        pool_n=min(len(range_ranked),max(free,2*free));pool=range_ranked[:pool_n]
+                        chosen=sorted(pool,key=lambda i:(-(float(rec[i].get('breakout_margin50')) if np.isfinite(rec[i].get('breakout_margin50',np.nan)) else -np.inf),float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf))))[:free]
+                        chosen_set=set(chosen);rest=[i for i in range_ranked if i not in chosen_set];todays=chosen+rest
+                        changed+=len(set(chosen)-set(range_ranked[:free]));events.append({'date':dt,'free_slots':free,'candidate_n':len(range_ranked),'finalist_n':pool_n,'range20_selected':range_ranked[:free],'two_stage_selected':chosen})
+                for i in todays:
+                    r=rec[i]
+                    if rescue_defensive and str(r.get('entry_regime','UNKNOWN')).upper()=='DEFENSIVE':
+                        _clv=float(r.get('entry_clv',np.nan))
+                        _p5r=float(r.get('pre5_over_pre20',np.nan))
+                        _allow=False
+                        if np.isfinite(_clv) and _clv>=ENTRY_CLV_RESCUE_THRESHOLD:
+                            _allow=True
+                        elif residual_rescue and np.isfinite(_clv) and _clv<ENTRY_CLV_RESCUE_THRESHOLD and np.isfinite(_p5r) and _p5r>=PRE5_OVER_PRE20_RESCUE_THRESHOLD:
+                            _allow=True
+                        if not _allow:
+                            skipdef+=1
+                            continue
+                        rescu_def+=1
+                    ep=float(r['entry_px_safe'])
+                    if not np.isfinite(ep) or ep<=0:skipcash+=1;continue
+                    if len(pos)<10 and target>0:
+                        invest=min(float(target),float(cash))
+                        if invest>1e-12:
+                            cash-=invest;pos[i]={'listing_id':str(r['listing_id']),'shares':invest/ep,'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep;admitted.append(i);continue
+                        skipcash+=1;continue
+                    skipcap+=1
+                hv=0.0
+                for i,p in pos.items():
+                    cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+                eq=cash+hv
+                if not np.isfinite(eq) or eq<=0:raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
+                eqrows.append((dt,float(eq),float(hv/eq) if eq>0 else np.nan,len(pos)))
+                if di%step==0 or di==len(cal):_v710_write(status='running',phase='account_replay',message=f'{label} {int(round(di/len(cal)*100))}%',processed=5,total=8,elapsed_sec=round(time.time()-t0,1))
+            st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st.update({'skipped_capacity':int(skipcap),'skipped_cash':int(skipcash),'skipped_defensive_low_clv':int(skipdef),'rescued_defensive_high_clv':int(rescu_def),'contest_days':int(contest_days),'changed_admissions':int(changed)});return st,pd.DataFrame(events),set(admitted)
+
+        _v710_write(status='running',phase='account_replay',
+                    message=f'A=Native V7.04；B=CLV>=0.75 OR residual pre5/pre20>={PRE5_OVER_PRE20_RESCUE_THRESHOLD:.4f}…',
+                    processed=4,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        A,EA,admA=sim('A_NATIVE_V704',two_stage=True,rescue_defensive=False,residual_rescue=False)
+        B,EB,admB=sim('B_CLV_PLUS_PRE5OVER20_RESCUE',two_stage=True,rescue_defensive=True,residual_rescue=True)
+
+        # Exact V7.04 control parity first.
+        _checks={
+            'admitted_positions':(int(A.get('admitted_positions',0)),int(_ref704.get('admitted_positions',0))),
+            'cagr':(float(A.get('cagr')),float(_ref704.get('cagr'))),
+            'profit_factor':(float(A.get('profit_factor')),float(_ref704.get('profit_factor'))),
+            'maxdd':(float(A.get('maxdd')),float(_ref704.get('maxdd')))
+        }
+        if _checks['admitted_positions'][0]!=_checks['admitted_positions'][1]:
+            raise RuntimeError(f'V7.10 native control admissions parity failed: {_checks["admitted_positions"]}')
+        for _k,_tol in [('cagr',0.0005),('profit_factor',0.005),('maxdd',0.0005)]:
+            if abs(_checks[_k][0]-_checks[_k][1])>_tol:
+                raise RuntimeError(f'V7.10 native control parity failed {_k}: live={_checks[_k][0]} V7.04={_checks[_k][1]}')
+
+        _v710_write(status='running',phase='economic_audit',
+                    message='经济审计：Residual rescue 是否把 CAGR 抢回，同时不把 DD/STOP 一起放回来…',
+                    processed=6,total=8,elapsed_sec=round(time.time()-t0,1))
+
+        keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate',
+              'winner20_capture','winner30_capture','winner50_capture','winner100_capture']
+        delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
+        ref708=(_r708.get('B') or {})
+        vs708={k:(B.get(k,np.nan)-ref708.get(k,np.nan)) for k in keys if k in ref708}
+        ref706=(_r706.get('B') or {})
+        vs706={k:(B.get(k,np.nan)-ref706.get(k,np.nan)) for k in keys if k in ref706}
+
+        displaced=sorted(set(admA)-set(admB))
+        added=sorted(set(admB)-set(admA))
+        def _diag(ids):
+            vals=[float(future.get(int(i),np.nan)) for i in ids if np.isfinite(future.get(int(i),np.nan))]
+            p5s=[float(rec[int(i)].get('pre5_over_pre20')) for i in ids
+                 if int(i) in rec and np.isfinite(rec[int(i)].get('pre5_over_pre20',np.nan))]
+            clvs=[float(rec[int(i)].get('entry_clv')) for i in ids
+                  if int(i) in rec and np.isfinite(rec[int(i)].get('entry_clv',np.nan))]
+            return {
+                'n':int(len(ids)),
+                'stop':int(sum(bool(rec[int(i)].get('is_stop',False)) for i in ids if int(i) in rec)),
+                'plus50':int(sum(v>=.50 for v in vals)),
+                'plus100':int(sum(v>=1.0 for v in vals)),
+                'median_future_ret':float(np.median(vals)) if vals else None,
+                'defensive':int(sum(str(rec[int(i)].get('entry_regime','UNKNOWN')).upper()=='DEFENSIVE'
+                                    for i in ids if int(i) in rec)),
+                'median_clv':float(np.median(clvs)) if clvs else None,
+                'median_pre5_over_pre20':float(np.median(p5s)) if p5s else None
+            }
+
+        annA=A.get('annual',{});annB=B.get('annual',{})
+        ys=sorted(set(annA)&set(annB))
+        changed_years=[y for y in ys if abs(float(annA[y])-float(annB[y]))>1e-12]
+        beats=sum(float(annB[y])>float(annA[y]) for y in changed_years)
+        beat_share=float(beats/len(changed_years)) if changed_years else np.nan
+
+        # Predeclared gate: must beat V7.08 on CAGR without surrendering its risk gains.
+        pass_econ=bool(
+            B.get('cagr',-999)>=ref708.get('cagr',-999)+.003 and
+            B.get('maxdd',-1)>=ref708.get('maxdd',-1)-.03 and
+            B.get('profit_factor',-999)>=2.30 and
+            B.get('calmar',-999)>=A.get('calmar',-999) and
+            B.get('winner50_capture',0)>=A.get('winner50_capture',0)*.95 and
+            B.get('winner100_capture',0)>=A.get('winner100_capture',0)*.95 and
+            (not changed_years or beat_share>=.50)
+        )
+        verdict='PRE5_OVER_PRE20_RESIDUAL_RESCUE_PASSES_NATIVE_ECONOMIC_AB' if pass_econ else 'PRE5_OVER_PRE20_RESIDUAL_RESCUE_FAILS_NATIVE_ECONOMIC_AB'
+
+        result={
+            'version':'V7.10 pre5_over_pre20 Residual Rescue · Native V7.04 Economic A/B',
+            'verdict':verdict,
+            'threshold':{
+                'feature':'pre5_over_pre20','direction':'HIGHER_BETTER',
+                'conditioning':'PIT DEFENSIVE and entry_clv < 0.75',
+                'rule':'Allow residual rescue only if pre5_over_pre20 >= discovery midpoint',
+                'winner50_median':_wm,'stop_median':_sm,
+                'value':PRE5_OVER_PRE20_RESCUE_THRESHOLD,
+                'derivation':'single midpoint of V7.09 WIN50-vs-STOP medians',
+                'threshold_sweep':False
+            },
+            'control_parity':_checks,
+            'A':A,'B':B,'delta_vs_V704':delta,
+            'V708_reference':ref708,'delta_vs_V708':vs708,
+            'V706_hard_block_reference':ref706,'delta_vs_V706':vs706,
+            'path_diagnostics':{'displaced_from_V704':_diag(displaced),'added_vs_V704':_diag(added)},
+            'year_stability':{'comparable_years':len(ys),'changed_years':len(changed_years),
+                              'B_beats_A_changed_years':int(beats),'beat_share':beat_share},
+            'acceptance':'PASS only if CAGR beats V7.08 by >=0.3pp; MaxDD no worse than V7.08 by >3pp; PF>=2.30; Calmar>=V7.04; +50/+100 capture retain >=95% of V7.04; changed-year beat share >=50%. No threshold sweep.',
+            'history_dedup':'Exactly one V7.09 residual DNA feature. No CLV retuning, no second residual feature, no feature combination/grid, no STOP/exit/sizing changes.',
+            'important':'Threshold is discovery-derived from only 3 +50 residual winners; this remains post-selection research and requires later untouched confirmation if it passes.',
+            'next_step':('If PASS: freeze the two-stage DEFENSIVE permission rule and run one untouched forward-chained confirmation.' if pass_econ else 'If FAIL: close residual rescue; do not tune neighboring pre5_over_pre20 cutoffs.')
+        }
+        V710_DIR.mkdir(parents=True,exist_ok=True)
+        V710_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v710_write(status='done',phase='done',message=f'V7.10 完成：{verdict}',
+                    processed=8,total=8,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v710_write(status='error',phase='error',message=f'V7.04 失败：{type(ex).__name__}: {ex}',processed=0,total=8,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v710_thread=None
+
+
+
+def _v710_start():
+    global v710_thread
+    if _v710_alive():return False
+    _v710_write(status='starting',phase='starting',message='V7.10 starting · preflight first',processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+    v710_thread=threading.Thread(target=_v710_run,daemon=True)
+    v710_thread.start();return True
+
+@APP.route('/v710/run',methods=['GET','POST'])
+def v710_run():
+    _v710_start();return redirect('/v710')
+
+@APP.get('/api/v710/status')
+def v710_status():
+    return jsonify(_v710_status())
+
+@APP.get('/v710')
+def v710_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v710_status();R={}
+    if V710_RESULT.exists():
+        try:R=json.loads(V710_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    A=R.get('A',{}) or {};B=R.get('B',{}) or {};D=R.get('delta_vs_V704',{}) or {}
+    R8=R.get('V708_reference',{}) or {};V8=R.get('delta_vs_V708',{}) or {}
+    R6=R.get('V706_hard_block_reference',{}) or {};T=R.get('threshold',{}) or {}
+    P=R.get('path_diagnostics',{}) or {};Y=R.get('year_stability',{}) or {}
+    def pct(x):
+        try:return f'{float(x)*100:.2f}%'
+        except:return '—'
+    def num(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    def row(name,z):
+        return f"<tr><td><b>{e(name)}</b></td><td>{pct(z.get('cagr'))}</td><td>{num(z.get('profit_factor'))}</td><td>{pct(z.get('maxdd'))}</td><td>{num(z.get('calmar'))}</td><td>{pct(z.get('win_rate'))}</td><td>{pct(z.get('avg_trade'))}</td><td>{pct(z.get('stop_rate'))}</td><td>{pct(z.get('winner50_capture'))}</td><td>{pct(z.get('winner100_capture'))}</td><td>{z.get('admitted_positions','—')}</td></tr>"
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v710/run'><button>▶ Run V7.10 Native A/B</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}
+.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}
+.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}
+.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}
+button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}
+pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V7.10 pre5/pre20 Residual Rescue</h1>
+<div class='ok'><b>规则：</b>DEFENSIVE 时，CLV≥0.75 正常 rescue；CLV&lt;0.75 时，只允许 <b>pre5_over_pre20</b> 通过单一 discovery-midpoint 门槛。<br>
+无 cutoff sweep、无第二 residual feature、Native V7.04 engine。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p>
+<p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',8)} · {st.get('elapsed_sec',0)}s</p>{btn}
+{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>{e(R.get('acceptance',''))}</p>
+<p>Frozen threshold={num(T.get('value'))} · winner50 median={num(T.get('winner50_median'))} · STOP median={num(T.get('stop_median'))}</p></div>
+<div class='c'><h2>Native Account Comparison</h2><div style='overflow:auto'><table>
+<tr><th></th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>Avg</th><th>STOP</th><th>+50 Cap</th><th>+100 Cap</th><th>Admissions</th></tr>
+{row('A V7.04 Native',A)}{row('B V7.10 Residual Rescue',B)}{row('V7.08 CLV ref',R8)}{row('V7.06 Hard Block ref',R6)}
+</table></div>
+<p>vs V7.04: ΔCAGR={pct(D.get('cagr'))} · ΔPF={num(D.get('profit_factor'))} · ΔMaxDD={pct(D.get('maxdd'))}</p>
+<p>vs V7.08: ΔCAGR={pct(V8.get('cagr'))} · ΔPF={num(V8.get('profit_factor'))} · ΔMaxDD={pct(V8.get('maxdd'))}</p></div>
+<div class='c'><h2>Path Diagnostics</h2><pre>{e(json.dumps(P,ensure_ascii=False,indent=2))}</pre>
+<p>Changed years={Y.get('changed_years','—')} · B beats A={Y.get('B_beats_A_changed_years','—')} · share={pct(Y.get('beat_share'))}</p></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('history_dedup',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v710/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
+
+# Homepage card, safe injection only; no home-route replacement/wrapping.
+@APP.after_request
+def _v710_home_card(response):
+    try:
+        from flask import request
+        if request.path=='/' and response.status_code==200 and response.mimetype=='text/html':
+            body=response.get_data(as_text=True)
+            if 'v710-home-card' not in body:
+                card="""<div id='v710-home-card' style='background:#fff;border:4px solid #0f766e;border-radius:22px;padding:20px;margin:18px'>
+                <h2>🧬 V7.10 pre5/pre20 Residual Rescue</h2>
+                <p>DEFENSIVE：CLV 主门 + pre5_over_pre20 单一 residual rescue。Native Economic A/B。</p>
+                <a href='/v710'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800'>打开 V7.10</button></a>
+                </div>"""
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos)
+                    body=(body[:gt+1]+card+body[gt+1:]) if gt>=0 else card+body
+                else:
+                    body=card+body
+                response.set_data(body)
+                response.headers['Content-Length']=str(len(response.get_data()))
+    except Exception:
+        pass
+    return response
