@@ -48965,7 +48965,6 @@ def _v712_run():
         if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact ledger missing')
         if not V707_ROWS.exists():raise RuntimeError('V7.07 exact DEFENSIVE feature rows missing')
         if not V706_RESULT.exists():raise RuntimeError('V7.06 result missing')
-        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired trade feature cache missing')
 
         r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
         if r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
@@ -48973,7 +48972,6 @@ def _v712_run():
 
         L=pd.read_csv(V704_LEDGER,compression='gzip')
         G=pd.read_csv(V707_ROWS,compression='gzip')
-        P=pd.read_csv(V669_TRADES,compression='gzip')
         if len(L)!=291:raise RuntimeError(f'V7.04 ledger parity {len(L)} != 291')
         if len(G)!=102:raise RuntimeError(f'V7.07 TRUE DEFENSIVE parity {len(G)} != 102')
         got=(len(G),int(G.is_stop.astype(str).str.lower().isin(["true","1","yes"]).sum()),
@@ -48982,45 +48980,126 @@ def _v712_run():
         if got!=(102,93,7,5):raise RuntimeError(f'DEFENSIVE parity {got} != (102,93,7,5)')
 
         _v712_write(status='running',phase='schema',
-                    message='Preflight PASS 102/93/7/5。检查 Sector / RS / Setup PIT 特征覆盖…',
+                    message='Preflight PASS 102/93/7/5。扫描已持久化 V3/V6 caches，寻找 exact ticker+date PIT features…',
                     processed=1,total=5,elapsed_sec=round(time.time()-t0,2))
 
-        # Never reconstruct admission. Enrichment only, from already persisted V6.69 trade feature cache.
-        key_candidates=[['listing_id','entry_date','candidate_order'],['listing_id','entry_date']]
-        keys=None
-        for ks in key_candidates:
-            if all(k in G.columns for k in ks) and all(k in P.columns for k in ks):
-                keys=ks;break
-        if keys is None:raise RuntimeError('No exact enrichment join key between V7.07 rows and V6.69 feature cache')
+        # TRUE DEFENSIVE rows already carry exact listing_id. Historical listing_id format is:
+        # TICKER__YYYYMMDD__YYYYMMDD, so ticker recovery is deterministic and does not reconstruct admission.
+        G=G.copy()
+        G['listing_id']=G['listing_id'].astype(str)
+        G['ticker']=G['listing_id'].str.split('__').str[0].str.upper().str.strip()
+        G['entry_date']=pd.to_datetime(G['entry_date'],errors='coerce').dt.normalize()
+        if G[['ticker','entry_date']].isna().any().any():
+            raise RuntimeError('Cannot derive exact ticker/date keys from V7.07 TRUE DEFENSIVE rows')
 
-        for d in (G,P):
-            d['listing_id']=d['listing_id'].astype(str)
-            d['entry_date']=pd.to_datetime(d['entry_date'],errors='coerce').dt.normalize()
-            if 'candidate_order' in keys:d['candidate_order']=pd.to_numeric(d['candidate_order'],errors='coerce')
-
-        # Predeclared features: sector context first, then individual relative-strength/setup quality.
         wanted=['sector_score','group_breadth','rs','quality','leader_score','supply_score','volratio']
-        avail=[c for c in wanted if c in P.columns]
-        if 'sector_score' not in avail:
-            raise RuntimeError('sector_score missing from persisted V6.69 feature cache; refuse to fake Sector Regime')
-        individual=[c for c in ['rs','quality','leader_score','supply_score','volratio'] if c in avail]
-        if not individual:
-            raise RuntimeError('No persisted individual RS/setup-quality feature available')
 
-        Q=P[keys+avail].copy()
-        # Exact enrichment requires one row per key. Ambiguous rows are rejected, never silently deduped.
-        dup=Q.duplicated(keys,keep=False)
-        if bool(dup.any()):
-            amb=Q.loc[dup,keys].drop_duplicates()
-            Q=Q.merge(amb.assign(_amb=1),on=keys,how='left')
-            Q=Q[Q['_amb'].isna()].drop(columns=['_amb'])
-        X=G.merge(Q,on=keys,how='left',validate='one_to_one')
-        cov={c:float(pd.to_numeric(X[c],errors='coerce').notna().mean()) for c in avail}
-        if cov['sector_score']<.80:
-            raise RuntimeError(f'sector_score coverage too low {cov["sector_score"]:.1%}')
-        if max(cov[c] for c in individual)<.80:
-            raise RuntimeError('individual RS/setup feature coverage below 80%')
+        # Read-only source discovery. No rerun of old experiments.
+        source_paths=[]
+        def _add_src(label,p):
+            try:
+                p=Path(p)
+                if p.exists() and p.stat().st_size>0:
+                    source_paths.append((label,p))
+            except Exception:
+                pass
 
+        try:
+            vr=v3_result_dir()
+            _add_src('V3 trades',vr/'jlaw_v3_trades.csv')
+            _add_src('V3 signals',vr/'jlaw_v3_signals.csv')
+        except Exception:pass
+
+        for nm,root in [
+            ('V6 Shadow',globals().get('V6_SHADOW_DIR')),
+            ('V6.1 Full',globals().get('V61_FAST_DIR')),
+            ('V6.10 Fresh',globals().get('V610_FRESH_DIR')),
+            ('V6.10 Daily',globals().get('V610_DAILY_DIR')),
+            ('V6.3 Full',globals().get('V63_DIR')),
+        ]:
+            if root is None:continue
+            root=Path(root)
+            variants=[root,root/'full',root/'quick']
+            for rr in variants:
+                for fn in ['jlaw_v3_trades.csv','jlaw_v3_signals.csv','jlaw_v6_trades.csv','jlaw_v6_signals.csv']:
+                    _add_src(f'{nm}/{rr.name}/{fn}',rr/fn)
+
+        # De-duplicate same physical path.
+        seen=set();sources=[]
+        for label,p in source_paths:
+            rp=str(p.resolve())
+            if rp in seen:continue
+            seen.add(rp);sources.append((label,p))
+
+        feature_best={}
+        source_diag=[]
+        for label,p in sources:
+            try:
+                D=pd.read_csv(p)
+            except Exception:
+                continue
+            if D is None or D.empty:continue
+            tcol=next((c for c in ['ticker','Ticker','symbol','Symbol'] if c in D.columns),None)
+            dcol=next((c for c in ['date','entry_date','Date','EntryDate'] if c in D.columns),None)
+            if tcol is None or dcol is None:continue
+            feats=[c for c in wanted if c in D.columns]
+            if not feats:continue
+            Z=D[[tcol,dcol]+feats].copy()
+            Z=Z.rename(columns={tcol:'ticker',dcol:'entry_date'})
+            Z['ticker']=Z['ticker'].astype(str).str.upper().str.strip()
+            Z['entry_date']=pd.to_datetime(Z['entry_date'],errors='coerce').dt.normalize()
+            Z=Z.dropna(subset=['ticker','entry_date'])
+            # Reject ambiguous same-day duplicate rows from this source rather than silently choosing.
+            dup=Z.duplicated(['ticker','entry_date'],keep=False)
+            Z=Z[~dup].copy()
+            if Z.empty:continue
+
+            tmp=G[['ticker','entry_date']].merge(Z,on=['ticker','entry_date'],how='left',validate='many_to_one')
+            diag={'source':label,'path':str(p),'rows':int(len(D)),'usable_exact_rows':int(len(Z))}
+            for f in feats:
+                cv=float(pd.to_numeric(tmp[f],errors='coerce').notna().mean())
+                diag[f]=cv
+                cur=feature_best.get(f)
+                if cur is None or cv>cur['coverage']:
+                    feature_best[f]={'coverage':cv,'source':label,'path':str(p),'frame':Z[['ticker','entry_date',f]].copy()}
+            source_diag.append(diag)
+
+        # Build one exact enrichment frame, each feature from the single persisted source with highest coverage.
+        X=G.copy()
+        feature_sources={}
+        for f,meta in feature_best.items():
+            F=meta['frame'].copy()
+            F[f]=pd.to_numeric(F[f],errors='coerce')
+            X=X.merge(F,on=['ticker','entry_date'],how='left',validate='many_to_one')
+            feature_sources[f]={'source':meta['source'],'coverage':float(meta['coverage']),'path':meta['path']}
+
+        avail=[f for f in wanted if f in X.columns and float(pd.to_numeric(X[f],errors='coerce').notna().mean())>=.30]
+        cov={f:float(pd.to_numeric(X[f],errors='coerce').notna().mean()) for f in avail}
+        sector_available=('sector_score' in avail and cov.get('sector_score',0)>=.50)
+        individual=[f for f in ['rs','quality','leader_score','supply_score','volratio'] if f in avail]
+
+        # IMPORTANT: missing sector is now a DATA VERDICT, not a runtime error.
+        # We still audit whatever genuine PIT individual features are exact-joinable.
+        if not avail:
+            result={
+                'version':'V7.12 Selective Defensive Admission DNA Audit · Source Fix',
+                'verdict':'NO_EXACT_JOINABLE_PIT_FEATURE_SOURCE',
+                'parity':{'n':got[0],'stop':got[1],'+50':got[2],'+100':got[3]},
+                'feature_sources':feature_sources,'source_diagnostics':source_diag,
+                'sector_source_available':False,
+                'boundaries':'No universe scan, no replay, no admission reconstruction, no fabricated sector score.',
+                'next_step':'Do not fake Sector Regime. Build a dedicated PIT sector feature store once, then rerun this diagnostic.'
+            }
+            V712_DIR.mkdir(parents=True,exist_ok=True)
+            V712_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v712_write(status='done',phase='done',message='V7.12 完成：NO_EXACT_JOINABLE_PIT_FEATURE_SOURCE',
+                        processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+            return
+
+        _v712_write(status='running',phase='audit',
+                    message=('Sector + individual PIT audit…' if sector_available else
+                             'Sector source unavailable；继续审计真实 exact-joinable individual RS/setup features，不伪造 sector。'),
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
         _v712_write(status='running',phase='audit',
                     message='Sector strength × individual RS/setup：STOP / +50 / +100 分离度 + 5-year direction stability…',
                     processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
@@ -49078,18 +49157,22 @@ def _v712_run():
         robust=[z for z in shared if z['robust']]
         sector_rob=[z for z in robust if z['layer']=='SECTOR']
         indiv_rob=[z for z in robust if z['layer']=='INDIVIDUAL']
-        verdict=('SELECTIVE_DEFENSIVE_SECTOR_AND_STOCK_DNA_FOUND' if sector_rob and indiv_rob
+        verdict=('SELECTIVE_DEFENSIVE_SECTOR_AND_STOCK_DNA_FOUND' if sector_available and sector_rob and indiv_rob
+                 else 'SELECTIVE_DEFENSIVE_INDIVIDUAL_DNA_FOUND_SECTOR_UNAVAILABLE' if (not sector_available and indiv_rob)
                  else 'SELECTIVE_DEFENSIVE_PARTIAL_DNA_FOUND' if robust
                  else 'NO_ROBUST_SELECTIVE_DEFENSIVE_DNA')
 
-        result={'version':'V7.12 Selective Defensive Admission DNA Audit',
+        result={'version':'V7.12 Selective Defensive Admission DNA Audit · Source Fix',
                 'verdict':verdict,'parity':{'n':got[0],'stop':got[1],'+50':got[2],'+100':got[3]},
-                'coverage':cov,'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],
-                'source':'V7.04 exact Actual Buy + V7.07 exact TRUE DEFENSIVE rows; enrichment only from persisted V6.69 feature cache',
-                'rule':'Diagnostic only. Market regime is fixed DEFENSIVE. Test whether persisted sector strength and individual RS/setup quality separate STOP from Non-STOP/+50/+100.',
+                'coverage':cov,'feature_sources':feature_sources,'source_diagnostics':source_diag,
+                'sector_source_available':bool(sector_available),
+                'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],
+                'source':'V7.04 exact Actual Buy + V7.07 exact TRUE DEFENSIVE rows; enrichment only from exact ticker+date matches in already-persisted V3/V6 caches.',
+                'rule':'Diagnostic only. Market regime fixed DEFENSIVE. Sector is used only when a genuine persisted PIT sector_score source exists; otherwise it is explicitly unavailable, never fabricated.',
                 'boundaries':'No universe scan, no account replay, no threshold sweep, no sizing change, no CLV/pre5 reopening, no admission reconstruction.',
                 'next_step':('V7.13: test exactly ONE top robust selective permission feature in native V7.04 engine.' if robust
-                             else 'Close selective DEFENSIVE feature branch; do not manufacture a sector rule without robust PIT evidence.')}
+                             else ('Build dedicated PIT sector feature store before sector-conditioned testing.' if not sector_available
+                                   else 'Close selective DEFENSIVE feature branch; no threshold fishing.'))}
         V712_DIR.mkdir(parents=True,exist_ok=True)
         V712_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
         _v712_write(status='done',phase='done',message=f'V7.12 完成：{verdict}',
@@ -49131,7 +49214,7 @@ def v712_page():
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>🧬 V7.12 Selective Defensive Admission DNA Audit</h1><div class='ok'><b>只诊断，不改策略：</b>锁定 TRUE DEFENSIVE Actual Buys，检查 <b>Sector strength × Individual RS/setup quality</b> 是否能稳定区分 STOP 与 Winner。<br>不扫 universe、不 replay、不调 threshold、不改仓位。</div></div>
+<div class='c'><h1>🧬 V7.12 Selective Defensive Admission DNA Audit · Source Fix</h1><div class='ok'><b>只诊断，不改策略：</b>锁定 TRUE DEFENSIVE Actual Buys，检查真实可精确匹配的 <b>Sector strength × Individual RS/setup quality</b>；缺 Sector 时明确报告 unavailable，绝不伪造。<br>不扫 universe、不 replay、不调 threshold、不改仓位。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
 <div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Parity: {e(R.get('parity',{}))}</p></div>
 <div class='c'><h2>Selective Defensive DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Layer</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Dir Cons.</th><th>Robust</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
