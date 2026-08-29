@@ -48361,6 +48361,10 @@ def _v710_run():
         keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate',
               'winner20_capture','winner30_capture','winner50_capture','winner100_capture']
         delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
+        if not V708_RESULT.exists():raise RuntimeError('缺 V7.08 result.json')
+        _r708=json.loads(V708_RESULT.read_text(encoding='utf-8'))
+        if not V706_RESULT.exists():raise RuntimeError('缺 V7.06 result.json')
+        _r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
         ref708=(_r708.get('B') or {})
         vs708={k:(B.get(k,np.nan)-ref708.get(k,np.nan)) for k in keys if k in ref708}
         ref706=(_r706.get('B') or {})
