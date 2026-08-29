@@ -48921,3 +48921,240 @@ def _v711_home_card(response):
     except Exception:
         pass
     return response
+
+
+# ================= V7.12 SELECTIVE DEFENSIVE ADMISSION DNA AUDIT =================
+# Diagnostic only. No account replay, no universe scan, no threshold sweep.
+V712_DIR=DATA_DIR/'v712_selective_defensive_admission_dna'
+V712_STATUS=V712_DIR/'status.json'
+V712_RESULT=V712_DIR/'result.json'
+v712_thread=None
+
+def _v712_status():
+    if V712_STATUS.exists():
+        try:return json.loads(V712_STATUS.read_text(encoding='utf-8'))
+        except Exception:pass
+    return {'status':'idle','phase':'idle','message':'Ready','processed':0,'total':5,'elapsed_sec':0}
+
+def _v712_write(**kw):
+    V712_DIR.mkdir(parents=True,exist_ok=True)
+    st=_v712_status();st.update(kw)
+    V712_STATUS.write_text(json.dumps(st,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v712_alive():return v712_thread is not None and v712_thread.is_alive()
+
+def _v712_auc(y,x):
+    y=np.asarray(y,dtype=int);x=np.asarray(x,dtype=float)
+    ok=np.isfinite(x);y=y[ok];x=x[ok]
+    if len(y)<8 or len(set(y.tolist()))<2:return np.nan
+    p=x[y==1];n=x[y==0]
+    if not len(p) or not len(n):return np.nan
+    # Mann-Whitney AUC, tie-safe.
+    rr=pd.Series(np.r_[p,n]).rank(method='average').to_numpy()
+    rp=rr[:len(p)].sum()
+    return float((rp-len(p)*(len(p)+1)/2)/(len(p)*len(n)))
+
+def _v712_run():
+    global v712_thread
+    t0=time.time()
+    try:
+        _v712_write(status='running',phase='preflight',
+                    message='Preflight：锁定 V7.04 exact ledger + V7.07 TRUE DEFENSIVE geometry；只做诊断。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact ledger missing')
+        if not V707_ROWS.exists():raise RuntimeError('V7.07 exact DEFENSIVE feature rows missing')
+        if not V706_RESULT.exists():raise RuntimeError('V7.06 result missing')
+        if not V669_TRADES.exists():raise RuntimeError('V6.69 paired trade feature cache missing')
+
+        r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
+        if r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
+            raise RuntimeError('V7.06 native hard-block reference is not valid')
+
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        G=pd.read_csv(V707_ROWS,compression='gzip')
+        P=pd.read_csv(V669_TRADES,compression='gzip')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger parity {len(L)} != 291')
+        if len(G)!=102:raise RuntimeError(f'V7.07 TRUE DEFENSIVE parity {len(G)} != 102')
+        got=(len(G),int(G.is_stop.astype(str).str.lower().isin(["true","1","yes"]).sum()),
+             int((pd.to_numeric(G.ret,errors="coerce")>=.50).sum()),
+             int((pd.to_numeric(G.ret,errors="coerce")>=1.0).sum()))
+        if got!=(102,93,7,5):raise RuntimeError(f'DEFENSIVE parity {got} != (102,93,7,5)')
+
+        _v712_write(status='running',phase='schema',
+                    message='Preflight PASS 102/93/7/5。检查 Sector / RS / Setup PIT 特征覆盖…',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        # Never reconstruct admission. Enrichment only, from already persisted V6.69 trade feature cache.
+        key_candidates=[['listing_id','entry_date','candidate_order'],['listing_id','entry_date']]
+        keys=None
+        for ks in key_candidates:
+            if all(k in G.columns for k in ks) and all(k in P.columns for k in ks):
+                keys=ks;break
+        if keys is None:raise RuntimeError('No exact enrichment join key between V7.07 rows and V6.69 feature cache')
+
+        for d in (G,P):
+            d['listing_id']=d['listing_id'].astype(str)
+            d['entry_date']=pd.to_datetime(d['entry_date'],errors='coerce').dt.normalize()
+            if 'candidate_order' in keys:d['candidate_order']=pd.to_numeric(d['candidate_order'],errors='coerce')
+
+        # Predeclared features: sector context first, then individual relative-strength/setup quality.
+        wanted=['sector_score','group_breadth','rs','quality','leader_score','supply_score','volratio']
+        avail=[c for c in wanted if c in P.columns]
+        if 'sector_score' not in avail:
+            raise RuntimeError('sector_score missing from persisted V6.69 feature cache; refuse to fake Sector Regime')
+        individual=[c for c in ['rs','quality','leader_score','supply_score','volratio'] if c in avail]
+        if not individual:
+            raise RuntimeError('No persisted individual RS/setup-quality feature available')
+
+        Q=P[keys+avail].copy()
+        # Exact enrichment requires one row per key. Ambiguous rows are rejected, never silently deduped.
+        dup=Q.duplicated(keys,keep=False)
+        if bool(dup.any()):
+            amb=Q.loc[dup,keys].drop_duplicates()
+            Q=Q.merge(amb.assign(_amb=1),on=keys,how='left')
+            Q=Q[Q['_amb'].isna()].drop(columns=['_amb'])
+        X=G.merge(Q,on=keys,how='left',validate='one_to_one')
+        cov={c:float(pd.to_numeric(X[c],errors='coerce').notna().mean()) for c in avail}
+        if cov['sector_score']<.80:
+            raise RuntimeError(f'sector_score coverage too low {cov["sector_score"]:.1%}')
+        if max(cov[c] for c in individual)<.80:
+            raise RuntimeError('individual RS/setup feature coverage below 80%')
+
+        _v712_write(status='running',phase='audit',
+                    message='Sector strength × individual RS/setup：STOP / +50 / +100 分离度 + 5-year direction stability…',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        X['ret']=pd.to_numeric(X['ret'],errors='coerce')
+        X['is_stop']=X['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        X['year']=pd.to_datetime(X['entry_date']).dt.year
+        feats=avail
+        audits={}
+        targets={
+            'NONSTOP':(~X.is_stop).astype(int),
+            'WIN50':(X.ret>=.50).astype(int),
+            'WIN100':(X.ret>=1.0).astype(int)
+        }
+        for name,y in targets.items():
+            rows=[]
+            for f in feats:
+                xv=pd.to_numeric(X[f],errors='coerce')
+                auc=_v712_auc(y,xv)
+                if not np.isfinite(auc):continue
+                direction='HIGHER_BETTER' if auc>=.5 else 'LOWER_BETTER'
+                oa=max(auc,1-auc)
+                blocks=[]
+                for b in sorted(X.year.dropna().unique()):
+                    # leave-one-year style direction check is too tiny; use fixed 5-year blocks.
+                    pass
+                for lo in range(int(X.year.min()),int(X.year.max())+1,5):
+                    m=X.year.between(lo,lo+4)
+                    a=_v712_auc(y[m],xv[m])
+                    if np.isfinite(a):
+                        od=max(a,1-a);dr='HIGHER_BETTER' if a>=.5 else 'LOWER_BETTER'
+                        blocks.append((od,dr))
+                cons=float(np.mean([dr==direction for _,dr in blocks])) if blocks else None
+                weakest=float(min([od for od,_ in blocks])) if blocks else None
+                rows.append({'feature':f,'direction':direction,'oriented_auc':oa,
+                             'coverage':cov[f],'block_count':len(blocks),
+                             'direction_consistency':cons,'weakest_block_auc':weakest})
+            audits[name]=sorted(rows,key=lambda z:(z['oriented_auc'],z['coverage']),reverse=True)
+
+        maps={k:{r['feature']:r for r in v} for k,v in audits.items()}
+        shared=[]
+        for f in feats:
+            a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+            if not (a and b and c):continue
+            same=len({a['direction'],b['direction'],c['direction']})==1
+            minauc=min(a['oriented_auc'],b['oriented_auc'],c['oriented_auc'])
+            mincons=min([z['direction_consistency'] for z in (a,b,c) if z['direction_consistency'] is not None] or [0])
+            robust=bool(same and minauc>=.62 and cov[f]>=.80 and mincons>=.60)
+            shared.append({'feature':f,'direction':a['direction'] if same else 'MIXED',
+                           'mean_oriented_auc':float(np.mean([a['oriented_auc'],b['oriented_auc'],c['oriented_auc']])),
+                           'min_oriented_auc':float(minauc),'coverage':cov[f],
+                           'min_direction_consistency':float(mincons),'robust':robust,
+                           'layer':'SECTOR' if f in ['sector_score','group_breadth'] else 'INDIVIDUAL'})
+        shared=sorted(shared,key=lambda z:(z['robust'],z['mean_oriented_auc'],z['min_oriented_auc']),reverse=True)
+        robust=[z for z in shared if z['robust']]
+        sector_rob=[z for z in robust if z['layer']=='SECTOR']
+        indiv_rob=[z for z in robust if z['layer']=='INDIVIDUAL']
+        verdict=('SELECTIVE_DEFENSIVE_SECTOR_AND_STOCK_DNA_FOUND' if sector_rob and indiv_rob
+                 else 'SELECTIVE_DEFENSIVE_PARTIAL_DNA_FOUND' if robust
+                 else 'NO_ROBUST_SELECTIVE_DEFENSIVE_DNA')
+
+        result={'version':'V7.12 Selective Defensive Admission DNA Audit',
+                'verdict':verdict,'parity':{'n':got[0],'stop':got[1],'+50':got[2],'+100':got[3]},
+                'coverage':cov,'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],
+                'source':'V7.04 exact Actual Buy + V7.07 exact TRUE DEFENSIVE rows; enrichment only from persisted V6.69 feature cache',
+                'rule':'Diagnostic only. Market regime is fixed DEFENSIVE. Test whether persisted sector strength and individual RS/setup quality separate STOP from Non-STOP/+50/+100.',
+                'boundaries':'No universe scan, no account replay, no threshold sweep, no sizing change, no CLV/pre5 reopening, no admission reconstruction.',
+                'next_step':('V7.13: test exactly ONE top robust selective permission feature in native V7.04 engine.' if robust
+                             else 'Close selective DEFENSIVE feature branch; do not manufacture a sector rule without robust PIT evidence.')}
+        V712_DIR.mkdir(parents=True,exist_ok=True)
+        V712_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v712_write(status='done',phase='done',message=f'V7.12 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v712_write(status='error',phase='error',message=f'V7.12 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v712_thread=None
+
+def _v712_start():
+    global v712_thread
+    if _v712_alive():return False
+    _v712_write(status='starting',phase='starting',message='V7.12 starting',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v712_thread=threading.Thread(target=_v712_run,daemon=True);v712_thread.start();return True
+
+@APP.route('/v712/run',methods=['GET','POST'])
+def v712_run():_v712_start();return redirect('/v712')
+
+@APP.get('/api/v712/status')
+def v712_status():return jsonify(_v712_status())
+
+@APP.get('/v712')
+def v712_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v712_status();R={}
+    if V712_RESULT.exists():
+        try:R=json.loads(V712_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def n3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    rows=''.join(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('layer'))}</td><td>{e(x.get('direction'))}</td><td>{n3(x.get('mean_oriented_auc'))}</td><td>{n3(x.get('min_oriented_auc'))}</td><td>{pc(x.get('coverage'))}</td><td>{pc(x.get('min_direction_consistency'))}</td><td>{'✅' if x.get('robust') else '—'}</td></tr>" for x in (R.get('shared_candidates') or []))
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v712/run'><button>▶ Run V7.12 DNA Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V7.12 Selective Defensive Admission DNA Audit</h1><div class='ok'><b>只诊断，不改策略：</b>锁定 TRUE DEFENSIVE Actual Buys，检查 <b>Sector strength × Individual RS/setup quality</b> 是否能稳定区分 STOP 与 Winner。<br>不扫 universe、不 replay、不调 threshold、不改仓位。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Parity: {e(R.get('parity',{}))}</p></div>
+<div class='c'><h2>Selective Defensive DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Layer</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Dir Cons.</th><th>Robust</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v712/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
+
+@APP.after_request
+def _v712_home_card(response):
+    try:
+        from flask import request
+        if request.path=='/' and response.status_code==200 and response.mimetype=='text/html':
+            body=response.get_data(as_text=True)
+            if 'v712-home-card' not in body:
+                card="""<div id='v712-home-card' style='background:#fff;border:4px solid #10b981;border-radius:22px;padding:20px;margin:18px'>
+                <h2>🧬 V7.12 Selective Defensive DNA Audit</h2>
+                <p>DEFENSIVE 内部：Sector strength × Individual RS/setup quality。纯诊断，不扫 universe、不 replay。</p>
+                <a href='/v712'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800'>打开 V7.12</button></a>
+                </div>"""
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos)
+                    body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
+    except Exception:pass
+    return response
