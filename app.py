@@ -49593,3 +49593,336 @@ def _v713_home_card(response):
                 response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
     except Exception:pass
     return response
+
+
+# ================= V7.13B PIT COVERAGE REPAIR =================
+V713B_DIR=DATA_DIR/'v713b_pit_coverage_repair'
+V713B_STATUS=V713B_DIR/'status.json'
+V713B_STORE=V713B_DIR/'actual_buy_pit_context_repaired.csv.gz'
+V713B_RESULT=V713B_DIR/'result.json'
+V713B_BUILD_ID='V713B_LISTING_CACHE_REPAIR_20260830A'
+v713b_thread=None
+
+def _v713b_status():
+    d={'build_id':V713B_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V713B_STATUS.exists():
+        try:
+            x=json.loads(V713B_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V713B_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v713b_write(**kw):
+    V713B_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v713b_status();x.update(kw);x['build_id']=V713B_BUILD_ID
+    V713B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v713b_alive():return v713b_thread is not None and v713b_thread.is_alive()
+
+def _v713b_perf_lower(d,n):
+    if d is None or len(d)<=n:return np.nan
+    try:
+        a=float(d['close'].iloc[-1]);b=float(d['close'].iloc[-1-n])
+        return a/b-1 if np.isfinite(a) and np.isfinite(b) and b>0 else np.nan
+    except Exception:return np.nan
+
+def _v713b_slice_lower(d,dt):
+    if d is None or len(d)==0:return None
+    x=d.copy()
+    x['date']=pd.to_datetime(x['date'],errors='coerce').dt.normalize()
+    x=x.dropna(subset=['date']).sort_values('date')
+    x=x[x['date']<=pd.Timestamp(dt).normalize()]
+    return x.reset_index(drop=True) if len(x) else None
+
+def _v713b_market_to_lower(d):
+    if d is None or len(d)==0:return None
+    try:
+        x=d.reset_index().copy()
+        lc={str(c).lower():c for c in x.columns}
+        datec=next((lc[k] for k in ['date'] if k in lc),x.columns[0])
+        def pick(k):
+            return lc.get(k)
+        cc=pick('close');oc=pick('open');hc=pick('high');lc0=pick('low');vc=pick('volume')
+        if cc is None:return None
+        out=pd.DataFrame({
+            'date':pd.to_datetime(x[datec],errors='coerce').dt.normalize(),
+            'open':pd.to_numeric(x[oc],errors='coerce') if oc else pd.to_numeric(x[cc],errors='coerce'),
+            'high':pd.to_numeric(x[hc],errors='coerce') if hc else pd.to_numeric(x[cc],errors='coerce'),
+            'low':pd.to_numeric(x[lc0],errors='coerce') if lc0 else pd.to_numeric(x[cc],errors='coerce'),
+            'close':pd.to_numeric(x[cc],errors='coerce'),
+            'volume':pd.to_numeric(x[vc],errors='coerce') if vc else np.nan
+        }).dropna(subset=['date','close']).sort_values('date').reset_index(drop=True)
+        return out
+    except Exception:return None
+
+def _v713b_features(stock,dt,spy=None,sector=None):
+    d=_v713b_slice_lower(stock,dt)
+    if d is None or len(d)<60:return None
+    spy=_v713b_slice_lower(spy,dt) if spy is not None else None
+    sector=_v713b_slice_lower(sector,dt) if sector is not None else None
+
+    # Individual RS: same semantics; compute only when SPY history is genuinely available.
+    rs=np.nan
+    if spy is not None and len(spy)>=127:
+        vals=[]
+        for n,w in [(63,.25),(126,.35),(252,.40)]:
+            a,b=_v713b_perf_lower(d,n),_v713b_perf_lower(spy,n)
+            if np.isfinite(a) and np.isfinite(b):vals.append((a-b,w))
+        if vals:
+            ex=sum(v*w for v,w in vals)/sum(w for _,w in vals)
+            rs=float(max(0,min(100,50+ex*180)))
+
+    # Sector score: genuine ETF-vs-SPY PIT only.
+    sector_score=np.nan
+    if sector is not None and spy is not None and len(sector)>=127 and len(spy)>=127:
+        vals=[]
+        for n,w in [(63,.45),(126,.55)]:
+            a,b=_v713b_perf_lower(sector,n),_v713b_perf_lower(spy,n)
+            if np.isfinite(a) and np.isfinite(b):vals.append((a-b,w))
+        if vals:
+            ex=sum(v*w for v,w in vals)/sum(w for _,w in vals)
+            sector_score=float(max(0,min(100,50+ex*220)))
+
+    q=d.copy()
+    c=pd.to_numeric(q['close'],errors='coerce')
+    h=pd.to_numeric(q['high'],errors='coerce')
+    l=pd.to_numeric(q['low'],errors='coerce')
+    v=pd.to_numeric(q['volume'],errors='coerce')
+    ma50=c.rolling(50).mean();ma150=c.rolling(150).mean();ma200=c.rolling(200).mean()
+    trend_ok=bool(len(q)>=200 and np.isfinite(ma50.iloc[-1]) and np.isfinite(ma150.iloc[-1]) and np.isfinite(ma200.iloc[-1])
+                  and c.iloc[-1]>ma50.iloc[-1]>ma150.iloc[-1]>ma200.iloc[-1])
+
+    vcp_quality=np.nan
+    if len(q)>=60:
+        x=q.iloc[-60:]
+        wins=[x.iloc[:20],x.iloc[20:40],x.iloc[40:]]
+        cs=[]
+        for w in wins:
+            lo=float(pd.to_numeric(w['low'],errors='coerce').min())
+            hi=float(pd.to_numeric(w['high'],errors='coerce').max())
+            cs.append((hi-lo)/lo if np.isfinite(lo) and lo>0 else np.nan)
+        c1,c2,c3=cs
+        base=float(v.iloc[-50:-10].mean()) if len(q)>=50 else np.nan
+        dry=float(v.iloc[-10:].mean()/base) if np.isfinite(base) and base>0 else np.nan
+        r12=c2/c1 if np.isfinite(c1) and c1!=0 else np.nan
+        r23=c3/c2 if np.isfinite(c2) and c2!=0 else np.nan
+        vcp_quality=float(100*(.35*band_q(c3,.035,.065,.095,.115)+
+                               .20*band_q(r12,.45,.60,.82,.95)+
+                               .30*band_q(r23,.45,.68,.88,.96)+
+                               .15*band_q(dry,.45,.62,.82,1.00)))
+
+    v50=v.rolling(50).mean()
+    volratio=float(v.iloc[-1]/v50.iloc[-1]) if len(q)>=50 and np.isfinite(v50.iloc[-1]) and v50.iloc[-1]>0 else np.nan
+    pivot=float(h.iloc[-40:].max()) if len(q)>=40 else np.nan
+    px=float(c.iloc[-1])
+    pivot_dist=float(px/pivot-1) if np.isfinite(pivot) and pivot>0 else np.nan
+
+    return {'sector_score_pit':sector_score,'rs_pit':rs,'vcp_quality_pit':vcp_quality,
+            'volratio_pit':volratio,'trend_ok_pit':trend_ok,'pivot_dist_pit':pivot_dist,
+            'stock_bars_to_entry':int(len(d)),
+            'spy_bars_to_entry':int(len(spy)) if spy is not None else 0,
+            'sector_bars_to_entry':int(len(sector)) if sector is not None else 0}
+
+def _v713b_run():
+    global v713b_thread
+    t0=time.time()
+    try:
+        _v713b_write(status='running',phase='preflight',
+                     message='锁定 V7.04 exact 291 ledger；检查 V7.13 低 coverage 基准。',
+                     processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact ledger missing')
+        if not V707_ROWS.exists():raise RuntimeError('V7.07 TRUE DEFENSIVE rows missing')
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        G=pd.read_csv(V707_ROWS,compression='gzip')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+        got=(len(G),int(G.is_stop.astype(str).str.lower().isin(['true','1','yes']).sum()),
+             int((pd.to_numeric(G.ret,errors='coerce')>=.50).sum()),
+             int((pd.to_numeric(G.ret,errors='coerce')>=1.0).sum()))
+        if got!=(102,93,7,5):raise RuntimeError(f'V7.07 parity {got} != (102,93,7,5)')
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('Historical listing manifest missing')
+        if 'listing_id' not in M.columns:raise RuntimeError('Historical manifest missing listing_id')
+        M=M.copy();M['listing_id']=M['listing_id'].astype(str)
+        # Exact listing_id only. No ticker guessing, no admission reconstruction.
+        M=M.drop_duplicates('listing_id',keep='last').set_index('listing_id',drop=False)
+
+        _v713b_write(status='running',phase='listing_cache',
+                     message='按 291 个 exact listing_id 读取 V6.15B/V6.17 Historical Cache…',
+                     processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        L=L.copy()
+        L['listing_id']=L['listing_id'].astype(str)
+        L['ticker']=L['listing_id'].str.split('__').str[0].str.upper().str.strip()
+        L['entry_date']=pd.to_datetime(L['entry_date'],errors='coerce').dt.normalize()
+        if 'v704_row_id' not in L.columns or not L['v704_row_id'].is_unique:
+            raise RuntimeError('V7.04 v704_row_id invalid')
+
+        # Shared benchmark caches only; these are not universe scans.
+        spy=_v713b_market_to_lower(load_cached('SPY'))
+        sector_cache={}
+        for etf in sorted(set(SECTOR.get(t) for t in L.ticker if SECTOR.get(t))):
+            sector_cache[etf]=_v713b_market_to_lower(load_cached(etf))
+
+        rows=[];manifest_miss=0;price_miss=0;short_history=0
+        for j,r in L.iterrows():
+            lid=str(r.listing_id)
+            mr=M.loc[lid] if lid in M.index else None
+            stock=None
+            if mr is None:
+                manifest_miss+=1
+            else:
+                try:stock=_v617fv1_read_price(mr)
+                except Exception:stock=None
+                if stock is None or len(stock)==0:price_miss+=1
+
+            sec_etf=SECTOR.get(str(r.ticker))
+            sec=sector_cache.get(sec_etf)
+            f=_v713b_features(stock,r.entry_date,spy=spy,sector=sec) if stock is not None else None
+            if f is None and stock is not None:short_history+=1
+            row={'v704_row_id':int(r.v704_row_id),'listing_id':lid,'ticker':str(r.ticker),
+                 'entry_date':pd.Timestamp(r.entry_date),'sector_etf':sec_etf,
+                 'manifest_exact_match':bool(mr is not None),'listing_price_found':bool(stock is not None and len(stock)>0)}
+            if f:row.update(f)
+            rows.append(row)
+
+            if (j+1)%40==0 or j+1==len(L):
+                _v713b_write(status='running',phase='listing_cache',
+                             message=f'Exact listing cache {j+1}/{len(L)} · manifest_miss={manifest_miss} · price_miss={price_miss}',
+                             processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        F=pd.DataFrame(rows)
+        if len(F)!=291 or not F.v704_row_id.is_unique:raise RuntimeError('V7.13B store identity failed')
+        V713B_DIR.mkdir(parents=True,exist_ok=True)
+        F.to_csv(V713B_STORE,index=False,compression='gzip')
+
+        feature_cols=['sector_score_pit','rs_pit','vcp_quality_pit','volratio_pit','pivot_dist_pit']
+        coverage={c:float(pd.to_numeric(F.get(c),errors='coerce').notna().mean()) if c in F.columns else 0.0 for c in feature_cols}
+        listing_cov=float(F['listing_price_found'].mean())
+        individual_cov=max(coverage['vcp_quality_pit'],coverage['volratio_pit'],coverage['pivot_dist_pit'])
+
+        _v713b_write(status='running',phase='coverage_audit',
+                     message=f'Coverage repaired：listing={listing_cov:.1%} · individual={individual_cov:.1%} · sector={coverage["sector_score_pit"]:.1%}',
+                     processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # Only run DNA if the infrastructure is actually usable.
+        dna={}
+        verdict='PIT_COVERAGE_REPAIRED_READY_FOR_DNA' if individual_cov>=.90 else 'PIT_COVERAGE_REPAIR_INCOMPLETE'
+        if individual_cov>=.90:
+            D=G.merge(F,on='v704_row_id',how='left',validate='one_to_one',suffixes=('','_pit'))
+            D['ret']=pd.to_numeric(D.ret,errors='coerce')
+            D['is_stop']=D.is_stop.astype(str).str.lower().isin(['true','1','yes'])
+            feats=[c for c in feature_cols if c in D.columns and pd.to_numeric(D[c],errors='coerce').notna().mean()>=.60]
+            targets={'NONSTOP':(~D.is_stop).astype(int),'WIN50':(D.ret>=.50).astype(int),'WIN100':(D.ret>=1.0).astype(int)}
+            audits={}
+            for name,y in targets.items():
+                rr=[]
+                for f in feats:
+                    x=pd.to_numeric(D[f],errors='coerce')
+                    auc=_v713_auc(y,x)
+                    if np.isfinite(auc):
+                        rr.append({'feature':f,'direction':'HIGHER_BETTER' if auc>=.5 else 'LOWER_BETTER',
+                                   'oriented_auc':float(max(auc,1-auc)),'coverage':float(x.notna().mean())})
+                audits[name]=sorted(rr,key=lambda z:z['oriented_auc'],reverse=True)
+            maps={k:{x['feature']:x for x in v} for k,v in audits.items()}
+            shared=[]
+            for f in feats:
+                a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+                if not(a and b and c):continue
+                same=len({a['direction'],b['direction'],c['direction']})==1
+                aucs=[a['oriented_auc'],b['oriented_auc'],c['oriented_auc']]
+                robust=bool(same and min(aucs)>=.62 and min(a['coverage'],b['coverage'],c['coverage'])>=.60)
+                shared.append({'feature':f,'direction':a['direction'] if same else 'MIXED',
+                               'mean_oriented_auc':float(np.mean(aucs)),'min_oriented_auc':float(min(aucs)),
+                               'coverage':float(min(a['coverage'],b['coverage'],c['coverage'])),'robust':robust})
+            shared=sorted(shared,key=lambda z:(z['robust'],z['mean_oriented_auc']),reverse=True)
+            robust=[x for x in shared if x['robust']]
+            dna={'audits':audits,'shared_candidates':shared,'top_robust':robust[:5]}
+            if robust:verdict='PIT_COVERAGE_REPAIRED_AND_SELECTIVE_DNA_FOUND'
+            else:verdict='PIT_COVERAGE_REPAIRED_NO_ROBUST_DNA'
+
+        result={
+            'version':'V7.13B PIT Coverage Repair',
+            'build_id':V713B_BUILD_ID,'verdict':verdict,
+            'actual_buy_rows':291,'defensive_parity':{'n':102,'stop':93,'+50':7,'+100':5},
+            'store_path':str(V713B_STORE),
+            'listing_cache_diagnostics':{
+                'manifest_exact_match_rate':float(F.manifest_exact_match.mean()),
+                'listing_price_found_rate':listing_cov,
+                'manifest_miss':int(manifest_miss),'price_miss':int(price_miss),'short_history':int(short_history)
+            },
+            'coverage':coverage,'individual_core_coverage':float(individual_cov),
+            'sector_note':'Sector score uses only genuine cached sector ETF + SPY history. Missing ETF history is reported, never fabricated.',
+            'dna':dna,
+            'boundaries':'Exact 291 V7.04 Actual Buys only. Uses V6.15B/V6.17 listing Historical Cache by listing_id. No universe scan, no account replay, no admission reconstruction, no threshold sweep.',
+            'next_step':('If individual coverage >=90% and robust DNA exists: V7.14 tests exactly ONE top feature in Native A/B.' if individual_cov>=.90 and dna.get('top_robust')
+                         else 'If coverage >=90% but no robust DNA: close selective-permission branch. If coverage <90%: repair remaining manifest/price-cache misses only.')
+        }
+        V713B_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v713b_write(status='done',phase='done',message=f'V7.13B 完成：{verdict}',
+                     processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v713b_write(status='error',phase='error',message=f'V7.13B 失败：{type(ex).__name__}: {ex}',
+                     processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                     error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v713b_thread=None
+
+def _v713b_start():
+    global v713b_thread
+    if _v713b_alive():return False
+    _v713b_write(status='starting',phase='starting',message='V7.13B starting',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v713b_thread=threading.Thread(target=_v713b_run,daemon=True);v713b_thread.start();return True
+
+@APP.route('/v713b/run',methods=['GET','POST'])
+def v713b_run():_v713b_start();return redirect('/v713b')
+
+@APP.get('/api/v713b/status')
+def v713b_status():return jsonify(_v713b_status())
+
+@APP.get('/v713b')
+def v713b_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v713b_status();R={}
+    if V713B_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V713B_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    C=R.get('coverage') or {};D=R.get('listing_cache_diagnostics') or {}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    dna=(R.get('dna') or {}).get('shared_candidates') or []
+    rows=''.join(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td><td>{float(x.get('mean_oriented_auc',0)):.3f}</td><td>{float(x.get('min_oriented_auc',0)):.3f}</td><td>{pc(x.get('coverage'))}</td><td>{'✅' if x.get('robust') else '—'}</td></tr>" for x in dna)
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v713b/run'><button>▶ Run V7.13B Coverage Repair</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🛠️ V7.13B PIT Coverage Repair</h1><div class='ok'><b>修真正根因：</b>291 Actual Buys 不再按 ticker 去 MARKET_DIR 找价格；改为按 exact <b>listing_id</b> 读取 V6.15B/V6.17 Historical Cache。<br>目标 Individual PIT coverage ≥90%。Sector 缺失只报告，不伪造。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Manifest exact={pc(D.get('manifest_exact_match_rate'))} · Listing price found={pc(D.get('listing_price_found_rate'))}</p></div>
+<div class='c'><h2>Coverage</h2><p><b>Individual core={pc(R.get('individual_core_coverage'))}</b><br>Sector={pc(C.get('sector_score_pit'))} · RS={pc(C.get('rs_pit'))} · VCP Quality={pc(C.get('vcp_quality_pit'))} · VolRatio={pc(C.get('volratio_pit'))} · PivotDist={pc(C.get('pivot_dist_pit'))}</p></div>
+<div class='c'><h2>Selective Defensive DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Robust</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v713b/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
+
+@APP.after_request
+def _v713b_home_card(response):
+    try:
+        from flask import request
+        if request.path=='/' and response.status_code==200 and response.mimetype=='text/html':
+            body=response.get_data(as_text=True)
+            if 'v713b-home-card' not in body:
+                card="""<div id='v713b-home-card' style='background:#fff;border:4px solid #f59e0b;border-radius:22px;padding:20px;margin:18px'>
+                <h2>🛠️ V7.13B PIT Coverage Repair</h2>
+                <p>用 exact listing_id 读取 Historical Cache，把 8% PIT coverage 修到可研究水平。</p>
+                <a href='/v713b'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800'>打开 V7.13B</button></a>
+                </div>"""
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
+    except Exception:pass
+    return response
