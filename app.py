@@ -48928,17 +48928,23 @@ def _v711_home_card(response):
 V712_DIR=DATA_DIR/'v712_selective_defensive_admission_dna'
 V712_STATUS=V712_DIR/'status.json'
 V712_RESULT=V712_DIR/'result.json'
+V712_BUILD_ID='V712_SOURCE_FIX_20260830A'
 v712_thread=None
 
 def _v712_status():
+    default={'build_id':V712_BUILD_ID,'status':'idle','phase':'idle','message':'Ready · current Source Fix build','processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
     if V712_STATUS.exists():
-        try:return json.loads(V712_STATUS.read_text(encoding='utf-8'))
-        except Exception:pass
-    return {'status':'idle','phase':'idle','message':'Ready','processed':0,'total':5,'elapsed_sec':0}
+        try:
+            x=json.loads(V712_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V712_BUILD_ID:
+                default.update(x)
+        except Exception:
+            pass
+    return default
 
 def _v712_write(**kw):
     V712_DIR.mkdir(parents=True,exist_ok=True)
-    st=_v712_status();st.update(kw)
+    st=_v712_status();st.update(kw);st['build_id']=V712_BUILD_ID
     V712_STATUS.write_text(json.dumps(st,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
 
 def _v712_alive():return v712_thread is not None and v712_thread.is_alive()
@@ -49200,7 +49206,7 @@ def v712_page():
     import html
     e=lambda x:html.escape(str(x))
     st=_v712_status();R={}
-    if V712_RESULT.exists():
+    if V712_RESULT.exists() and st.get('status')=='done':
         try:R=json.loads(V712_RESULT.read_text(encoding='utf-8'))
         except Exception:R={}
     def n3(x):
@@ -49215,7 +49221,7 @@ def v712_page():
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
 <div class='c'><h1>🧬 V7.12 Selective Defensive Admission DNA Audit · Source Fix</h1><div class='ok'><b>只诊断，不改策略：</b>锁定 TRUE DEFENSIVE Actual Buys，检查真实可精确匹配的 <b>Sector strength × Individual RS/setup quality</b>；缺 Sector 时明确报告 unavailable，绝不伪造。<br>不扫 universe、不 replay、不调 threshold、不改仓位。</div></div>
-<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id','—'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
 <div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Parity: {e(R.get('parity',{}))}</p></div>
 <div class='c'><h2>Selective Defensive DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Layer</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Dir Cons.</th><th>Robust</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
