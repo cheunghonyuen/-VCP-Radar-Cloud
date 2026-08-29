@@ -45965,6 +45965,18 @@ def _v704_run():
         r702=json.loads(V702_RESULT.read_text(encoding='utf-8'));r703=json.loads(V703_RESULT.read_text(encoding='utf-8'))
         if r702.get('verdict')!='RANGE20_CONTEST_RANKING_PASSES_ECONOMIC_AB':raise RuntimeError('V7.02 未 PASS')
         if r703.get('verdict')!='SECOND_LAYER_TRIGGER_DNA_FOUND':raise RuntimeError('V7.03 未 PASS')
+        # Fail-fast exact V7.02 identity check BEFORE the expensive Historical Cache pass.
+        savedB=r702.get('B') or {}; expected=int(savedB.get('admitted_positions') or 0)
+        if not V702_B_ADMISSION_LEDGER.exists():
+            raise RuntimeError('缺 V7.02 exact B admission ledger; 不允许重建 control')
+        _L=pd.read_csv(V702_B_ADMISSION_LEDGER,compression='gzip')
+        if len(_L)!=expected:
+            raise RuntimeError(f'V7.02 exact ledger row parity failed {len(_L)} != {expected}')
+        if 'v702_row_id' not in _L.columns:
+            raise RuntimeError('V7.02 exact ledger missing v702_row_id')
+        _ids=pd.to_numeric(_L['v702_row_id'],errors='coerce')
+        if _ids.isna().any() or int(_ids.nunique())!=expected:
+            raise RuntimeError(f'V7.02 exact identity parity failed unique={_ids.nunique()} expected={expected}')
         shared=r703.get('shared_stable_trigger_dna') or []
         top=(shared[0].get('feature') if shared else None)
         if top!='breakout_margin50':raise RuntimeError(f'V7.03 top shared feature is {top}, not breakout_margin50; V7.04 blocked')
@@ -46041,16 +46053,20 @@ def _v704_run():
                 hv=0.0
                 for i,p in pos.items():
                     cp=_v699_quote(packs.get(p['listing_id']),dt,'close');cp=cp if np.isfinite(cp) else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
-                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0;todays=list(entries.get(dt,[]));free=max(0,10-len(pos))
-                orig=sorted(todays,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
-                todays=orig
-                if free>0 and len(orig)>free:
+                eq_now=cash+hv;target=eq_now/10.0 if eq_now>0 else 0.0
+                original=list(entries.get(dt,[])); todays=list(original); free=max(0,10-len(pos))
+                # EXACT V7.02 CONTROL SEMANTICS: preserve original V6.69 order on non-contest days.
+                # Range20 ordering is activated ONLY when same-day candidates exceed available slots.
+                if free>0 and len(original)>free:
                     contest_days+=1
-                    if two_stage:
-                        pool_n=min(len(orig),max(free,2*free));pool=orig[:pool_n]
+                    range_ranked=sorted(original,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
+                    if not two_stage:
+                        todays=range_ranked
+                    else:
+                        pool_n=min(len(range_ranked),max(free,2*free));pool=range_ranked[:pool_n]
                         chosen=sorted(pool,key=lambda i:(-(float(rec[i].get('breakout_margin50')) if np.isfinite(rec[i].get('breakout_margin50',np.nan)) else -np.inf),float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf))))[:free]
-                        chosen_set=set(chosen);rest=[i for i in orig if i not in chosen_set];todays=chosen+rest
-                        changed+=len(set(chosen)-set(orig[:free]));events.append({'date':dt,'free_slots':free,'candidate_n':len(orig),'finalist_n':pool_n,'range20_selected':orig[:free],'two_stage_selected':chosen})
+                        chosen_set=set(chosen);rest=[i for i in range_ranked if i not in chosen_set];todays=chosen+rest
+                        changed+=len(set(chosen)-set(range_ranked[:free]));events.append({'date':dt,'free_slots':free,'candidate_n':len(range_ranked),'finalist_n':pool_n,'range20_selected':range_ranked[:free],'two_stage_selected':chosen})
                 for i in todays:
                     r=rec[i];ep=float(r['entry_px_safe'])
                     if not np.isfinite(ep) or ep<=0:skipcash+=1;continue
@@ -46069,9 +46085,8 @@ def _v704_run():
                 if di%step==0 or di==len(cal):_v704_write(status='running',phase='account_replay',message=f'{label} {int(round(di/len(cal)*100))}%',processed=5,total=8,elapsed_sec=round(time.time()-t0,1))
             st=_v699_stats(eqrows,ledger,admitted,future,denoms,label);st.update({'skipped_capacity':int(skipcap),'skipped_cash':int(skipcash),'contest_days':int(contest_days),'changed_admissions':int(changed)});return st,pd.DataFrame(events),set(admitted)
 
-        _v704_write(status='running',phase='account_replay',message='A=V7.02 Range20 Rank；B=Range20 finalist → Breakout50 select；完整 10-slot A/B…',processed=4,total=8,elapsed_sec=round(time.time()-t0,1))
+        _v704_write(status='running',phase='account_replay',message='A=EXACT V7.02 contest-only Range20；B=同一 contest + Breakout50 second layer；完整 10-slot A/B…',processed=4,total=8,elapsed_sec=round(time.time()-t0,1))
         A,_,admA=sim('A_V702_RANGE20',False);B,EV,admB=sim('B_RANGE20_THEN_BREAKOUT50',True)
-        savedB=r702.get('B') or {};expected=int(savedB.get('admitted_positions') or 0)
         if expected and int(A.get('admitted_positions',0))!=expected:raise RuntimeError(f'V7.02 executable parity failed A={A.get("admitted_positions")} expected={expected}')
         # Strong metric parity guard against accidental replay drift.
         for k,tol in [('cagr',0.002),('profit_factor',0.03),('maxdd',0.01)]:
@@ -46103,7 +46118,7 @@ def _v704_run():
                 'history_dedup':'V6.91 hard admission remains closed; V6.16I ranking/replacement grids remain closed. V7.04 tests exactly one hierarchical economic use of V7.03 top shared trigger DNA. No numeric cutoff, no feature-weight grid, no ATR20, no third feature.',
                 'important':'V7.03 was discovered on V7.02 Actual Buys, so V7.04 is still post-selection research, not untouched production validation. If this fails, do not tune the finalist multiplier or neighboring rules.',
                 'next_step':('If PASS, freeze V7.04 and run one untouched forward-chained confirmation before production promotion.' if pass_econ else 'Close breakout_margin50 second-layer economic branch; do not tune 2x pool/cutoffs. Return to source-semantic candidate quality or a genuinely new mechanism.'),
-                'cache_note':'V6.94 candidate outcomes + V6.69 candidate order/exits + V7.02 range20 cache + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
+                'cache_note':'V7.02 exact 280 admission ledger identity precheck + V6.94 candidate outcomes + V6.69 original order/exits + V7.02 range20 cache + V6.17 Historical Cache + SPY calendar; 0 Tiingo; 0 universe rescan.'}
         V704_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
         if len(EV):EV.to_csv(V704_DIR/'two_stage_contest_events.csv.gz',index=False,compression='gzip')
         if admB:
