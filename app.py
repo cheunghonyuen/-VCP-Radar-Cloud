@@ -46987,7 +46987,7 @@ def _v706_run():
             exits.setdefault(pd.Timestamp(r['exit_date']),[]).append(i)
 
         def sim(label,block_defensive):
-            cash=1.0;pos={};last={};eqrows=[];ledger=[];blocked=[];clipped=0
+            cash=1.0;pos={};last={};eqrows=[];ledger=[];blocked=[];clipped=0;admitted=0
             for dt in cal:
                 dt=pd.Timestamp(dt).normalize()
                 for i in exits.get(dt,[]):
@@ -47010,7 +47010,7 @@ def _v706_run():
                     ep=float(rec[i]['entry_px_safe']);invest=min(float(target),float(cash)) if target>0 else 0.0
                     if invest<=1e-12:clipped+=1;continue
                     cash-=invest;pos[i]={'listing_id':str(rec[i]['listing_id']),'shares':invest/ep,
-                                        'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep
+                                        'entry_px':ep,'cost':invest,'entry_date':dt};last[i]=ep;admitted+=1
                 hv=0.0
                 for i,p in pos.items():
                     cp=_v699_quote(packs.get(p['listing_id']),dt,'close')
@@ -47018,15 +47018,21 @@ def _v706_run():
                 eq=cash+hv
                 if eq<=0 or not np.isfinite(eq):raise RuntimeError(f'{label}: invalid equity {eq} @ {dt}')
                 eqrows.append({'date':dt,'equity':float(eq),'exposure':float(hv/eq) if eq>0 else np.nan,'positions':int(len(pos))})
-            M,E,Lg=_v706_metrics(eqrows,ledger,label);M['blocked_defensive_entries']=int(len(blocked));M['clipped_entries']=int(clipped)
+            M,E,Lg=_v706_metrics(eqrows,ledger,label)
+            M['blocked_defensive_entries']=int(len(blocked));M['clipped_entries']=int(clipped)
+            M['admitted_entries']=int(admitted);M['open_at_end']=int(len(pos))
             return M,E,Lg,blocked
 
         A,EA,LA,_=sim('A_V704_EXACT_SCHEDULE',False)
         B,EB,LB,blocked=sim('B_BLOCK_DEFENSIVE_NEW_ADMISSION',True)
 
         # Hard parity with V7.04/V7.05 control before interpreting challenger.
-        if A['realized_trades']!=expected:
-            raise RuntimeError(f'Control schedule parity {A["realized_trades"]} != {expected}')
+        # IMPORTANT: admissions and realized exits are different concepts. The exact schedule
+        # may legitimately finish with an open position / boundary trade, so parity is on
+        # admitted entries (source-of-truth schedule), while realized exits are reported separately.
+        if A['admitted_entries']!=expected:
+            raise RuntimeError(f'Control admission parity {A["admitted_entries"]} != {expected}')
+        same_day_boundary=int((X.entry_date==X.exit_date).sum())
         for k,tol in [('cagr',0.015),('maxdd',0.015),('profit_factor',0.10)]:
             refv=ref.get(k);av=A.get(k)
             if refv is not None and np.isfinite(float(refv)) and np.isfinite(float(av)) and abs(float(refv)-float(av))>tol:
@@ -47081,6 +47087,9 @@ def _v706_run():
                       'stop':'unchanged','winner_exit':'unchanged','position_sizing':'10-slot target unchanged'},
             'causal_change':'B skips a scheduled NEW entry only when its point-in-time SPY regime at entry is DEFENSIVE. Existing positions are untouched. No replacement candidate is inserted.',
             'A':A,'B':B,'delta':delta,
+            'schedule_parity':{'expected_admissions':expected,'control_admitted':A.get('admitted_entries'),
+                               'control_realized_exits':A.get('realized_trades'),'control_open_at_end':A.get('open_at_end'),
+                               'same_day_entry_exit_rows':same_day_boundary},
             'blocked_defensive':blocked_diag,
             'winner_retention':{'+50':p50_ret,'+100':p100_ret},
             'year_stability':{'comparable_years':len(ys),'changed_years':len(changed_years),
@@ -47160,7 +47169,8 @@ pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
 <div class='c'><h2>DEFENSIVE Block Diagnostics</h2>
 <p>Blocked N=<b>{BD.get('n','—')}</b> · STOP={BD.get('stops','—')} · STOP%={pct(BD.get('stop_rate'))} · +50={BD.get('plus50','—')} · +100={BD.get('plus100','—')} · AvgRet={pct(BD.get('avg_ret'))}</p>
 <p>Winner retention: +50=<b>{pct(WR.get('+50'))}</b> · +100=<b>{pct(WR.get('+100'))}</b></p>
-<p>Changed years={Y.get('changed_years','—')} · B beats A={Y.get('B_beats_A_changed_years','—')} · share={pct(Y.get('beat_share'))}</p></div>
+<p>Changed years={Y.get('changed_years','—')} · B beats A={Y.get('B_beats_A_changed_years','—')} · share={pct(Y.get('beat_share'))}</p>
+<p>Control schedule: admitted={A.get('admitted_entries','—')} · realized exits={A.get('realized_trades','—')} · open at end={A.get('open_at_end','—')}</p></div>
 <div class='c'><div class='warn'><b>解释边界：</b>{e(R.get('important','固定 schedule shadow；不补 replacement，故偏保守。'))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let q=await fetch('/api/v706/status',{{cache:'no-store'}}),x=await q.json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
