@@ -45997,8 +45997,12 @@ def _v704_run():
         Z=Z.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
         Z['v704_row_id']=np.arange(len(Z),dtype=int)
         if len(Z)<500:raise RuntimeError(f'candidate rows too small: {len(Z)}')
-        r20cov=float(pd.to_numeric(Z.range20,errors='coerce').notna().mean());
-        if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
+        # FIX4: fail-fast schema guard. range20/breakout_margin50 do NOT exist yet;
+        # they are computed from Historical Cache below. Validate only source columns here.
+        _req_pre={'listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret','v704_row_id'}
+        _miss_pre=sorted(_req_pre-set(Z.columns))
+        if _miss_pre:
+            raise RuntimeError('V7.04 pre-cache schema missing: '+','.join(_miss_pre))
 
         _v704_write(status='running',phase='historical_cache',message=f'Candidate={len(Z):,} · 严格复刻 V7.02 execution pack；Breakout50 用独立 feature-only pack…',processed=1,total=8,elapsed_sec=round(time.time()-t0,1))
         M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
@@ -46046,7 +46050,12 @@ def _v704_run():
         cur=Z[['v702_row_id','listing_id','entry_date','candidate_order']].copy();mm=chk.merge(cur,on='v702_row_id',how='left',suffixes=('_saved','_cur'))
         bad=((mm.listing_id_saved!=mm.listing_id_cur)|(mm.entry_date_saved!=mm.entry_date_cur)|(pd.to_numeric(mm.candidate_order_saved,errors='coerce')!=pd.to_numeric(mm.candidate_order_cur,errors='coerce')))
         if bool(bad.any()):raise RuntimeError(f'V7.02 candidate identity content mismatch rows={int(bad.sum())}')
-        r20cov=float(pd.to_numeric(Z.range20,errors='coerce').notna().mean()) if len(Z) else 0.;b50cov=float(pd.to_numeric(Z.breakout_margin50,errors='coerce').notna().mean()) if len(Z) else 0.
+        _req_post={'range20','breakout_margin50','v702_row_id'}
+        _miss_post=sorted(_req_post-set(Z.columns))
+        if _miss_post:
+            raise RuntimeError('V7.04 post-cache schema missing: '+','.join(_miss_post))
+        r20cov=float(pd.to_numeric(Z['range20'],errors='coerce').notna().mean()) if len(Z) else 0.
+        b50cov=float(pd.to_numeric(Z['breakout_margin50'],errors='coerce').notna().mean()) if len(Z) else 0.
         if r20cov<.90:raise RuntimeError(f'range20 coverage too low {r20cov:.1%}')
         if b50cov<.90:raise RuntimeError(f'breakout_margin50 coverage too low {b50cov:.1%}')
         V704_DIR.mkdir(parents=True,exist_ok=True);Z[['v702_row_id','v704_row_id','listing_id','entry_date','candidate_order','range20','breakout_margin50']].to_csv(V704_BREAKOUT_CACHE,index=False,compression='gzip')
