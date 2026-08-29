@@ -46411,3 +46411,293 @@ if _v705_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v705_home_base:APP.view_functions[ep]=_v705_home_wrap
+
+
+# ========================= V7 RUNTIME PREFLIGHT / SCHEMA AUDIT =========================
+# Project-level fail-fast diagnostic. NO strategy replay, NO Historical Cache scan,
+# NO universe scan. It inspects only persisted ledgers/caches/results and identity keys.
+
+V7PF_DIR = DATA_DIR/'v7_runtime_preflight'
+V7PF_RESULT = V7PF_DIR/'result.json'
+
+def _v7pf_json(path):
+    out={'path':str(path),'exists':bool(path.exists())}
+    if not path.exists():
+        return out
+    try:
+        out['size_bytes']=int(path.stat().st_size)
+        x=json.loads(path.read_text(encoding='utf-8'))
+        out['keys']=sorted(list(x.keys()))[:80] if isinstance(x,dict) else []
+        if isinstance(x,dict):
+            out['version']=x.get('version')
+            out['verdict']=x.get('verdict')
+            if isinstance(x.get('A'),dict):
+                out['A_admitted']=x['A'].get('admitted_positions')
+            if isinstance(x.get('B'),dict):
+                out['B_admitted']=x['B'].get('admitted_positions')
+    except Exception as ex:
+        out['error']=f'{type(ex).__name__}: {ex}'
+    return out
+
+def _v7pf_csv(path, key_cols=None):
+    key_cols=key_cols or []
+    out={'path':str(path),'exists':bool(path.exists())}
+    if not path.exists():
+        return out
+    try:
+        out['size_bytes']=int(path.stat().st_size)
+        hdr=pd.read_csv(path,compression='gzip',nrows=0)
+        out['columns']=list(hdr.columns)
+        # Only load identity / date columns needed for diagnostics.
+        wanted=[]
+        for c in ['v702_row_id','v704_row_id','candidate_order','listing_id','entry_date','exit_date',
+                  'entry_px_safe','exit_px_safe','entry_px_raw','exit_px_raw','entry_px',
+                  'control_exit_px','control_exit_date','control_reason','ret','is_stop',
+                  'range20','breakout_margin50']:
+            if c in hdr.columns:
+                wanted.append(c)
+        df=pd.read_csv(path,compression='gzip',usecols=wanted if wanted else None)
+        out['rows']=int(len(df))
+        for c in ['v702_row_id','v704_row_id','candidate_order']:
+            if c in df.columns:
+                s=df[c]
+                out[c]={
+                    'nonnull':int(s.notna().sum()),
+                    'unique':int(s.nunique(dropna=True)),
+                    'duplicates':int(s.duplicated(keep=False).sum()),
+                    'is_unique_nonnull':bool(s.notna().all() and s.is_unique)
+                }
+        if 'listing_id' in df.columns and 'entry_date' in df.columns:
+            q=df[['listing_id','entry_date']].copy()
+            q['listing_id']=q['listing_id'].astype(str)
+            q['entry_date']=pd.to_datetime(q['entry_date'],errors='coerce').dt.normalize()
+            out['listing_entry_pair']={
+                'unique':int(q.drop_duplicates().shape[0]),
+                'duplicate_rows':int(q.duplicated(keep=False).sum()),
+                'is_unique':bool(not q.duplicated().any())
+            }
+        if 'candidate_order' in df.columns and 'listing_id' in df.columns and 'entry_date' in df.columns:
+            q=df[['candidate_order','listing_id','entry_date']].copy()
+            q['entry_date']=pd.to_datetime(q['entry_date'],errors='coerce').dt.normalize()
+            out['candidate_identity_triplet']={
+                'unique':int(q.drop_duplicates().shape[0]),
+                'duplicate_rows':int(q.duplicated(keep=False).sum()),
+                'is_unique':bool(not q.duplicated().any())
+            }
+        out['missing_requested_keys']=[c for c in key_cols if c not in df.columns]
+    except Exception as ex:
+        out['error']=f'{type(ex).__name__}: {ex}'
+    return out
+
+def _v7pf_run_now():
+    t0=time.time()
+    V7PF_DIR.mkdir(parents=True,exist_ok=True)
+
+    files={
+        'V6.69 trades': _v7pf_csv(V669_TRADES,['listing_id','entry_date']),
+        'V7.02 exact B ledger': _v7pf_csv(V702_B_ADMISSION_LEDGER,['v702_row_id','listing_id','entry_date']),
+        'V7.02 range20 cache': _v7pf_csv(V702_RANGE20_CACHE,['listing_id','entry_date','candidate_order','range20']),
+        'V7.04 challenger ledger': _v7pf_csv(V704_LEDGER,['v704_row_id','listing_id','entry_date']),
+        'V7.04 breakout cache': _v7pf_csv(V704_BREAKOUT_CACHE,['v704_row_id','v702_row_id','candidate_order','range20','breakout_margin50']),
+    }
+    results={
+        'V7.02 result':_v7pf_json(V702_RESULT),
+        'V7.03 result':_v7pf_json(V703_RESULT),
+        'V7.04 result':_v7pf_json(V704_RESULT),
+    }
+
+    # Cross-file identity checks. These are the important part.
+    cross={}
+    try:
+        if V704_LEDGER.exists() and V704_BREAKOUT_CACHE.exists():
+            L=pd.read_csv(V704_LEDGER,compression='gzip')
+            C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
+            if 'v704_row_id' in L.columns and 'v704_row_id' in C.columns:
+                lk=pd.to_numeric(L.v704_row_id,errors='coerce')
+                ck=pd.to_numeric(C.v704_row_id,errors='coerce')
+                lset=set(lk.dropna().astype(int)); cset=set(ck.dropna().astype(int))
+                cross['V704 ledger -> breakout cache by v704_row_id']={
+                    'ledger_rows':int(len(L)),
+                    'ledger_key_unique':bool(lk.notna().all() and lk.is_unique),
+                    'cache_key_unique':bool(ck.notna().all() and ck.is_unique),
+                    'matched':int(len(lset & cset)),
+                    'missing_from_cache':int(len(lset-cset)),
+                    'extra_in_cache':int(len(cset-lset)),
+                    'exact_ledger_coverage':bool(len(lset)==len(L) and len(lset-cset)==0)
+                }
+            if 'candidate_order' in L.columns and 'candidate_order' in C.columns:
+                lk=pd.to_numeric(L.candidate_order,errors='coerce')
+                ck=pd.to_numeric(C.candidate_order,errors='coerce')
+                cross['V704 ledger candidate_order diagnostic']={
+                    'ledger_unique':int(lk.nunique(dropna=True)),
+                    'ledger_rows':int(len(L)),
+                    'ledger_duplicate_rows':int(lk.duplicated(keep=False).sum()),
+                    'cache_unique':int(ck.nunique(dropna=True)),
+                    'note':'candidate_order is diagnostic only; use v704_row_id if exact coverage passes'
+                }
+    except Exception as ex:
+        cross['V704 cross error']=f'{type(ex).__name__}: {ex}'
+
+    try:
+        if V702_B_ADMISSION_LEDGER.exists() and V704_BREAKOUT_CACHE.exists():
+            L=pd.read_csv(V702_B_ADMISSION_LEDGER,compression='gzip')
+            C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
+            if 'v702_row_id' in L.columns and 'v702_row_id' in C.columns:
+                lk=pd.to_numeric(L.v702_row_id,errors='coerce')
+                ck=pd.to_numeric(C.v702_row_id,errors='coerce')
+                lset=set(lk.dropna().astype(int)); cset=set(ck.dropna().astype(int))
+                cross['V702 ledger -> V704 cache by v702_row_id']={
+                    'ledger_rows':int(len(L)),
+                    'ledger_key_unique':bool(lk.notna().all() and lk.is_unique),
+                    'cache_key_unique':bool(ck.notna().all() and ck.is_unique),
+                    'matched':int(len(lset & cset)),
+                    'missing_from_cache':int(len(lset-cset)),
+                    'exact_ledger_coverage':bool(len(lset)==len(L) and len(lset-cset)==0)
+                }
+    except Exception as ex:
+        cross['V702 cross error']=f'{type(ex).__name__}: {ex}'
+
+    # Decide canonical adapter keys from observed facts, not guesses.
+    adapter=[]
+    v704=files.get('V7.04 challenger ledger',{})
+    v704c=files.get('V7.04 breakout cache',{})
+    if (
+        isinstance(v704.get('v704_row_id'),dict) and v704['v704_row_id'].get('is_unique_nonnull') and
+        isinstance(v704c.get('v704_row_id'),dict) and v704c['v704_row_id'].get('is_unique_nonnull') and
+        isinstance(cross.get('V704 ledger -> breakout cache by v704_row_id'),dict) and
+        cross['V704 ledger -> breakout cache by v704_row_id'].get('exact_ledger_coverage')
+    ):
+        adapter.append({
+            'scope':'V7.04 Actual Buy',
+            'canonical_key':'v704_row_id',
+            'source_of_truth':'V7.04 challenger_actual_buy_ledger.csv.gz',
+            'enrichment':'join V7.04 candidate_breakout_margin50_cache.csv.gz by v704_row_id',
+            'reconstruct_admission':False
+        })
+    v702=files.get('V7.02 exact B ledger',{})
+    if isinstance(v702.get('v702_row_id'),dict) and v702['v702_row_id'].get('is_unique_nonnull'):
+        adapter.append({
+            'scope':'V7.02 Actual Buy',
+            'canonical_key':'v702_row_id',
+            'source_of_truth':'V7.02 b_range20_actual_buy_ledger.csv.gz',
+            'reconstruct_admission':False
+        })
+
+    verdict='PREFLIGHT_READY_FOR_UNIFIED_ADAPTER' if adapter else 'PREFLIGHT_BLOCKED_IDENTITY_NOT_PROVEN'
+    result={
+        'version':'V7 Runtime Preflight / Schema Audit',
+        'verdict':verdict,
+        'elapsed_sec':round(time.time()-t0,3),
+        'files':files,
+        'results':results,
+        'cross_checks':cross,
+        'canonical_adapter':adapter,
+        'hard_rule':'No long replay may start unless this preflight proves the exact ledger key and all required joins first.',
+        'note':'This page does not run strategy logic, Historical Cache, universe scan, or portfolio replay.'
+    }
+    V7PF_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return result
+
+@APP.route('/v7/runtime-preflight/run',methods=['GET','POST'])
+def v7_runtime_preflight_run():
+    _v7pf_run_now()
+    return redirect('/v7/runtime-preflight')
+
+@APP.get('/api/v7/runtime-preflight')
+def v7_runtime_preflight_api():
+    try:
+        if V7PF_RESULT.exists():
+            return jsonify(json.loads(V7PF_RESULT.read_text(encoding='utf-8')))
+    except Exception:
+        pass
+    return jsonify({'verdict':'NOT_RUN'})
+
+@APP.get('/v7/runtime-preflight')
+def v7_runtime_preflight_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R={}
+    if V7PF_RESULT.exists():
+        try:R=json.loads(V7PF_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    files=R.get('files',{}) if isinstance(R.get('files'),dict) else {}
+    cross=R.get('cross_checks',{}) if isinstance(R.get('cross_checks'),dict) else {}
+    adapter=R.get('canonical_adapter',[]) if isinstance(R.get('canonical_adapter'),list) else []
+
+    def keycell(d,k):
+        x=d.get(k)
+        if not isinstance(x,dict): return '—'
+        return f"{x.get('unique','—')}/{d.get('rows','—')} unique · dup rows={x.get('duplicates','—')}"
+
+    trs=[]
+    for name,d in files.items():
+        cols=d.get('columns',[])
+        important=[c for c in ['v702_row_id','v704_row_id','candidate_order','listing_id','entry_date','exit_date',
+                               'entry_px_safe','exit_px_safe','entry_px_raw','exit_px_raw','entry_px',
+                               'control_exit_px','range20','breakout_margin50'] if c in cols]
+        trs.append(
+            f"<tr><td><b>{e(name)}</b></td><td>{'✅' if d.get('exists') else '❌'}</td>"
+            f"<td>{e(d.get('rows','—'))}</td>"
+            f"<td>{e(keycell(d,'v702_row_id'))}</td>"
+            f"<td>{e(keycell(d,'v704_row_id'))}</td>"
+            f"<td>{e(keycell(d,'candidate_order'))}</td>"
+            f"<td>{e((d.get('listing_entry_pair') or {}).get('is_unique','—'))}</td>"
+            f"<td>{e(', '.join(important))}</td></tr>"
+        )
+
+    cr=[]
+    for name,d in cross.items():
+        cr.append(f"<div class='box'><b>{e(name)}</b><pre>{e(json.dumps(d,ensure_ascii=False,indent=2))}</pre></div>")
+
+    ar=[]
+    for x in adapter:
+        ar.append(f"<div class='ok'><b>{e(x.get('scope'))}</b><br>Canonical key: <b>{e(x.get('canonical_key'))}</b><br>"
+                  f"Source: {e(x.get('source_of_truth'))}<br>"
+                  f"Enrichment: {e(x.get('enrichment','—'))}<br>"
+                  f"Reconstruct admission: <b>{e(x.get('reconstruct_admission'))}</b></div>")
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}
+button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px;margin:10px 0}}
+.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}
+.box{{background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px;padding:12px;margin:10px 0}}
+pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
+</style></head><body><div class='w'>
+<a href='/'>← 首页</a>
+<div class='c'><h1>🩺 V7 Runtime Preflight / Schema Audit</h1>
+<div class='warn'><b>只诊断，不回测。</b> 不读 Historical Cache，不扫 universe，不 replay。目标是在几秒内锁定真实 ledger schema / 唯一键 / join parity。</div></div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<p>Elapsed: {e(R.get('elapsed_sec','—'))}s</p>
+<form method='post' action='/v7/runtime-preflight/run'><button>▶ Run Preflight</button></form></div>
+<div class='c'><h2>1. Runtime Files / Identity</h2><div style='overflow:auto'><table>
+<tr><th>File</th><th>Exists</th><th>Rows</th><th>v702_row_id</th><th>v704_row_id</th><th>candidate_order</th><th>listing+date unique?</th><th>Important columns</th></tr>
+{''.join(trs) if trs else '<tr><td colspan=8>Run Preflight first.</td></tr>'}
+</table></div></div>
+<div class='c'><h2>2. Cross-file exact identity checks</h2>{''.join(cr) if cr else '—'}</div>
+<div class='c'><h2>3. Canonical Actual-Buy Adapter</h2>{''.join(ar) if ar else '<div class="warn">Identity not proven yet. Do not run long replay.</div>'}</div>
+<div class='c'><div class='warn'><b>以后强制规则：</b>任何长跑版本必须先通过这个 Preflight；Actual Buy 必须直接读 exact ledger，不再自己 reconstruct admission。</div></div>
+</div></body></html>"""
+
+_v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v7pf_home_base is not None:
+    def _v7pf_home_wrap(*args,**kwargs):
+        resp=_v7pf_home_base(*args,**kwargs)
+        card="""<div id='v7-runtime-preflight-card' style='background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🩺 V7 Runtime Preflight</h2><p>先锁 schema / unique key / parity，再允许长跑。</p>
+        <a href='/v7/runtime-preflight'><button>打开 Runtime Preflight</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            pos=body.find('<body')
+            if pos>=0:
+                gt=body.find('>',pos)
+                body=body[:gt+1]+card+body[gt+1:]
+            else: body=card+body
+            resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v7pf_home_base:
+            APP.view_functions[ep]=_v7pf_home_wrap
