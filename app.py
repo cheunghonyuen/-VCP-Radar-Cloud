@@ -45739,3 +45739,171 @@ if _v702_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v702_home_base:APP.view_functions[ep]=_v702_home_wrap
+
+# ========================= V7.03 RANGE20-CONDITIONED TRIGGER-GEOMETRY AUDIT =========================
+V703_DIR=DATA_DIR/'v703_range20_conditioned_trigger_geometry_audit'
+V703_STATUS=V703_DIR/'status.json'; V703_RESULT=V703_DIR/'result.json'; V703_ROWS=V703_DIR/'trigger_geometry.csv.gz'
+v703_thread=None
+
+def _v703_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V703_STATUS.exists():
+        try:x.update(json.loads(V703_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v703_write(**kw):
+    V703_DIR.mkdir(parents=True,exist_ok=True);x=_v703_status();x.update(kw)
+    V703_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v703_alive():return v703_thread is not None and v703_thread.is_alive()
+
+def _v703_auc(x,y):
+    z=pd.DataFrame({'x':pd.to_numeric(pd.Series(x),errors='coerce'),'y':pd.Series(y).astype(int)}).dropna()
+    if z.empty or z.y.nunique()<2:return np.nan
+    r=z.x.rank(method='average');n1=int((z.y==1).sum());n0=int((z.y==0).sum())
+    return float((r[z.y==1].sum()-n1*(n1+1)/2)/(n1*n0)) if n1 and n0 else np.nan
+
+def _v703_smd(a,b):
+    a=pd.to_numeric(pd.Series(a),errors='coerce').dropna();b=pd.to_numeric(pd.Series(b),errors='coerce').dropna()
+    if len(a)<8 or len(b)<8:return np.nan
+    va=float(a.var(ddof=1));vb=float(b.var(ddof=1));den=np.sqrt(max(1e-12,((len(a)-1)*va+(len(b)-1)*vb)/(len(a)+len(b)-2)))
+    return float((a.mean()-b.mean())/den) if den>0 else np.nan
+
+def _v703_block5(y):
+    y=int(y);s=1996+5*((y-1996)//5);return f'{s}-{s+4}'
+
+def _v703_run():
+    global v703_thread
+    t0=time.time()
+    try:
+        _v703_write(status='running',phase='precheck',message='V7.02 PASS；只审计 Range20-ranked Actual Buy 的新 trigger geometry，不重做 generic DNA…',processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+        if not V702_RESULT.exists():raise RuntimeError('找不到 V7.02 result.json')
+        r702=json.loads(V702_RESULT.read_text(encoding='utf-8'))
+        if r702.get('verdict')!='RANGE20_CONTEST_RANKING_PASSES_ECONOMIC_AB':raise RuntimeError('V7.02 未 PASS')
+        expected=int((r702.get('B') or {}).get('admitted_positions') or 0)
+        if not V702_RANGE20_CACHE.exists():raise RuntimeError('找不到 V7.02 range20 cache')
+        fp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 cache')
+
+        _v703_write(status='running',phase='reconstruct',message=f'重建 V7.02 B Actual Buy，目标 admissions={expected}…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+        F=pd.read_csv(fp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'});C=pd.read_csv(V702_RANGE20_CACHE,compression='gzip')
+        for d in (F,P,C):d['listing_id']=d.listing_id.astype(str);d['entry_date']=pd.to_datetime(d.entry_date,errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce');F['is_stop']=F.is_stop.astype(bool)
+        meta=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first');meta['candidate_order']=pd.to_numeric(meta.candidate_order,errors='coerce')
+        Z=F.merge(meta,on=['listing_id','entry_date'],how='left').merge(C[['listing_id','entry_date','range20']],on=['listing_id','entry_date'],how='inner')
+        Z['range20']=pd.to_numeric(Z.range20,errors='coerce');Z=Z.dropna(subset=['entry_date','exit_date','ret','candidate_order']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        rec=Z.to_dict('index');entries={}
+        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i)
+        active={};adm=[]
+        for dt in sorted(entries):
+            for i in list(active):
+                if pd.Timestamp(active[i])<=pd.Timestamp(dt):active.pop(i,None)
+            todays=list(entries[dt]);free=max(0,10-len(active))
+            if free>0 and len(todays)>free:
+                todays=sorted(todays,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
+            for i in todays:
+                if len(active)>=10:break
+                active[i]=pd.Timestamp(rec[i]['exit_date']);adm.append(i)
+        if len(adm)!=expected:raise RuntimeError(f'B admission parity mismatch {len(adm)} != {expected}')
+        A=Z.loc[adm].copy().reset_index(drop=True);A['year']=A.entry_date.dt.year.astype(int);A['block5']=A.year.map(_v703_block5)
+
+        _v703_write(status='running',phase='feature_cache',message=f'Parity OK {len(A)}。只读这批 Actual Buy 的 Historical Cache…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
+        M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()};rows=[];missing=0
+        for n,r in A.iterrows():
+            mr=mmap.get(str(r.listing_id))
+            if mr is None:missing+=1;continue
+            try:d=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if d is None or d.empty:missing+=1;continue
+            lc={str(c).lower():c for c in d.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
+            q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce').dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce')}).dropna().sort_values('date').drop_duplicates('date',keep='last')
+            ed=pd.Timestamp(r.entry_date).normalize();q=q[q.date<=ed].tail(80).reset_index(drop=True)
+            if len(q)<55 or q.date.iloc[-1]!=ed:missing+=1;continue
+            ev=_v6894_detect_events(q[['date','open','close']].copy());hev=[x for x in ev if x['high_confidence']]
+            for c in ['open','high','low','close']:q[c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
+            cur=q.iloc[-1];pre=q.iloc[:-1];pc=float(pre.close.iloc[-1]);cl=float(cur.close);op=float(cur.open);hi=float(cur.high);lo=float(cur.low)
+            def rpct(k):
+                g=pre.tail(k);return float((g.high.max()-g.low.min())/pc) if len(g)>=k and pc>0 else np.nan
+            p5,p10,p20=rpct(5),rpct(10),rpct(20);pr20=float(pre.tail(20).high.max());pr50=float(pre.tail(50).high.max());avg20=float(((pre.tail(20).high-pre.tail(20).low)/pre.tail(20).close).mean());dr=float((hi-lo)/pc)
+            rows.append({'listing_id':str(r.listing_id),'entry_date':ed,'ret':float(r.ret),'is_stop':bool(r.is_stop),'year':int(r.year),'block5':str(r.block5),'range20':float(r.range20),
+                         'pre5_range_pct':p5,'pre10_range_pct':p10,'pre5_over_pre20':p5/p20 if np.isfinite(p5) and np.isfinite(p20) and p20>0 else np.nan,'pre10_over_pre20':p10/p20 if np.isfinite(p10) and np.isfinite(p20) and p20>0 else np.nan,
+                         'breakout_margin20':cl/pr20-1 if pr20>0 else np.nan,'breakout_margin50':cl/pr50-1 if pr50>0 else np.nan,'entry_clv':(cl-lo)/(hi-lo) if hi>lo else np.nan,'entry_gap_pct':op/pc-1 if pc>0 else np.nan,'entry_body_pct':cl/op-1 if op>0 else np.nan,'entry_range_expansion20':dr/avg20 if avg20>0 else np.nan})
+            if (n+1)%50==0 or n+1==len(A):_v703_write(status='running',phase='feature_cache',message=f'Trigger geometry {n+1}/{len(A)} · missing={missing}',processed=3,total=7,elapsed_sec=round(time.time()-t0,1))
+        G=pd.DataFrame(rows)
+        if len(G)<int(expected*.85):raise RuntimeError(f'feature coverage too low {len(G)}/{expected}')
+        G.to_csv(V703_ROWS,index=False,compression='gzip')
+
+        _v703_write(status='running',phase='audit',message='STOP vs +50/+100：pooled + 5-year block stability；不组合、不调 cutoff…',processed=4,total=7,elapsed_sec=round(time.time()-t0,1))
+        feats=['pre5_range_pct','pre10_range_pct','pre5_over_pre20','pre10_over_pre20','breakout_margin20','breakout_margin50','entry_clv','entry_gap_pct','entry_body_pct','entry_range_expansion20'];aud={}
+        for name,thr in [('WIN50',.50),('WIN100',1.0)]:
+            sub=G[(G.is_stop)|(G.ret>=thr)].copy();sub['y']=(sub.ret>=thr).astype(int);out=[]
+            for f in feats:
+                z=sub[[f,'y','block5']].copy();z[f]=pd.to_numeric(z[f],errors='coerce');z=z.dropna();auc=_v703_auc(z[f],z.y);smd=_v703_smd(z.loc[z.y.eq(1),f],z.loc[z.y.eq(0),f]);sgn=1 if np.isfinite(auc) and auc>=.5 else -1;blocks=[]
+                for b,g in z.groupby('block5'):
+                    if len(g)<20 or g.y.nunique()<2 or int(g.y.sum())<2:continue
+                    a=_v703_auc(g[f],g.y)
+                    if np.isfinite(a):blocks.append({'block':str(b),'n':int(len(g)),'winner_n':int(g.y.sum()),'auc':float(a),'oriented_auc':float(max(a,1-a)),'same_direction':bool((a-.5)*sgn>=0)})
+                vals=[x['oriented_auc'] for x in blocks];dirs=[x['same_direction'] for x in blocks]
+                out.append({'feature':f,'coverage':float(pd.to_numeric(sub[f],errors='coerce').notna().mean()),'n':int(len(z)),'winner_n':int(z.y.sum()),'pooled_auc':float(auc) if np.isfinite(auc) else None,'pooled_oriented_auc':float(max(auc,1-auc)) if np.isfinite(auc) else None,'smd':float(smd) if np.isfinite(smd) else None,'winner_median':float(z.loc[z.y.eq(1),f].median()),'stop_median':float(z.loc[z.y.eq(0),f].median()),'block_count':len(blocks),'mean_block_auc':float(np.mean(vals)) if vals else None,'weakest_block_auc':float(np.min(vals)) if vals else None,'block_ge_060_share':float(np.mean([v>=.60 for v in vals])) if vals else None,'direction_consistency':float(np.mean(dirs)) if dirs else None,'blocks':blocks})
+            aud[name]=sorted(out,key=lambda x:((x.get('direction_consistency') or 0),(x.get('pooled_oriented_auc') or 0),abs(x.get('smd') or 0)),reverse=True)
+
+        _v703_write(status='running',phase='gate',message='寻找同一第二层 trigger DNA 同时通过 +50/+100…',processed=6,total=7,elapsed_sec=round(time.time()-t0,1))
+        shared=[]
+        for f in feats:
+            a=next(x for x in aud['WIN50'] if x['feature']==f);b=next(x for x in aud['WIN100'] if x['feature']==f)
+            ok=lambda x:(x.get('coverage') or 0)>=.85 and (x.get('pooled_oriented_auc') or 0)>=.62 and abs(x.get('smd') or 0)>=.35 and (x.get('block_count') or 0)>=4 and (x.get('direction_consistency') or 0)>=.75 and (x.get('block_ge_060_share') or 0)>=.50
+            if ok(a) and ok(b):shared.append({'feature':f,'win50':a,'win100':b})
+        shared.sort(key=lambda x:(x['win50']['pooled_oriented_auc']+x['win100']['pooled_oriented_auc']),reverse=True)
+        verdict='SECOND_LAYER_TRIGGER_DNA_FOUND' if shared else 'NO_STABLE_SECOND_LAYER_TRIGGER_DNA'
+        cc={'actual_buy_n':int(len(G)),'stop':int(G.is_stop.sum()),'winner50':int((G.ret>=.50).sum()),'winner100':int((G.ret>=1.0).sum())}
+        result={'version':'V7.03 Range20-Conditioned Trigger-Geometry Audit','verdict':verdict,'class_counts':cc,'v702_expected_admissions':expected,'reconstructed_admissions':len(A),'feature_rows':len(G),'missing_rows':missing,'tested_features':feats,'win50_audit':aud['WIN50'],'win100_audit':aud['WIN100'],'shared_stable_trigger_dna':shared,'acceptance':'Same single feature must pass +50 and +100: coverage>=85%, pooled oriented AUC>=0.62, |SMD|>=0.35, >=4 valid 5-year blocks, direction consistency>=75%, >=50% blocks AUC>=0.60. No combination/cutoff sweep.','history_dedup':'V6.90 generic momentum/base/location/trend DNA is not rebuilt. V6.91 hard admission remains closed. V7.03 only tests new trigger geometry conditioned on exact V7.02 Range20-ranked Actual Buys.','next_step':('V7.04: freeze top shared trigger feature and run exactly one second-layer contest-ranking A/B on top of range20.' if shared else 'Close numeric second-layer trigger geometry and move to source-semantic candidate-generation/permission reconstruction.'),'cache_note':'V7.02 range20 cache + V6.94 outcomes + V6.69 metadata + V6.17 Historical Cache for reconstructed B Actual Buys only; 0 Tiingo; 0 universe rescan; 0 portfolio replay.'}
+        V703_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v703_write(status='done',phase='done',message=f'V7.03 完成：{verdict}',processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+    except Exception as ex:
+        _v703_write(status='error',phase='error',message=f'V7.03 失败：{type(ex).__name__}: {ex}',processed=0,total=7,elapsed_sec=round(time.time()-t0,1),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v703_thread=None
+
+def _v703_start():
+    global v703_thread
+    if _v703_alive():return False
+    _v703_write(status='starting',phase='starting',message='V7.03 正在启动',processed=0,total=7,elapsed_sec=0,error=None,traceback=None);v703_thread=threading.Thread(target=_v703_run,daemon=True);v703_thread.start();return True
+
+@APP.route('/v703/run',methods=['GET','POST'])
+def v703_run():_v703_start();return redirect('/v703/range20-conditioned-trigger-geometry')
+@APP.get('/api/v703/status')
+def v703_status_api():return jsonify(_v703_status())
+@APP.get('/v703/range20-conditioned-trigger-geometry')
+def v703_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v703_status();R={}
+    if V703_RESULT.exists():
+        try:R=json.loads(V703_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    def n(v,d=0):
+        try:return float(v)
+        except Exception:return d
+    def p(v):
+        try:return f'{float(v)*100:.1f}%'
+        except Exception:return '—'
+    def tr(xs):
+        s=''
+        for x in xs or []:s+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{p(x.get('coverage'))}</td><td>{int(x.get('n',0))}</td><td>{int(x.get('winner_n',0))}</td><td>{n(x.get('pooled_oriented_auc')):.3f}</td><td>{n(x.get('smd')):+.2f}</td><td>{n(x.get('winner_median')):.3f}</td><td>{n(x.get('stop_median')):.3f}</td><td>{int(x.get('block_count',0))}</td><td>{n(x.get('mean_block_auc')):.3f}</td><td>{n(x.get('weakest_block_auc')):.3f}</td><td>{p(x.get('block_ge_060_share'))}</td><td>{p(x.get('direction_consistency'))}</td></tr>"
+        return s
+    C=R.get('class_counts',{});S=R.get('shared_stable_trigger_dna') or [];btn='' if _v703_alive() else '<a href="/v703/run"><button>▶ 开始 V7.03</button></a>';err=f"<pre>{e(st.get('traceback',''))}</pre>" if st.get('error') else ''
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1700px;margin:auto}}.c{{background:white;padding:24px;border-radius:20px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🧬 V7.03 Range20-Conditioned Second-Layer Trigger Audit</h1><p>只研究 V7.02 Range20 Rank 真正买入的 Actual Buy；不重做 V6.90 generic DNA，不改账户规则。</p></div><div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p>{btn}{err}</div><div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Actual Buy={int(C.get('actual_buy_n',0))} · STOP={int(C.get('stop',0))} · +50={int(C.get('winner50',0))} · +100={int(C.get('winner100',0))} · Shared={e(', '.join(x.get('feature','') for x in S) or 'None')}</p></div><div class='c'><h2>+50 Winner vs STOP</h2><table><tr><th>Feature</th><th>Cov</th><th>N</th><th>W</th><th>AUC</th><th>SMD</th><th>W med</th><th>STOP med</th><th>Blocks</th><th>Mean</th><th>Weakest</th><th>≥.60</th><th>Dir</th></tr>{tr(R.get('win50_audit'))}</table></div><div class='c'><h2>+100 Winner vs STOP</h2><table><tr><th>Feature</th><th>Cov</th><th>N</th><th>W</th><th>AUC</th><th>SMD</th><th>W med</th><th>STOP med</th><th>Blocks</th><th>Mean</th><th>Weakest</th><th>≥.60</th><th>Dir</th></tr>{tr(R.get('win100_audit'))}</table></div><div class='c'><b>下一步：</b>{e(R.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v703/status',{{cache:'no-store'}})).json();if(x.status==='starting'||x.status==='running')location.reload()}}catch(e){{}}}},2500)</script></body></html>"""
+
+_v703_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v703_home_base is not None:
+    def _v703_home_wrap(*args,**kwargs):
+        resp=_v703_home_base(*args,**kwargs);card='<div id="v703-card" style="background:#eef2ff;border:5px solid #6366f1;border-radius:24px;padding:28px;margin:22px 0"><h2>🧬 V7.03 Second-Layer Trigger Audit</h2><p>Exact V7.02 Actual Buy · new trigger geometry only</p><a href="/v703/range20-conditioned-trigger-geometry"><button>打开 V7.03</button></a></div>'
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v703-card' not in body:
+                p0=body.find('<body');g=body.find('>',p0) if p0>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v703_home_base:APP.view_functions[ep]=_v703_home_wrap
