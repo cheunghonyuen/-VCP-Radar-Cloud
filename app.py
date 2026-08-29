@@ -47067,3 +47067,351 @@ def v706_native_page():
 <div class='c'><p>Blocked N={BD.get('n','—')} · STOP={BD.get('stop','—')} · +50={BD.get('plus50','—')} · +100={BD.get('plus100','—')}</p><p>Winner retention +50={pct(WR.get('+50'))} · +100={pct(WR.get('+100'))}</p></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v706-native/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
 </div></body></html>"""
+
+
+# ========================= V7.07 DEFENSIVE ADMISSION DNA AUDIT =========================
+V707_DIR=DATA_DIR/'v707_defensive_admission_dna_audit'
+V707_STATUS=V707_DIR/'status.json'
+V707_RESULT=V707_DIR/'result.json'
+V707_ROWS=V707_DIR/'defensive_entry_geometry.csv.gz'
+v707_thread=None
+
+def _v707_status():
+    x={'status':'idle','message':'尚未运行','phase':'','processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V707_STATUS.exists():
+        try:x.update(json.loads(V707_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v707_write(**kw):
+    V707_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v707_status();x.update(kw)
+    V707_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v707_alive():
+    return v707_thread is not None and v707_thread.is_alive()
+
+def _v707_oriented_auc(a):
+    return float(max(a,1-a)) if a is not None and np.isfinite(a) else None
+
+def _v707_run():
+    global v707_thread
+    t0=time.time()
+    try:
+        # 0) Fail-fast parity only. No Historical Cache until this passes.
+        _v707_write(status='running',phase='preflight',
+                    message='V7.07 Preflight：从 V7.04 exact 291 ledger 派生 DEFENSIVE 样本，并与 V7.06 154/137/12/10 四项对账…',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('缺 V7.04 exact challenger ledger')
+        if not V704_BREAKOUT_CACHE.exists():raise RuntimeError('缺 V7.04 breakout cache')
+        if not V706_RESULT.exists():raise RuntimeError('缺 V7.06 result.json')
+
+        r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
+        if r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
+            raise RuntimeError(f'V7.06 未 PASS: {r706.get("verdict")}')
+
+        ref=r706.get('blocked_defensive') or {}
+        ref_n=int(ref.get('n') or 0); ref_stop=int(ref.get('stop') or 0)
+        ref50=int(ref.get('plus50') or 0); ref100=int(ref.get('plus100') or 0)
+        if (ref_n,ref_stop,ref50,ref100)!=(154,137,12,10):
+            raise RuntimeError(f'V7.06 blocked reference drift: {(ref_n,ref_stop,ref50,ref100)} != (154,137,12,10)')
+
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
+        for d in (L,C):
+            if 'v704_row_id' not in d.columns:raise RuntimeError('v704_row_id missing')
+            d['v704_row_id']=pd.to_numeric(d['v704_row_id'],errors='coerce')
+            if d['v704_row_id'].isna().any() or not d['v704_row_id'].is_unique:
+                raise RuntimeError('v704_row_id identity invalid')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+
+        enrich=[c for c in ['v704_row_id','v702_row_id','range20','breakout_margin50'] if c in C.columns]
+        X=L.merge(C[enrich],on='v704_row_id',how='left',validate='one_to_one',suffixes=('','_cache'))
+        X['_ord']=np.arange(len(X),dtype=int)
+        X['entry_date']=pd.to_datetime(X['entry_date'],errors='coerce').dt.normalize()
+        X['exit_date']=pd.to_datetime(X['exit_date'],errors='coerce').dt.normalize()
+        X['ret']=pd.to_numeric(X['ret'],errors='coerce')
+        if 'is_stop' in X.columns:
+            X['is_stop']=X['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        else:
+            X['is_stop']=X.get('control_reason',pd.Series('',index=X.index)).astype(str).str.upper().str.contains('STOP')
+
+        rg=_v42_spy_regimes()
+        if rg is None or rg.empty:raise RuntimeError('SPY PIT regime cache unavailable')
+        R=rg.reset_index()
+        if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+        if 'regime' not in R.columns:raise RuntimeError('SPY regime column missing')
+        R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+        R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+
+        X=pd.merge_asof(X.sort_values('entry_date'),
+                        R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
+                        on='entry_date',direction='backward')
+        X=X.sort_values('_ord',kind='stable').reset_index(drop=True)
+        X['regime']=X['regime'].fillna('UNKNOWN').astype(str).str.upper()
+
+        D=X[X.regime.eq('DEFENSIVE')].copy()
+        got=(len(D),int(D.is_stop.sum()),int((D.ret>=.50).sum()),int((D.ret>=1.0).sum()))
+        if got!=(ref_n,ref_stop,ref50,ref100):
+            raise RuntimeError(f'DEFENSIVE sample parity failed derived={got} V7.06={(ref_n,ref_stop,ref50,ref100)}')
+
+        preflight_sec=time.time()-t0
+        _v707_write(status='running',phase='feature_cache',
+                    message=f'Parity PASS {got} · {preflight_sec:.2f}s。只读这 154 笔 Actual Buy 的 Historical Cache，提取 trigger geometry…',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,1))
+
+        # 1) Feature extraction ONLY for 154 exact DEFENSIVE actual buys.
+        M=_v615b_read_manifest()
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest 缺 listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        rows=[];missing=0
+        D=D.reset_index(drop=True)
+
+        for n,r in D.iterrows():
+            mr=mmap.get(str(r.listing_id))
+            if mr is None:missing+=1;continue
+            try:q0=_v617fv1_read_price(mr)
+            except Exception:missing+=1;continue
+            if q0 is None or q0.empty:missing+=1;continue
+            lc={str(c).lower():c for c in q0.columns}
+            if not all(k in lc for k in ['date','open','high','low','close']):missing+=1;continue
+
+            q=pd.DataFrame({
+                'date':pd.to_datetime(q0[lc['date']],errors='coerce').dt.normalize(),
+                'open':pd.to_numeric(q0[lc['open']],errors='coerce'),
+                'high':pd.to_numeric(q0[lc['high']],errors='coerce'),
+                'low':pd.to_numeric(q0[lc['low']],errors='coerce'),
+                'close':pd.to_numeric(q0[lc['close']],errors='coerce')
+            }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+
+            ed=pd.Timestamp(r.entry_date).normalize()
+            q=q[q.date<=ed].tail(90).reset_index(drop=True)
+            if len(q)<55 or q.date.iloc[-1]!=ed:missing+=1;continue
+
+            ev=_v6894_detect_events(q[['date','open','close']].copy())
+            hev=[x for x in ev if x['high_confidence']]
+            for c in ['open','high','low','close']:
+                q[c]=[float(v)*_v6894_factor_for_date(hev,dt) for v,dt in zip(q[c],q.date)]
+
+            cur=q.iloc[-1];pre=q.iloc[:-1]
+            pc=float(pre.close.iloc[-1]);cl=float(cur.close);op=float(cur.open);hi=float(cur.high);lo=float(cur.low)
+            def rpct(k):
+                g=pre.tail(k)
+                return float((g.high.max()-g.low.min())/pc) if len(g)>=k and pc>0 else np.nan
+            p5,p10,p20,p50=rpct(5),rpct(10),rpct(20),rpct(50)
+            pr20=float(pre.tail(20).high.max());pr50=float(pre.tail(50).high.max())
+            avg20=float(((pre.tail(20).high-pre.tail(20).low)/pre.tail(20).close).mean())
+            dr=float((hi-lo)/pc) if pc>0 else np.nan
+
+            rows.append({
+                'v704_row_id':int(r.v704_row_id),'listing_id':str(r.listing_id),'entry_date':ed,
+                'ret':float(r.ret),'is_stop':bool(r.is_stop),
+                'year':int(ed.year),'block5':_v703_block5(int(ed.year)),
+                'range20':float(r.range20) if 'range20' in r.index and np.isfinite(r.range20) else np.nan,
+                'breakout_margin50_cache':float(r.breakout_margin50) if 'breakout_margin50' in r.index and np.isfinite(r.breakout_margin50) else np.nan,
+                'pre5_range_pct':p5,'pre10_range_pct':p10,'pre20_range_pct':p20,'pre50_range_pct':p50,
+                'pre5_over_pre20':p5/p20 if np.isfinite(p5) and np.isfinite(p20) and p20>0 else np.nan,
+                'pre10_over_pre20':p10/p20 if np.isfinite(p10) and np.isfinite(p20) and p20>0 else np.nan,
+                'breakout_margin20':cl/pr20-1 if pr20>0 else np.nan,
+                'breakout_margin50':cl/pr50-1 if pr50>0 else np.nan,
+                'entry_clv':(cl-lo)/(hi-lo) if hi>lo else np.nan,
+                'entry_gap_pct':op/pc-1 if pc>0 else np.nan,
+                'entry_body_pct':cl/op-1 if op>0 else np.nan,
+                'entry_range_expansion20':dr/avg20 if np.isfinite(dr) and avg20>0 else np.nan
+            })
+            if (n+1)%40==0 or n+1==len(D):
+                _v707_write(status='running',phase='feature_cache',
+                            message=f'DEFENSIVE trigger geometry {n+1}/{len(D)} · missing={missing}',
+                            processed=2,total=6,elapsed_sec=round(time.time()-t0,1))
+
+        G=pd.DataFrame(rows)
+        if len(G)<int(ref_n*.90):
+            raise RuntimeError(f'V7.07 feature coverage too low {len(G)}/{ref_n}')
+        G.to_csv(V707_ROWS,index=False,compression='gzip')
+
+        # 2) Conditional audit. This is a NEW conditioned sample, not a rerun of global V6.90/V7.03.
+        _v707_write(status='running',phase='audit',
+                    message='DEFENSIVE 内部：STOP vs Non-STOP / +50 / +100，pooled + 5-year direction stability；不设 cutoff、不做组合…',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,1))
+
+        feats=['range20','pre5_range_pct','pre10_range_pct','pre5_over_pre20','pre10_over_pre20',
+               'breakout_margin20','breakout_margin50','entry_clv','entry_gap_pct','entry_body_pct','entry_range_expansion20']
+        outcome_defs=[('NONSTOP',None),('WIN50',.50),('WIN100',1.0)]
+        audits={}
+
+        for name,thr in outcome_defs:
+            if name=='NONSTOP':
+                sub=G.copy();sub['y']=(~sub.is_stop).astype(int)
+            else:
+                sub=G[(G.is_stop)|(G.ret>=thr)].copy();sub['y']=(sub.ret>=thr).astype(int)
+            outrows=[]
+            for f in feats:
+                z=sub[[f,'y','block5']].copy()
+                z[f]=pd.to_numeric(z[f],errors='coerce');z=z.dropna()
+                if len(z)<20 or z.y.nunique()<2:continue
+                auc=_v703_auc(z[f],z.y)
+                smd=_v703_smd(z.loc[z.y.eq(1),f],z.loc[z.y.eq(0),f])
+                sign=1 if np.isfinite(auc) and auc>=.5 else -1
+                blocks=[]
+                for bk,bg in z.groupby('block5'):
+                    # small conditioned sample: allow 1 winner, but require >=10 observations.
+                    if len(bg)<10 or bg.y.nunique()<2 or int(bg.y.sum())<1:continue
+                    ba=_v703_auc(bg[f],bg.y)
+                    if np.isfinite(ba):
+                        blocks.append({'block':str(bk),'n':int(len(bg)),'positive_n':int(bg.y.sum()),
+                                       'auc':float(ba),'oriented_auc':float(max(ba,1-ba)),
+                                       'same_direction':bool((ba-.5)*sign>=0)})
+                vals=[x['oriented_auc'] for x in blocks];dirs=[x['same_direction'] for x in blocks]
+                outrows.append({
+                    'feature':f,'coverage':float(pd.to_numeric(sub[f],errors='coerce').notna().mean()),
+                    'n':int(len(z)),'positive_n':int(z.y.sum()),
+                    'pooled_auc':float(auc) if np.isfinite(auc) else None,
+                    'pooled_oriented_auc':_v707_oriented_auc(auc),
+                    'direction':'HIGHER_BETTER' if np.isfinite(auc) and auc>=.5 else 'LOWER_BETTER',
+                    'smd':float(smd) if np.isfinite(smd) else None,
+                    'positive_median':float(z.loc[z.y.eq(1),f].median()),
+                    'stop_median':float(z.loc[z.y.eq(0),f].median()),
+                    'block_count':len(blocks),
+                    'mean_block_auc':float(np.mean(vals)) if vals else None,
+                    'weakest_block_auc':float(np.min(vals)) if vals else None,
+                    'direction_consistency':float(np.mean(dirs)) if dirs else None,
+                    'blocks':blocks
+                })
+            audits[name]=sorted(outrows,key=lambda x:((x.get('direction_consistency') or 0),
+                                                     (x.get('pooled_oriented_auc') or 0),
+                                                     abs(x.get('smd') or 0)),reverse=True)
+
+        # 3) Shared candidate selection: no threshold tuning.
+        maps={k:{x['feature']:x for x in v} for k,v in audits.items()}
+        candidates=[]
+        for f in feats:
+            a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+            if not a or not b or not c:continue
+            dirs=[a.get('direction'),b.get('direction'),c.get('direction')]
+            same_dir=len(set(dirs))==1
+            aucs=[a.get('pooled_oriented_auc') or 0,b.get('pooled_oriented_auc') or 0,c.get('pooled_oriented_auc') or 0]
+            cons=[a.get('direction_consistency') or 0,b.get('direction_consistency') or 0,c.get('direction_consistency') or 0]
+            score=float(np.mean(aucs))
+            robust=bool(same_dir and min(aucs)>=.60 and np.mean(cons)>=.60 and
+                        min(a.get('coverage',0),b.get('coverage',0),c.get('coverage',0))>=.90)
+            candidates.append({'feature':f,'direction':dirs[0] if same_dir else 'MIXED',
+                               'shared_mean_oriented_auc':score,'min_oriented_auc':float(min(aucs)),
+                               'mean_direction_consistency':float(np.mean(cons)),
+                               'robust_shared':robust})
+        candidates=sorted(candidates,key=lambda x:(x['robust_shared'],x['shared_mean_oriented_auc'],
+                                                    x['mean_direction_consistency']),reverse=True)
+        robust=[x for x in candidates if x['robust_shared']]
+        verdict='DEFENSIVE_RESCUE_DNA_FOUND' if robust else 'NO_ROBUST_DEFENSIVE_RESCUE_DNA'
+
+        result={
+            'version':'V7.07 Defensive Admission DNA Audit',
+            'verdict':verdict,
+            'preflight':{'derived_defensive_n':int(len(D)),'stop':int(D.is_stop.sum()),
+                         '+50':int((D.ret>=.50).sum()),'+100':int((D.ret>=1.0).sum()),
+                         'matches_V7.06':True,'preflight_sec':round(preflight_sec,3)},
+            'feature_rows':int(len(G)),'feature_coverage':float(len(G)/ref_n),
+            'audits':audits,'shared_candidates':candidates[:10],
+            'top_robust':robust[:5],
+            'rules':'Conditioned only on the exact V7.06 DEFENSIVE admissions. No universe rescan, no account replay, no cutoff sweep, no feature combination, no third-stage ranking.',
+            'acceptance':'A rescue DNA is only promoted if the SAME feature has the SAME direction for Non-STOP, +50 and +100; oriented AUC >=0.60 in all three; >=90% coverage; and mean 5-year direction consistency >=60%.',
+            'next_step':('If robust DNA exists, V7.08 will test exactly ONE top rescue feature inside DEFENSIVE using the native V7.04 engine; no threshold grid.' if robust else
+                         'If none exists, do not tune DEFENSIVE subfilters. Keep V7.06 hard block as a risk-control research result and move to a genuinely new mechanism.')
+        }
+        V707_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v707_write(status='done',phase='done',message=f'V7.07 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
+
+    except Exception as ex:
+        _v707_write(status='error',phase='error',message=f'V7.07 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,1),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v707_thread=None
+
+def _v707_start():
+    global v707_thread
+    if _v707_alive():return False
+    _v707_write(status='starting',phase='starting',message='V7.07 starting',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v707_thread=threading.Thread(target=_v707_run,daemon=True)
+    v707_thread.start()
+    return True
+
+@APP.route('/v707/run',methods=['GET','POST'])
+def v707_run():
+    _v707_start()
+    return redirect('/v707')
+
+@APP.get('/api/v707/status')
+def v707_status():
+    return jsonify(_v707_status())
+
+@APP.get('/v707')
+def v707_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v707_status();R={}
+    if V707_RESULT.exists():
+        try:R=json.loads(V707_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    P=R.get('preflight',{}) or {};C=R.get('shared_candidates',[]) or []
+    audits=R.get('audits',{}) or {}
+
+    def pct(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def num(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    def rows_for(name):
+        rr=(audits.get(name) or [])[:10]
+        return ''.join(
+            f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td>"
+            f"<td>{num(x.get('pooled_oriented_auc'))}</td><td>{num(x.get('smd'))}</td>"
+            f"<td>{x.get('positive_n','—')}</td><td>{x.get('block_count','—')}</td>"
+            f"<td>{pct(x.get('direction_consistency'))}</td></tr>" for x in rr
+        ) or "<tr><td colspan='7'>—</td></tr>"
+
+    cand=''.join(
+        f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td>"
+        f"<td>{num(x.get('shared_mean_oriented_auc'))}</td><td>{num(x.get('min_oriented_auc'))}</td>"
+        f"<td>{pct(x.get('mean_direction_consistency'))}</td><td>{'✅' if x.get('robust_shared') else '—'}</td></tr>"
+        for x in C
+    ) or "<tr><td colspan='6'>—</td></tr>"
+
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v707/run'><button>▶ Run V7.07 Defensive DNA</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}
+.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}
+.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}
+button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}
+pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V7.07 Defensive Admission DNA Audit</h1>
+<div class='ok'><b>只研究 V7.06 被 DEFENSIVE 挡住的 154 笔。</b><br>
+先强制对账 154 / STOP137 / +50=12 / +100=10；对不上立即停。对上后只读这 154 笔 Historical Cache，不跑账户、不扫 universe。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p>
+<p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p>{btn}
+{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<p>Parity: N={P.get('derived_defensive_n','—')} · STOP={P.get('stop','—')} · +50={P.get('+50','—')} · +100={P.get('+100','—')} · Feature rows={R.get('feature_rows','—')}</p></div>
+<div class='c'><h2>Shared Rescue Candidates</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Direction</th><th>Mean AUC</th><th>Min AUC</th><th>Direction consistency</th><th>Robust</th></tr>{cand}
+</table></div></div>
+<div class='c'><h2>Non-STOP vs STOP</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Direction</th><th>Oriented AUC</th><th>SMD</th><th>Positive N</th><th>Blocks</th><th>Dir consistency</th></tr>{rows_for('NONSTOP')}
+</table></div></div>
+<div class='c'><h2>+50 Winner vs STOP</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Direction</th><th>Oriented AUC</th><th>SMD</th><th>Positive N</th><th>Blocks</th><th>Dir consistency</th></tr>{rows_for('WIN50')}
+</table></div></div>
+<div class='c'><h2>+100 Winner vs STOP</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Direction</th><th>Oriented AUC</th><th>SMD</th><th>Positive N</th><th>Blocks</th><th>Dir consistency</th></tr>{rows_for('WIN100')}
+</table></div></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('rules',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v707/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},2500)</script>
+</div></body></html>"""
