@@ -47101,7 +47101,7 @@ def _v707_run():
     try:
         # 0) Fail-fast parity only. No Historical Cache until this passes.
         _v707_write(status='running',phase='preflight',
-                    message='V7.07 Preflight：从 V7.04 exact 291 ledger 派生 DEFENSIVE 样本，并与 V7.06 154/137/12/10 四项对账…',
+                    message='V7.07 Preflight：从 V7.04 exact 291 ledger 直接派生 TRUE DEFENSIVE Actual Buy，并核对 102/93/7/5…',
                     processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
 
         if not V704_LEDGER.exists():raise RuntimeError('缺 V7.04 exact challenger ledger')
@@ -47112,11 +47112,10 @@ def _v707_run():
         if r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
             raise RuntimeError(f'V7.06 未 PASS: {r706.get("verdict")}')
 
-        ref=r706.get('blocked_defensive') or {}
-        ref_n=int(ref.get('n') or 0); ref_stop=int(ref.get('stop') or 0)
-        ref50=int(ref.get('plus50') or 0); ref100=int(ref.get('plus100') or 0)
-        if (ref_n,ref_stop,ref50,ref100)!=(154,137,12,10):
-            raise RuntimeError(f'V7.06 blocked reference drift: {(ref_n,ref_stop,ref50,ref100)} != (154,137,12,10)')
+        # IMPORTANT: V7.06 blocked_defensive is a dynamic path-difference set, not the
+        # pure PIT-DEFENSIVE Actual-Buy sample. V7.07 must derive the latter directly
+        # from the frozen V7.04 challenger ledger + PIT regime.
+        ref_n,ref_stop,ref50,ref100=(102,93,7,5)
 
         L=pd.read_csv(V704_LEDGER,compression='gzip')
         C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
@@ -47155,7 +47154,7 @@ def _v707_run():
         D=X[X.regime.eq('DEFENSIVE')].copy()
         got=(len(D),int(D.is_stop.sum()),int((D.ret>=.50).sum()),int((D.ret>=1.0).sum()))
         if got!=(ref_n,ref_stop,ref50,ref100):
-            raise RuntimeError(f'DEFENSIVE sample parity failed derived={got} V7.06={(ref_n,ref_stop,ref50,ref100)}')
+            raise RuntimeError(f'TRUE DEFENSIVE Actual-Buy parity failed derived={got} expected={(ref_n,ref_stop,ref50,ref100)}')
 
         preflight_sec=time.time()-t0
         _v707_write(status='running',phase='feature_cache',
@@ -47311,11 +47310,11 @@ def _v707_run():
             'verdict':verdict,
             'preflight':{'derived_defensive_n':int(len(D)),'stop':int(D.is_stop.sum()),
                          '+50':int((D.ret>=.50).sum()),'+100':int((D.ret>=1.0).sum()),
-                         'matches_V7.06':True,'preflight_sec':round(preflight_sec,3)},
+                         'matches_true_DEFENSIVE_actual_buy_baseline':True,'preflight_sec':round(preflight_sec,3)},
             'feature_rows':int(len(G)),'feature_coverage':float(len(G)/ref_n),
             'audits':audits,'shared_candidates':candidates[:10],
             'top_robust':robust[:5],
-            'rules':'Conditioned only on the exact V7.06 DEFENSIVE admissions. No universe rescan, no account replay, no cutoff sweep, no feature combination, no third-stage ranking.',
+            'rules':'Conditioned only on the exact V7.04 Actual Buys whose PIT entry regime is DEFENSIVE. No universe rescan, no account replay, no cutoff sweep, no feature combination, no third-stage ranking.',
             'acceptance':'A rescue DNA is only promoted if the SAME feature has the SAME direction for Non-STOP, +50 and +100; oriented AUC >=0.60 in all three; >=90% coverage; and mean 5-year direction consistency >=60%.',
             'next_step':('If robust DNA exists, V7.08 will test exactly ONE top rescue feature inside DEFENSIVE using the native V7.04 engine; no threshold grid.' if robust else
                          'If none exists, do not tune DEFENSIVE subfilters. Keep V7.06 hard block as a risk-control research result and move to a genuinely new mechanism.')
@@ -47393,8 +47392,8 @@ table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;bo
 pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
 </style></head><body><div class='w'><a href='/'>← 首页</a>
 <div class='c'><h1>🧬 V7.07 Defensive Admission DNA Audit</h1>
-<div class='ok'><b>只研究 V7.06 被 DEFENSIVE 挡住的 154 笔。</b><br>
-先强制对账 154 / STOP137 / +50=12 / +100=10；对不上立即停。对上后只读这 154 笔 Historical Cache，不跑账户、不扫 universe。</div></div>
+<div class='ok'><b>只研究 V7.04 Actual Buy 中 entry 当天真正处于 DEFENSIVE 的 102 笔。</b><br>
+先强制对账 102 / STOP93 / +50=7 / +100=5；对不上立即停。对上后只读这 102 笔 Historical Cache，不跑账户、不扫 universe。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p>
 <p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p>{btn}
 {("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
