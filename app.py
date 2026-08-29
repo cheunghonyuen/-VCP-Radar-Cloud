@@ -46878,11 +46878,17 @@ def _v706_run():
             raise RuntimeError('Unified adapter ledger schema/parity failed')
 
         # Point-in-time entry regime, backward asof only.
+        # FINAL invariant: preserve V7.05 exact schedule order across regime enrichment
+        X = X.copy()
+        X['_v706_exact_schedule_ordinal'] = range(len(X))
         X=pd.merge_asof(
             X.sort_values('entry_date'),
             R[['date','regime']].rename(columns={'date':'entry_date'}).sort_values('entry_date'),
             on='entry_date',direction='backward'
         )
+        if '_v706_exact_schedule_ordinal' not in X.columns:
+            raise RuntimeError('V7.06 enrichment lost exact schedule ordinal')
+        X = X.sort_values('_v706_exact_schedule_ordinal', kind='stable').reset_index(drop=True)
         X['regime']=X['regime'].fillna('UNKNOWN').astype(str).str.upper()
         if int((X.regime=='DEFENSIVE').sum())<=0:
             raise RuntimeError('No DEFENSIVE entries found; causal test blocked')
@@ -47156,7 +47162,7 @@ table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 5p
 pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}
 </style></head><body><div class='w'>
 <a href='/'>← 首页</a>
-<div class='c'><h1>🛡️ V7.06 Defensive New-Admission Causal A/B</h1>
+<div class='c'><h1>🛡️ V7.06 Defensive New-Admission Causal A/B · Immutable Schedule FINAL</h1>
 <div class='ok'><b>唯一改动：</b>entry 当天 SPY PIT regime=DEFENSIVE 时，不开新仓。已有仓位、Range20→Breakout50、Stop、Winner Exit 全部冻结。<br>固定 291 exact schedule；blocked trade 不补 replacement。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message',''))}</p><p>{e(st.get('phase',''))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p>{btn}
 {("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' and st.get('traceback') else ''}</div>
@@ -47180,7 +47186,7 @@ if _v706_home_base is not None:
     def _v706_home_wrap(*args,**kwargs):
         resp=_v706_home_base(*args,**kwargs)
         card="""<div id='v706-card' style='background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>🛡️ V7.06 Defensive New-Admission Causal A/B</h2><p>Preflight first · fixed 291 exact schedule · one causal permission rule only</p>
+        <h2>🛡️ V7.06 Defensive New-Admission Causal A/B · Immutable Schedule FINAL</h2><p>Preflight first · fixed 291 exact schedule · one causal permission rule only</p>
         <a href='/v706/defensive-new-admission-causal-ab'><button>打开 V7.06</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
