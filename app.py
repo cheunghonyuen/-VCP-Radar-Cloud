@@ -49926,3 +49926,291 @@ def _v713b_home_card(response):
                 response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
     except Exception:pass
     return response
+
+
+# ================= V7.14 DEFENSIVE PORTFOLIO-HEAT AUDIT =================
+# Diagnostic only: use exact V7.04 Actual-Buy ledger and frozen PIT regime.
+# No account replay, no threshold sweep, no entry-DNA reopening.
+V714_DIR=DATA_DIR/'v714_defensive_portfolio_heat_audit'
+V714_STATUS=V714_DIR/'status.json'
+V714_RESULT=V714_DIR/'result.json'
+V714_ROWS=V714_DIR/'actual_buy_heat_rows.csv.gz'
+V714_BUILD_ID='V714_HEAT_AUDIT_20260830A'
+v714_thread=None
+
+def _v714_status():
+    d={'build_id':V714_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V714_STATUS.exists():
+        try:
+            x=json.loads(V714_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V714_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v714_write(**kw):
+    V714_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v714_status();x.update(kw);x['build_id']=V714_BUILD_ID
+    V714_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v714_alive():return v714_thread is not None and v714_thread.is_alive()
+
+def _v714_auc(y,x):
+    y=np.asarray(y,dtype=int);x=np.asarray(x,dtype=float)
+    ok=np.isfinite(x);y=y[ok];x=x[ok]
+    if len(y)<8 or len(set(y.tolist()))<2:return np.nan
+    p=x[y==1];n=x[y==0]
+    if not len(p) or not len(n):return np.nan
+    rr=pd.Series(np.r_[p,n]).rank(method='average').to_numpy()
+    rp=rr[:len(p)].sum()
+    return float((rp-len(p)*(len(p)+1)/2)/(len(p)*len(n)))
+
+def _v714_regime_map():
+    rg=_v42_spy_regimes()
+    if rg is None or len(rg)==0:raise RuntimeError('SPY PIT regime cache unavailable')
+    R=rg.reset_index().copy()
+    if 'date' not in R.columns:R=R.rename(columns={R.columns[0]:'date'})
+    if 'regime' not in R.columns:raise RuntimeError('SPY PIT regime column missing')
+    R['date']=pd.to_datetime(R['date'],errors='coerce').dt.normalize()
+    R=R.dropna(subset=['date']).sort_values('date').drop_duplicates('date',keep='last')
+    dns=R['date'].astype('int64').to_numpy(dtype='int64')
+    vals=R['regime'].astype(str).str.upper().to_numpy()
+    def f(dt):
+        x=np.int64(pd.Timestamp(dt).normalize().value)
+        j=int(np.searchsorted(dns,x,side='right')-1)
+        return str(vals[j]) if j>=0 else 'UNKNOWN'
+    return f
+
+def _v714_run():
+    global v714_thread
+    t0=time.time()
+    try:
+        _v714_write(status='running',phase='preflight',
+                    message='Preflight：锁定 V7.04 exact 291 Actual Buys + PIT regime；不重跑账户。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact challenger ledger missing')
+        if not V704_RESULT.exists():raise RuntimeError('V7.04 result missing')
+        if not V706_RESULT.exists():raise RuntimeError('V7.06 result missing')
+
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+        for c in ['v704_row_id','listing_id','entry_date','exit_date','ret','is_stop']:
+            if c not in L.columns:raise RuntimeError(f'V7.04 ledger missing {c}')
+        if not L['v704_row_id'].is_unique:raise RuntimeError('v704_row_id not unique')
+
+        r704=json.loads(V704_RESULT.read_text(encoding='utf-8'))
+        r706=json.loads(V706_RESULT.read_text(encoding='utf-8'))
+        ref=r704.get('B') or {}
+        if int(ref.get('admitted_positions',0))!=291:
+            raise RuntimeError(f'V7.04 result admissions {ref.get("admitted_positions")} != 291')
+        if r706.get('verdict')!='DEFENSIVE_NEW_ADMISSION_BLOCK_PASSES_NATIVE_CAUSAL_AB':
+            raise RuntimeError('V7.06 reference invalid')
+
+        L=L.copy()
+        L['entry_date']=pd.to_datetime(L['entry_date'],errors='coerce').dt.normalize()
+        L['exit_date']=pd.to_datetime(L['exit_date'],errors='coerce').dt.normalize()
+        L['ret']=pd.to_numeric(L['ret'],errors='coerce')
+        L['is_stop']=L['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        L['candidate_order']=pd.to_numeric(L.get('candidate_order'),errors='coerce').fillna(10**9)
+        if L[['entry_date','exit_date']].isna().any().any():
+            raise RuntimeError('V7.04 ledger has invalid dates')
+
+        regime_for=_v714_regime_map()
+        L['regime']=[regime_for(d) for d in L['entry_date']]
+
+        # Exact same-day semantics: V7.04 exits first, then admissions in candidate_order.
+        # Heat is slot-based because V7.04 target is equity/10 per new position.
+        L=L.sort_values(['entry_date','candidate_order','v704_row_id'],kind='stable').reset_index(drop=True)
+        open_positions=[]
+        heat_rows=[]
+        for _,r in L.iterrows():
+            dt=pd.Timestamp(r.entry_date)
+            open_positions=[x for x in open_positions if pd.Timestamp(x['exit_date'])>dt]
+            open_before=len(open_positions)
+            heat_before=float(open_before/10.0)
+            heat_after=float(min(10,open_before+1)/10.0)
+            heat_rows.append({
+                'v704_row_id':int(r.v704_row_id),'listing_id':str(r.listing_id),
+                'entry_date':dt,'exit_date':pd.Timestamp(r.exit_date),
+                'regime':str(r.regime),'open_slots_before':int(open_before),
+                'slot_heat_before':heat_before,'slot_heat_after':heat_after,
+                'ret':float(r.ret) if np.isfinite(r.ret) else np.nan,
+                'is_stop':bool(r.is_stop),
+                'is_50':bool(np.isfinite(r.ret) and r.ret>=.50),
+                'is_100':bool(np.isfinite(r.ret) and r.ret>=1.0)
+            })
+            open_positions.append({'exit_date':pd.Timestamp(r.exit_date)})
+
+        H=pd.DataFrame(heat_rows)
+        if len(H)!=291:raise RuntimeError('heat row parity failed')
+        V714_DIR.mkdir(parents=True,exist_ok=True)
+        H.to_csv(V714_ROWS,index=False,compression='gzip')
+
+        D=H[H.regime.eq('DEFENSIVE')].copy()
+        got=(len(D),int(D.is_stop.sum()),int(D.is_50.sum()),int(D.is_100.sum()))
+        if got!=(102,93,7,5):
+            raise RuntimeError(f'TRUE DEFENSIVE parity {got} != (102,93,7,5)')
+
+        _v714_write(status='running',phase='heat_audit',
+                    message='TRUE DEFENSIVE 102 对账 PASS。审计入场前 portfolio heat 与 STOP / +50 / +100。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        # Predeclared buckets, descriptive only; no optimization.
+        bins=[-0.001,.30,.60,.90,1.001]
+        labels=['0-30%','40-60%','70-90%','100%']
+        D['heat_bucket']=pd.cut(D['slot_heat_before'],bins=bins,labels=labels,include_lowest=True)
+        bucket_rows=[]
+        for b,g in D.groupby('heat_bucket',observed=False):
+            if len(g)==0:continue
+            bucket_rows.append({
+                'bucket':str(b),'n':int(len(g)),
+                'avg_open_slots_before':float(g.open_slots_before.mean()),
+                'stop_rate':float(g.is_stop.mean()),
+                'plus50_rate':float(g.is_50.mean()),
+                'plus100_rate':float(g.is_100.mean()),
+                'avg_ret':float(g.ret.mean()),
+                'median_ret':float(g.ret.median())
+            })
+
+        # Does higher heat predict bad outcome?
+        y_nonstop=(~D.is_stop).astype(int)
+        y50=D.is_50.astype(int);y100=D.is_100.astype(int)
+        auc_nonstop=_v714_auc(y_nonstop,D.slot_heat_before)
+        auc50=_v714_auc(y50,D.slot_heat_before)
+        auc100=_v714_auc(y100,D.slot_heat_before)
+
+        # We care about LOWER_BETTER if higher heat worsens outcomes.
+        def oriented(a):return float(max(a,1-a)) if np.isfinite(a) else None
+        direction_nonstop='HIGHER_BETTER' if np.isfinite(auc_nonstop) and auc_nonstop>=.5 else 'LOWER_BETTER'
+        direction50='HIGHER_BETTER' if np.isfinite(auc50) and auc50>=.5 else 'LOWER_BETTER'
+        direction100='HIGHER_BETTER' if np.isfinite(auc100) and auc100>=.5 else 'LOWER_BETTER'
+
+        # Five-year block stability on NONSTOP only (largest positive sample).
+        D['year']=pd.to_datetime(D.entry_date).dt.year
+        blocks=[]
+        ymin=int(D.year.min());ymax=int(D.year.max())
+        for lo in range(ymin,ymax+1,5):
+            g=D[D.year.between(lo,lo+4)]
+            a=_v714_auc((~g.is_stop).astype(int),g.slot_heat_before)
+            if np.isfinite(a):
+                blocks.append({'block':f'{lo}-{lo+4}','n':int(len(g)),
+                               'oriented_auc':float(max(a,1-a)),
+                               'direction':'HIGHER_BETTER' if a>=.5 else 'LOWER_BETTER'})
+        dir_cons=float(np.mean([x['direction']==direction_nonstop for x in blocks])) if blocks else None
+        weakest=float(min([x['oriented_auc'] for x in blocks])) if blocks else None
+
+        # Drawdown-window concentration from the already-established V7.05 window.
+        dd_start=pd.Timestamp('2007-01-17');dd_end=pd.Timestamp('2009-03-03')
+        W=D[D.entry_date.between(dd_start,dd_end)].copy()
+        outside=D[~D.entry_date.between(dd_start,dd_end)].copy()
+        window={
+            'n':int(len(W)),'stop':int(W.is_stop.sum()),'stop_rate':float(W.is_stop.mean()) if len(W) else None,
+            'mean_heat':float(W.slot_heat_before.mean()) if len(W) else None,
+            'median_heat':float(W.slot_heat_before.median()) if len(W) else None,
+            'plus50':int(W.is_50.sum()),'plus100':int(W.is_100.sum())
+        }
+        outwin={
+            'n':int(len(outside)),'stop_rate':float(outside.is_stop.mean()) if len(outside) else None,
+            'mean_heat':float(outside.slot_heat_before.mean()) if len(outside) else None
+        }
+
+        # Actionable only if heat is consistently LOWER_BETTER and materially discriminative.
+        shared_lower=(direction_nonstop==direction50==direction100=='LOWER_BETTER')
+        minauc=min([x for x in [oriented(auc_nonstop),oriented(auc50),oriented(auc100)] if x is not None] or [0])
+        actionable=bool(shared_lower and minauc>=.60 and (dir_cons is not None and dir_cons>=.60))
+        verdict='DEFENSIVE_PORTFOLIO_HEAT_SIGNAL_FOUND' if actionable else 'NO_ROBUST_DEFENSIVE_PORTFOLIO_HEAT_SIGNAL'
+
+        result={
+            'version':'V7.14 Defensive Portfolio-Heat Audit',
+            'build_id':V714_BUILD_ID,'verdict':verdict,
+            'v704_reference':{'cagr':ref.get('cagr'),'profit_factor':ref.get('profit_factor'),
+                              'maxdd':ref.get('maxdd'),'admissions':ref.get('admitted_positions')},
+            'defensive_parity':{'n':got[0],'stop':got[1],'+50':got[2],'+100':got[3]},
+            'heat_definition':'open V7.04 Actual-Buy positions immediately before each entry / 10 slots; same-day exits first, then candidate_order admissions.',
+            'bucket_summary':bucket_rows,
+            'auc':{
+                'NONSTOP':{'auc':float(auc_nonstop) if np.isfinite(auc_nonstop) else None,'oriented_auc':oriented(auc_nonstop),'direction':direction_nonstop},
+                'WIN50':{'auc':float(auc50) if np.isfinite(auc50) else None,'oriented_auc':oriented(auc50),'direction':direction50},
+                'WIN100':{'auc':float(auc100) if np.isfinite(auc100) else None,'oriented_auc':oriented(auc100),'direction':direction100}
+            },
+            'five_year_stability':{'blocks':blocks,'direction_consistency':dir_cons,'weakest_oriented_auc':weakest},
+            'maxdd_window':window,'outside_maxdd_window':outwin,
+            'acceptance':'Promote heat to a causal test only if higher heat is consistently worse for Non-STOP/+50/+100, min oriented AUC >=0.60, and 5-year NONSTOP direction consistency >=60%. No heat cutoff is chosen here.',
+            'boundaries':'Diagnostic only. No account replay, no new entry feature, no sizing multiplier, no heat threshold sweep, no universe scan.',
+            'next_step':('V7.15: test exactly ONE predeclared DEFENSIVE portfolio-heat permission mechanism in Native V7.04 A/B; no cutoff grid.' if actionable
+                         else 'Close portfolio-heat branch. Do not sweep heat caps; move to a genuinely new drawdown mechanism.')
+        }
+        V714_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v714_write(status='done',phase='done',message=f'V7.14 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v714_write(status='error',phase='error',message=f'V7.14 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v714_thread=None
+
+def _v714_start():
+    global v714_thread
+    if _v714_alive():return False
+    _v714_write(status='starting',phase='starting',message='V7.14 starting',processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v714_thread=threading.Thread(target=_v714_run,daemon=True);v714_thread.start();return True
+
+@APP.route('/v714/run',methods=['GET','POST'])
+def v714_run():_v714_start();return redirect('/v714')
+
+@APP.get('/api/v714/status')
+def v714_status():return jsonify(_v714_status())
+
+@APP.get('/v714')
+def v714_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v714_status();R={}
+    if V714_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V714_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    B=R.get('bucket_summary') or []
+    brows=''.join(f"<tr><td><b>{e(x.get('bucket'))}</b></td><td>{x.get('n')}</td><td>{x.get('avg_open_slots_before',0):.2f}</td><td>{pc(x.get('stop_rate'))}</td><td>{pc(x.get('plus50_rate'))}</td><td>{pc(x.get('plus100_rate'))}</td><td>{pc(x.get('avg_ret'))}</td></tr>" for x in B)
+    A=R.get('auc') or {}
+    arows=''.join(f"<tr><td><b>{k}</b></td><td>{e(v.get('direction'))}</td><td>{n3(v.get('oriented_auc'))}</td></tr>" for k,v in A.items())
+    W=R.get('maxdd_window') or {};O=R.get('outside_maxdd_window') or {}
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v714/run'><button>▶ Run V7.14 Heat Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🔥 V7.14 Defensive Portfolio-Heat Audit</h1><div class='ok'><b>只找 MaxDD 结构，不改策略：</b>用 V7.04 exact Actual Buys 计算每笔入场前 open slots / 10，检查 DEFENSIVE 时 portfolio heat 是否系统性放大 STOP、压低 Big Winner。<br>不 replay、不调 heat cap、不改 sizing。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>DEFENSIVE parity={e(R.get('defensive_parity',{}))}</p></div>
+<div class='c'><h2>Heat Buckets</h2><div style='overflow:auto'><table><tr><th>Heat</th><th>N</th><th>Open slots</th><th>STOP%</th><th>+50%</th><th>+100%</th><th>Avg Ret</th></tr>{brows or "<tr><td colspan='7'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Heat Discrimination</h2><table><tr><th>Outcome</th><th>Direction</th><th>Oriented AUC</th></tr>{arows or "<tr><td colspan='3'>—</td></tr>"}</table></div>
+<div class='c'><h2>2007–2009 MaxDD Window</h2><p>Window N={W.get('n','—')} · STOP%={pc(W.get('stop_rate'))} · Mean heat={pc(W.get('mean_heat'))}<br>Outside STOP%={pc(O.get('stop_rate'))} · Mean heat={pc(O.get('mean_heat'))}</p></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v714/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1600)</script></div></body></html>"""
+
+@APP.after_request
+def _v714_home_card(response):
+    try:
+        from flask import request
+        if request.path=='/' and response.status_code==200 and response.mimetype=='text/html':
+            body=response.get_data(as_text=True)
+            if 'v714-home-card' not in body:
+                card="""<div id='v714-home-card' style='background:#fff;border:4px solid #ef4444;border-radius:22px;padding:20px;margin:18px'>
+                <h2>🔥 V7.14 Defensive Portfolio-Heat Audit</h2>
+                <p>只诊断 DEFENSIVE 期间账户热度是否放大 STOP / MaxDD；秒级，不 replay。</p>
+                <a href='/v714'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800'>打开 V7.14</button></a>
+                </div>"""
+                pos=body.find('<body')
+                if pos>=0:
+                    gt=body.find('>',pos);body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body
+                else:body=card+body
+                response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
+    except Exception:pass
+    return response
