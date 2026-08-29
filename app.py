@@ -45524,6 +45524,7 @@ if _v701_home_base is not None:
 V702_DIR=DATA_DIR/'v702_range20_pit_contest_ranking_ab'
 V702_STATUS=V702_DIR/'status.json'; V702_RESULT=V702_DIR/'result.json'
 V702_RANGE20_CACHE=V702_DIR/'candidate_range20_cache.csv.gz'
+V702_B_ADMISSION_LEDGER=V702_DIR/'b_range20_actual_buy_ledger.csv.gz'
 v702_thread=None
 
 def _v702_status():
@@ -45679,6 +45680,14 @@ def _v702_run():
         A,_,admA=sim('A_FIRST_COME',False);executable_ratio=float(A.get('admitted_positions',0)/expected) if expected else np.nan
         if expected and executable_ratio<.90:raise RuntimeError(f'Executable control coverage too low: A={A.get("admitted_positions")}/{expected} ({executable_ratio:.1%})')
         B,RE,admB=sim('B_RANGE20_CONTEST_RANKING',True)
+        # Persist the exact executable B Actual-Buy ledger. Downstream audits must read this
+        # instead of structurally reconstructing admissions, because cash/MTM path dependency
+        # can make a simple active<10 reconstruction diverge from executable replay.
+        if admB:
+            cols=[c for c in ['listing_id','entry_date','exit_date','ret','is_stop','candidate_order','range20','entry_px_safe','exit_px_safe','control_reason','exit_reason'] if c in Z.columns]
+            LB=Z.loc[sorted(admB),cols].copy()
+            LB['v702_row_id']=sorted(admB)
+            LB.to_csv(V702_B_ADMISSION_LEDGER,index=False,compression='gzip')
 
         _v702_write(status='running',phase='economic_audit',message='经济审计：CAGR/PF/MaxDD/Big-Winner capture + 年度稳定性…',processed=6,total=8,elapsed_sec=round(time.time()-t0,1))
         keys=['cagr','maxdd','calmar','profit_factor','win_rate','avg_trade','stop_rate','winner20_capture','winner30_capture','winner50_capture','winner100_capture'];delta={k:(B.get(k,np.nan)-A.get(k,np.nan)) for k in keys}
@@ -45786,27 +45795,26 @@ def _v703_run():
         fp=V694_DIR/'clean_candidate_path_features.csv.gz'
         if not fp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 cache')
 
-        _v703_write(status='running',phase='reconstruct',message=f'重建 V7.02 B Actual Buy，目标 admissions={expected}…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
-        F=pd.read_csv(fp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'});C=pd.read_csv(V702_RANGE20_CACHE,compression='gzip')
-        for d in (F,P,C):d['listing_id']=d.listing_id.astype(str);d['entry_date']=pd.to_datetime(d.entry_date,errors='coerce').dt.normalize()
-        F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce');F['is_stop']=F.is_stop.astype(bool)
-        meta=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first');meta['candidate_order']=pd.to_numeric(meta.candidate_order,errors='coerce')
-        Z=F.merge(meta,on=['listing_id','entry_date'],how='left').merge(C[['listing_id','entry_date','range20']],on=['listing_id','entry_date'],how='inner')
-        Z['range20']=pd.to_numeric(Z.range20,errors='coerce');Z=Z.dropna(subset=['entry_date','exit_date','ret','candidate_order']).sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
-        rec=Z.to_dict('index');entries={}
-        for i,r in rec.items():entries.setdefault(pd.Timestamp(r['entry_date']),[]).append(i)
-        active={};adm=[]
-        for dt in sorted(entries):
-            for i in list(active):
-                if pd.Timestamp(active[i])<=pd.Timestamp(dt):active.pop(i,None)
-            todays=list(entries[dt]);free=max(0,10-len(active))
-            if free>0 and len(todays)>free:
-                todays=sorted(todays,key=lambda i:(float(rec[i].get('range20')) if np.isfinite(rec[i].get('range20',np.nan)) else np.inf,float(rec[i].get('candidate_order',np.inf)),str(rec[i].get('listing_id',''))))
-            for i in todays:
-                if len(active)>=10:break
-                active[i]=pd.Timestamp(rec[i]['exit_date']);adm.append(i)
-        if len(adm)!=expected:raise RuntimeError(f'B admission parity mismatch {len(adm)} != {expected}')
-        A=Z.loc[adm].copy().reset_index(drop=True);A['year']=A.entry_date.dt.year.astype(int);A['block5']=A.year.map(_v703_block5)
+        _v703_write(status='running',phase='reconstruct',message=f'读取 V7.02 精确 executable B Actual-Buy ledger，目标 admissions={expected}…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+        if not V702_B_ADMISSION_LEDGER.exists():
+            raise RuntimeError('缺 V7.02 exact B admission ledger；请先用本修正版重跑一次 V7.02，之后 V7.03 将直接复用，不再结构重建')
+        A=pd.read_csv(V702_B_ADMISSION_LEDGER,compression='gzip')
+        A['listing_id']=A.listing_id.astype(str)
+        A['entry_date']=pd.to_datetime(A.entry_date,errors='coerce').dt.normalize()
+        A['exit_date']=pd.to_datetime(A.exit_date,errors='coerce').dt.normalize() if 'exit_date' in A.columns else pd.NaT
+        A['ret']=pd.to_numeric(A.ret,errors='coerce')
+        if 'is_stop' in A.columns:
+            # robust bool normalization for CSV round-trip
+            A['is_stop']=A['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        else:
+            reason=A.get('control_reason',A.get('exit_reason',pd.Series('',index=A.index))).astype(str)
+            A['is_stop']=reason.str.upper().str.contains('STOP')
+        A=A.dropna(subset=['listing_id','entry_date','ret']).copy()
+        if len(A)!=expected:
+            raise RuntimeError(f'Exact B admission ledger parity mismatch {len(A)} != {expected}; rerun V7.02 before V7.03')
+        if A.duplicated(['listing_id','entry_date']).any():
+            raise RuntimeError('Exact B admission ledger contains duplicate listing_id/entry_date')
+        A['year']=A.entry_date.dt.year.astype(int);A['block5']=A.year.map(_v703_block5)
 
         _v703_write(status='running',phase='feature_cache',message=f'Parity OK {len(A)}。只读这批 Actual Buy 的 Historical Cache…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
         M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
