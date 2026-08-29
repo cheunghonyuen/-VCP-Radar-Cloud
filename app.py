@@ -46233,56 +46233,113 @@ def _v705_run():
         if len(L)!=expected:raise RuntimeError(f'V7.04 exact ledger parity {len(L)} != {expected}')
         if 'v704_row_id' not in L.columns or L['v704_row_id'].duplicated().any():raise RuntimeError('V7.04 ledger v704_row_id identity invalid')
 
-        _v705_write(status='running',phase='recover_exact_rows',message=f'固定 Actual Buy={expected}；恢复 raw execution fields（不做 candidate replay）…',processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
-        # FIX1: recover raw execution prices from the exact V6.69 candidate_order
-        # persisted in the V7.04 Actual-Buy ledger. Do NOT reconstruct row identity
-        # from V6.94 and do NOT assume entry_px_raw/exit_px_raw are stored in V7.04 ledger.
-        if not V669_TRADES.exists():raise RuntimeError('缺 V6.69 cache')
-        if 'candidate_order' not in L.columns:
-            raise RuntimeError('V7.04 ledger missing candidate_order; cannot recover exact execution rows')
+        _v705_write(status='running',phase='adapter_preflight',
+                     message=f'统一 Adapter：V7.04 exact ledger={expected}，只用 v704_row_id；不重建 admission…',
+                     processed=1,total=7,elapsed_sec=round(time.time()-t0,1))
+
+        # ---- Unified Actual-Buy Adapter contract ----
+        # Source of truth: V7.04 challenger ledger.
+        # Canonical key: v704_row_id.
+        # Enrichment: V7.04 breakout cache by v704_row_id (one-to-one).
+        # Admission is NEVER reconstructed.
+        if 'V7PF_RESULT' in globals() and V7PF_RESULT.exists():
+            try:
+                pf=json.loads(V7PF_RESULT.read_text(encoding='utf-8'))
+                if pf.get('verdict')!='PREFLIGHT_READY_FOR_UNIFIED_ADAPTER':
+                    raise RuntimeError(f'Runtime Preflight not ready: {pf.get("verdict")}')
+            except RuntimeError:
+                raise
+            except Exception as ex:
+                raise RuntimeError(f'Runtime Preflight unreadable: {type(ex).__name__}: {ex}')
+
+        if not V704_BREAKOUT_CACHE.exists():
+            raise RuntimeError('缺 V7.04 breakout cache')
+        C=pd.read_csv(V704_BREAKOUT_CACHE,compression='gzip')
+        if 'v704_row_id' not in C.columns:
+            raise RuntimeError('V7.04 breakout cache missing v704_row_id')
+
+        L['v704_row_id']=pd.to_numeric(L['v704_row_id'],errors='coerce')
+        C['v704_row_id']=pd.to_numeric(C['v704_row_id'],errors='coerce')
+        if L['v704_row_id'].isna().any() or not L['v704_row_id'].is_unique:
+            raise RuntimeError('V7.04 ledger v704_row_id identity invalid')
+        if C['v704_row_id'].isna().any() or not C['v704_row_id'].is_unique:
+            raise RuntimeError('V7.04 breakout cache v704_row_id identity invalid')
+
+        ids=set(L['v704_row_id'].astype(int))
+        cache_ids=set(C['v704_row_id'].astype(int))
+        if not ids.issubset(cache_ids):
+            raise RuntimeError(f'Adapter cache coverage failed: missing {len(ids-cache_ids)} of {len(ids)}')
+
+        enrich_cols=[c for c in ['v704_row_id','v702_row_id','range20','breakout_margin50'] if c in C.columns]
+        X=L.merge(C[enrich_cols],on='v704_row_id',how='left',validate='one_to_one',suffixes=('','_cache'))
+        if len(X)!=expected:
+            raise RuntimeError(f'Unified adapter ledger parity {len(X)} != {expected}')
+
+        # Recover execution raw fields using the SAME deterministic V7.04 source-row construction,
+        # keyed ONLY by canonical v704_row_id. This restores fields; it does not reconstruct admission.
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists() or not V669_TRADES.exists():
+            raise RuntimeError('缺 V6.94/V6.69 source cache for exact field recovery')
+        F=pd.read_csv(ffp,compression='gzip')
         P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
-        needp=['candidate_order','listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason']
-        missp=[c for c in needp if c not in P.columns]
-        if missp:raise RuntimeError('V6.69 cache 缺字段: '+','.join(missp))
-        P['candidate_order']=pd.to_numeric(P['candidate_order'],errors='coerce')
+        F['listing_id']=F['listing_id'].astype(str)
+        F['entry_date']=pd.to_datetime(F['entry_date'],errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F['exit_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
         P['listing_id']=P['listing_id'].astype(str)
         P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
-        P['control_exit_date']=pd.to_datetime(P['control_exit_date'],errors='coerce').dt.normalize()
-        if P['candidate_order'].duplicated().any():
-            raise RuntimeError('V6.69 candidate_order is not unique')
-        L['candidate_order']=pd.to_numeric(L['candidate_order'],errors='coerce')
-        if L['candidate_order'].isna().any() or L['candidate_order'].duplicated().any():
-            raise RuntimeError('V7.04 ledger candidate_order identity invalid')
-        L['listing_id']=L['listing_id'].astype(str)
-        X=L.merge(
-            P[needp],
-            on='candidate_order',
-            how='left',
-            suffixes=('_ledger','_v669'),
-            validate='one_to_one'
-        )
-        if len(X)!=expected:raise RuntimeError(f'Fixed-row recovery parity {len(X)} != {expected}')
-        bad_lid=(X['listing_id_ledger']!=X['listing_id_v669'])
-        bad_entry=(pd.to_datetime(X['entry_date_ledger'],errors='coerce').dt.normalize()!=pd.to_datetime(X['entry_date_v669'],errors='coerce').dt.normalize())
-        bad_exit=(pd.to_datetime(X['exit_date'],errors='coerce').dt.normalize()!=pd.to_datetime(X['control_exit_date'],errors='coerce').dt.normalize())
-        if bool(bad_lid.any() or bad_entry.any() or bad_exit.any()):
+
+        need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order']
+        miss=[c for c in need if c not in P.columns]
+        if miss:
+            raise RuntimeError('V6.69 source cache 缺字段: '+','.join(miss))
+        meta=P[need].copy()
+        meta['control_exit_date']=pd.to_datetime(meta['control_exit_date'],errors='coerce').dt.normalize()
+        meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+
+        S=F.merge(meta,on=['listing_id','entry_date'],how='left')
+        S['candidate_order']=pd.to_numeric(S['candidate_order'],errors='coerce')
+        S['entry_px_raw']=pd.to_numeric(S['entry_px'],errors='coerce')
+        S['exit_px_raw']=pd.to_numeric(S['control_exit_px'],errors='coerce')
+        S=S.dropna(subset=['entry_date','exit_date','entry_px_raw','exit_px_raw','candidate_order','ret']) \
+             .sort_values(['entry_date','candidate_order','listing_id']).reset_index(drop=True)
+        S['v704_row_id']=np.arange(len(S),dtype=int)
+
+        need_ids=set(X['v704_row_id'].astype(int))
+        SRC=S[S['v704_row_id'].isin(need_ids)][
+            ['v704_row_id','listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','control_reason']
+        ].copy()
+        if len(SRC)!=expected or not SRC['v704_row_id'].is_unique:
+            raise RuntimeError(f'Canonical source-row recovery parity {len(SRC)} != {expected}')
+
+        X=X.merge(SRC,on='v704_row_id',how='left',validate='one_to_one',suffixes=('_ledger','_src'))
+        # Exact identity check against the source-of-truth ledger.
+        lid_bad=(X['listing_id_ledger'].astype(str)!=X['listing_id_src'].astype(str))
+        ent_bad=(pd.to_datetime(X['entry_date_ledger'],errors='coerce').dt.normalize()!=
+                 pd.to_datetime(X['entry_date_src'],errors='coerce').dt.normalize())
+        ext_bad=(pd.to_datetime(X['exit_date_ledger'],errors='coerce').dt.normalize()!=
+                 pd.to_datetime(X['exit_date_src'],errors='coerce').dt.normalize())
+        if bool(lid_bad.any() or ent_bad.any() or ext_bad.any()):
             raise RuntimeError(
-                f'Exact-row identity mismatch lid={int(bad_lid.sum())} '
-                f'entry={int(bad_entry.sum())} exit={int(bad_exit.sum())}'
+                f'Canonical adapter identity mismatch '
+                f'lid={int(lid_bad.sum())} entry={int(ent_bad.sum())} exit={int(ext_bad.sum())}'
             )
-        X['listing_id']=X['listing_id_ledger']
+
+        X['listing_id']=X['listing_id_ledger'].astype(str)
         X['entry_date']=pd.to_datetime(X['entry_date_ledger'],errors='coerce').dt.normalize()
-        X['exit_date']=pd.to_datetime(X['exit_date'],errors='coerce').dt.normalize()
-        X['entry_px_raw']=pd.to_numeric(X['entry_px'],errors='coerce')
-        X['exit_px_raw']=pd.to_numeric(X['control_exit_px'],errors='coerce')
+        X['exit_date']=pd.to_datetime(X['exit_date_ledger'],errors='coerce').dt.normalize()
         X['ret']=pd.to_numeric(X['ret'],errors='coerce')
+        X['entry_px_raw']=pd.to_numeric(X['entry_px_raw'],errors='coerce')
+        X['exit_px_raw']=pd.to_numeric(X['exit_px_raw'],errors='coerce')
         if 'is_stop' not in X.columns:
             X['is_stop']=X['control_reason'].astype(str).str.upper().str.contains('STOP')
+
         req=['v704_row_id','listing_id','entry_date','exit_date','entry_px_raw','exit_px_raw','ret','is_stop']
         miss=[c for c in req if c not in X.columns]
-        if miss:raise RuntimeError('Recovered rows missing: '+','.join(miss))
+        if miss:
+            raise RuntimeError('Unified adapter missing fields: '+','.join(miss))
         if X[['entry_px_raw','exit_px_raw','ret']].isna().any().any():
-            raise RuntimeError('Recovered exact rows contain missing price/return values')
+            raise RuntimeError('Unified adapter recovered rows contain missing price/return values')
 
         _v705_write(status='running',phase='price_cache',message=f'只读取 {X.listing_id.nunique()} 个实际持仓 listing 的 Historical Cache…',processed=2,total=7,elapsed_sec=round(time.time()-t0,1))
         M=_v615b_read_manifest();lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
@@ -46367,7 +46424,7 @@ def _v705_run():
         dd_stop_rate=float(exitW.is_stop.mean()) if len(exitW) else None;all_stop_rate=float(T.is_stop.mean()) if len(T) else None;dd_plus50=int((pd.to_numeric(exitW.ret,errors='coerce')>=.5).sum()) if len(exitW) else 0;dd_plus100=int((pd.to_numeric(exitW.ret,errors='coerce')>=1.0).sum()) if len(exitW) else 0
         dominant_regime=regime_rows[0] if regime_rows else None;largest_cluster=cluster_rows[0] if cluster_rows else None;total_loss=abs(float(pd.to_numeric(exitW.pnl,errors='coerce').sum())) if len(exitW) else 0.0
         concentrated=bool((dominant_regime and abs(float(dominant_regime.get('pnl',0)))>=.25*max(1e-12,total_loss)) or (largest_cluster and largest_cluster['n']>=5));verdict='DRAWDOWN_SOURCE_CONCENTRATED_AND_ACTIONABLE_FOR_ONE_CAUSAL_TEST' if concentrated else 'DRAWDOWN_DIFFUSE_NO_SINGLE_ACTIONABLE_SOURCE'
-        result={'version':'V7.05 V7.04-B Drawdown Regime Autopsy','verdict':verdict,'frozen_strategy':'V7.04 B Range20→BreakoutMargin50; diagnosis only; no rule changes','account_reference':{'v704_reported_cagr':B.get('cagr'),'v704_reported_maxdd':B.get('maxdd'),'v704_reported_pf':B.get('profit_factor'),'fixed_ledger_n':int(expected),'fixed_schedule_executable_n':int(len(X)),'clipped_entries':int(clipped)},'maxdd_window':{'peak_date':str(peak_date.date()),'peak_equity':peak_eq,'trough_date':str(trough_date.date()),'trough_equity':float(trough.equity),'maxdd':maxdd,'recovery_date':str(recovery_date.date()) if recovery_date is not None else None,'calendar_days':int((trough_date-peak_date).days)},'drawdown_trade_burden':{'overlapping_positions':int(len(W)),'exits_in_window':int(len(exitW)),'stop_rate_in_window':dd_stop_rate,'all_sample_stop_rate':all_stop_rate,'plus50_exits':dd_plus50,'plus100_exits':dd_plus100,'realized_pnl_sum':float(pd.to_numeric(exitW.pnl,errors='coerce').sum()) if len(exitW) else 0.0},'stop_clusters':cluster_rows,'regime_attribution':regime_rows,'worst_years':yearly[:10],'best_years':sorted(yearly,key=lambda z:z['pnl'],reverse=True)[:10],'history_dedup':'V6.95 already measured broad STOP capital burden. V7.05 does NOT reopen STOP classifiers or early-exit/capital-recycling. It isolates the exact V7.04 challenger max-drawdown episode on its fixed Actual-Buy schedule and asks whether the damage is concentrated in a regime/cluster.','next_step':('If concentrated, run exactly ONE causal risk-permission test against the single dominant drawdown source while preserving V7.04 entry ranking and winner capture.' if concentrated else 'Do not invent a risk overlay. Close this repair route and return to candidate-generation quality, because V7.04 drawdown is diffuse.'),'cache_note':'V7.04 exact challenger ledger + exact V6.69 candidate_order price recovery + Historical Cache for admitted listings only + SPY PIT regime cache; 0 Tiingo; 0 universe rescan; 0 candidate replay.'}
+        result={'version':'V7.05 V7.04-B Drawdown Regime Autopsy','verdict':verdict,'frozen_strategy':'V7.04 B Range20→BreakoutMargin50; diagnosis only; no rule changes','account_reference':{'v704_reported_cagr':B.get('cagr'),'v704_reported_maxdd':B.get('maxdd'),'v704_reported_pf':B.get('profit_factor'),'fixed_ledger_n':int(expected),'fixed_schedule_executable_n':int(len(X)),'clipped_entries':int(clipped)},'maxdd_window':{'peak_date':str(peak_date.date()),'peak_equity':peak_eq,'trough_date':str(trough_date.date()),'trough_equity':float(trough.equity),'maxdd':maxdd,'recovery_date':str(recovery_date.date()) if recovery_date is not None else None,'calendar_days':int((trough_date-peak_date).days)},'drawdown_trade_burden':{'overlapping_positions':int(len(W)),'exits_in_window':int(len(exitW)),'stop_rate_in_window':dd_stop_rate,'all_sample_stop_rate':all_stop_rate,'plus50_exits':dd_plus50,'plus100_exits':dd_plus100,'realized_pnl_sum':float(pd.to_numeric(exitW.pnl,errors='coerce').sum()) if len(exitW) else 0.0},'stop_clusters':cluster_rows,'regime_attribution':regime_rows,'worst_years':yearly[:10],'best_years':sorted(yearly,key=lambda z:z['pnl'],reverse=True)[:10],'history_dedup':'V6.95 already measured broad STOP capital burden. V7.05 does NOT reopen STOP classifiers or early-exit/capital-recycling. It isolates the exact V7.04 challenger max-drawdown episode on its fixed Actual-Buy schedule and asks whether the damage is concentrated in a regime/cluster.','next_step':('If concentrated, run exactly ONE causal risk-permission test against the single dominant drawdown source while preserving V7.04 entry ranking and winner capture.' if concentrated else 'Do not invent a risk overlay. Close this repair route and return to candidate-generation quality, because V7.04 drawdown is diffuse.'),'cache_note':'Runtime Preflight-approved unified adapter: V7.04 exact challenger ledger + V7.04 breakout cache joined by v704_row_id; source fields recovered by the same V7.04 row construction keyed by v704_row_id; Historical Cache only for the 291 admitted trades + SPY PIT regime cache; 0 Tiingo; 0 universe rescan; 0 admission reconstruction.'}
         V705_DIR.mkdir(parents=True,exist_ok=True);V705_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');E.to_csv(V705_EQUITY,index=False,compression='gzip');
         if len(exitW):exitW.to_csv(V705_DD_TRADES,index=False,compression='gzip')
         _v705_write(status='done',phase='done',message=f'V7.05 完成：{verdict}',processed=7,total=7,elapsed_sec=round(time.time()-t0,1),error=None,traceback=None)
