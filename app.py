@@ -51389,7 +51389,7 @@ V801_DIR=DATA_DIR/'v801_source_semantic_candidate_architecture'
 V801_STATUS=V801_DIR/'status.json'
 V801_RESULT=V801_DIR/'result.json'
 V801_ROWS=V801_DIR/'setup_family_attribution.csv.gz'
-V801_BUILD_ID='V801_SOURCE_SEMANTIC_20260830A'
+V801_BUILD_ID='V801_SOURCE_SEMANTIC_20260830B_SCHEMA_FIX'
 v801_thread=None
 
 def _v801_status():
@@ -51481,22 +51481,44 @@ def _v801_run():
         F['setup_family_proxy']=F['frozen_edge_count'].map(fam)
 
         # Exact Actual-Buy identity join; never reconstruct admission.
+        # IMPORTANT: rename BOTH sides explicitly before merge.
+        # Pandas suffixes apply only to overlapping columns, which caused the prior
+        # KeyError 'ret_candidate' when family_stats() was called directly on F.
         k=['listing_id','entry_date']
-        keymap=A[k+['ret','is_stop','winner50','winner100']].drop_duplicates(k,keep='last')
-        J=F.merge(keymap,on=k,how='left',suffixes=('_candidate','_actual'),indicator=True)
+        FC=F.rename(columns={
+            'ret':'ret_candidate',
+            'is_stop':'is_stop_candidate',
+            'winner50':'winner50_candidate',
+            'winner100':'winner100_candidate'
+        }).copy()
+        keymap=A[k+['ret','is_stop','winner50','winner100']].rename(columns={
+            'ret':'ret_actual',
+            'is_stop':'is_stop_actual',
+            'winner50':'winner50_actual',
+            'winner100':'winner100_actual'
+        }).drop_duplicates(k,keep='last')
+        J=FC.merge(keymap,on=k,how='left',validate='many_to_one',indicator=True)
         J['is_actual_buy']=J['_merge'].eq('both')
+
+        # Fail-fast schema audit BEFORE attribution.
+        required_candidate=['ret_candidate','is_stop_candidate','winner50_candidate','winner100_candidate']
+        required_actual=['ret_actual','is_stop_actual','winner50_actual','winner100_actual']
+        miss_schema=[c for c in required_candidate+required_actual if c not in J.columns]
+        if miss_schema: raise RuntimeError('V8.01 normalized attribution schema missing: '+','.join(miss_schema))
 
         # Actual buy coverage against V7.04.
         matched_actual=int(J.loc[J.is_actual_buy,k].drop_duplicates().shape[0])
         actual_cov=matched_actual/291.0
 
         _v801_write(status='running',phase='attribution',
-                    message=f'Actual-Buy exact join coverage={actual_cov:.1%}；计算各 setup family 的 STOP / +50 / +100 enrichment。',
+                    message=f'Actual-Buy exact join coverage={actual_cov:.1%}；normalized schema PASS；计算 setup family attribution。',
                     processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
 
         def family_stats(g,scope):
             retcol='ret_actual' if scope=='ACTUAL_BUY' else 'ret_candidate'
             stopcol='is_stop_actual' if scope=='ACTUAL_BUY' else 'is_stop_candidate'
+            if retcol not in g.columns or stopcol not in g.columns:
+                raise RuntimeError(f'family_stats schema mismatch scope={scope}: ret={retcol in g.columns}, stop={stopcol in g.columns}')
             r=pd.to_numeric(g[retcol],errors='coerce')
             st=g[stopcol].fillna(False).astype(bool)
             return {
@@ -51509,7 +51531,7 @@ def _v801_run():
             }
 
         rows=[]
-        for nm,g in F.groupby('setup_family_proxy',dropna=False):
+        for nm,g in FC.groupby('setup_family_proxy',dropna=False):
             rows.append(family_stats(g.assign(setup_family_proxy=nm),'CANDIDATE'))
         JA=J[J.is_actual_buy].copy()
         for nm,g in JA.groupby('setup_family_proxy',dropna=False):
@@ -51519,9 +51541,9 @@ def _v801_run():
         # Enrichment versus each scope baseline. This is attribution, not a cutoff rule.
         enrich=[]
         for scope,G in T.groupby('scope'):
-            src=F if scope=='CANDIDATE' else JA
+            src=FC if scope=='CANDIDATE' else JA
             if scope=='CANDIDATE':
-                rr=pd.to_numeric(src['ret'],errors='coerce'); ss=src['is_stop'].astype(bool)
+                rr=pd.to_numeric(src['ret_candidate'],errors='coerce'); ss=src['is_stop_candidate'].astype(bool)
             else:
                 rr=pd.to_numeric(src['ret_actual'],errors='coerce'); ss=src['is_stop_actual'].fillna(False).astype(bool)
             bstop=float(ss.mean());b50=float((rr>=.5).mean());b100=float((rr>=1.0).mean())
