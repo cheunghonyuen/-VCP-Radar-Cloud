@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v809-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v810-home-card-real' style='background:#fff7ed;border:6px solid #b45309;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>☕ V8.10 Cup-of-Handle Exact-Spec Reconstruction</h2>
+        <p>Right-side narrowing → Pivot → Alert → review · no invented geometry · no replay.</p>
+        <a href='/v810'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.10</button></a>
+        </div>
+        <div id='v809-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧬 V8.09 Low Cheat Exact-Spec Reconstruction</h2>
         <p>Source-only geometry lock · no invented thresholds · no replay.</p>
         <a href='/v809'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.09</button></a>
@@ -53472,3 +53477,192 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Forbidden Inference</h2><ul>{F or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v809/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.10 CUP-OF-HANDLE EXACT-SPEC RECONSTRUCTION =================
+# Source reconstruction only.
+# Uses already-cached JLaw subtitle evidence. Does not invent cup/handle geometry.
+V810_DIR=DATA_DIR/'v810_cup_handle_exact_spec_reconstruction'
+V810_STATUS=V810_DIR/'status.json'
+V810_RESULT=V810_DIR/'result.json'
+V810_BUILD_ID='V810_CUP_HANDLE_SPEC_20260830A'
+v810_thread=None
+
+def _v810_status():
+    x={'build_id':V810_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · source reconstruction only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V810_STATUS.exists():
+        try:
+            q=json.loads(V810_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V810_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v810_write(**kw):
+    V810_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v810_status();x.update(kw);x['build_id']=V810_BUILD_ID
+    V810_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v810_alive():return v810_thread is not None and v810_thread.is_alive()
+
+def _v810_run():
+    global v810_thread
+    t0=time.time()
+    try:
+        _v810_write(status='running',phase='preflight',
+                    message='锁定 Cup of Handle 原始案例；只保留字幕明确支持的 pattern/pivot/alert 语义。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        locked=[
+          {
+            'field':'SETUP_NAME',
+            'status':'EXPLICIT',
+            'source_meaning':'The source explicitly says the example is, strictly speaking, Cup of Handle (杯柄形态).',
+            'machine_value':'CUP_OF_HANDLE'
+          },
+          {
+            'field':'RIGHT_SIDE_STRUCTURE',
+            'status':'EXPLICIT_QUALITATIVE',
+            'source_meaning':'The right side shows volatility/range narrowing.',
+            'machine_value':'RIGHT_SIDE_NARROWING_CONTEXT'
+          },
+          {
+            'field':'PIVOT_FORMATION',
+            'status':'EXPLICIT',
+            'source_meaning':'As the right side narrows, a Pivot / least-resistance area appears.',
+            'machine_value':'PIVOT_FORMS_AFTER_RIGHT_SIDE_NARROWING'
+          },
+          {
+            'field':'PIVOT_PRICE',
+            'status':'EXAMPLE_SPECIFIC',
+            'source_meaning':'In the example, Pivot high is stated as 99.72.',
+            'machine_value':'EXAMPLE_ONLY_NOT_UNIVERSAL'
+          },
+          {
+            'field':'ALERT_BEHAVIOR',
+            'status':'EXPLICIT_OPERATION',
+            'source_meaning':'JLaw sets an alert at the Pivot breakout level and watches the stock when that price is reached/broken.',
+            'machine_value':'SET_ALERT_AT_PIVOT_BREAK_LEVEL'
+          },
+          {
+            'field':'BUY_DECISION_STAGE',
+            'status':'EXPLICIT_CONTEXT',
+            'source_meaning':'When the alert triggers, JLaw returns to the stock, analyzes that day’s conditions, and decides whether to buy; breakout alert is not itself an automatic buy.',
+            'machine_value':'ALERT_THEN_CONTEXT_REVIEW_NOT_AUTOBUY'
+          }
+        ]
+
+        _v810_write(status='running',phase='gap_map',
+                    message='列出 Cup/Handle 几何与 breakout execution 仍未被原文机器化支持的部分。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        unresolved=[
+          'Exact cup depth / percent drawdown.',
+          'Exact cup duration.',
+          'Exact handle duration.',
+          'Exact handle depth.',
+          'Exact required relationship between handle high/low and cup rim.',
+          'Exact volume behavior required inside cup and handle.',
+          'Exact symmetry / roundness requirements for the cup.',
+          'Exact maximum distance from prior high.',
+          'Exact formula for right-side narrowing.',
+          'Whether every valid Cup of Handle requires a VCP-like contraction sequence.',
+          'Exact breakout-volume requirement specific to Cup of Handle.',
+          'Exact invalidation rule before breakout.',
+          'Exact buy execution rule after Pivot alert, including same-day vs next-open.',
+          'Exact stop placement specific to Cup of Handle.'
+        ]
+
+        forbidden=[
+          'Do not import generic O’Neil Cup-with-Handle depth/duration rules unless JLaw source explicitly states them.',
+          'Do not reuse generic VCP contraction percentages as Cup/Handle geometry.',
+          'Do not treat the example Pivot price 99.72 as a universal rule.',
+          'Do not convert “right-side narrowing” into an arbitrary ATR/range percentile cutoff.',
+          'Do not assume Pivot alert == automatic buy.',
+          'Do not materialize a Cup-of-Handle generator from one explicit example.',
+          'Do not run portfolio A/B until the pattern geometry is source-supported enough to generate candidates reproducibly.'
+        ]
+
+        _v810_write(status='running',phase='architecture_assessment',
+                    message='判断 Cup of Handle 是否比 Low Cheat 更接近可机器化第二水源。',
+                    processed=4,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        verdict='CUP_HANDLE_SOURCE_CONCEPT_AND_EXECUTION_CHAIN_CONFIRMED_EXACT_GEOMETRY_UNVERIFIED'
+        result={
+          'version':'V8.10 Cup-of-Handle Exact-Spec Reconstruction',
+          'build_id':V810_BUILD_ID,
+          'verdict':verdict,
+          'source_examples_used':1,
+          'source_example_note':'One explicit Cup of Handle example was located in the cached source corpus for this audit.',
+          'locked_source_components':locked,
+          'unresolved_exact_mechanics':unresolved,
+          'forbidden_inference':forbidden,
+          'architecture_conclusion':(
+              'CUP_OF_HANDLE has stronger execution-chain evidence than LOW_CHEAT: the source explicitly names the pattern, '
+              'describes right-side narrowing into a Pivot, sets an alert at the Pivot breakout level, and then performs a '
+              'day-of-event review before deciding whether to buy. However, the cup/handle geometry itself remains qualitative '
+              'and cannot yet support a reproducible standalone generator without importing external or invented thresholds.'
+          ),
+          'comparison_vs_low_cheat':(
+              'Cup of Handle is currently more machine-adjacent than Low Cheat because the source provides an explicit '
+              'right-side-narrowing -> Pivot -> alert -> review sequence. But both remain exact-geometry UNVERIFIED.'
+          ),
+          'next_step':(
+              'Do NOT materialize Cup of Handle yet. Search the existing JLaw corpus for additional Cup-of-Handle examples '
+              'or a direct geometry definition. If no further source detail exists, close it as SOURCE_CONCEPT_PLUS_EXECUTION_ONLY. '
+              'At that point the project should stop searching for alternate setup families in this corpus and move to a different '
+              'architecture lever rather than inventing pattern thresholds.'
+          ),
+          'boundaries':'Source reconstruction only. 0 universe scan, 0 Historical Cache reread, 0 candidate generation, 0 account replay, 0 threshold sweep, 0 trading-rule activation.'
+        }
+
+        V810_DIR.mkdir(parents=True,exist_ok=True)
+        V810_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v810_write(status='done',phase='done',message=f'V8.10 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v810_write(status='error',phase='error',message=f'V8.10 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v810_thread=None
+
+def _v810_start():
+    global v810_thread
+    if _v810_alive():return False
+    _v810_write(status='starting',phase='starting',message='V8.10 starting · source reconstruction only',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v810_thread=threading.Thread(target=_v810_run,daemon=True);v810_thread.start();return True
+
+@APP.route('/v810/run',methods=['GET','POST'])
+def v810_run():_v810_start();return redirect('/v810')
+
+@APP.get('/api/v810/status')
+def v810_status_api():return jsonify(_v810_status())
+
+@APP.get('/v810')
+def v810_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v810_status();R={}
+    if V810_RESULT.exists():
+        try:R=json.loads(V810_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    L=R.get('locked_source_components') or []
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('field'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('source_meaning'))}</td><td>{e(x.get('machine_value'))}</td></tr>"
+      for x in L
+    )
+    U=''.join(f"<li>{e(x)}</li>" for x in R.get('unresolved_exact_mechanics',[]))
+    F=''.join(f"<li>{e(x)}</li>" for x in R.get('forbidden_inference',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v810/run'><button>▶ Run V8.10 Cup Handle Spec</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>☕ V8.10 Cup-of-Handle Exact-Spec Reconstruction</h1><div class='g'><b>只认原文：</b>锁定 Cup of Handle 的右侧收窄 → Pivot → Alert → 当日复核链条；Cup/Handle 深度、天数、量能、形状没有明说就不补猜。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Explicit Cup-of-Handle examples used: <b>{e(R.get('source_examples_used','—'))}</b></p><div class='o'>{e(R.get('architecture_conclusion',''))}<br><br><b>vs Low Cheat:</b> {e(R.get('comparison_vs_low_cheat',''))}</div></div>
+<div class='c'><h2>Source-Locked Cup-of-Handle Components</h2><div style='overflow:auto'><table><tr><th>Field</th><th>Status</th><th>Source Meaning</th><th>Machine-Safe Lock</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Still Unverified — Do Not Invent</h2><ul>{U or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Forbidden Inference</h2><ul>{F or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v810/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
