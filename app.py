@@ -46783,9 +46783,9 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>💰 V8.18B Big Winner vs STOP Economic Test</h2>
+        <h2>💰 V8.18C Big Winner vs STOP Economic Test</h2>
         <p>Actual Buy +50/+100 vs STOP · frozen PIT features · economic signal test · 0 rescan.</p>
-        <a href='/v818'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.18</button></a>
+        <a href='/v818'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.18C</button></a>
         </div>
         <div id='v817b-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧹 V8.17B Fundamental Semantic Fix</h2>
@@ -55850,7 +55850,7 @@ def v818_page():
       for x in tops
     )
     passed=R.get('passing_features') or []
-    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v818/run'><button>▶ Run V8.18 Big Winner vs STOP</button></form>"
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v818/run'><button>▶ Run V8.18C Big Winner vs STOP</button></form>"
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
