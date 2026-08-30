@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v807-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v808-home-card-real' style='background:#ecfeff;border:6px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧩 V8.08 Alternate Generator Source Audit</h2>
+        <p>Low Cheat / Cup of Handle / non-VCP Pivot source evidence · no replay · no proxy.</p>
+        <a href='/v808'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.08</button></a>
+        </div>
+        <div id='v807-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧾 V8.07 Discretionary Admission History Closure</h2>
         <p>Close duplicated V6.45–V6.57 review/admission branches · 0 replay · no new rule.</p>
         <a href='/v807'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.07</button></a>
@@ -53060,3 +53065,229 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v807/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.08 ALTERNATE GENERATOR SOURCE AUDIT =================
+# Source-evidence / architecture audit only.
+# No universe scan, no Historical Cache replay, no account replay, no threshold fitting.
+# Purpose: determine whether JLaw source material supports a genuinely distinct setup-family
+# beyond the current TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT lineage.
+V808_DIR=DATA_DIR/'v808_alternate_generator_source_audit'
+V808_STATUS=V808_DIR/'status.json'
+V808_RESULT=V808_DIR/'result.json'
+V808_BUILD_ID='V808_ALT_GENERATOR_SOURCE_AUDIT_20260830A'
+v808_thread=None
+
+def _v808_status():
+    x={'build_id':V808_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · source evidence only','processed':0,'total':6,
+       'elapsed_sec':0,'error':None,'traceback':None}
+    if V808_STATUS.exists():
+        try:
+            q=json.loads(V808_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V808_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v808_write(**kw):
+    V808_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v808_status();x.update(kw);x['build_id']=V808_BUILD_ID
+    V808_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v808_alive():return v808_thread is not None and v808_thread.is_alive()
+
+def _v808_read(name):
+    p=globals().get(name)
+    try:
+        if p and Path(p).exists():
+            return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception:pass
+    return None
+
+def _v808_run():
+    global v808_thread
+    t0=time.time()
+    try:
+        _v808_write(status='running',phase='preflight',
+                    message='历史查重 + source-only audit；先禁止 Pullback/Re-strength/Power-Play proxy 重做。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        r803=_v808_read('V803_RESULT')
+        r804=_v808_read('V804_RESULT')
+        r805=_v808_read('V805_RESULT')
+        r806=_v808_read('V806_RESULT')
+        r807=_v808_read('V807_RESULT')
+
+        current_lineage='TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT'
+        if r803 and r803.get('source_variant'):
+            current_lineage=str(r803.get('source_variant'))
+
+        _v808_write(status='running',phase='source_evidence',
+                    message='审计原始字幕中明确命名的非标准 VCP setup families：Low Cheat / Cup of Handle / non-VCP Pivot。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # SOURCE-LOCKED evidence from the previously cached JLaw subtitle corpus:
+        # 1) ABT is explicitly called a Low Cheat; described as a relatively short base,
+        #    meaningful consolidation, potentially developing a Pivot.
+        # 2) A chart is explicitly described as, strictly speaking, Cup of Handle; right side
+        #    narrows into a Pivot and a pivot-break alert is set.
+        # 3) Another chart is explicitly said not to be VCP, yet a Pivot appears to be forming.
+        #
+        # None of these examples gives a complete machine-exact geometry definition.
+        families=[
+          {
+            'family':'LOW_CHEAT',
+            'source_status':'EXPLICIT_NAMED_SETUP',
+            'distinct_from_current':'YES_SETUP_FAMILY',
+            'execution_event':'PIVOT_FORMATION / PIVOT_BREAKOUT_CONTEXT',
+            'evidence_summary':'ABT is explicitly named Low Cheat; source describes a relatively short base and meaningful consolidation that may develop into a Pivot.',
+            'exact_machine_spec':'UNVERIFIED',
+            'priority':1,
+            'why':'Strongest explicit alternate setup-family label found in the cached source material; not merely a numeric proxy.'
+          },
+          {
+            'family':'CUP_OF_HANDLE',
+            'source_status':'EXPLICIT_NAMED_SETUP',
+            'distinct_from_current':'YES_SETUP_FAMILY',
+            'execution_event':'RIGHT_SIDE_NARROWING -> PIVOT -> ALERT/BREAKOUT',
+            'evidence_summary':'Source explicitly says the chart is, strictly speaking, Cup of Handle; right-side volatility narrows into a Pivot and a Pivot-break alert is set.',
+            'exact_machine_spec':'UNVERIFIED',
+            'priority':2,
+            'why':'Clearly a different pattern label, but execution still converges on the Pivot-break event.'
+          },
+          {
+            'family':'NON_VCP_PIVOT',
+            'source_status':'EXPLICIT_EXAMPLE_NOT_NAMED_FAMILY',
+            'distinct_from_current':'POSSIBLE_SOURCE_DIVERSIFICATION',
+            'execution_event':'PIVOT_FORMING / WATCH',
+            'evidence_summary':'Source explicitly notes a chart is not VCP, yet a Pivot appears to be forming and remains worth watching.',
+            'exact_machine_spec':'UNVERIFIED',
+            'priority':3,
+            'why':'Shows candidate discovery is not necessarily limited to textbook VCP, but evidence is not enough to call it a standalone named setup family.'
+          },
+          {
+            'family':'FIRST_PULLBACK_RESTRENGTH',
+            'source_status':'CONCEPT_SUPPORTED_EXACT_RULE_UNVERIFIED',
+            'distinct_from_current':'YES_EVENT_FAMILY',
+            'execution_event':'PULLBACK_AREA -> RE_STRENGTH',
+            'evidence_summary':'Concept language exists, but V6.13/V6.39/V6.41/V6.42 already exposed proxy/spec drift and non-passing implementations.',
+            'exact_machine_spec':'UNVERIFIED_AND_HISTORICALLY_CLOSED',
+            'priority':99,
+            'why':'Do not recycle as V8.08.'
+          },
+          {
+            'family':'POWER_PLAY',
+            'source_status':'NO_DIRECT_SOURCE_PROOF_IN_PRIOR_AUDIT',
+            'distinct_from_current':'POTENTIALLY',
+            'execution_event':'UNVERIFIED',
+            'evidence_summary':'Prior V8.04/V6.16A prototype existed, but source-proof count was insufficient for a source-faithful generator.',
+            'exact_machine_spec':'UNVERIFIED',
+            'priority':99,
+            'why':'Do not promote.'
+          }
+        ]
+
+        _v808_write(status='running',phase='history_dedup',
+                    message='确认这些不是 V6.13/V6.39 pullback proxy，也不是 V6.44 3 个 breakout variant 的改名。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        closed=[
+          'V6.13 First Pullback / META numeric proxy — do not rerun.',
+          'V6.39 STATEFUL_PULLBACK_AREA — do not rerun.',
+          'V6.41/V6.42 Re-strength reconstruction/A-B — do not rerun.',
+          'V6.44 CURRENT_TRIPLE_GATE / PIVOT_BREAKOUT_ALERT / TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT — already tested.',
+          'V6.45–V6.57 admission/review/market-permission branches — already reconstructed.',
+          'POWER_PLAY_PB proxy — no direct source proof; do not promote.'
+        ]
+
+        _v808_write(status='running',phase='architecture_gate',
+                    message='判断是否存在“来源真实但 exact 机械定义尚未锁定”的第二 setup-family。',
+                    processed=5,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # Important distinction:
+        # We have source evidence for distinct SETUP FAMILIES, but not enough evidence yet for
+        # a machine-exact generator. Therefore we do NOT materialize candidates or backtest here.
+        verdict='ALTERNATE_SETUP_FAMILY_SOURCE_EVIDENCE_FOUND_EXACT_GENERATOR_SPEC_UNVERIFIED'
+        selected='LOW_CHEAT'
+
+        result={
+          'version':'V8.08 Alternate Generator Source Audit',
+          'build_id':V808_BUILD_ID,
+          'verdict':verdict,
+          'current_source_lineage':current_lineage,
+          'alternate_families':families,
+          'selected_for_exact_spec_reconstruction':selected,
+          'key_architecture_finding':(
+              'The source corpus does support at least one explicitly named setup family beyond a textbook VCP label: LOW_CHEAT, '
+              'and also explicitly discusses CUP_OF_HANDLE and a non-VCP chart with a forming Pivot. '
+              'However, the available source examples do not yet define machine-exact geometry for these families. '
+              'They are source-supported setup concepts, not production-ready generators.'
+          ),
+          'important_distinction':(
+              'This is setup-family diversification, not necessarily trigger-event diversification. '
+              'Low Cheat and Cup of Handle examples still converge on Pivot formation / Pivot-breakout execution.'
+          ),
+          'closed_history':closed,
+          'hard_rules':[
+              'Do not invent Low Cheat geometry from generic VCP contraction thresholds.',
+              'Do not treat Cup of Handle as merely another name for the current TIGHT_BREAKOUT generator.',
+              'Do not revive Pullback/Re-strength or Power-Play proxies.',
+              'Do not run portfolio A/B until exact setup geometry is source-supported and provenance can be persisted at generation time.'
+          ],
+          'next_step':(
+              'V8.09 may inspect ONLY Low Cheat source examples to reconstruct the minimum source-faithful geometry: '
+              'base location, relative shortness, consolidation structure, Pivot formation and invalidation. '
+              'No threshold sweep and no account replay. If exact mechanics remain unsupported, mark LOW_CHEAT_GENERATOR_UNVERIFIED and stop.'
+          ),
+          'boundaries':'Source audit only. 0 universe scan, 0 Historical Cache reread, 0 candidate materialization, 0 account replay, 0 threshold sweep, 0 trading-rule activation.'
+        }
+
+        V808_DIR.mkdir(parents=True,exist_ok=True)
+        V808_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v808_write(status='done',phase='done',message=f'V8.08 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v808_write(status='error',phase='error',message=f'V8.08 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v808_thread=None
+
+def _v808_start():
+    global v808_thread
+    if _v808_alive():return False
+    _v808_write(status='starting',phase='starting',message='V8.08 starting · source-only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v808_thread=threading.Thread(target=_v808_run,daemon=True);v808_thread.start();return True
+
+@APP.route('/v808/run',methods=['GET','POST'])
+def v808_run():_v808_start();return redirect('/v808')
+
+@APP.get('/api/v808/status')
+def v808_status_api():return jsonify(_v808_status())
+
+@APP.get('/v808')
+def v808_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v808_status();R={}
+    if V808_RESULT.exists():
+        try:R=json.loads(V808_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    F=R.get('alternate_families') or []
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('family'))}</b></td><td>{e(x.get('source_status'))}</td><td>{e(x.get('distinct_from_current'))}</td><td>{e(x.get('execution_event'))}</td><td>{e(x.get('exact_machine_spec'))}</td><td>{e(x.get('why'))}</td></tr>"
+      for x in F
+    )
+    closed=''.join(f"<li>{e(x)}</li>" for x in R.get('closed_history',[]))
+    rules=''.join(f"<li>{e(x)}</li>" for x in R.get('hard_rules',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v808/run'><button>▶ Run V8.08 Source Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧩 V8.08 Alternate Generator Source Audit</h1><div class='g'><b>只找真正第二水源：</b>不再碰 Pullback/Re-strength proxy。直接审计字幕里明确出现的 Low Cheat / Cup of Handle / non-VCP Pivot，判断它们是否足够成为不同 setup-family。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Current lineage: <b>{e(R.get('current_source_lineage','—'))}</b><br>Selected exact-spec target: <b>{e(R.get('selected_for_exact_spec_reconstruction','—'))}</b></p><div class='o'>{e(R.get('key_architecture_finding',''))}<br><br><b>重要区别：</b>{e(R.get('important_distinction',''))}</div></div>
+<div class='c'><h2>Alternate Setup-Family Evidence</h2><div style='overflow:auto'><table><tr><th>Family</th><th>Source status</th><th>Distinct?</th><th>Execution event</th><th>Exact spec</th><th>Assessment</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Hard Rules</h2><ul>{rules or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v808/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
