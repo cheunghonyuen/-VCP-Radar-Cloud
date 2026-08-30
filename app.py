@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v806-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v807-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧾 V8.07 Discretionary Admission History Closure</h2>
+        <p>Close duplicated V6.45–V6.57 review/admission branches · 0 replay · no new rule.</p>
+        <a href='/v807'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.07</button></a>
+        </div>
+        <div id='v806-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.06 Re-Strength History Dedup / Evidence Gate</h2>
         <p>Detect V6.41/V6.42 duplicate work before any new trigger test · 0 replay.</p>
         <a href='/v806'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.06</button></a>
@@ -52900,3 +52905,158 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><div class='o'><b>需要的新证据：</b>{e(R.get('required_new_evidence',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v806/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script>
 </div></body></html>"""
+
+
+# ================= V8.07 DISCRETIONARY ADMISSION HISTORY CLOSURE =================
+# Historical closure only. The requested "review current conditions" branch already exists in V6.45-V6.57.
+# No new A/B, no replay, no threshold invention.
+V807_DIR=DATA_DIR/'v807_discretionary_admission_history_closure'
+V807_STATUS=V807_DIR/'status.json'
+V807_RESULT=V807_DIR/'result.json'
+V807_BUILD_ID='V807_ADMISSION_HISTORY_CLOSURE_20260830A'
+v807_thread=None
+
+def _v807_status():
+    x={'build_id':V807_BUILD_ID,'status':'idle','phase':'idle','message':'Ready · historical closure only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V807_STATUS.exists():
+        try:
+            q=json.loads(V807_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V807_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v807_write(**kw):
+    V807_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v807_status();x.update(kw);x['build_id']=V807_BUILD_ID
+    V807_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v807_alive():return v807_thread is not None and v807_thread.is_alive()
+
+def _v807_read(name):
+    p=globals().get(name)
+    try:
+        if p and Path(p).exists():return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception:pass
+    return None
+
+def _v807_run():
+    global v807_thread
+    t0=time.time()
+    try:
+        _v807_write(status='running',phase='preflight',
+                    message='检查 V6.45–V6.57 已完成的 discretionary review / admission 历史，禁止重复。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        versions={}
+        for ver,var in [
+            ('V6.45','V645_RESULT'),('V6.46','V646_RESULT'),('V6.47','V647_RESULT'),
+            ('V6.48','V648_RESULT'),('V6.49','V649_RESULT'),('V6.50','V650_RESULT'),
+            ('V6.51','V651_RESULT'),('V6.52','V652_RESULT'),('V6.53','V653_RESULT'),
+            ('V6.54','V654_RESULT'),('V6.55','V655_RESULT'),('V6.56','V656_RESULT'),
+            ('V6.57','V657_RESULT')
+        ]:
+            r=_v807_read(var)
+            versions[ver]={'present':bool(r),'verdict':(r or {}).get('verdict'),'version':(r or {}).get('version')}
+
+        _v807_write(status='running',phase='history_map',
+                    message='V6.45 source review、V6.46 hard gate、V6.47 ranking、V6.48 BUY/WATCH/PASS、V6.52+ market permission 全部纳入查重。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        ledger=[
+          {'branch':'Breakout → Review → Actual Buy source evidence','history':'V6.45','state':'DONE',
+           'conclusion':'Source review dimensions already reconstructed: Relative Strength/Leadership, Ranking/Selection, Fundamentals, Market Context, Risk/Reward.'},
+          {'branch':'RS / Price-quality as hard admission gate','history':'V6.46','state':'CLOSED',
+           'conclusion':'Hard pass/fail review dimensions were destructive to the payoff shape; do not reopen as simple vetoes.'},
+          {'branch':'Same-day RS / composite ranking','history':'V6.47','state':'CLOSED_AS_NAIVE_RANKING',
+           'conclusion':'Source-inspired priority/ranking already tested; naive higher-RS/composite ordering did not establish a superior architecture.'},
+          {'branch':'Explicit Actual BUY / WATCH / PASS reconstruction','history':'V6.48 + V6.54','state':'DONE_SOURCE_STACK',
+           'conclusion':'A layered decision stack was reconstructed. No single numeric threshold explains actual-buy decisions.'},
+          {'branch':'Extended / Chase veto','history':'V6.49–V6.51','state':'CLOSED',
+           'conclusion':'No source-defined executable universal Extended/Chase cutoff was verified; threshold invention permanently stopped.'},
+          {'branch':'Market Context → permission / exposure','history':'V6.52–V6.57','state':'DONE_DIAGNOSTIC',
+           'conclusion':'Market context was reconstructed and mapped point-in-time. It is context/permission/exposure semantics, not a simple BULL=BUY / BEAR=PASS rule.'}
+        ]
+
+        _v807_write(status='running',phase='closure',
+                    message='形成历史关闭清单；不再把 admission/review 旧分支包装成 V8 新实验。',
+                    processed=4,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        verdict='DISCRETIONARY_ADMISSION_BRANCH_ALREADY_RECONSTRUCTED_AND_SIMPLE_RULES_CLOSED'
+        result={
+          'version':'V8.07 Discretionary Admission History Closure',
+          'build_id':V807_BUILD_ID,
+          'verdict':verdict,
+          'runtime_artifacts':versions,
+          'closure_ledger':ledger,
+          'source_facts':[
+            'V6.45 already found cross-video evidence for RS/Leadership, Ranking/Selection, Fundamentals and Market Context.',
+            'V6.46/V6.47 already tested simple review gates/ranking and showed why naive admission scoring can damage the asymmetric payoff.',
+            'V6.48/V6.54 already reconstructed the BUY/WATCH/PASS decision stack.',
+            'V6.52-V6.57 already reconstructed and point-in-time mapped market permission/exposure semantics.'
+          ],
+          'closed_actions':[
+            'Do not rerun V6.45 review-current-conditions source audit.',
+            'Do not rerun RS hard gates or RS/composite ranking.',
+            'Do not invent Extended/Chase thresholds.',
+            'Do not create a binary market-regime admission rule from old evidence.',
+            'Do not convert the layered decision stack into a fitted weighted score/grid.'
+          ],
+          'architecture_conclusion':(
+            'The discretionary admission layer is not missing because it was never studied; it was studied extensively. '
+            'The unresolved V8 architecture problem is that the current candidate stream is still a single recovered '
+            'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT lineage, while no source-faithful distinct alternate generator has yet been approved.'
+          ),
+          'next_step':(
+            'Return to the genuinely unresolved architecture gap: source diversification. Do not revisit admission micro-rules. '
+            'A future V8.08 should only proceed if a distinct, source-faithful non-breakout generator can be defined from evidence '
+            'without recycling V6.13/V6.39 pullback proxies. Otherwise mark alternate-generator architecture UNVERIFIED and stop.'
+          ),
+          'boundaries':'Historical closure only. 0 universe scan, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 strategy mutation.'
+        }
+        V807_DIR.mkdir(parents=True,exist_ok=True)
+        V807_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v807_write(status='done',phase='done',message=f'V8.07 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v807_write(status='error',phase='error',message=f'V8.07 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v807_thread=None
+
+def _v807_start():
+    global v807_thread
+    if _v807_alive():return False
+    _v807_write(status='starting',phase='starting',message='V8.07 starting · history closure first',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v807_thread=threading.Thread(target=_v807_run,daemon=True);v807_thread.start();return True
+
+@APP.route('/v807/run',methods=['GET','POST'])
+def v807_run():_v807_start();return redirect('/v807')
+
+@APP.get('/api/v807/status')
+def v807_status_api():return jsonify(_v807_status())
+
+@APP.get('/v807')
+def v807_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v807_status();R={}
+    if V807_RESULT.exists():
+        try:R=json.loads(V807_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    L=R.get('closure_ledger') or []
+    rows=''.join(f"<tr><td><b>{e(x.get('branch'))}</b></td><td>{e(x.get('history'))}</td><td>{e(x.get('state'))}</td><td>{e(x.get('conclusion'))}</td></tr>" for x in L)
+    A=R.get('runtime_artifacts') or {}
+    arows=''.join(f"<tr><td><b>{e(k)}</b></td><td>{'✅' if v.get('present') else '—'}</td><td>{e(v.get('verdict') or '—')}</td></tr>" for k,v in A.items())
+    closed=''.join(f"<li>{e(x)}</li>" for x in R.get('closed_actions',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v807/run'><button>▶ Run V8.07 History Closure</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.07 Discretionary Admission History Closure</h1><div class='g'><b>先查历史：</b>“review current conditions / Actual Buy” 并不是没做过。V6.45–V6.57 已经系统研究。V8.07 的任务是正式关闭重复分支。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+<div class='c'><h2>Historical Admission Branch Ledger</h2><div style='overflow:auto'><table><tr><th>Branch</th><th>History</th><th>State</th><th>Conclusion</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Runtime Artifact Check</h2><div style='overflow:auto'><table><tr><th>Version</th><th>Present</th><th>Verdict</th></tr>{arows or "<tr><td colspan='3'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v807/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
