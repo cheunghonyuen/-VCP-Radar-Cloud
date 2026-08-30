@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v814-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v815-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧬 V8.15 Parent-Opportunity Lineage Feasibility</h2>
+        <p>Stage-2 → V6.44 → V6.69 → V6.94 → V7.04 exact identity audit · no replay · no fuzzy join.</p>
+        <a href='/v815'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.15</button></a>
+        </div>
+        <div id='v814-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.14 Remaining-Open-Mechanism Ledger</h2>
         <p>PASS / FAIL / CLOSED / DIAGNOSTIC / UNTESTED · 全历史架构查重 · 0 strategy test.</p>
         <a href='/v814'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.14</button></a>
@@ -54511,3 +54516,325 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><div class='b'><b>Selected next:</b> {e(R.get('selected_next','—'))}<br><br><b>V8.15：</b>{e(R.get('v815_spec',''))}</div></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v814/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.15 PARENT-OPPORTUNITY LINEAGE FEASIBILITY / RECOVERY =================
+# DATA-LINEAGE audit only.
+# Reads persisted CSV artifacts only. No Historical Cache price reads, no universe scan, no replay.
+V815_DIR=DATA_DIR/'v815_parent_opportunity_lineage_feasibility'
+V815_STATUS=V815_DIR/'status.json'
+V815_RESULT=V815_DIR/'result.json'
+V815_MAP=V815_DIR/'partial_exact_parent_lineage.csv.gz'
+V815_BUILD_ID='V815_PARENT_LINEAGE_20260830A'
+v815_thread=None
+
+def _v815_status():
+    x={'build_id':V815_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · persisted-artifact lineage audit only',
+       'processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V815_STATUS.exists():
+        try:
+            q=json.loads(V815_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V815_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v815_write(**kw):
+    V815_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v815_status();x.update(kw);x['build_id']=V815_BUILD_ID
+    V815_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v815_alive(): return v815_thread is not None and v815_thread.is_alive()
+
+def _v815_key_stats(df, cols):
+    if df is None or df.empty or any(c not in df.columns for c in cols):
+        return {'rows':0,'unique_keys':0,'duplicate_rows':0,'is_unique':False}
+    k=df[cols].astype(str).agg('|'.join,axis=1)
+    return {
+      'rows':int(len(df)),
+      'unique_keys':int(k.nunique()),
+      'duplicate_rows':int(k.duplicated(keep=False).sum()),
+      'is_unique':bool(k.is_unique)
+    }
+
+def _v815_run():
+    global v815_thread
+    t0=time.time()
+    try:
+        _v815_write(status='running',phase='preflight',
+                    message='只读 Stage-2 / V6.44 / V6.69 / V6.94 / V7.04 persisted artifacts；不读 Historical Cache 价格。',
+                    processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+
+        req_files={
+          'stage2':V617FV2_TRADES,
+          'v644':V644_TRADE_CACHE,
+          'v669':V669_TRADES,
+          'v694':V694_DIR/'clean_candidate_path_features.csv.gz',
+          'v704_cache':V704_BREAKOUT_CACHE,
+          'v704_ledger':V704_LEDGER
+        }
+        missing=[k for k,p in req_files.items() if not Path(p).exists()]
+        if missing:
+            raise RuntimeError('Missing persisted lineage artifacts: '+','.join(missing))
+
+        S2=pd.read_csv(req_files['stage2'],compression='gzip')
+        X44=pd.read_csv(req_files['v644'],compression='gzip')
+        P69=pd.read_csv(req_files['v669'],compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
+        F94=pd.read_csv(req_files['v694'],compression='gzip')
+        C74=pd.read_csv(req_files['v704_cache'],compression='gzip')
+        L74=pd.read_csv(req_files['v704_ledger'],compression='gzip')
+
+        for D in [S2,X44,P69,F94,C74,L74]:
+            if 'listing_id' in D.columns:D['listing_id']=D['listing_id'].astype(str)
+            for c in ['entry_date','exit_date','control_exit_date']:
+                if c in D.columns:D[c]=pd.to_datetime(D[c],errors='coerce').dt.normalize()
+
+        _v815_write(status='running',phase='schema_audit',
+                    message='审计每一跳是否持久化 stable parent key / opportunity date / source id。',
+                    processed=1,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        schema_rows=[]
+        for name,D in [('Stage2',S2),('V6.44',X44),('V6.69',P69),('V6.94',F94),('V7.04 cache',C74),('V7.04 ledger',L74)]:
+            schema_rows.append({
+              'artifact':name,'rows':int(len(D)),
+              'has_listing_id':bool('listing_id' in D.columns),
+              'has_entry_date':bool('entry_date' in D.columns),
+              'has_parent_id':bool(any(c in D.columns for c in [
+                  'parent_opportunity_id','opportunity_id','stage2_row_id','source_row_id','parent_row_id'
+              ])),
+              'has_source_family':bool(any(c in D.columns for c in [
+                  'source','source_family','generator','generator_id','setup_family','provenance'
+              ])),
+              'identity_columns':[c for c in [
+                  'v704_row_id','v702_row_id','candidate_order','listing_id','entry_date'
+              ] if c in D.columns]
+            })
+
+        # ---- Stage2 -> V6.44 current-path parent feasibility ----
+        # V6.44 deliberately persisted the NEW trigger entry_date and discarded the original r.entry_date
+        # plus any Stage2 row id. Therefore we refuse heuristic date-window / BDay / fuzzy recovery.
+        # We only accept exact parent recovery where listing_id alone maps to one and only one Stage2 row.
+        cur=X44[X44['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        if cur.empty: raise RuntimeError('V6.44 current path absent')
+
+        s2_counts=S2.groupby('listing_id',dropna=False).size().rename('stage2_rows_for_listing')
+        cur=cur.merge(s2_counts,on='listing_id',how='left')
+        cur['stage2_rows_for_listing']=pd.to_numeric(cur['stage2_rows_for_listing'],errors='coerce').fillna(0).astype(int)
+        exact_parent=cur[cur.stage2_rows_for_listing.eq(1)].copy()
+        ambiguous_parent=cur[cur.stage2_rows_for_listing.gt(1)].copy()
+        missing_parent=cur[cur.stage2_rows_for_listing.eq(0)].copy()
+
+        if len(exact_parent):
+            s2_one=S2[S2.listing_id.isin(set(exact_parent.listing_id))].copy()
+            s2_one=s2_one.drop_duplicates('listing_id',keep=False)
+            keep=[c for c in ['listing_id','ticker','entry_date','exit_date','entry_px','exit_px','dna','exit_reason'] if c in s2_one.columns]
+            s2_one=s2_one[keep].rename(columns={
+                'entry_date':'stage2_entry_date','exit_date':'stage2_exit_date',
+                'entry_px':'stage2_entry_px','exit_px':'stage2_exit_px',
+                'dna':'stage2_dna','exit_reason':'stage2_exit_reason'
+            })
+            exact_parent=exact_parent.merge(s2_one,on='listing_id',how='left',validate='many_to_one')
+
+        _v815_write(status='running',phase='downstream_chain',
+                    message='验证 V6.44 current → V6.69 → V6.94 → V7.04 的 downstream identity coverage。',
+                    processed=3,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        # V6.44 -> V6.69 via persisted listing_id + trigger entry_date.
+        cur44=cur[['listing_id','entry_date']].copy()
+        cur44['_k']=cur44.listing_id+'|'+cur44.entry_date.dt.strftime('%Y-%m-%d')
+        p69=P69[['listing_id','entry_date','candidate_order']].copy()
+        p69['_k']=p69.listing_id+'|'+p69.entry_date.dt.strftime('%Y-%m-%d')
+        k44_counts=cur44.groupby('_k').size()
+        k69_counts=p69.groupby('_k').size()
+        exact_keys_4469=set(k44_counts[k44_counts.eq(1)].index)&set(k69_counts[k69_counts.eq(1)].index)
+        downstream_4469_coverage=float(cur44['_k'].isin(exact_keys_4469).mean()) if len(cur44) else 0.0
+
+        # V6.69 -> V6.94 via listing_id + entry_date; quantify exact unique-key coverage.
+        f94=F94[['listing_id','entry_date']].copy()
+        f94['_k']=f94.listing_id+'|'+f94.entry_date.dt.strftime('%Y-%m-%d')
+        k94_counts=f94.groupby('_k').size()
+        exact_keys_6994=set(k69_counts[k69_counts.eq(1)].index)&set(k94_counts[k94_counts.eq(1)].index)
+        downstream_6994_coverage=float(p69['_k'].isin(exact_keys_6994).mean()) if len(p69) else 0.0
+
+        # V7.04 internally has canonical v704_row_id; verify one-to-one cache/ledger parity.
+        v704_ok=False; v704_overlap=0
+        if 'v704_row_id' in C74.columns and 'v704_row_id' in L74.columns:
+            ci=pd.to_numeric(C74.v704_row_id,errors='coerce')
+            li=pd.to_numeric(L74.v704_row_id,errors='coerce')
+            if not ci.isna().any() and not li.isna().any() and ci.is_unique and li.is_unique:
+                cs=set(ci.astype(int));ls=set(li.astype(int))
+                v704_overlap=len(cs&ls)
+                v704_ok=bool(ls.issubset(cs))
+
+        # Reconstruct the deterministic V7.04 source-row id assignment WITHOUT reading price cache.
+        # This is the same order construction used by V7.04 / unified adapter.
+        meta=P69[['listing_id','entry_date','candidate_order']].copy()
+        meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
+        F=F94.copy()
+        F=F.merge(meta,on=['listing_id','entry_date'],how='left')
+        F['candidate_order']=pd.to_numeric(F['candidate_order'],errors='coerce')
+        F=F.dropna(subset=['entry_date','candidate_order']).sort_values(
+            ['entry_date','candidate_order','listing_id']
+        ).reset_index(drop=True)
+        F['recovered_v704_row_id']=np.arange(len(F),dtype=int)
+
+        # V7.04 cache must expose row ids produced by the same deterministic ordering.
+        recoverable_v704_ids=set()
+        if 'v704_row_id' in C74.columns:
+            recoverable_v704_ids=set(pd.to_numeric(C74.v704_row_id,errors='coerce').dropna().astype(int))
+        F['in_v704_cache']=F.recovered_v704_row_id.isin(recoverable_v704_ids)
+
+        _v815_write(status='running',phase='partial_mapping',
+                    message='仅对 Stage-2 listing_id 唯一的 current-path rows 保存 exact parent mapping；其余明确标 ambiguous。',
+                    processed=5,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        # Attach exact downstream candidate order when unique on listing/date.
+        if len(exact_parent):
+            exact_parent['_k']=exact_parent.listing_id+'|'+pd.to_datetime(exact_parent.entry_date).dt.strftime('%Y-%m-%d')
+            p69_one=p69[p69['_k'].isin(exact_keys_4469)][['_k','candidate_order']].drop_duplicates('_k',keep=False)
+            exact_parent=exact_parent.merge(p69_one,on='_k',how='left',validate='many_to_one')
+            # Join recovered V704 row id via unique trigger identity.
+            fkey=F[['listing_id','entry_date','recovered_v704_row_id','in_v704_cache']].copy()
+            fkey['_k']=fkey.listing_id+'|'+fkey.entry_date.dt.strftime('%Y-%m-%d')
+            fkey=fkey.drop_duplicates('_k',keep=False)
+            exact_parent=exact_parent.merge(
+                fkey[['_k','recovered_v704_row_id','in_v704_cache']],
+                on='_k',how='left',validate='many_to_one'
+            )
+            save_cols=[c for c in [
+                'listing_id','ticker_x','ticker_y','stage2_entry_date','entry_date',
+                'stage2_exit_date','exit_date','stage2_entry_px','entry_px',
+                'stage2_dna','stage2_exit_reason','candidate_order',
+                'recovered_v704_row_id','in_v704_cache'
+            ] if c in exact_parent.columns]
+            V815_DIR.mkdir(parents=True,exist_ok=True)
+            exact_parent[save_cols].to_csv(V815_MAP,index=False,compression='gzip')
+
+        parent_exact_rate=float(len(exact_parent)/len(cur)) if len(cur) else 0.0
+        direct_parent_key_present=any(r['artifact']=='V6.44' and r['has_parent_id'] for r in schema_rows)
+
+        # Exact recovery of the whole current stream requires a persisted parent key or 100% unambiguous mapping.
+        full_parent_recoverable=bool(direct_parent_key_present or (len(cur)>0 and len(ambiguous_parent)==0 and len(missing_parent)==0))
+        verdict=('PARENT_OPPORTUNITY_LINEAGE_FULLY_RECOVERABLE'
+                 if full_parent_recoverable
+                 else 'PARENT_OPPORTUNITY_LINEAGE_PARTIALLY_RECOVERABLE_NOT_EXACT_FOR_FULL_STREAM')
+
+        if full_parent_recoverable:
+            next_step=(
+              'Persist the full parent mapping and proceed to capacity-displacement attribution using exact parent opportunity identity only.'
+            )
+        else:
+            next_step=(
+              'Do NOT run capacity-displacement economics yet. The current persisted V6.44 cache discarded the original Stage-2 parent row/date, '
+              'so ambiguous multi-opportunity listings cannot be exactly attributed without regenerating lineage metadata from the upstream Stage-2 handoff. '
+              'The safe engineering fix is forward-only provenance persistence: add parent_opportunity_id/stage2_row_id at candidate generation and carry it through future caches. '
+              'Do not reconstruct ambiguous parents with fuzzy dates or business-day guesses.'
+            )
+
+        result={
+          'version':'V8.15 Parent-Opportunity Lineage Feasibility / Recovery',
+          'build_id':V815_BUILD_ID,'verdict':verdict,
+          'artifact_schema':schema_rows,
+          'stage2_rows':int(len(S2)),
+          'v644_current_rows':int(len(cur)),
+          'exact_parent_rows':int(len(exact_parent)),
+          'ambiguous_parent_rows':int(len(ambiguous_parent)),
+          'missing_parent_rows':int(len(missing_parent)),
+          'exact_parent_coverage':parent_exact_rate,
+          'direct_parent_key_persisted_in_v644':bool(direct_parent_key_present),
+          'downstream_identity':{
+            'v644_to_v669_exact_unique_key_coverage':downstream_4469_coverage,
+            'v669_to_v694_exact_unique_key_coverage':downstream_6994_coverage,
+            'v704_cache_ledger_exact_row_id_ready':v704_ok,
+            'v704_cache_ledger_overlap_rows':int(v704_overlap),
+            'recovered_v704_candidate_rows':int(F.in_v704_cache.sum())
+          },
+          'root_cause':(
+              'The lineage break occurs at the Stage-2 -> V6.44 handoff. _v644_build iterates each Stage-2 row r, '
+              'but the persisted V6.44 trade cache stores the new trigger entry_date and omits r.entry_date and any stable Stage-2 row/opportunity id. '
+              'Downstream V6.69/V6.94/V7.04 identity is substantially stronger, including candidate_order and canonical v704_row_id.'
+          ),
+          'partial_mapping_file':str(V815_MAP) if V815_MAP.exists() else None,
+          'hard_rules':[
+              'No fuzzy parent matching.',
+              'No business-day subtraction from delay_sessions as an exact parent date.',
+              'No Historical Cache reread for lineage recovery.',
+              'No account replay or displacement economics until full parent identity is exact.',
+              'Forward fixes must persist parent_opportunity_id/stage2_row_id at generation time.'
+          ],
+          'next_step':next_step,
+          'boundaries':'Persisted artifacts only. 0 universe scan, 0 Historical Cache price reread, 0 account replay, 0 threshold sweep, 0 trading-rule mutation.'
+        }
+        V815_DIR.mkdir(parents=True,exist_ok=True)
+        V815_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v815_write(status='done',phase='done',message=f'V8.15 完成：{verdict}',
+                    processed=7,total=7,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v815_write(status='error',phase='error',message=f'V8.15 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',
+                    traceback=traceback.format_exc())
+    finally:
+        v815_thread=None
+
+def _v815_start():
+    global v815_thread
+    if _v815_alive():return False
+    _v815_write(status='starting',phase='starting',
+                message='V8.15 starting · persisted-artifact lineage only',
+                processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+    v815_thread=threading.Thread(target=_v815_run,daemon=True);v815_thread.start();return True
+
+@APP.route('/v815/run',methods=['GET','POST'])
+def v815_run():_v815_start();return redirect('/v815')
+
+@APP.get('/api/v815/status')
+def v815_status_api():return jsonify(_v815_status())
+
+@APP.get('/v815')
+def v815_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v815_status();R={}
+    if V815_RESULT.exists():
+        try:R=json.loads(V815_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    sr=''.join(
+      f"<tr><td><b>{e(x.get('artifact'))}</b></td><td>{e(x.get('rows'))}</td>"
+      f"<td>{'✅' if x.get('has_parent_id') else '—'}</td>"
+      f"<td>{'✅' if x.get('has_source_family') else '—'}</td>"
+      f"<td>{e(', '.join(x.get('identity_columns') or []))}</td></tr>"
+      for x in R.get('artifact_schema',[]) or []
+    )
+    d=R.get('downstream_identity') or {}
+    pc=lambda x: ('—' if x is None else f"{float(x)*100:.1f}%")
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v815/run'><button>▶ Run V8.15 Lineage Audit</button></form>"
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.15 Parent-Opportunity Lineage Feasibility / Recovery</h1><div class='g'><b>只查身份链：</b>Stage-2 → V6.44 → V6.69 → V6.94 → V7.04。禁止 fuzzy join、禁止 Historical Cache 价格读取、禁止 account replay。</div></div>
+
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<div class='o'><b>Root cause:</b> {e(R.get('root_cause',''))}</div>
+<p>V6.44 current rows: <b>{e(R.get('v644_current_rows','—'))}</b> · Exact parent rows: <b>{e(R.get('exact_parent_rows','—'))}</b> · Ambiguous: <b>{e(R.get('ambiguous_parent_rows','—'))}</b> · Missing: <b>{e(R.get('missing_parent_rows','—'))}</b> · Exact coverage: <b>{pc(R.get('exact_parent_coverage'))}</b></p>
+</div>
+
+<div class='c'><h2>Persisted Identity Schema</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Rows</th><th>Parent ID</th><th>Source family</th><th>Identity columns</th></tr>{sr or "<tr><td colspan='5'>—</td></tr>"}</table></div></div>
+
+<div class='c'><h2>Downstream Identity Coverage</h2>
+<div class='b'>
+V6.44 → V6.69 exact unique key: <b>{pc(d.get('v644_to_v669_exact_unique_key_coverage'))}</b><br>
+V6.69 → V6.94 exact unique key: <b>{pc(d.get('v669_to_v694_exact_unique_key_coverage'))}</b><br>
+V7.04 cache ↔ ledger canonical row-id ready: <b>{'✅' if d.get('v704_cache_ledger_exact_row_id_ready') else '—'}</b><br>
+V7.04 cache ↔ ledger overlap rows: <b>{e(d.get('v704_cache_ledger_overlap_rows','—'))}</b>
+</div></div>
+
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v815/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>"""
+
