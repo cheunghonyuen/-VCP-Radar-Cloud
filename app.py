@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v803-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v804-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧭 V8.04 Distinct Generator Architecture Audit</h2>
+        <p>Do not rerun Breakout · audit Pullback / Re-strength / Power-Play prototypes · report only.</p>
+        <a href='/v804'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.04</button></a>
+        </div>
+        <div id='v803-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧬 V8.03B Candidate Provenance Recovery</h2>
         <p>Fix verdict gate · recover V6.44→V7.04 lineage · persist metadata only · 0 replay.</p>
         <a href='/v803'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.03</button></a>
@@ -52188,3 +52193,332 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Architecture Conclusion</h2><div class='warn'>{e(R.get('conclusion',''))}</div></div>
 <div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v803/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.04 DISTINCT UPSTREAM GENERATOR ARCHITECTURE AUDIT =================
+# Report/design audit only. Reuses frozen prior results; does NOT rerun V6.44 or V6.16A.
+# Goal: identify genuinely distinct candidate-generator families that already have code/evidence.
+V804_DIR=DATA_DIR/'v804_distinct_generator_architecture_audit'
+V804_STATUS=V804_DIR/'status.json'
+V804_RESULT=V804_DIR/'result.json'
+V804_BUILD_ID='V804_GENERATOR_ARCH_AUDIT_20260830A'
+v804_thread=None
+
+def _v804_status():
+    d={'build_id':V804_BUILD_ID,'status':'idle','phase':'idle','message':'Ready · report only',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V804_STATUS.exists():
+        try:
+            x=json.loads(V804_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V804_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v804_write(**kw):
+    V804_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v804_status();x.update(kw);x['build_id']=V804_BUILD_ID
+    V804_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v804_alive(): return v804_thread is not None and v804_thread.is_alive()
+
+def _v804_read(path):
+    try:
+        p=Path(path)
+        if not p.exists():return None
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:return None
+
+def _v804_num(x):
+    try:
+        z=float(x)
+        return z if np.isfinite(z) else None
+    except Exception:return None
+
+def _v804_run():
+    global v804_thread
+    t0=time.time()
+    try:
+        _v804_write(status='running',phase='preflight',
+                    message='读取 V8.03B / V6.44 / V6.16A / V6.34 / V6.35 frozen results；0 replay。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        r803=_v804_read(V803_RESULT)
+        if r803 is None:
+            raise RuntimeError('V8.03B provenance result missing')
+        if r803.get('verdict')!='SOURCE_LINEAGE_RECOVERED_AND_PERSISTED':
+            raise RuntimeError(f'V8.03B lineage not closed: {r803.get("verdict")}')
+
+        r644=_v804_read(V644_RESULT) if 'V644_RESULT' in globals() else None
+        r616=_v804_read(V616A_RESULT) if 'V616A_RESULT' in globals() else None
+        r634=_v804_read(V634_RESULT) if 'V634_RESULT' in globals() else None
+        r635=_v804_read(V635_RESULT) if 'V635_RESULT' in globals() else None
+
+        present={'V8.03B':True,'V6.44':r644 is not None,'V6.16A':r616 is not None,
+                 'V6.34':r634 is not None,'V6.35':r635 is not None}
+
+        _v804_write(status='running',phase='dedup',
+                    message='先做历史查重：Breakout family 已在 V6.44 测过，不重新包装成“新 generator”。',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        current_source=str(r803.get('source_variant') or 'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')
+
+        # Existing V6.44 source-supported breakout variants are explicitly NOT new architecture.
+        old_breakout=[]
+        if r644:
+            overall={str(x.get('strategy')):x for x in (r644.get('overall') or [])}
+            opp=r644.get('opportunity_summary') or {}
+            for name in ['CURRENT_TRIPLE_GATE','PIVOT_BREAKOUT_ALERT','TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT']:
+                x=overall.get(name) or {}
+                old_breakout.append({
+                    'generator':name,
+                    'family':'BREAKOUT',
+                    'opportunities':opp.get(name),
+                    'cagr':_v804_num(x.get('cagr')),
+                    'pf':_v804_num(x.get('profit_factor')),
+                    'maxdd':_v804_num(x.get('maxdd')),
+                    'wr':_v804_num(x.get('win_rate')),
+                    'status':('CURRENT_SOURCE' if name==current_source else 'ALREADY_TESTED_V6.44'),
+                    'new_architecture':False
+                })
+
+        _v804_write(status='running',phase='distinct_candidates',
+                    message='审计真正不同的 Pullback / Re-strength / Power-Play prototypes；只读旧结果，不重算。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # Source-status map from the already-run V6.35 transcript/spec reconciliation.
+        topic_status={}
+        if r635:
+            for x in (r635.get('topics') or []):
+                topic_status[str(x.get('topic'))]={
+                    'source_status':str(x.get('source_status') or ''),
+                    'assessment':str(x.get('assessment') or ''),
+                    'hit_count':int(x.get('hit_count') or 0)
+                }
+
+        # V6.34 explicitly labeled which mechanics are concept-aligned vs proxy.
+        spec_rows=(r634.get('spec') or []) if r634 else []
+        spec_by_stage={str(x.get('stage')):x for x in spec_rows}
+
+        methods={}
+        if r616:
+            for x in (r616.get('methods') or []):
+                methods[str(x.get('method'))]=x
+
+        control=methods.get('CONTROL') or {}
+        ctl_mae=_v804_num(control.get('avg_mae'))
+        ctl_bw50=_v804_num(control.get('bw50'))
+        ctl_winloss=_v804_num(control.get('winloss'))
+
+        candidates=[
+            {
+                'generator':'FIRST_PULLBACK_10MA',
+                'prototype_method':'PB10',
+                'family':'PULLBACK',
+                'source_topic':'First Pullback timing',
+                'support_topic':'Pivot / 10MA / 20MA support zone',
+                'code_status':'EXISTS_V6.16A',
+                'semantic_note':'Genuinely different from breakout timing: waits for post-breakout pullback toward 10MA context.',
+                'spec_risk':'HIGH_NUMERIC_PROXY'
+            },
+            {
+                'generator':'FIRST_PULLBACK_20MA',
+                'prototype_method':'PB20',
+                'family':'PULLBACK',
+                'source_topic':'First Pullback timing',
+                'support_topic':'Pivot / 10MA / 20MA support zone',
+                'code_status':'EXISTS_V6.16A',
+                'semantic_note':'Same Pullback family; deeper 20MA context. Treat as sibling, not a separate architecture branch.',
+                'spec_risk':'HIGH_NUMERIC_PROXY'
+            },
+            {
+                'generator':'RE_STRENGTH_AFTER_PULLBACK',
+                'prototype_method':'RE_STRENGTH',
+                'family':'RE_STRENGTH',
+                'source_topic':'Re-strength / trigger confirmation',
+                'support_topic':'First Pullback timing',
+                'code_status':'EXISTS_V6.16A_AND_V6.13',
+                'semantic_note':'Distinct event family: wait for pullback/near-support, then require renewed strength before entry.',
+                'spec_risk':'MEDIUM_CONCEPT_ALIGNED'
+            },
+            {
+                'generator':'POWER_PLAY_FIRST_PULLBACK_PROXY',
+                'prototype_method':'POWER_PLAY_PB',
+                'family':'POWER_PLAY',
+                'source_topic':'',
+                'support_topic':'',
+                'code_status':'EXISTS_V6.16A_PROXY',
+                'semantic_note':'Distinct prototype exists, but current implementation is explicitly a proxy and is not treated as JLaw-exact.',
+                'spec_risk':'HIGH_NEEDS_SOURCE_PROOF'
+            }
+        ]
+
+        rows=[]
+        for c in candidates:
+            m=methods.get(c['prototype_method']) or {}
+            cov=_v804_num(m.get('coverage'))
+            mae=_v804_num(m.get('avg_mae'))
+            bw50=_v804_num(m.get('bw50'))
+            bwret=_v804_num(m.get('bw20_retention'))
+            winloss=_v804_num(m.get('winloss'))
+            avgret=_v804_num(m.get('avg_ret60'))
+
+            t1=topic_status.get(c['source_topic'],{}) if c['source_topic'] else {}
+            t2=topic_status.get(c['support_topic'],{}) if c['support_topic'] else {}
+            source_hits=max(int(t1.get('hit_count') or 0),int(t2.get('hit_count') or 0))
+            source_statuses=[x for x in [t1.get('source_status'),t2.get('source_status')] if x]
+            source_concept_supported=bool(source_hits>0 and not all(x=='NO_SOURCE_HIT' for x in source_statuses))
+
+            # This is only a FEASIBILITY gate for future generator materialization.
+            # It is NOT a trading-rule acceptance test.
+            mae_improves=bool(mae is not None and ctl_mae is not None and mae>ctl_mae)
+            tail_ok=bool(bwret is not None and bwret>=.70)
+            coverage_ok=bool(cov is not None and cov>=.20)
+            code_ok=bool(m)
+            source_ok=source_concept_supported and c['generator']!='POWER_PLAY_FIRST_PULLBACK_PROXY'
+
+            feasibility=bool(code_ok and coverage_ok and mae_improves and tail_ok and source_ok)
+
+            rows.append({
+                **c,
+                'prototype_available':code_ok,
+                'coverage':cov,
+                'avg_mae':mae,
+                'mae_improves_vs_control':mae_improves,
+                'bw50':bw50,
+                'bw20_retention':bwret,
+                'avg_ret60':avgret,
+                'winloss':winloss,
+                'source_hits':source_hits,
+                'source_statuses':source_statuses,
+                'source_concept_supported':source_concept_supported,
+                'architecture_feasible':feasibility,
+                'research_warning':(
+                    'V6.16A metrics are entry-location research only and carry the original survivorship-bias warning; '
+                    'they are used here only to judge whether a generator prototype is worth materializing.'
+                )
+            })
+
+        feasible=[x for x in rows if x['architecture_feasible']]
+
+        # Prefer re-strength if feasible because V6.34 classified that mechanism as concept-aligned,
+        # while fixed pullback windows/tolerances were explicitly proxy-heavy.
+        selected=None
+        for name in ['RE_STRENGTH_AFTER_PULLBACK','FIRST_PULLBACK_10MA','FIRST_PULLBACK_20MA']:
+            z=next((x for x in feasible if x['generator']==name),None)
+            if z is not None:
+                selected=z
+                break
+
+        _v804_write(status='running',phase='architecture_verdict',
+                    message='生成单一 next-generator recommendation；不做组合、不做 portfolio A/B。',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        if selected:
+            verdict='DISTINCT_UPSTREAM_GENERATOR_CANDIDATE_READY'
+            next_step=(
+                f"V8.05: materialize exactly ONE new provenance-preserving candidate stream: "
+                f"{selected['generator']}. Use existing Feature Store/Historical Cache only; "
+                f"do not replay the account yet. First measure candidate count, overlap vs current breakout stream, "
+                f"and STOP/+50/+100 outcome distribution on the frozen historical opportunity set."
+            )
+        elif r616 is None:
+            verdict='DISTINCT_GENERATOR_EVIDENCE_INCOMPLETE_V616A_MISSING'
+            next_step='Do not rerun the universe. Restore/read the existing V6.16A result artifact before generator design.'
+        else:
+            verdict='NO_SOURCE_FAITHFUL_DISTINCT_GENERATOR_READY'
+            next_step=(
+                'Do not create another proxy generator. The Pullback/Re-strength concepts need a source-faithful '
+                'mechanical definition before materialization; Power Play proxy remains unapproved.'
+            )
+
+        result={
+            'version':'V8.04 Distinct Upstream Generator Architecture Audit',
+            'build_id':V804_BUILD_ID,
+            'verdict':verdict,
+            'report_only':True,
+            'source_presence':present,
+            'current_source_lineage':current_source,
+            'already_tested_breakout_family':old_breakout,
+            'distinct_generator_candidates':rows,
+            'selected_generator':selected,
+            'control_entry_reference':{
+                'avg_mae':ctl_mae,'bw50':ctl_bw50,'winloss':ctl_winloss
+            },
+            'feasibility_gate':(
+                'Prototype exists in frozen V6.16A result; coverage >=20%; average MAE improves vs CONTROL; '
+                'BW20 retention >=70%; source concept has cached transcript/spec support. '
+                'This gate approves materialization research only, NOT production trading.'
+            ),
+            'history_dedup':(
+                'V6.44 already tested CURRENT_TRIPLE_GATE / PIVOT_BREAKOUT_ALERT / '
+                'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT with full account replay. V8.04 does not rerun them. '
+                'V6.16A already researched PB10/PB20/RE_STRENGTH/POWER_PLAY_PB entry locations; V8.04 only reads those frozen results.'
+            ),
+            'boundaries':'Report/design audit only. No universe scan, no Historical Cache reread, no account replay, no threshold sweep, no admission/exit/sizing change.',
+            'next_step':next_step
+        }
+
+        V804_DIR.mkdir(parents=True,exist_ok=True)
+        V804_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v804_write(status='done',phase='done',message=f'V8.04 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v804_write(status='error',phase='error',message=f'V8.04 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v804_thread=None
+
+def _v804_start():
+    global v804_thread
+    if _v804_alive():return False
+    _v804_write(status='starting',phase='starting',message='V8.04 starting · report only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v804_thread=threading.Thread(target=_v804_run,daemon=True);v804_thread.start();return True
+
+@APP.route('/v804/run',methods=['GET','POST'])
+def v804_run():_v804_start();return redirect('/v804')
+
+@APP.get('/api/v804/status')
+def v804_status():return jsonify(_v804_status())
+
+@APP.get('/v804')
+def v804_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v804_status();R={}
+    if V804_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V804_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n2(x):
+        try:return f'{float(x):.2f}'
+        except:return '—'
+
+    old=R.get('already_tested_breakout_family') or []
+    oldrows=''.join(
+        f"<tr><td><b>{e(x.get('generator'))}</b></td><td>{e(x.get('status'))}</td><td>{x.get('opportunities','—')}</td><td>{pc(x.get('cagr'))}</td><td>{n2(x.get('pf'))}</td><td>{pc(x.get('maxdd'))}</td></tr>"
+        for x in old
+    )
+
+    C=R.get('distinct_generator_candidates') or []
+    crows=''.join(
+        f"<tr><td><b>{e(x.get('generator'))}</b></td><td>{e(x.get('family'))}</td><td>{'✅' if x.get('prototype_available') else '—'}</td><td>{pc(x.get('coverage'))}</td><td>{pc(x.get('avg_mae'))}</td><td>{pc(x.get('bw20_retention'))}</td><td>{x.get('source_hits','—')}</td><td>{e('/'.join(x.get('source_statuses') or []) or '—')}</td><td>{'✅' if x.get('architecture_feasible') else '—'}</td></tr>"
+        for x in C
+    )
+    S=R.get('selected_generator') or {}
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v804/run'><button>▶ Build V8.04 Architecture Audit</button></form>"
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.04 Distinct Upstream Generator Architecture Audit</h1><div class='ok'><b>不再重复 Breakout：</b>V6.44 已经测过 3 个 Breakout variants。V8.04 只读旧结果，寻找真正不同的 Pullback / Re-strength / Power-Play generator 候选，并检查 source/spec 支持。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Current source lineage: <b>{e(R.get('current_source_lineage','—'))}</b></p><div class='warn'><b>Selected next generator:</b> {e(S.get('generator','—'))}<br>{e(S.get('semantic_note',''))}</div></div>
+<div class='c'><h2>Already-Tested Breakout Family — DO NOT RERUN</h2><div style='overflow:auto'><table><tr><th>Generator</th><th>Status</th><th>Opportunities</th><th>CAGR</th><th>PF</th><th>MaxDD</th></tr>{oldrows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Genuinely Distinct Generator Candidates</h2><div style='overflow:auto'><table><tr><th>Generator</th><th>Family</th><th>Prototype</th><th>Coverage</th><th>Avg MAE</th><th>BW20 Retention</th><th>Source Hits</th><th>Source Status</th><th>Feasible</th></tr>{crows or "<tr><td colspan='9'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v804/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
