@@ -46752,7 +46752,17 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v7-runtime-preflight-card' style='background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v716-home-card-real' style='background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🩺 V7.16 Recent-Cohort Health Admission Audit</h2>
+        <p>Lagged D10 MAE cohort health · diagnostic only · no exit/replay.</p>
+        <a href='/v716'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.16</button></a>
+        </div>
+        <div id='v715-home-card-real' style='background:#f5f3ff;border:5px solid #8b5cf6;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>⏱️ V7.15 STOP Failure-Timing Path Audit</h2>
+        <p>291 Actual Buys · D5/D10 failure timing · diagnostic only</p>
+        <a href='/v715'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.15</button></a>
+        </div>
+        <div id='v7-runtime-preflight-card' style='background:#eff6ff;border:5px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🩺 V7 Runtime Preflight</h2><p>先锁 schema / unique key / parity，再允许长跑。</p>
         <a href='/v7/runtime-preflight'><button>打开 Runtime Preflight</button></a></div>"""
         if hasattr(resp,'get_data'):
@@ -50273,7 +50283,7 @@ V715_DIR=DATA_DIR/'v715_stop_failure_timing_path_audit'
 V715_STATUS=V715_DIR/'status.json'
 V715_RESULT=V715_DIR/'result.json'
 V715_ROWS=V715_DIR/'actual_buy_early_path_rows.csv.gz'
-V715_BUILD_ID='V715_STOP_TIMING_20260830B_FINAL'
+V715_BUILD_ID='V715_STOP_TIMING_20260830C_CARD_REAL'
 v715_thread=None
 
 def _v715_status():
@@ -50451,3 +50461,290 @@ if _v715_home_base is not None:
             p=body.find('<body');g=body.find('>',p) if p>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
         return body
     APP.view_functions['home']=_v715_home_wrap
+
+
+# ================= V7.16 RECENT-COHORT HEALTH ADMISSION AUDIT =================
+# Diagnostic only. Uses the V7.15 robust d10_mae idea at the ACCOUNT CONTEXT layer.
+# No exit change, no account replay, no admission cutoff, no threshold sweep.
+V716_DIR=DATA_DIR/'v716_recent_cohort_health_admission_audit'
+V716_STATUS=V716_DIR/'status.json'
+V716_RESULT=V716_DIR/'result.json'
+V716_ROWS=V716_DIR/'actual_buy_recent_cohort_health.csv.gz'
+V716_BUILD_ID='V716_COHORT_HEALTH_20260830A'
+v716_thread=None
+
+def _v716_status():
+    d={'build_id':V716_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V716_STATUS.exists():
+        try:
+            x=json.loads(V716_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V716_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v716_write(**kw):
+    V716_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v716_status();x.update(kw);x['build_id']=V716_BUILD_ID
+    V716_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v716_alive():return v716_thread is not None and v716_thread.is_alive()
+
+def _v716_auc(y,x):
+    y=np.asarray(y,dtype=int);x=np.asarray(x,dtype=float)
+    ok=np.isfinite(x);y=y[ok];x=x[ok]
+    if len(y)<8 or len(set(y.tolist()))<2:return np.nan
+    p=x[y==1];n=x[y==0]
+    if not len(p) or not len(n):return np.nan
+    rr=pd.Series(np.r_[p,n]).rank(method='average').to_numpy()
+    rp=rr[:len(p)].sum()
+    return float((rp-len(p)*(len(p)+1)/2)/(len(p)*len(n)))
+
+def _v716_norm_listing_price(d):
+    if d is None or len(d)==0:return None
+    x=d.copy()
+    lc={str(c).lower():c for c in x.columns}
+    if 'date' not in lc:
+        try:
+            x=x.reset_index()
+            lc={str(c).lower():c for c in x.columns}
+        except Exception:return None
+    datec=lc.get('date') or x.columns[0]
+    closec=lc.get('close');highc=lc.get('high');lowc=lc.get('low')
+    if closec is None:return None
+    close=pd.to_numeric(x[closec],errors='coerce')
+    out=pd.DataFrame({
+        'date':pd.to_datetime(x[datec],errors='coerce').dt.normalize(),
+        'close':close,
+        'high':pd.to_numeric(x[highc],errors='coerce') if highc is not None else close,
+        'low':pd.to_numeric(x[lowc],errors='coerce') if lowc is not None else close
+    }).dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    return out if len(out) else None
+
+def _v716_d10_mae_observation(d,entry_date):
+    x=_v716_norm_listing_price(d)
+    if x is None or len(x)<11:return None
+    ed=pd.Timestamp(entry_date).normalize()
+    idx=x.index[x['date'].eq(ed)]
+    if len(idx)!=1:return None
+    j=int(idx[0])
+    if j+10>=len(x):return None
+    entry=float(x.loc[j,'close'])
+    if not np.isfinite(entry) or entry<=0:return None
+    z=x.iloc[j+1:j+11]
+    mae=float(pd.to_numeric(z['low'],errors='coerce').min()/entry-1.0)
+    obs_date=pd.Timestamp(x.loc[j+10,'date']).normalize()
+    return {'d10_mae':mae,'d10_obs_date':obs_date}
+
+def _v716_run():
+    global v716_thread
+    t0=time.time()
+    try:
+        _v716_write(status='running',phase='preflight',
+                    message='Preflight：V7.04 exact 291 + V7.15 robust d10_mae verdict + exact Historical Cache。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact ledger missing')
+        if not V715_RESULT.exists():raise RuntimeError('V7.15 result missing')
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        R715=json.loads(V715_RESULT.read_text(encoding='utf-8'))
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+        if R715.get('verdict')!='EARLY_FAILURE_PATH_DNA_FOUND':
+            raise RuntimeError(f'V7.15 robust path signal not validated: {R715.get("verdict")}')
+        tops=R715.get('top_robust') or []
+        if not tops or tops[0].get('feature')!='d10_mae':
+            raise RuntimeError(f'V7.15 top robust feature drift: {tops[:1]}')
+
+        for c in ['v704_row_id','listing_id','entry_date','ret','is_stop']:
+            if c not in L.columns:raise RuntimeError(f'V7.04 ledger missing {c}')
+        if not L['v704_row_id'].is_unique:raise RuntimeError('v704_row_id not unique')
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty or 'listing_id' not in M.columns:
+            raise RuntimeError('Historical listing manifest missing/invalid')
+        M=M.copy();M['listing_id']=M['listing_id'].astype(str)
+        # Same validated canonicalization as V7.13B/V7.15 final fix.
+        M=M.drop_duplicates('listing_id',keep='last').set_index('listing_id',drop=False)
+
+        L=L.copy()
+        L['listing_id']=L['listing_id'].astype(str)
+        L['entry_date']=pd.to_datetime(L['entry_date'],errors='coerce').dt.normalize()
+        L['ret']=pd.to_numeric(L['ret'],errors='coerce')
+        L['is_stop']=L['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        L['is_50']=L['ret'].ge(.50)
+        L['is_100']=L['ret'].ge(1.0)
+        L=L.sort_values(['entry_date','v704_row_id'],kind='stable').reset_index(drop=True)
+
+        # Use SPY trading calendar only as a calendar; this is not a universe scan.
+        spy=_v716_norm_listing_price(load_cached('SPY'))
+        if spy is None or len(spy)<100:raise RuntimeError('SPY trading calendar unavailable')
+        cal=pd.DatetimeIndex(spy['date'].drop_duplicates().sort_values())
+        cal_ns=cal.astype('int64').to_numpy(dtype='int64')
+        def cal_pos(dt):
+            x=np.int64(pd.Timestamp(dt).normalize().value)
+            j=int(np.searchsorted(cal_ns,x,side='right')-1)
+            return j
+
+        _v716_write(status='running',phase='path_observation',
+                    message='构建每笔 Actual Buy 的 D10 MAE 可观察日期；严格禁止使用尚未成熟的未来路径。',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        obs=[];miss=0
+        for k,r in L.iterrows():
+            lid=str(r.listing_id)
+            if lid not in M.index:
+                miss+=1;continue
+            try:d=_v617fv1_read_price(M.loc[lid])
+            except Exception:d=None
+            o=_v716_d10_mae_observation(d,r.entry_date) if d is not None else None
+            if o is None:
+                miss+=1;continue
+            obs.append({'v704_row_id':int(r.v704_row_id),'d10_mae':float(o['d10_mae']),
+                        'd10_obs_date':pd.Timestamp(o['d10_obs_date'])})
+        O=pd.DataFrame(obs)
+        if len(O)<.95*291:
+            raise RuntimeError(f'D10 observation coverage too low {len(O)}/291')
+        if not O['v704_row_id'].is_unique:raise RuntimeError('D10 observation duplicate v704_row_id')
+
+        X=L.merge(O,on='v704_row_id',how='left',validate='one_to_one')
+        X['entry_cal_pos']=[cal_pos(d) for d in X.entry_date]
+        X['obs_cal_pos']=[cal_pos(d) if pd.notna(d) else -10**9 for d in X.d10_obs_date]
+
+        _v716_write(status='running',phase='cohort_build',
+                    message='固定 20 个 SPY 交易日 lookback；只使用当前 entry 前已经成熟的 D10 MAE。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # PREDECLARED recent cohort:
+        # D10 observation became available strictly before current entry,
+        # and within previous 20 SPY sessions. No cutoff tuning.
+        cohort_health=[];cohort_n=[]
+        for i,r in X.iterrows():
+            p=int(r.entry_cal_pos)
+            eligible=X[(X.obs_cal_pos < p) & (X.obs_cal_pos >= p-20)]
+            vals=pd.to_numeric(eligible['d10_mae'],errors='coerce').dropna()
+            cohort_n.append(int(len(vals)))
+            cohort_health.append(float(vals.median()) if len(vals)>=3 else np.nan)
+        X['cohort_n']=cohort_n
+        X['cohort_d10_mae_median_20d']=cohort_health
+        feature='cohort_d10_mae_median_20d'
+        cov=float(pd.to_numeric(X[feature],errors='coerce').notna().mean())
+        X.to_csv(V716_ROWS,index=False,compression='gzip')
+
+        _v716_write(status='running',phase='audit',
+                    message=f'Cohort health coverage={cov:.1%}。审计其对后续 STOP / +50 / +100 的预测方向与稳定性。',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        targets={'NONSTOP':(~X.is_stop).astype(int),'WIN50':X.is_50.astype(int),'WIN100':X.is_100.astype(int)}
+        audits={}
+        for name,y in targets.items():
+            xv=pd.to_numeric(X[feature],errors='coerce')
+            auc=_v716_auc(y,xv)
+            if not np.isfinite(auc):
+                audits[name]={'auc':None,'oriented_auc':None,'direction':'—','coverage':cov}
+                continue
+            direction='HIGHER_BETTER' if auc>=.5 else 'LOWER_BETTER'
+            audits[name]={'auc':float(auc),'oriented_auc':float(max(auc,1-auc)),
+                          'direction':direction,'coverage':cov}
+
+        dirs=[audits[k]['direction'] for k in ['NONSTOP','WIN50','WIN100']]
+        oas=[audits[k]['oriented_auc'] for k in ['NONSTOP','WIN50','WIN100']]
+        same=(len(set(dirs))==1 and '—' not in dirs)
+        minauc=min([x for x in oas if x is not None] or [0.0])
+
+        # Five-year stability on NONSTOP, largest positive sample.
+        X['year']=X.entry_date.dt.year
+        blocks=[]
+        ymin=int(X.year.min());ymax=int(X.year.max())
+        main_dir=audits['NONSTOP']['direction']
+        for lo in range(ymin,ymax+1,5):
+            g=X[X.year.between(lo,lo+4)]
+            a=_v716_auc((~g.is_stop).astype(int),pd.to_numeric(g[feature],errors='coerce'))
+            if np.isfinite(a):
+                d='HIGHER_BETTER' if a>=.5 else 'LOWER_BETTER'
+                blocks.append({'block':f'{lo}-{lo+4}','n':int(len(g)),
+                               'direction':d,'oriented_auc':float(max(a,1-a))})
+        cons=float(np.mean([b['direction']==main_dir for b in blocks])) if blocks and main_dir!='—' else None
+        weakest=float(min([b['oriented_auc'] for b in blocks])) if blocks else None
+
+        # Also report the known V7.05 MaxDD window, but do not optimize on it.
+        dd_start=pd.Timestamp('2007-01-17');dd_end=pd.Timestamp('2009-03-03')
+        W=X[X.entry_date.between(dd_start,dd_end)]
+        OX=X[~X.entry_date.between(dd_start,dd_end)]
+        dd={
+            'window_n':int(len(W)),
+            'window_health_median':float(pd.to_numeric(W[feature],errors='coerce').median()),
+            'outside_health_median':float(pd.to_numeric(OX[feature],errors='coerce').median()),
+            'window_stop_rate':float(W.is_stop.mean()) if len(W) else None,
+            'outside_stop_rate':float(OX.is_stop.mean()) if len(OX) else None
+        }
+
+        actionable=bool(same and dirs[0]=='HIGHER_BETTER' and minauc>=.60 and cov>=.60 and cons is not None and cons>=.60)
+        verdict='RECENT_COHORT_HEALTH_SIGNAL_FOUND' if actionable else 'NO_ROBUST_RECENT_COHORT_HEALTH_SIGNAL'
+
+        result={
+            'version':'V7.16 Recent-Cohort Health Admission Audit',
+            'build_id':V716_BUILD_ID,'verdict':verdict,
+            'source_signal':'V7.15 robust d10_mae; transformed into lagged account-context only.',
+            'cohort_definition':'Median D10 MAE of prior Actual Buys whose D10 observation date is strictly before current entry and within prior 20 SPY trading sessions; minimum cohort N=3.',
+            'feature':feature,'coverage':cov,
+            'audits':audits,
+            'five_year_stability':{'blocks':blocks,'direction_consistency':cons,'weakest_oriented_auc':weakest},
+            'maxdd_window':dd,
+            'acceptance':'Promote only if healthier cohort is consistently HIGHER_BETTER for Non-STOP/+50/+100, min oriented AUC >=0.60, coverage >=60%, and 5-year NONSTOP direction consistency >=60%. No admission threshold is selected here.',
+            'history_dedup':'Distinct from V6.95–V7.00: no existing position is exited or recycled. Distinct from V7.06/V7.11: no DEFENSIVE hard block or sizing change. This is lagged recent-cohort context diagnosis only.',
+            'boundaries':'No account replay, no admission blocking, no exit change, no sizing change, no threshold sweep, no universe scan.',
+            'next_step':('V7.17: test exactly ONE predeclared cohort-health permission mechanism in Native V7.04 A/B; no cutoff grid.' if actionable
+                         else 'Close recent-cohort-health branch. Do not sweep lookbacks/min-N/cutoffs.')
+        }
+        V716_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v716_write(status='done',phase='done',message=f'V7.16 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v716_write(status='error',phase='error',message=f'V7.16 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v716_thread=None
+
+def _v716_start():
+    global v716_thread
+    if _v716_alive():return False
+    _v716_write(status='starting',phase='starting',message='V7.16 starting · preflight first',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v716_thread=threading.Thread(target=_v716_run,daemon=True);v716_thread.start();return True
+
+@APP.route('/v716/run',methods=['GET','POST'])
+def v716_run():_v716_start();return redirect('/v716')
+
+@APP.get('/api/v716/status')
+def v716_status():return jsonify(_v716_status())
+
+@APP.get('/v716')
+def v716_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v716_status();R={}
+    if V716_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V716_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    A=R.get('audits') or {}
+    rows=''.join(f"<tr><td><b>{k}</b></td><td>{e(v.get('direction'))}</td><td>{n3(v.get('oriented_auc'))}</td><td>{pc(v.get('coverage'))}</td></tr>" for k,v in A.items())
+    S=R.get('five_year_stability') or {};D=R.get('maxdd_window') or {}
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v716/run'><button>▶ Run V7.16 Cohort Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🩺 V7.16 Recent-Cohort Health Admission Audit</h1><div class='ok'><b>新机制，只诊断：</b>不卖旧仓。把 V7.15 的 robust D10 MAE 转成滞后的账户环境信号：看最近已经成熟的一批新仓是否健康，再判断之后的新入场是不是更容易 STOP / Big Winner。<br>固定 20 个 SPY 交易日 lookback；不扫参数。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Feature coverage={pc(R.get('coverage'))}</p><p>{e(R.get('cohort_definition',''))}</p></div>
+<div class='c'><h2>Predictive Separation</h2><table><tr><th>Outcome</th><th>Direction</th><th>Oriented AUC</th><th>Coverage</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div>
+<div class='c'><h2>5-Year Stability</h2><p>Direction consistency={pc(S.get('direction_consistency'))} · Weakest AUC={n3(S.get('weakest_oriented_auc'))}</p></div>
+<div class='c'><h2>2007–2009 MaxDD Window</h2><p>Window health median={pc(D.get('window_health_median'))} · Outside={pc(D.get('outside_health_median'))}<br>Window STOP%={pc(D.get('window_stop_rate'))} · Outside STOP%={pc(D.get('outside_stop_rate'))}</p></div>
+<div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v716/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
