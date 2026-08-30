@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v805-home-card-real' style='background:#fff7ed;border:6px solid #ea580c;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v806-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧭 V8.06 Re-Strength History Dedup / Evidence Gate</h2>
+        <p>Detect V6.41/V6.42 duplicate work before any new trigger test · 0 replay.</p>
+        <a href='/v806'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.06</button></a>
+        </div>
+        <div id='v805-home-card-real' style='background:#fff7ed;border:6px solid #ea580c;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>📜 V8.05 Source-Faithful Generator Spec Lock</h2>
         <p>Lock JLaw-supported semantics · dedup V6.39 · no proxy invention · report only.</p>
         <a href='/v805'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.05</button></a>
@@ -52740,3 +52745,158 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Still Unverified — Do Not Invent</h2><ul>{ul or '<li>—</li>'}</ul></div>
 <div class='c'><div class='warn'><b>历史查重：</b>V6.39 已经做过 STATEFUL_PULLBACK_AREA A/B；V8.05 不重跑、不改名重做。<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v805/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.06 RE-STRENGTH HISTORY DEDUP / EVIDENCE GATE =================
+# IMPORTANT: V6.41 already performed Re-Strength source reconstruction.
+# V6.42 already implemented the controlled Source-Event Trigger A/B.
+# Therefore V8.06 MUST NOT repeat either branch.
+V806_DIR=DATA_DIR/'v806_restrength_history_dedup_evidence_gate'
+V806_STATUS=V806_DIR/'status.json'
+V806_RESULT=V806_DIR/'result.json'
+V806_BUILD_ID='V806_RESTRENGTH_DEDUP_20260830A'
+v806_thread=None
+
+def _v806_status():
+    x={'build_id':V806_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · historical dedup before any new trigger test',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V806_STATUS.exists():
+        try:
+            q=json.loads(V806_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V806_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v806_write(**kw):
+    V806_DIR.mkdir(parents=True,exist_ok=True);x=_v806_status();x.update(kw);x['build_id']=V806_BUILD_ID
+    V806_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v806_alive():return v806_thread is not None and v806_thread.is_alive()
+
+def _v806_jread(name):
+    p=globals().get(name)
+    try:
+        if p and Path(p).exists():return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception:pass
+    return None
+
+def _v806_run():
+    global v806_thread
+    t0=time.time()
+    try:
+        _v806_write(status='running',phase='preflight',message='Preflight: verify old V6.41/V6.42 artifacts before doing anything new.',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        r641=_v806_jread('V641_RESULT')
+        r642=_v806_jread('V642_RESULT')
+        r640=_v806_jread('V640_RESULT')
+        r805=_v806_jread('V805_RESULT')
+
+        _v806_write(status='running',phase='dedup',message='Historical dedup: V6.41 source reconstruction and V6.42 Source-Event A/B are closed prior work.',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # These facts are locked from the already-shipped historical implementation,
+        # even if a Railway result JSON has later been cleaned.
+        historical={
+          'V6.40':{
+            'work':'Trigger Bottleneck / Missed-Winner Decomposition',
+            'known_conclusion':'ARMED_BUT_NO_RE_STRENGTH was the dominant missed +100% stage.',
+            'runtime_result_present':bool(r640)
+          },
+          'V6.41':{
+            'work':'Re-Strength Gate Source Reconstruction',
+            'known_conclusion':'RE_STRENGTH_SPEC_DRIFT_CONFIRMED; transcript language supported re-strength/reclaim/trigger concepts, but did not verify the current triple conjunction.',
+            'runtime_result_present':bool(r641),
+            'runtime_verdict':(r641 or {}).get('verdict')
+          },
+          'V6.42':{
+            'work':'Source-Event Re-strength controlled A/B',
+            'known_change':'CURRENT_TRIPLE_GATE vs SOURCE_EVENT_TRIGGER; source-event operationalization = close>prior close AND close>=at least one relevant anchor; next-open remained execution model.',
+            'important_caveat':'V6.42 itself states this formula is an operationalization, NOT an exact JLaw quotation.',
+            'runtime_result_present':bool(r642),
+            'runtime_verdict':(r642 or {}).get('verdict')
+          }
+        }
+
+        _v806_write(status='running',phase='evidence_gate',message='Do not invent V8.06 trigger. Gate requires example-level direct evidence beyond V6.41 keyword/context evidence.',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # We deliberately do NOT manufacture a new trigger from generic transcript keywords.
+        # A new strategy test is allowed only after direct example-level evidence resolves
+        # the actual event and timing.
+        exact_questions=[
+          'Does JLaw buy as price turns up intraday, or require a close confirmation?',
+          'Is taking out the prior bar high actually required, optional, or merely one example?',
+          'Must price reclaim the relevant Pivot/10MA/20MA anchor, or only hold the pullback area?',
+          'Is a bullish candle body required?',
+          'Is execution same-day at trigger, stop-entry above a level, or next-session open?',
+          'What invalidates an armed pullback before the re-strength event?'
+        ]
+
+        verdict='DUPLICATE_RESTRENGTH_BRANCH_FOUND_DO_NOT_RERUN'
+        if r641 and r642:
+            verdict='V641_V642_HISTORY_CONFIRMED_NEW_TRIGGER_REQUIRES_EXAMPLE_EVIDENCE'
+
+        result={
+          'version':'V8.06 Re-Strength Historical Dedup / Evidence Gate',
+          'build_id':V806_BUILD_ID,
+          'verdict':verdict,
+          'historical_work':historical,
+          'v805_verdict':(r805 or {}).get('verdict'),
+          'exact_questions_remaining':exact_questions,
+          'closed_actions':[
+            'DO NOT rerun V6.41 transcript keyword/context reconstruction.',
+            'DO NOT rerun V6.42 CURRENT_TRIPLE_GATE vs SOURCE_EVENT_TRIGGER.',
+            'DO NOT tune close>prior-high / bullish-candle / support-envelope thresholds.',
+            'DO NOT label close>prior-close + reclaim-one-anchor as exact JLaw.'
+          ],
+          'required_new_evidence':'Example-level JLaw chart/transcript evidence that ties a specific pullback chart to the actual buy/trigger event and timing. Generic keyword hits are insufficient.',
+          'boundaries':'Audit/dedup only. 0 universe scan, 0 replay, 0 account replay, 0 threshold sweep, 0 new trigger activation.',
+          'next_step':'Recover/inspect the original JLaw example-level transcript/chart cases for exact buy-trigger timing. Only after a directly supported event is identified should ONE controlled A/B be built. If no direct evidence exists, leave RE_STRENGTH exact mechanics UNVERIFIED.'
+        }
+        V806_DIR.mkdir(parents=True,exist_ok=True)
+        V806_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v806_write(status='done',phase='done',message=f'V8.06 完成：{verdict}',processed=6,total=6,
+                    elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v806_write(status='error',phase='error',message=f'V8.06 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v806_thread=None
+
+def _v806_start():
+    global v806_thread
+    if _v806_alive():return False
+    _v806_write(status='starting',phase='starting',message='V8.06 starting · dedup first',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v806_thread=threading.Thread(target=_v806_run,daemon=True);v806_thread.start();return True
+
+@APP.route('/v806/run',methods=['GET','POST'])
+def v806_run():_v806_start();return redirect('/v806')
+
+@APP.get('/api/v806/status')
+def v806_status_api():return jsonify(_v806_status())
+
+@APP.get('/v806')
+def v806_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v806_status();R={}
+    if V806_RESULT.exists():
+        try:R=json.loads(V806_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    hist=R.get('historical_work') or {}
+    hrs=''.join(f"<tr><td><b>{e(k)}</b></td><td>{e(v.get('work'))}</td><td>{e(v.get('runtime_verdict') or v.get('known_conclusion') or v.get('known_change'))}</td><td>{'✅' if v.get('runtime_result_present') else '⚠️ result JSON absent'}</td></tr>" for k,v in hist.items())
+    qs=''.join(f"<li>{e(x)}</li>" for x in R.get('exact_questions_remaining',[]))
+    closed=''.join(f"<li>{e(x)}</li>" for x in R.get('closed_actions',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v806/run'><button>▶ Run V8.06 Dedup Gate</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.06 Re-Strength History Dedup / Evidence Gate</h1><div class='g'><b>先查历史，不重复开发：</b>V6.41 已审计 Re-strength 原文；V6.42 已做 Source-Event Trigger A/B。V8.06 禁止换名字重做。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div style='overflow:auto'><table><tr><th>Version</th><th>Old work</th><th>Conclusion</th><th>Runtime artifact</th></tr>{hrs or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Exact Re-strength Questions Still Open</h2><ul>{qs or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>需要的新证据：</b>{e(R.get('required_new_evidence',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v806/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>"""
