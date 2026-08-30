@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v801-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v802-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧾 V8.02 Upstream Candidate Provenance Audit</h2>
+        <p>查真实 source/setup/trigger 水源标签 · 0 replay · 0 universe scan · no proxy fabrication.</p>
+        <a href='/v802'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.02</button></a>
+        </div>
+        <div id='v801-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧬 V8.01 Source-Semantic Candidate Architecture Audit</h2>
         <p>Candidate source/setup-family attribution · 0 replay · 0 universe scan.</p>
         <a href='/v801'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.01</button></a>
@@ -51667,3 +51672,229 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Best / Worst Architecture Family</h2><p><b>Best:</b> {e((R.get('best_actual_buy_family') or {}).get('family','—'))}<br><b>Worst:</b> {e((R.get('worst_actual_buy_family') or {}).get('family','—'))}</p></div>
 <div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v801/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
+
+
+# ================= V8.02 UPSTREAM CANDIDATE-GENERATION PROVENANCE AUDIT =================
+# Diagnostic/schema audit only. No universe scan, no replay, no trading-rule creation.
+# Goal: determine whether TRUE upstream source/setup/trigger provenance was actually persisted.
+V802_DIR=DATA_DIR/'v802_upstream_candidate_provenance_audit'
+V802_STATUS=V802_DIR/'status.json'
+V802_RESULT=V802_DIR/'result.json'
+V802_BUILD_ID='V802_PROVENANCE_AUDIT_20260830A'
+v802_thread=None
+
+def _v802_status():
+    d={'build_id':V802_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V802_STATUS.exists():
+        try:
+            x=json.loads(V802_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V802_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v802_write(**kw):
+    V802_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v802_status();x.update(kw);x['build_id']=V802_BUILD_ID
+    V802_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v802_alive(): return v802_thread is not None and v802_thread.is_alive()
+
+def _v802_read_schema(path):
+    p=Path(path)
+    if not p.exists(): return {'exists':False,'rows':None,'columns':[]}
+    try:
+        compression='gzip' if p.suffix=='.gz' else 'infer'
+        h=pd.read_csv(p,compression=compression,nrows=5)
+        # Row count only for modest known artifacts; no recursive directory scan.
+        try:
+            z=pd.read_csv(p,compression=compression,usecols=[h.columns[0]])
+            n=int(len(z))
+        except Exception:n=None
+        return {'exists':True,'rows':n,'columns':[str(c) for c in h.columns]}
+    except Exception as ex:
+        return {'exists':True,'rows':None,'columns':[],'read_error':f'{type(ex).__name__}: {ex}'}
+
+def _v802_provenance_cols(cols):
+    # TRUE semantic tags only: do not treat numeric quality/rank features as provenance.
+    exact={
+        'source','source_id','source_name','scanner','scanner_id','scanner_name',
+        'setup','setup_type','setup_family','setup_name',
+        'entry_type','trigger_type','trigger_name',
+        'pattern','pattern_type','pattern_name',
+        'strategy','strategy_name','signal_type','signal_name',
+        'generator','generator_name','candidate_source','candidate_origin'
+    }
+    return [c for c in cols if str(c).lower() in exact]
+
+def _v802_identity_cols(cols):
+    low={str(c).lower():str(c) for c in cols}
+    lid=low.get('listing_id')
+    dt=low.get('entry_date')
+    return lid,dt
+
+def _v802_run():
+    global v802_thread
+    t0=time.time()
+    try:
+        _v802_write(status='running',phase='preflight',
+                    message='只审计已持久化 artifacts 的 schema/provenance；不扫 universe、不 replay。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists(): raise RuntimeError('V7.04 exact Actual-Buy ledger missing')
+        A=pd.read_csv(V704_LEDGER,compression='gzip')
+        if len(A)!=291: raise RuntimeError(f'V7.04 Actual Buy rows {len(A)} != 291')
+        A['listing_id']=A['listing_id'].astype(str)
+        A['entry_date']=pd.to_datetime(A['entry_date'],errors='coerce').dt.normalize()
+
+        # Known persisted artifacts only. Missing ones are reported, never treated as runtime errors.
+        specs=[]
+        def add(name,obj):
+            try:
+                p=Path(obj)
+                specs.append((name,p))
+            except Exception:pass
+
+        add('V6.69 paired candidate/exit cache',V669_TRADES)
+        add('V6.94 clean candidate feature store',V694_DIR/'clean_candidate_path_features.csv.gz')
+        add('V7.02 exact B admission ledger',V702_B_LEDGER if 'V702_B_LEDGER' in globals() else DATA_DIR/'__missing_v702_b_ledger__')
+        add('V7.02 Range20 candidate cache',V702_RANGE20_CACHE if 'V702_RANGE20_CACHE' in globals() else DATA_DIR/'__missing_v702_range20__')
+        add('V7.04 challenger Actual-Buy ledger',V704_LEDGER)
+        add('V7.04 breakout candidate cache',V704_BREAKOUT_CACHE if 'V704_BREAKOUT_CACHE' in globals() else DATA_DIR/'__missing_v704_breakout__')
+        add('V7.15 early-path rows',V715_ROWS if 'V715_ROWS' in globals() else DATA_DIR/'__missing_v715__')
+        add('V8.01 family attribution',V801_ROWS if 'V801_ROWS' in globals() else DATA_DIR/'__missing_v801__')
+
+        seen=set();artifacts=[]
+        for name,p in specs:
+            key=str(p)
+            if key in seen:continue
+            seen.add(key)
+            sc=_v802_read_schema(p)
+            prov=_v802_provenance_cols(sc.get('columns',[]))
+            lid,dt=_v802_identity_cols(sc.get('columns',[]))
+            artifacts.append({
+                'name':name,'path':str(p),'exists':sc.get('exists',False),'rows':sc.get('rows'),
+                'columns':sc.get('columns',[]),'provenance_columns':prov,
+                'listing_id_column':lid,'entry_date_column':dt,
+                'read_error':sc.get('read_error')
+            })
+
+        _v802_write(status='running',phase='schema_inventory',
+                    message=f'已审计 {len(artifacts)} 个已知 persisted artifacts；寻找 literal source/setup/trigger tags。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        found=[x for x in artifacts if x.get('exists') and x.get('provenance_columns')]
+        attribution=[]
+
+        # If TRUE provenance exists and is identity-joinable, attribute STOP/+50/+100.
+        for art in found:
+            if not art.get('listing_id_column') or not art.get('entry_date_column'):continue
+            p=Path(art['path'])
+            try:
+                df=pd.read_csv(p,compression='gzip' if p.suffix=='.gz' else 'infer')
+            except Exception:continue
+
+            lid=art['listing_id_column'];dt=art['entry_date_column']
+            df=df.copy()
+            df[lid]=df[lid].astype(str)
+            df[dt]=pd.to_datetime(df[dt],errors='coerce').dt.normalize()
+            base=A[['listing_id','entry_date','ret','is_stop']].copy()
+            base['ret']=pd.to_numeric(base['ret'],errors='coerce')
+            base['is_stop']=base['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+            base['winner50']=base['ret'].ge(.50);base['winner100']=base['ret'].ge(1.0)
+
+            for c in art['provenance_columns']:
+                q=df[[lid,dt,c]].dropna(subset=[lid,dt]).drop_duplicates([lid,dt],keep='last')
+                q=q.rename(columns={lid:'listing_id',dt:'entry_date',c:'provenance_value'})
+                j=base.merge(q,on=['listing_id','entry_date'],how='left',validate='many_to_one')
+                cov=float(j['provenance_value'].notna().mean())
+                for val,g in j[j.provenance_value.notna()].groupby('provenance_value',dropna=False):
+                    if len(g)<5:continue
+                    attribution.append({
+                        'artifact':art['name'],'column':c,'value':str(val),'n':int(len(g)),
+                        'coverage':cov,'stop_rate':float(g.is_stop.mean()),
+                        'winner50_rate':float(g.winner50.mean()),
+                        'winner100_rate':float(g.winner100.mean())
+                    })
+
+        _v802_write(status='running',phase='provenance_verdict',
+                    message=('找到真实 provenance tags，正在做 Actual-Buy attribution。' if found
+                             else '未找到真实 provenance tags；不创建 proxy，不继续猜 source family。'),
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        true_joinable=bool(attribution)
+        if true_joinable:
+            verdict='TRUE_UPSTREAM_PROVENANCE_FOUND_AND_JOINABLE'
+            next_step='V8.03: rank true upstream source/setup families by STOP and +50/+100 contribution, then choose at most ONE architecture hypothesis. Still no replay yet.'
+        elif found:
+            verdict='PROVENANCE_TAGS_FOUND_BUT_NOT_EXACTLY_JOINABLE'
+            next_step='Do not infer source quality from unmatched tags. Repair provenance identity persistence (listing_id + entry_date) before any new strategy test.'
+        else:
+            verdict='UPSTREAM_PROVENANCE_NOT_PERSISTED'
+            next_step='Do not create another proxy cutoff. The next engineering change is provenance logging at candidate generation: persist literal source/setup/trigger + listing_id + entry_date into the candidate Feature Store, then regenerate provenance metadata only—not a new universe/backtest.'
+
+        result={
+            'version':'V8.02 Upstream Candidate-Generation Provenance Audit',
+            'build_id':V802_BUILD_ID,'verdict':verdict,
+            'actual_buy_rows':291,
+            'artifact_inventory':artifacts,
+            'true_provenance_artifact_count':int(len(found)),
+            'true_provenance_artifacts':[{'name':x['name'],'columns':x['provenance_columns']} for x in found],
+            'attribution_rows':attribution,
+            'principle':'Literal provenance only. Numeric ranking/features, V8.01 path-shape proxies, and inferred labels are NOT treated as candidate source semantics.',
+            'boundaries':'Schema/provenance audit only. No universe scan, no account replay, no threshold grid, no admission/exit/sizing change.',
+            'next_step':next_step
+        }
+        V802_DIR.mkdir(parents=True,exist_ok=True)
+        V802_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v802_write(status='done',phase='done',message=f'V8.02 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v802_write(status='error',phase='error',message=f'V8.02 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v802_thread=None
+
+def _v802_start():
+    global v802_thread
+    if _v802_alive():return False
+    _v802_write(status='starting',phase='starting',message='V8.02 starting · schema audit first',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v802_thread=threading.Thread(target=_v802_run,daemon=True);v802_thread.start();return True
+
+@APP.route('/v802/run',methods=['GET','POST'])
+def v802_run():_v802_start();return redirect('/v802')
+
+@APP.get('/api/v802/status')
+def v802_status():return jsonify(_v802_status())
+
+@APP.get('/v802')
+def v802_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v802_status();R={}
+    if V802_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V802_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    arts=R.get('artifact_inventory') or []
+    rows=''.join(
+        f"<tr><td><b>{e(x.get('name'))}</b></td><td>{'✅' if x.get('exists') else '—'}</td><td>{x.get('rows','—')}</td><td>{e(', '.join(x.get('provenance_columns') or []) or '—')}</td><td>{'✅' if x.get('listing_id_column') and x.get('entry_date_column') else '—'}</td></tr>"
+        for x in arts
+    )
+    att=R.get('attribution_rows') or []
+    arows=''.join(
+        f"<tr><td>{e(x.get('artifact'))}</td><td><b>{e(x.get('column'))}</b></td><td>{e(x.get('value'))}</td><td>{x.get('n')}</td><td>{float(x.get('stop_rate',0))*100:.1f}%</td><td>{float(x.get('winner50_rate',0))*100:.1f}%</td><td>{float(x.get('winner100_rate',0))*100:.1f}%</td></tr>"
+        for x in att[:100]
+    )
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v802/run'><button>▶ Run V8.02 Provenance Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.02 Upstream Candidate-Generation Provenance Audit</h1><div class='ok'><b>只找真实水源标签：</b>检查已持久化 candidate/cache/ledger 里有没有 literal source / setup / trigger / scanner provenance。没有就明确 unavailable，绝不再造 proxy。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='warn'>{e(R.get('principle',''))}</div></div>
+<div class='c'><h2>Persisted Artifact Provenance Inventory</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Exists</th><th>Rows</th><th>Literal Provenance Columns</th><th>Exact Identity</th></tr>{rows or "<tr><td colspan='5'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>True Provenance → Actual-Buy Attribution</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Column</th><th>Value</th><th>N</th><th>STOP%</th><th>+50%</th><th>+100%</th></tr>{arows or "<tr><td colspan='7'>No joinable literal provenance found.</td></tr>"}</table></div></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v802/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
