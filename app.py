@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v817-home-card-real' style='background:#eef2ff;border:6px solid #4f46e5;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v817b-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧹 V8.17B Fundamental Semantic Fix</h2>
+        <p>Exclude breakout_margin false positive · lock true PIT-fundamental inventory · 0 strategy test.</p>
+        <a href='/v817b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.17B</button></a>
+        </div>
+        <div id='v817-home-card-real' style='background:#eef2ff;border:6px solid #4f46e5;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.17 Corrected Open-Mechanism Ledger</h2>
         <p>Correct V6.97–V6.99 capacity history · inventory true PIT fundamentals · 0 strategy test.</p>
         <a href='/v817'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.17</button></a>
@@ -55330,3 +55335,207 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><div class='b'><b>Selected next:</b> {e(R.get('selected_next','—'))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v817/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.17B FUNDAMENTAL SEMANTIC FALSE-POSITIVE FIX =================
+# Fixes V8.17 inventory false positives such as breakout_margin50.
+# Audit only: no strategy test, no replay, no new data pull.
+V817B_DIR=DATA_DIR/'v817b_fundamental_semantic_false_positive_fix'
+V817B_STATUS=V817B_DIR/'status.json'
+V817B_RESULT=V817B_DIR/'result.json'
+V817B_BUILD_ID='V817B_FUNDAMENTAL_SEMANTIC_FIX_20260830A'
+v817b_thread=None
+
+def _v817b_status():
+    x={'build_id':V817B_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · semantic inventory fix only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V817B_STATUS.exists():
+        try:
+            q=json.loads(V817B_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V817B_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v817b_write(**kw):
+    V817B_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v817b_status();x.update(kw);x['build_id']=V817B_BUILD_ID
+    V817B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v817b_alive(): return v817b_thread is not None and v817b_thread.is_alive()
+
+def _v817b_cols(path):
+    try:
+        p=Path(path)
+        if not p.exists(): return []
+        return list(pd.read_csv(p,compression='gzip',nrows=3).columns)
+    except Exception:return []
+
+def _v817b_is_true_fundamental_col(c):
+    lc=str(c).lower()
+
+    # Explicitly reject known price-action / technical uses of "margin".
+    technical_false_positive_patterns=[
+      'breakout_margin','pivot_margin','range_margin','trigger_margin',
+      'entry_margin','price_margin','distance_margin','stop_margin'
+    ]
+    if any(x in lc for x in technical_false_positive_patterns):
+        return False
+
+    # Accept only clearly fundamental semantics.
+    exact_or_stems=[
+      'eps','earnings','revenue','sales','gross_profit','operating_income',
+      'net_income','ebit','ebitda','free_cash_flow','fcf','cash_flow',
+      'book_value','shares_outstanding','roe','roic','debt_to_equity',
+      'gross_margin','operating_margin','net_margin',
+      'quarterly_sales','quarterly_revenue','quarterly_eps',
+      'annual_sales','annual_revenue','annual_eps',
+      'estimate_eps','estimate_revenue','analyst_estimate'
+    ]
+    return any(x in lc for x in exact_or_stems)
+
+def _v817b_run():
+    global v817b_thread
+    t0=time.time()
+    try:
+        _v817b_write(status='running',phase='inventory',
+                     message='重新扫描 persisted stores；技术字段中的 margin 不再计入 fundamentals。',
+                     processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        candidates=[]
+        if 'V690_DIR' in globals(): candidates.append(('V6.90 clean admission features',V690_DIR/'clean_admission_features.csv.gz'))
+        if 'V694_DIR' in globals(): candidates.append(('V6.94 clean candidate path features',V694_DIR/'clean_candidate_path_features.csv.gz'))
+        if 'V713_STORE' in globals(): candidates.append(('V7.13 PIT context store',V713_STORE))
+        if 'V704_BREAKOUT_CACHE' in globals(): candidates.append(('V7.04 breakout cache',V704_BREAKOUT_CACHE))
+        if 'V704_LEDGER' in globals(): candidates.append(('V7.04 Actual Buy ledger',V704_LEDGER))
+
+        rows=[]
+        true_hits=[]
+        rejected=[]
+        for name,p in candidates:
+            cols=_v817b_cols(p)
+            hits=[c for c in cols if _v817b_is_true_fundamental_col(c)]
+            rej=[c for c in cols if 'margin' in str(c).lower() and not _v817b_is_true_fundamental_col(c)]
+            rows.append({
+              'artifact':name,
+              'exists':bool(Path(p).exists()),
+              'columns':len(cols),
+              'true_fundamental_fields':hits,
+              'rejected_false_positive_fields':rej
+            })
+            true_hits += [(name,c) for c in hits]
+            rejected += [(name,c) for c in rej]
+
+        _v817b_write(status='running',phase='verdict_fix',
+                     message='修正 V8.17：breakout_margin50 属于技术字段，不是 fundamental margin。',
+                     processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        if len(true_hits)==0:
+            verdict='CORRECTED_LEDGER_COMPLETE_TRUE_PIT_FUNDAMENTALS_IS_HIGHEST_VALUE_UNTESTED_DATA_LEVER'
+            state='UNTESTED_DATA_GAP'
+            conclusion=(
+              'No true point-in-time fundamental fields are present in the audited persisted stores. '
+              'The previous V8.17 “fields present” result was a semantic false positive caused by breakout_margin50, '
+              'which is a technical breakout-distance field, not a company profitability margin.'
+            )
+        else:
+            verdict='TRUE_FUNDAMENTAL_FIELDS_PRESENT_REQUIRE_PIT_SEMANTIC_AUDIT'
+            state='DATA_PRESENT_NEEDS_SEMANTIC_AUDIT'
+            conclusion=(
+              'At least one genuinely fundamental-like field is present after strict semantic filtering; '
+              'those fields still require publication/report-date and lookahead-safety validation.'
+            )
+
+        _v817b_write(status='running',phase='history_alignment',
+                     message='与 V6.46 历史对齐：Fundamentals 当时明确 NOT TESTED，禁止 synthetic proxy。',
+                     processed=4,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        result={
+          'version':'V8.17B Fundamental Semantic False-Positive Fix',
+          'build_id':V817B_BUILD_ID,
+          'verdict':verdict,
+          'corrected_state':state,
+          'inventory':rows,
+          'true_fundamental_fields':true_hits,
+          'rejected_false_positives':rejected,
+          'correction':{
+            'v817_false_positive':'breakout_margin50',
+            'reason':'Contains the token "margin" but represents breakout margin/distance, not gross/operating/net business margin.',
+            'correct_action':'Exclude technical-margin fields from fundamental inventory.'
+          },
+          'architecture_conclusion':conclusion,
+          'next_step':(
+            'Proceed to V8.18 Fundamental Data Availability / PIT Semantics Audit. '
+            'First inspect existing Tiingo entitlement and already-persisted project data for quarterly sales/revenue/EPS/earnings '
+            'with reliable report/publication dates and exact point-in-time join semantics. '
+            'Do not create a strategy rule or synthetic proxy before data semantics pass.'
+          ),
+          'hard_rules':[
+            'breakout_margin50 is technical, not fundamental.',
+            'Only business fundamentals with explicit financial-statement semantics qualify.',
+            'Quarterly period end alone is insufficient for PIT joins; report/publication availability date is required.',
+            'No synthetic fundamental proxy from price/volume.',
+            'No strategy A/B until V8.18 data semantics pass.'
+          ],
+          'boundaries':'Semantic inventory fix only. 0 universe scan, 0 web/API data pull, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 strategy mutation.'
+        }
+
+        V817B_DIR.mkdir(parents=True,exist_ok=True)
+        V817B_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v817b_write(status='done',phase='done',message=f'V8.17B 完成：{verdict}',
+                     processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v817b_write(status='error',phase='error',
+                     message=f'V8.17B failed: {type(ex).__name__}: {ex}',
+                     elapsed_sec=round(time.time()-t0,2),
+                     error=f'{type(ex).__name__}: {ex}',
+                     traceback=traceback.format_exc())
+    finally:v817b_thread=None
+
+def _v817b_start():
+    global v817b_thread
+    if _v817b_alive():return False
+    _v817b_write(status='starting',phase='starting',
+                 message='V8.17B starting · semantic fix only',
+                 processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v817b_thread=threading.Thread(target=_v817b_run,daemon=True);v817b_thread.start();return True
+
+@APP.route('/v817b/run',methods=['GET','POST'])
+def v817b_run():_v817b_start();return redirect('/v817b')
+
+@APP.get('/api/v817b/status')
+def v817b_status_api():return jsonify(_v817b_status())
+
+@APP.get('/v817b')
+def v817b_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v817b_status();R={}
+    if V817B_RESULT.exists():
+        try:R=json.loads(V817B_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('artifact'))}</b></td><td>{'✅' if x.get('exists') else '—'}</td>"
+      f"<td>{e(x.get('columns'))}</td><td>{e(', '.join(x.get('true_fundamental_fields') or []))}</td>"
+      f"<td>{e(', '.join(x.get('rejected_false_positive_fields') or []))}</td></tr>"
+      for x in R.get('inventory',[]) or []
+    )
+    C=R.get('correction') or {}
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v817b/run'><button>▶ Run V8.17B Semantic Fix</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧹 V8.17B Fundamental Semantic False-Positive Fix</h1><div class='g'><b>修正字段误判：</b>breakout_margin50 是技术 breakout margin，不是公司 gross/operating/net margin。只认真正财务语义字段。</div></div>
+
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+
+<div class='c'><h2>Semantic Correction</h2><div class='b'><b>False positive:</b> {e(C.get('v817_false_positive','—'))}<br><br><b>Why:</b> {e(C.get('reason',''))}<br><br><b>Fix:</b> {e(C.get('correct_action',''))}</div></div>
+
+<div class='c'><h2>Corrected PIT Fundamental Inventory</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Exists</th><th>Columns</th><th>True fundamental fields</th><th>Rejected false positives</th></tr>{rows or "<tr><td colspan='5'>—</td></tr>"}</table></div></div>
+
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v817b/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script>
+</div></body></html>"""
