@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v802-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v803-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧬 V8.03 Candidate Provenance Recovery</h2>
+        <p>Recover V6.44→V7.04 lineage · persist metadata only · 0 replay · 0 universe scan.</p>
+        <a href='/v803'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.03</button></a>
+        </div>
+        <div id='v802-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧾 V8.02 Upstream Candidate Provenance Audit</h2>
         <p>查真实 source/setup/trigger 水源标签 · 0 replay · 0 universe scan · no proxy fabrication.</p>
         <a href='/v802'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.02</button></a>
@@ -51898,3 +51903,282 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>True Provenance → Actual-Buy Attribution</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Column</th><th>Value</th><th>N</th><th>STOP%</th><th>+50%</th><th>+100%</th></tr>{arows or "<tr><td colspan='7'>No joinable literal provenance found.</td></tr>"}</table></div></div>
 <div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v802/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.03 CANDIDATE PROVENANCE RECOVERY / PERSISTENCE REPAIR =================
+# Diagnostic + metadata repair only.
+# Verifies the real persisted lineage V6.44 -> V6.69 -> V6.94 -> V7.02 -> V7.04.
+# No universe scan, no account replay, no trading-rule change.
+V803_DIR=DATA_DIR/'v803_candidate_provenance_recovery'
+V803_STATUS=V803_DIR/'status.json'
+V803_RESULT=V803_DIR/'result.json'
+V803_OVERLAY=V803_DIR/'candidate_provenance_overlay.csv.gz'
+V803_CONTRACT=V803_DIR/'provenance_contract.json'
+V803_BUILD_ID='V803_PROVENANCE_RECOVERY_20260830A'
+v803_thread=None
+
+def _v803_status():
+    d={'build_id':V803_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V803_STATUS.exists():
+        try:
+            x=json.loads(V803_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V803_BUILD_ID:d.update(x)
+        except Exception: pass
+    return d
+
+def _v803_write(**kw):
+    V803_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v803_status(); x.update(kw); x['build_id']=V803_BUILD_ID
+    V803_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v803_alive(): return v803_thread is not None and v803_thread.is_alive()
+
+def _v803_load(path):
+    p=Path(path)
+    if not p.exists(): return None
+    try:
+        return pd.read_csv(p,compression='gzip' if p.suffix=='.gz' else 'infer')
+    except Exception:
+        return None
+
+def _v803_identity(df):
+    if df is None or len(df)==0:return pd.DataFrame(columns=['listing_id','entry_date'])
+    if 'listing_id' not in df.columns or 'entry_date' not in df.columns:
+        return pd.DataFrame(columns=['listing_id','entry_date'])
+    z=df[['listing_id','entry_date']].copy()
+    z['listing_id']=z['listing_id'].astype(str)
+    z['entry_date']=pd.to_datetime(z['entry_date'],errors='coerce').dt.normalize()
+    z=z.dropna().drop_duplicates(['listing_id','entry_date'])
+    return z
+
+def _v803_overlap(child,parent):
+    c=_v803_identity(child); p=_v803_identity(parent)
+    if len(c)==0:return {'child_n':0,'parent_n':int(len(p)),'matched':0,'coverage':0.0}
+    q=c.merge(p,on=['listing_id','entry_date'],how='left',indicator=True)
+    m=int(q['_merge'].eq('both').sum())
+    return {'child_n':int(len(c)),'parent_n':int(len(p)),'matched':m,'coverage':float(m/len(c))}
+
+def _v803_run():
+    global v803_thread
+    t0=time.time()
+    try:
+        _v803_write(status='running',phase='preflight',
+                    message='锁定现有 V6.44/V6.69/V6.94/V7.02/V7.04 artifacts；只恢复 metadata lineage。',
+                    processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+
+        if not V644_TRADE_CACHE.exists(): raise RuntimeError('V6.44 trade cache missing')
+        if not V669_TRADES.exists(): raise RuntimeError('V6.69 paired cache missing')
+        f694=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not f694.exists(): raise RuntimeError('V6.94 clean candidate store missing')
+        if not V702_RANGE20_CACHE.exists(): raise RuntimeError('V7.02 Range20 cache missing')
+
+        f704=(V704_BREAKOUT_CACHE if 'V704_BREAKOUT_CACHE' in globals()
+              else DATA_DIR/'v704_range20_breakout50_economic_ab'/'candidate_breakout_margin50_cache.csv.gz')
+        if not Path(f704).exists():
+            # Known alternate filename in deployed branch.
+            cand=list((Path(V704_DIR) if 'V704_DIR' in globals() else DATA_DIR).glob('**/*breakout*cache*.csv.gz'))
+            f704=cand[0] if cand else Path('__missing__')
+        if not Path(f704).exists(): raise RuntimeError('V7.04 breakout candidate cache missing')
+
+        X644=_v803_load(V644_TRADE_CACHE)
+        X669=_v803_load(V669_TRADES)
+        X694=_v803_load(f694)
+        X702=_v803_load(V702_RANGE20_CACHE)
+        X704=_v803_load(f704)
+
+        if any(x is None for x in [X644,X669,X694,X702,X704]):
+            raise RuntimeError('One or more lineage artifacts are unreadable')
+
+        _v803_write(status='running',phase='v644_source',
+                    message='验证 V6.44 真正 source-supported trigger variants 与 V6.69 的来源。',
+                    processed=1,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        required644=['variant','listing_id','entry_date']
+        miss=[c for c in required644 if c not in X644.columns]
+        if miss: raise RuntimeError('V6.44 cache missing: '+','.join(miss))
+
+        X644=X644.copy()
+        X644['listing_id']=X644['listing_id'].astype(str)
+        X644['entry_date']=pd.to_datetime(X644['entry_date'],errors='coerce').dt.normalize()
+        X644['variant']=X644['variant'].astype(str)
+        variants={str(k):int(v) for k,v in X644['variant'].value_counts().items()}
+
+        source_variant='TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT'
+        S644=X644[X644['variant'].eq(source_variant)].copy()
+        if len(S644)==0: raise RuntimeError('V6.44 source variant TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT missing')
+
+        # V6.69 code itself filters exactly this V6.44 variant.
+        o669=_v803_overlap(X669,S644)
+
+        _v803_write(status='running',phase='lineage_parity',
+                    message=f'V6.69 <- V6.44 tight-breakout identity coverage={o669["coverage"]:.1%}；继续验证下游。',
+                    processed=2,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        o694=_v803_overlap(X694,X669)
+        o702=_v803_overlap(X702,X694)
+        o704=_v803_overlap(X704,X702)
+
+        # Also verify the current 64k stream is not a mixture of multiple V6.44 variants
+        # on the exact identities that survive into V6.69.
+        i669=_v803_identity(X669)
+        tagged=i669.merge(X644[['listing_id','entry_date','variant']].drop_duplicates(),
+                          on=['listing_id','entry_date'],how='left')
+        matched_tags=tagged[tagged['variant'].notna()].copy()
+        tag_counts={str(k):int(v) for k,v in matched_tags['variant'].value_counts().items()}
+        non_source_tags=int((matched_tags['variant']!=source_variant).sum())
+
+        chain={
+            'V6.69_from_V6.44_tight':o669,
+            'V6.94_from_V6.69':o694,
+            'V7.02_from_V6.94':o702,
+            'V7.04_from_V7.02':o704
+        }
+        chain_min=min(v['coverage'] for v in chain.values())
+
+        _v803_write(status='running',phase='recovery',
+                    message=f'下游 lineage min coverage={chain_min:.1%}；构建 provenance overlay（仅在身份链充分时）。',
+                    processed=4,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        recoverable=bool(chain_min>=.99 and non_source_tags==0)
+        overlay_rows=0
+
+        if recoverable:
+            C=X704.copy()
+            if 'listing_id' not in C.columns or 'entry_date' not in C.columns:
+                raise RuntimeError('V7.04 cache lacks exact identity')
+            C['listing_id']=C['listing_id'].astype(str)
+            C['entry_date']=pd.to_datetime(C['entry_date'],errors='coerce').dt.normalize()
+            C=C.dropna(subset=['listing_id','entry_date']).copy()
+            keep=['listing_id','entry_date']
+            for c in ['v704_row_id','v702_row_id','candidate_order']:
+                if c in C.columns: keep.append(c)
+            O=C[keep].drop_duplicates(['listing_id','entry_date'],keep='last').copy()
+            O['provenance_source_stage']='V6.44_SOURCE_SUPPORTED_BREAKOUT'
+            O['provenance_trigger_variant']=source_variant
+            O['provenance_trigger_anchor']='PIVOT_BREAKOUT+VOLUME_CONTEXT'
+            O['provenance_lineage']='V6.44 -> V6.69 -> V6.94 -> V7.02 -> V7.04'
+            O['provenance_recovery_method']='EXACT_IDENTITY_CHAIN_PLUS_CODE_FILTER'
+            O['provenance_confidence']='HIGH'
+            V803_DIR.mkdir(parents=True,exist_ok=True)
+            O.to_csv(V803_OVERLAY,index=False,compression='gzip')
+            overlay_rows=int(len(O))
+
+        # Persistence contract for all future candidate-generation branches.
+        contract={
+            'version':'V8.03 provenance contract',
+            'required_identity':['listing_id','entry_date'],
+            'required_literal_provenance':[
+                'source_stage','source_variant','setup_family','trigger_type',
+                'trigger_anchor','generator_version'
+            ],
+            'rules':[
+                'Persist literal provenance at candidate-generation time, not after account replay.',
+                'Never reconstruct source/setup labels from numeric ranking features.',
+                'Every downstream candidate cache must preserve provenance columns unchanged.',
+                'Any transformation that changes entry_date must preserve parent_identity and transformation_name.'
+            ]
+        }
+        V803_DIR.mkdir(parents=True,exist_ok=True)
+        V803_CONTRACT.write_text(json.dumps(contract,ensure_ascii=False,indent=2),encoding='utf-8')
+
+        _v803_write(status='running',phase='architecture_conclusion',
+                    message='判定当前 64k candidate stream 是单一 source lineage 还是可分 source families。',
+                    processed=6,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        if recoverable:
+            verdict='SINGLE_SOURCE_LINEAGE_RECOVERED_AND_PERSISTED'
+            conclusion=(
+                'Current candidate stream is not a mixture of multiple upstream source families. '
+                'Its persisted lineage recovers to one source-supported trigger archetype: '
+                'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT. Therefore source-family filtering cannot solve '
+                'the admission-quality problem inside this stream; true architecture improvement '
+                'requires adding distinct upstream candidate/setup families with provenance preserved.'
+            )
+            next_step=(
+                'V8.04 should be an upstream candidate-generator architecture design audit: identify '
+                'which genuinely distinct JLaw/Minervini setup families can be produced from existing '
+                'Feature Store without universe rescan. No portfolio replay yet.'
+            )
+        else:
+            verdict='PARTIAL_PROVENANCE_RECOVERY_IDENTITY_CHAIN_INCOMPLETE'
+            conclusion=(
+                'Historical source lineage is only partially recoverable. Do not use recovered labels '
+                'as trading semantics until exact identity coverage is repaired.'
+            )
+            next_step=(
+                'Repair only the broken identity handoff shown in the lineage table. Do not rerun universe '
+                'or create a source-family trading rule.'
+            )
+
+        result={
+            'version':'V8.03 Candidate Provenance Recovery / Persistence Repair',
+            'build_id':V803_BUILD_ID,'verdict':verdict,
+            'v644_variant_counts':variants,
+            'v669_matched_variant_counts':tag_counts,
+            'non_source_variant_matches':non_source_tags,
+            'source_variant':source_variant,
+            'lineage_checks':chain,
+            'lineage_min_coverage':chain_min,
+            'recoverable':recoverable,
+            'overlay_rows':overlay_rows,
+            'overlay_path':str(V803_OVERLAY) if recoverable else None,
+            'provenance_contract_path':str(V803_CONTRACT),
+            'conclusion':conclusion,
+            'boundaries':'Metadata recovery/persistence only. No universe scan, no account replay, no ranking/admission/exit/sizing change.',
+            'next_step':next_step
+        }
+        V803_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v803_write(status='done',phase='done',message=f'V8.03 完成：{verdict}',
+                    processed=7,total=7,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v803_write(status='error',phase='error',message=f'V8.03 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=7,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:
+        v803_thread=None
+
+def _v803_start():
+    global v803_thread
+    if _v803_alive(): return False
+    _v803_write(status='starting',phase='starting',message='V8.03 starting · lineage preflight',
+                processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+    v803_thread=threading.Thread(target=_v803_run,daemon=True);v803_thread.start();return True
+
+@APP.route('/v803/run',methods=['GET','POST'])
+def v803_run(): _v803_start(); return redirect('/v803')
+
+@APP.get('/api/v803/status')
+def v803_status(): return jsonify(_v803_status())
+
+@APP.get('/v803')
+def v803_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v803_status();R={}
+    if V803_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V803_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    chain=R.get('lineage_checks') or {}
+    rows=''.join(
+        f"<tr><td><b>{e(k)}</b></td><td>{v.get('child_n','—')}</td><td>{v.get('matched','—')}</td><td>{pc(v.get('coverage'))}</td></tr>"
+        for k,v in chain.items()
+    )
+    vc=R.get('v644_variant_counts') or {}
+    vrows=''.join(f"<tr><td><b>{e(k)}</b></td><td>{v:,}</td></tr>" for k,v in vc.items())
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v803/run'><button>▶ Run V8.03 Recovery</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.03 Candidate Provenance Recovery / Persistence Repair</h1><div class='ok'><b>只修数据血缘：</b>验证 V6.44 → V6.69 → V6.94 → V7.02 → V7.04 exact identity lineage。身份链够完整才写 provenance overlay；不够就只报告断点。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Source variant: <b>{e(R.get('source_variant','—'))}</b><br>Lineage min coverage={pc(R.get('lineage_min_coverage'))} · Overlay rows={R.get('overlay_rows','—')}</p></div>
+<div class='c'><h2>V6.44 Source Variants</h2><table><tr><th>Variant</th><th>Rows</th></tr>{vrows or "<tr><td colspan='2'>—</td></tr>"}</table></div>
+<div class='c'><h2>Exact Identity Lineage</h2><table><tr><th>Handoff</th><th>Child N</th><th>Matched</th><th>Coverage</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div>
+<div class='c'><h2>Architecture Conclusion</h2><div class='warn'>{e(R.get('conclusion',''))}</div></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v803/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
