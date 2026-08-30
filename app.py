@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v800-home-card-real' style='background:#fff7ed;border:6px solid #f97316;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v801-home-card-real' style='background:#f5f3ff;border:6px solid #7c3aed;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧬 V8.01 Source-Semantic Candidate Architecture Audit</h2>
+        <p>Candidate source/setup-family attribution · 0 replay · 0 universe scan.</p>
+        <a href='/v801'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.01</button></a>
+        </div>
+        <div id='v800-home-card-real' style='background:#fff7ed;border:6px solid #f97316;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🏗️ V8.00 JLaw Gap & Architecture Review</h2>
         <p>阶段收口 · 读取 V7.04–V7.17 frozen results · 0 replay · 0 universe scan.</p>
         <a href='/v800'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.00</button></a>
@@ -51374,3 +51379,269 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>JLaw Project Reference</h2><p><b>参考胜率：</b>{e(J.get('win_rate_reference','—'))}<br><b>亏损：</b>{e(J.get('loss_behavior','—'))}<br><b>赢家：</b>{e(J.get('winner_behavior','—'))}</p><div class='warn'>这部分是项目中此前提供的 JLaw 参考框架，V8.00 不重新测量或虚构 JLaw 的公开业绩数字。</div></div>
 <div class='c'><h2>Next: {e(N.get('version','—'))} {e(N.get('name',''))}</h2><div class='warn'><b>目标：</b>{e(N.get('goal',''))}<br><br><b>约束：</b>{e(N.get('constraints',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v800/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.01 SOURCE-SEMANTIC CANDIDATE ARCHITECTURE AUDIT =================
+# Diagnostic only. Uses V6.94 frozen clean-candidate path feature store + V7.04 exact Actual Buys.
+# If literal source/setup tags are absent in persisted caches, DO NOT fabricate them:
+# use only frozen V6.94 path-shape semantics as setup-family proxies.
+V801_DIR=DATA_DIR/'v801_source_semantic_candidate_architecture'
+V801_STATUS=V801_DIR/'status.json'
+V801_RESULT=V801_DIR/'result.json'
+V801_ROWS=V801_DIR/'setup_family_attribution.csv.gz'
+V801_BUILD_ID='V801_SOURCE_SEMANTIC_20260830A'
+v801_thread=None
+
+def _v801_status():
+    d={'build_id':V801_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V801_STATUS.exists():
+        try:
+            x=json.loads(V801_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V801_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v801_write(**kw):
+    V801_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v801_status();x.update(kw);x['build_id']=V801_BUILD_ID
+    V801_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v801_alive(): return v801_thread is not None and v801_thread.is_alive()
+
+def _v801_bool(s):
+    return s.astype(str).str.lower().isin(['true','1','yes'])
+
+def _v801_run():
+    global v801_thread
+    t0=time.time()
+    try:
+        _v801_write(status='running',phase='preflight',
+                    message='锁定 V6.94 frozen clean-candidate store + V7.04 exact 291 Actual Buys；不扫 universe、不 replay。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        ffp=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not ffp.exists(): raise RuntimeError('V6.94 clean candidate feature store missing')
+        if not V704_LEDGER.exists(): raise RuntimeError('V7.04 exact Actual-Buy ledger missing')
+
+        F=pd.read_csv(ffp,compression='gzip')
+        A=pd.read_csv(V704_LEDGER,compression='gzip')
+        if len(A)!=291: raise RuntimeError(f'V7.04 Actual Buy rows {len(A)} != 291')
+
+        need=['listing_id','entry_date','ret','is_stop','contraction_3stage','contraction_20v20','updown_ratio_40','ret_20']
+        miss=[c for c in need if c not in F.columns]
+        if miss: raise RuntimeError('V6.94 store missing frozen fields: '+','.join(miss))
+
+        F=F.copy()
+        F['listing_id']=F['listing_id'].astype(str)
+        F['entry_date']=pd.to_datetime(F['entry_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        F['is_stop']=_v801_bool(F['is_stop'])
+        F['winner50']=F['ret'].ge(.50)
+        F['winner100']=F['ret'].ge(1.0)
+        F=F.dropna(subset=['entry_date','ret']).copy()
+
+        A=A.copy()
+        A['listing_id']=A['listing_id'].astype(str)
+        A['entry_date']=pd.to_datetime(A['entry_date'],errors='coerce').dt.normalize()
+        A['ret']=pd.to_numeric(A['ret'],errors='coerce')
+        A['is_stop']=_v801_bool(A['is_stop'])
+        A['winner50']=A['ret'].ge(.50)
+        A['winner100']=A['ret'].ge(1.0)
+
+        # Literal persisted source/setup tags are used only if they truly exist.
+        literal_cols=[c for c in ['source','setup_type','setup_family','entry_type','trigger_type','pattern_type'] if c in F.columns]
+        literal_source_available=bool(literal_cols)
+
+        _v801_write(status='running',phase='family_build',
+                    message=('使用真实 persisted source/setup tags。' if literal_source_available else
+                             'Persisted cache 无 literal source/setup tag；不伪造，改用 V6.94 frozen path-shape semantics。'),
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        # Frozen setup-shape semantics from V6.94 only. No new feature search.
+        # Favorable direction was already frozen in V6.94:
+        # contraction_3stage LOWER, contraction_20v20 LOWER, updown_ratio_40 HIGHER, ret_20 HIGHER.
+        cols=['contraction_3stage','contraction_20v20','updown_ratio_40','ret_20']
+        for c in cols:F[c]=pd.to_numeric(F[c],errors='coerce')
+        med={c:float(F[c].median()) for c in cols}
+
+        favorable=pd.DataFrame(index=F.index)
+        favorable['c3']=F['contraction_3stage']<=med['contraction_3stage']
+        favorable['c20']=F['contraction_20v20']<=med['contraction_20v20']
+        favorable['ud40']=F['updown_ratio_40']>=med['updown_ratio_40']
+        favorable['r20']=F['ret_20']>=med['ret_20']
+        F['frozen_edge_count']=favorable.sum(axis=1).astype(int)
+
+        def fam(n):
+            n=int(n)
+            if n==4:return 'A_ALL_4_FROZEN_EDGES'
+            if n==3:return 'B_3_OF_4_EDGES'
+            if n==2:return 'C_MIXED_2_OF_4'
+            return 'D_WEAK_0_1_EDGE'
+        F['setup_family_proxy']=F['frozen_edge_count'].map(fam)
+
+        # Exact Actual-Buy identity join; never reconstruct admission.
+        k=['listing_id','entry_date']
+        keymap=A[k+['ret','is_stop','winner50','winner100']].drop_duplicates(k,keep='last')
+        J=F.merge(keymap,on=k,how='left',suffixes=('_candidate','_actual'),indicator=True)
+        J['is_actual_buy']=J['_merge'].eq('both')
+
+        # Actual buy coverage against V7.04.
+        matched_actual=int(J.loc[J.is_actual_buy,k].drop_duplicates().shape[0])
+        actual_cov=matched_actual/291.0
+
+        _v801_write(status='running',phase='attribution',
+                    message=f'Actual-Buy exact join coverage={actual_cov:.1%}；计算各 setup family 的 STOP / +50 / +100 enrichment。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        def family_stats(g,scope):
+            retcol='ret_actual' if scope=='ACTUAL_BUY' else 'ret_candidate'
+            stopcol='is_stop_actual' if scope=='ACTUAL_BUY' else 'is_stop_candidate'
+            r=pd.to_numeric(g[retcol],errors='coerce')
+            st=g[stopcol].fillna(False).astype(bool)
+            return {
+                'scope':scope,'family':str(g['setup_family_proxy'].iloc[0]),'n':int(len(g)),
+                'stop_rate':float(st.mean()) if len(g) else None,
+                'winner50_rate':float((r>=.50).mean()) if len(g) else None,
+                'winner100_rate':float((r>=1.0).mean()) if len(g) else None,
+                'avg_ret':float(r.mean()) if len(g) else None,
+                'median_ret':float(r.median()) if len(g) else None
+            }
+
+        rows=[]
+        for nm,g in F.groupby('setup_family_proxy',dropna=False):
+            rows.append(family_stats(g.assign(setup_family_proxy=nm),'CANDIDATE'))
+        JA=J[J.is_actual_buy].copy()
+        for nm,g in JA.groupby('setup_family_proxy',dropna=False):
+            rows.append(family_stats(g.assign(setup_family_proxy=nm),'ACTUAL_BUY'))
+        T=pd.DataFrame(rows)
+
+        # Enrichment versus each scope baseline. This is attribution, not a cutoff rule.
+        enrich=[]
+        for scope,G in T.groupby('scope'):
+            src=F if scope=='CANDIDATE' else JA
+            if scope=='CANDIDATE':
+                rr=pd.to_numeric(src['ret'],errors='coerce'); ss=src['is_stop'].astype(bool)
+            else:
+                rr=pd.to_numeric(src['ret_actual'],errors='coerce'); ss=src['is_stop_actual'].fillna(False).astype(bool)
+            bstop=float(ss.mean());b50=float((rr>=.5).mean());b100=float((rr>=1.0).mean())
+            for _,r in G.iterrows():
+                z=dict(r)
+                z['stop_index_vs_scope']=float(r.stop_rate/bstop) if bstop>0 else None
+                z['winner50_index_vs_scope']=float(r.winner50_rate/b50) if b50>0 else None
+                z['winner100_index_vs_scope']=float(r.winner100_rate/b100) if b100>0 else None
+                enrich.append(z)
+        E=pd.DataFrame(enrich)
+        E.to_csv(V801_ROWS,index=False,compression='gzip')
+
+        # Rank families: we are looking for structural source-quality differences, not an immediate rule.
+        ATab=E[E.scope.eq('ACTUAL_BUY')].copy()
+        if len(ATab):
+            ATab['quality_score']=(
+                ATab['winner50_index_vs_scope'].fillna(0)+
+                ATab['winner100_index_vs_scope'].fillna(0)-
+                ATab['stop_index_vs_scope'].fillna(1)
+            )
+            ATab=ATab.sort_values('quality_score',ascending=False)
+        best=ATab.iloc[0].to_dict() if len(ATab) else {}
+        worst=ATab.iloc[-1].to_dict() if len(ATab) else {}
+
+        meaningful=False
+        if len(ATab)>=3 and actual_cov>=.90:
+            # Diagnostic gate only: winner enrichment + materially lower stop, or inverse for worst.
+            for _,r in ATab.iterrows():
+                if (r.get('winner50_index_vs_scope',0)>=1.5 and
+                    r.get('winner100_index_vs_scope',0)>=1.5 and
+                    r.get('stop_index_vs_scope',99)<=.90 and int(r.get('n',0))>=20):
+                    meaningful=True
+
+        verdict='SETUP_FAMILY_SOURCE_QUALITY_SEPARATION_FOUND' if meaningful else 'NO_STRONG_SETUP_FAMILY_SOURCE_QUALITY_SEPARATION'
+
+        # Literal source tags, if present, are reported separately without inventing values.
+        literal_report=[]
+        if literal_source_available:
+            for c in literal_cols:
+                vc=F[c].astype(str).value_counts(dropna=False).head(20)
+                literal_report.append({'column':c,'top_values':{str(k):int(v) for k,v in vc.items()}})
+
+        result={
+            'version':'V8.01 Source-Semantic Candidate Architecture Audit',
+            'build_id':V801_BUILD_ID,'verdict':verdict,
+            'candidate_rows':int(len(F)),'actual_buy_rows':291,
+            'actual_buy_exact_join_coverage':actual_cov,
+            'literal_source_tags_available':literal_source_available,
+            'literal_source_columns':literal_cols,
+            'literal_source_report':literal_report,
+            'proxy_notice':(
+                'Literal source/setup tags were absent from persisted V6.94 cache, so V8.01 did NOT fabricate them. '
+                'It used only the four V6.94 already-frozen path-shape features to form coarse setup-family proxies.'
+                if not literal_source_available else
+                'Literal persisted source/setup columns were available and are reported separately.'
+            ),
+            'frozen_feature_medians':med,
+            'family_rows':E.replace({np.nan:None,np.inf:None,-np.inf:None}).to_dict('records'),
+            'best_actual_buy_family':best,
+            'worst_actual_buy_family':worst,
+            'acceptance':'Architecture signal only if an Actual-Buy family has N>=20, +50 and +100 enrichment >=1.5x, STOP index <=0.90, and exact join coverage >=90%. No admission rule is activated here.',
+            'boundaries':'No universe scan, no account replay, no threshold grid, no incumbent replacement, no exit change. Median splits are descriptive family labels only, not a trading cutoff.',
+            'next_step':(
+                'V8.02: audit the single best/worst setup-family source mechanism against candidate supply and admission opportunity; still no portfolio replay.'
+                if meaningful else
+                'Do not create a V8.02 family cutoff from weak separation. Inspect missing literal source semantics / upstream candidate-generation tags before any new strategy test.'
+            )
+        }
+        V801_DIR.mkdir(parents=True,exist_ok=True)
+        V801_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v801_write(status='done',phase='done',message=f'V8.01 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v801_write(status='error',phase='error',message=f'V8.01 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v801_thread=None
+
+def _v801_start():
+    global v801_thread
+    if _v801_alive():return False
+    _v801_write(status='starting',phase='starting',message='V8.01 starting · preflight first',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v801_thread=threading.Thread(target=_v801_run,daemon=True);v801_thread.start();return True
+
+@APP.route('/v801/run',methods=['GET','POST'])
+def v801_run():_v801_start();return redirect('/v801')
+
+@APP.get('/api/v801/status')
+def v801_status():return jsonify(_v801_status())
+
+@APP.get('/v801')
+def v801_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v801_status();R={}
+    if V801_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V801_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n2(x):
+        try:return f'{float(x):.2f}'
+        except:return '—'
+    FR=R.get('family_rows') or []
+    ar=[x for x in FR if x.get('scope')=='ACTUAL_BUY']
+    rows=''.join(
+        f"<tr><td><b>{e(x.get('family'))}</b></td><td>{x.get('n','—')}</td><td>{pc(x.get('stop_rate'))}</td><td>{pc(x.get('winner50_rate'))}</td><td>{pc(x.get('winner100_rate'))}</td><td>{n2(x.get('stop_index_vs_scope'))}x</td><td>{n2(x.get('winner50_index_vs_scope'))}x</td><td>{n2(x.get('winner100_index_vs_scope'))}x</td></tr>"
+        for x in ar
+    )
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v801/run'><button>▶ Run V8.01 Architecture Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.01 Source-Semantic Candidate Architecture Audit</h1><div class='ok'><b>真正换层：</b>不再加 MaxDD 小规则。用 V6.94 frozen clean candidates + V7.04 exact Actual Buys，找哪些 setup family 制造 STOP、哪些贡献 +50/+100。若 cache 没有真实 source tag，明确报告 unavailable，绝不伪造。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Candidate rows={R.get('candidate_rows','—')} · Actual Buy join={pc(R.get('actual_buy_exact_join_coverage'))}</p><div class='warn'>{e(R.get('proxy_notice',''))}</div></div>
+<div class='c'><h2>Actual-Buy Setup Family Attribution</h2><div style='overflow:auto'><table><tr><th>Family</th><th>N</th><th>STOP%</th><th>+50%</th><th>+100%</th><th>STOP Index</th><th>+50 Index</th><th>+100 Index</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Best / Worst Architecture Family</h2><p><b>Best:</b> {e((R.get('best_actual_buy_family') or {}).get('family','—'))}<br><b>Worst:</b> {e((R.get('worst_actual_buy_family') or {}).get('family','—'))}</p></div>
+<div class='c'><div class='warn'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v801/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
