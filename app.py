@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v816-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v817-home-card-real' style='background:#eef2ff;border:6px solid #4f46e5;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧭 V8.17 Corrected Open-Mechanism Ledger</h2>
+        <p>Correct V6.97–V6.99 capacity history · inventory true PIT fundamentals · 0 strategy test.</p>
+        <a href='/v817'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.17</button></a>
+        </div>
+        <div id='v816-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧬 V8.16 Forward Provenance Persistence Repair</h2>
         <p>Persist parent identity before trigger delay · legacy cache untouched · 0 replay.</p>
         <a href='/v816'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.16</button></a>
@@ -55062,3 +55067,266 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>⚠️ V8.14 Ledger Correction</h2><div class='b'><b>{e(H.get('v814_item',''))}</b><br>V8.14: {e(H.get('v814_state_was',''))} → Correct: <b>{e(H.get('correct_state',''))}</b><br><br>{e(H.get('evidence',''))}<br><br><b>Action:</b> {e(H.get('action',''))}</div></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v816/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.17 CORRECTED OPEN-MECHANISM LEDGER =================
+# Corrects V8.14 using V6.97/V6.98/V6.99 + V8.16, and audits whether true PIT fundamentals
+# are present in existing persisted feature stores. No strategy test.
+V817_DIR=DATA_DIR/'v817_corrected_open_mechanism_ledger'
+V817_STATUS=V817_DIR/'status.json'
+V817_RESULT=V817_DIR/'result.json'
+V817_BUILD_ID='V817_CORRECTED_LEDGER_20260830A'
+v817_thread=None
+
+def _v817_status():
+    x={'build_id':V817_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · corrected architecture ledger only',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V817_STATUS.exists():
+        try:
+            q=json.loads(V817_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V817_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v817_write(**kw):
+    V817_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v817_status();x.update(kw);x['build_id']=V817_BUILD_ID
+    V817_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v817_alive():return v817_thread is not None and v817_thread.is_alive()
+
+def _v817_json(path):
+    try:
+        p=Path(path)
+        if p.exists():return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:pass
+    return None
+
+def _v817_cols(path):
+    try:
+        p=Path(path)
+        if not p.exists():return []
+        return list(pd.read_csv(p,compression='gzip',nrows=3).columns)
+    except Exception:return []
+
+def _v817_run():
+    global v817_thread
+    t0=time.time()
+    try:
+        _v817_write(status='running',phase='preflight',
+                    message='纠正 V8.14：先核对 V6.97/6.98/6.99、V8.16，再找真正未测试机制。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        r697=_v817_json(V697_RESULT) if 'V697_RESULT' in globals() else None
+        r698=_v817_json(V698_RESULT) if 'V698_RESULT' in globals() else None
+        r699=_v817_json(V699_RESULT) if 'V699_RESULT' in globals() else None
+        r646=_v817_json(V646_RESULT) if 'V646_RESULT' in globals() else None
+        r816=_v817_json(V816_RESULT) if 'V816_RESULT' in globals() else None
+
+        _v817_write(status='running',phase='capacity_correction',
+                    message='Capacity/displacement family 已有 V6.97→V6.98→V6.99 完整历史，正式从 UNTESTED 移除。',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        capacity={
+          'V6.97':{
+            'present':bool(r697),
+            'verdict':(r697 or {}).get('verdict'),
+            'meaning':'FIRST_COME 10-slot capacity-skipped winner / STOP blocker attribution already studied.'
+          },
+          'V6.98':{
+            'present':bool(r698),
+            'verdict':(r698 or {}).get('verdict'),
+            'meaning':'Point-in-time incumbent-vs-candidate contest-strength gaps already audited.'
+          },
+          'V6.99':{
+            'present':bool(r699),
+            'verdict':(r699 or {}).get('verdict'),
+            'meaning':'Exactly one dynamic replacement PIT A/B already tested; neighboring replacement rules are not open.'
+          }
+        }
+
+        _v817_write(status='running',phase='fundamental_inventory',
+                    message='检查现有 PIT/Feature Store 是否真的有季度销售/盈利等 fundamental 数据，而不是字幕标签。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        stores=[]
+        candidates=[]
+        if 'V690_DIR' in globals(): candidates.append(('V6.90 clean admission features',V690_DIR/'clean_admission_features.csv.gz'))
+        if 'V694_DIR' in globals(): candidates.append(('V6.94 clean candidate path features',V694_DIR/'clean_candidate_path_features.csv.gz'))
+        if 'V713_STORE' in globals(): candidates.append(('V7.13 PIT context store',V713_STORE))
+        if 'V704_BREAKOUT_CACHE' in globals(): candidates.append(('V7.04 breakout cache',V704_BREAKOUT_CACHE))
+        if 'V704_LEDGER' in globals(): candidates.append(('V7.04 Actual Buy ledger',V704_LEDGER))
+
+        fundamental_tokens=[
+          'eps','earnings','sales','revenue','fundamental','margin','quarter','annual',
+          'estimate','forecast','institutional','roe','roic'
+        ]
+        true_fundamental_cols=[]
+        for name,p in candidates:
+            cols=_v817_cols(p)
+            hits=[c for c in cols if any(tok in str(c).lower() for tok in fundamental_tokens)]
+            stores.append({'artifact':name,'exists':bool(Path(p).exists()),'columns':len(cols),'fundamental_like_columns':hits})
+            true_fundamental_cols += [(name,c) for c in hits]
+
+        # Transcript/source labels are not numeric PIT fundamentals; exclude known text/label fields if any.
+        real_hits=[]
+        for name,c in true_fundamental_cols:
+            lc=str(c).lower()
+            if lc in ('source_generator_id','source_family','setup_family','fundamental_tag'):
+                continue
+            real_hits.append((name,c))
+
+        _v817_write(status='running',phase='source_history_check',
+                    message='核对 V6.45/V6.46：Fundamentals 有 source evidence，但 V6.46 明确 NOT TESTED，禁止 synthetic proxy。',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        v646_fund=None
+        try:v646_fund=((r646 or {}).get('source_rules') or {}).get('FUNDAMENTALS')
+        except Exception:pass
+
+        # Corrected architecture states after V8.16.
+        ledger=[
+          {'lever':'Candidate source / alternate generator','state':'CLOSED',
+           'history':'V6.44 + V8.01–V8.12',
+           'reason':'Current persisted alternatives are same upstream source; source-faithful alternate pattern geometry not recoverable from current corpus.'},
+          {'lever':'Generic admission / ranking / selective DNA','state':'CLOSED',
+           'history':'V6.46–V6.48, V6.90–V6.94, V7.01–V7.13',
+           'reason':'Price/RS/path-DNA/selective permission branches already tested or diagnosed; no threshold/grid reopen.'},
+          {'lever':'DEFENSIVE hard block / sizing','state':'FAIL',
+           'history':'V7.06, V7.11',
+           'reason':'Risk improved in places but economics failed acceptance.'},
+          {'lever':'Portfolio heat / cohort health / breadth','state':'CLOSED',
+           'history':'V7.14–V7.17',
+           'reason':'Diagnostic context did not produce robust standalone admission edge.'},
+          {'lever':'STOP path / early exit / replacement / recycling','state':'CLOSED',
+           'history':'V6.76–V7.00, V7.15, V8.13',
+           'reason':'Post-entry timing, washout, proof-state, early-exit and recycling families are exhausted.'},
+          {'lever':'Capacity competition / displacement','state':'CLOSED',
+           'history':'V6.97–V6.99',
+           'reason':'V6.97 attribution, V6.98 PIT contest audit and V6.99 one-replacement A/B already cover this family.'},
+          {'lever':'Parent opportunity lineage','state':'ENGINEERING_PASS_FORWARD_ONLY',
+           'history':'V8.15–V8.16',
+           'reason':'Forward provenance contract installed. Legacy full-stream parent lineage remains ambiguous and must not be reconstructed fuzzily.'},
+          {'lever':'Winner exit / hold capture','state':'PASS_FREEZE',
+           'history':'V6.7 winner-capture lineage',
+           'reason':'Preserved strength; not the dominant architecture gap.'},
+          {'lever':'True point-in-time fundamentals at review/admission','state':'UNTESTED_DATA_GAP' if not real_hits else 'DATA_PRESENT_NEEDS_SEMANTIC_AUDIT',
+           'history':'V6.45 source evidence; V6.46 explicitly left FUNDAMENTALS untested',
+           'reason':('No real quarterly sales/earnings/revenue PIT fields were found in the persisted stores audited here.'
+                     if not real_hits else
+                     'Fundamental-like fields exist and must be audited for PIT semantics before any strategy use.')}
+        ]
+
+        _v817_write(status='running',phase='final_gate',
+                    message='只允许真正 source-supported 且未测试的 FUNDAMENTALS 数据层进入下一步。',
+                    processed=5,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        if not real_hits:
+            verdict='CORRECTED_LEDGER_COMPLETE_TRUE_PIT_FUNDAMENTALS_IS_HIGHEST_VALUE_UNTESTED_DATA_LEVER'
+            selected='True point-in-time fundamentals at review/admission'
+            next_step=(
+              'V8.18 must be a FUNDAMENTAL DATA AVAILABILITY / PIT SEMANTICS AUDIT only. '
+              'Do not create a fundamental trading rule yet. First determine whether the existing Tiingo entitlement or already-persisted project data '
+              'can supply quarterly sales/revenue/EPS/earnings fields with report/publication dates sufficient for point-in-time joins at candidate entry. '
+              'Required proof: field names, coverage, filing/report date semantics, revision policy, and exact join key/date. '
+              'If PIT-safe data is unavailable, return FUNDAMENTAL_DATA_NOT_PIT_SAFE and stop. No synthetic proxy.'
+            )
+        else:
+            verdict='CORRECTED_LEDGER_COMPLETE_FUNDAMENTAL_FIELDS_PRESENT_REQUIRE_PIT_SEMANTIC_AUDIT'
+            selected='Fundamental PIT semantic validation'
+            next_step=(
+              'V8.18 must audit the discovered fundamental-like columns for publication/report-date semantics and lookahead safety. '
+              'No portfolio replay until exact PIT joins are proven.'
+            )
+
+        result={
+          'version':'V8.17 Corrected Open-Mechanism Ledger',
+          'build_id':V817_BUILD_ID,'verdict':verdict,
+          'capacity_history_correction':capacity,
+          'v816_forward_provenance':{
+            'present':bool(r816),'verdict':(r816 or {}).get('verdict'),
+            'legacy_status':((r816 or {}).get('legacy_v644') or {}).get('classification')
+          },
+          'fundamental_source_history':{
+            'v646_fundamentals_rule':v646_fund,
+            'source_support_note':'V6.45 reconstructed Fundamentals as a cross-video review dimension; V6.46 explicitly refused to invent a synthetic proxy.'
+          },
+          'persisted_store_inventory':stores,
+          'real_fundamental_like_columns':real_hits,
+          'ledger':ledger,
+          'selected_next':selected,
+          'architecture_conclusion':(
+              'After correcting the V8.14 capacity error, no internal price/volume/STOP/capacity micro-mechanism remains honestly UNTESTED. '
+              'The clean remaining source-supported gap is TRUE point-in-time fundamentals at the review/admission layer. '
+              'This is a new-information/data lever, not another threshold on existing price features.'
+          ),
+          'next_step':next_step,
+          'hard_rules':[
+            'Do not reopen capacity replacement: V6.97–V6.99 already studied it.',
+            'Do not use transcript FUNDAMENTAL tags as numeric data.',
+            'Do not synthesize earnings/sales proxies from price or volume.',
+            'Do not join quarterly fundamentals by period-end alone; publication/report availability date must be PIT-safe.',
+            'Do not run a strategy A/B until data semantics and coverage pass first.'
+          ],
+          'boundaries':'Corrected ledger + persisted-column inventory only. 0 universe scan, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 strategy mutation.'
+        }
+
+        V817_DIR.mkdir(parents=True,exist_ok=True)
+        V817_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v817_write(status='done',phase='done',message=f'V8.17 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v817_write(status='error',phase='error',message=f'V8.17 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',
+                    traceback=traceback.format_exc())
+    finally:v817_thread=None
+
+def _v817_start():
+    global v817_thread
+    if _v817_alive():return False
+    _v817_write(status='starting',phase='starting',message='V8.17 starting · corrected ledger only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v817_thread=threading.Thread(target=_v817_run,daemon=True);v817_thread.start();return True
+
+@APP.route('/v817/run',methods=['GET','POST'])
+def v817_run():_v817_start();return redirect('/v817')
+
+@APP.get('/api/v817/status')
+def v817_status_api():return jsonify(_v817_status())
+
+@APP.get('/v817')
+def v817_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v817_status();R={}
+    if V817_RESULT.exists():
+        try:R=json.loads(V817_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    lrows=''.join(
+      f"<tr><td><b>{e(x.get('lever'))}</b></td><td>{e(x.get('state'))}</td><td>{e(x.get('history'))}</td><td>{e(x.get('reason'))}</td></tr>"
+      for x in R.get('ledger',[]) or []
+    )
+    srows=''.join(
+      f"<tr><td><b>{e(x.get('artifact'))}</b></td><td>{'✅' if x.get('exists') else '—'}</td><td>{e(x.get('columns'))}</td><td>{e(', '.join(x.get('fundamental_like_columns') or []))}</td></tr>"
+      for x in R.get('persisted_store_inventory',[]) or []
+    )
+    C=R.get('capacity_history_correction') or {}
+    crows=''.join(
+      f"<tr><td><b>{e(k)}</b></td><td>{'✅' if v.get('present') else '—'}</td><td>{e(v.get('verdict') or '—')}</td><td>{e(v.get('meaning'))}</td></tr>"
+      for k,v in C.items()
+    )
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v817/run'><button>▶ Run V8.17 Corrected Ledger</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.17 Corrected Open-Mechanism Ledger</h1><div class='g'><b>纠正 V8.14：</b>Capacity/Displacement 已由 V6.97→V6.98→V6.99 做过；V8.17 重新找真正还没测试的机制，不做策略 A/B。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+<div class='c'><h2>Capacity History Correction</h2><div style='overflow:auto'><table><tr><th>Version</th><th>Present</th><th>Verdict</th><th>Meaning</th></tr>{crows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Corrected Architecture Ledger</h2><div style='overflow:auto'><table><tr><th>Lever</th><th>State</th><th>History</th><th>Reason</th></tr>{lrows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>PIT Fundamental Data Inventory</h2><div style='overflow:auto'><table><tr><th>Artifact</th><th>Exists</th><th>Columns</th><th>Fundamental-like fields</th></tr>{srows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='b'><b>Selected next:</b> {e(R.get('selected_next','—'))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v817/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
