@@ -50214,3 +50214,228 @@ def _v714_home_card(response):
                 response.set_data(body);response.headers['Content-Length']=str(len(response.get_data()))
     except Exception:pass
     return response
+
+
+# ================= V7.14 HOME CARD HARD FIX =================
+# Do not rely on after_request for the dashboard entry.
+# Wrap the actual current "/" endpoint directly, last in the file.
+_v714_home_endpoint_base = APP.view_functions.get('home')
+
+if _v714_home_endpoint_base is not None:
+    def _v714_home_endpoint_wrap(*args, **kwargs):
+        resp = _v714_home_endpoint_base(*args, **kwargs)
+        card = """<div id='v714-home-card-hard'
+        style='background:#fff;border:5px solid #ef4444;border-radius:24px;padding:24px;margin:20px'>
+        <h2>🔥 V7.14 Defensive Portfolio-Heat Audit</h2>
+        <p>DEFENSIVE 期间 portfolio heat / MaxDD 结构诊断。秒级，不 replay。</p>
+        <a href='/v714'>
+        <button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>
+        打开 V7.14
+        </button></a>
+        </div>"""
+
+        if hasattr(resp, 'get_data'):
+            body = resp.get_data(as_text=True)
+            if 'v714-home-card-hard' not in body:
+                p = body.find('<body')
+                g = body.find('>', p) if p >= 0 else -1
+                body = (body[:g+1] + card + body[g+1:]) if g >= 0 else card + body
+                resp.set_data(body)
+                try:
+                    resp.headers['Content-Length'] = str(len(resp.get_data()))
+                except Exception:
+                    pass
+            return resp
+
+        body = str(resp)
+        if 'v714-home-card-hard' not in body:
+            p = body.find('<body')
+            g = body.find('>', p) if p >= 0 else -1
+            body = (body[:g+1] + card + body[g+1:]) if g >= 0 else card + body
+        return body
+
+    APP.view_functions['home'] = _v714_home_endpoint_wrap
+
+
+# ================= V7.15 STOP FAILURE-TIMING PATH AUDIT =================
+# Diagnostic only. Does NOT reopen V6.95–V7.00 early-exit/capital-recycling.
+# Fixed horizons D5/D10 only. No threshold/grid, no account replay.
+V715_DIR=DATA_DIR/'v715_stop_failure_timing_path_audit'
+V715_STATUS=V715_DIR/'status.json'
+V715_RESULT=V715_DIR/'result.json'
+V715_ROWS=V715_DIR/'actual_buy_early_path_rows.csv.gz'
+V715_BUILD_ID='V715_STOP_TIMING_20260830A'
+v715_thread=None
+
+def _v715_status():
+    d={'build_id':V715_BUILD_ID,'status':'idle','phase':'idle','message':'Ready','processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V715_STATUS.exists():
+        try:
+            x=json.loads(V715_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V715_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v715_write(**kw):
+    V715_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v715_status();x.update(kw);x['build_id']=V715_BUILD_ID
+    V715_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v715_alive(): return v715_thread is not None and v715_thread.is_alive()
+
+def _v715_auc(y,x):
+    y=np.asarray(y,dtype=int);x=np.asarray(x,dtype=float)
+    ok=np.isfinite(x);y=y[ok];x=x[ok]
+    if len(y)<8 or len(set(y.tolist()))<2:return np.nan
+    p=x[y==1];n=x[y==0]
+    if not len(p) or not len(n):return np.nan
+    rr=pd.Series(np.r_[p,n]).rank(method='average').to_numpy();rp=rr[:len(p)].sum()
+    return float((rp-len(p)*(len(p)+1)/2)/(len(p)*len(n)))
+
+def _v715_norm_price(d):
+    if d is None or len(d)==0:return None
+    x=d.copy()
+    if 'date' not in x.columns:
+        x=x.reset_index()
+    lc={str(c).lower():c for c in x.columns}
+    dc=lc.get('date') or x.columns[0]; cc=lc.get('close')
+    if cc is None:return None
+    hc=lc.get('high'); lc0=lc.get('low')
+    out=pd.DataFrame({'date':pd.to_datetime(x[dc],errors='coerce').dt.normalize(),
+                      'close':pd.to_numeric(x[cc],errors='coerce'),
+                      'high':pd.to_numeric(x[hc],errors='coerce') if hc else pd.to_numeric(x[cc],errors='coerce'),
+                      'low':pd.to_numeric(x[lc0],errors='coerce') if lc0 else pd.to_numeric(x[cc],errors='coerce')})
+    out=out.dropna(subset=['date','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    return out if len(out) else None
+
+def _v715_path(d,entry_date,exit_date):
+    x=_v715_norm_price(d)
+    if x is None:return None
+    ed=pd.Timestamp(entry_date).normalize(); xd=pd.Timestamp(exit_date).normalize()
+    ii=x.index[x.date.eq(ed)]
+    if len(ii)!=1:return None
+    j=int(ii[0]); ep=float(x.loc[j,'close'])
+    if not np.isfinite(ep) or ep<=0:return None
+    post=x.iloc[j:].reset_index(drop=True)
+    ex=post.index[post.date.eq(xd)]
+    hold_td=int(ex[0]) if len(ex)==1 else None
+    f={'entry_cache_close':ep,'hold_td':hold_td}
+    for h in [5,10]:
+        if len(post)<=h:
+            for k in ['close_ret','mfe','mae','never_green']:f[f'd{h}_{k}']=np.nan
+            continue
+        z=post.iloc[1:h+1]
+        f[f'd{h}_close_ret']=float(post.iloc[h].close/ep-1)
+        f[f'd{h}_mfe']=float(pd.to_numeric(z.high,errors='coerce').max()/ep-1)
+        f[f'd{h}_mae']=float(pd.to_numeric(z.low,errors='coerce').min()/ep-1)
+        f[f'd{h}_never_green']=float((pd.to_numeric(z.high,errors='coerce')<=ep).all())
+    return f
+
+def _v715_run():
+    global v715_thread
+    t0=time.time()
+    try:
+        _v715_write(status='running',phase='preflight',message='Preflight：V7.04 exact 291 Actual Buys + exact listing Historical Cache。',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+        if not V704_LEDGER.exists() or not V704_RESULT.exists():raise RuntimeError('V7.04 exact ledger/result missing')
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+        for c in ['v704_row_id','listing_id','entry_date','exit_date','ret','is_stop']:
+            if c not in L.columns:raise RuntimeError(f'V7.04 ledger missing {c}')
+        if not L.v704_row_id.is_unique:raise RuntimeError('v704_row_id not unique')
+        r704=json.loads(V704_RESULT.read_text(encoding='utf-8')); ref=r704.get('B') or {}
+        if int(ref.get('admitted_positions',0))!=291:raise RuntimeError('V7.04 result admissions parity failed')
+        M=_v615b_read_manifest()
+        if M is None or M.empty or 'listing_id' not in M.columns:raise RuntimeError('Historical listing manifest missing')
+        M=M.copy();M['listing_id']=M.listing_id.astype(str)
+        if M.listing_id.duplicated().any():raise RuntimeError('Historical manifest listing_id not unique')
+        M=M.set_index('listing_id',drop=False)
+        L=L.copy();L['listing_id']=L.listing_id.astype(str);L['entry_date']=pd.to_datetime(L.entry_date,errors='coerce').dt.normalize();L['exit_date']=pd.to_datetime(L.exit_date,errors='coerce').dt.normalize();L['ret']=pd.to_numeric(L.ret,errors='coerce');L['is_stop']=L.is_stop.astype(str).str.lower().isin(['true','1','yes'])
+        if L[['entry_date','exit_date']].isna().any().any():raise RuntimeError('V7.04 invalid dates')
+        _v715_write(status='running',phase='path_build',message='读取 291 个 exact listing_id；只算固定 D5/D10 路径。',processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+        rows=[];mm=pm=em=0
+        for k,r in L.reset_index(drop=True).iterrows():
+            lid=str(r.listing_id)
+            if lid not in M.index:mm+=1;continue
+            try:d=_v617fv1_read_price(M.loc[lid])
+            except Exception:d=None
+            if d is None or len(d)==0:pm+=1;continue
+            f=_v715_path(d,r.entry_date,r.exit_date)
+            if f is None:em+=1;continue
+            z={'v704_row_id':int(r.v704_row_id),'listing_id':lid,'entry_date':r.entry_date,'exit_date':r.exit_date,'ret':float(r.ret) if np.isfinite(r.ret) else np.nan,'is_stop':bool(r.is_stop),'is_50':bool(np.isfinite(r.ret) and r.ret>=.50),'is_100':bool(np.isfinite(r.ret) and r.ret>=1.0)};z.update(f);rows.append(z)
+        P=pd.DataFrame(rows);cov=float(len(P)/291)
+        if cov<.95:raise RuntimeError(f'Early-path coverage too low {cov:.1%}; manifest_miss={mm}, price_miss={pm}, entry_day_miss={em}')
+        if not P.v704_row_id.is_unique:raise RuntimeError('V7.15 duplicate v704_row_id')
+        V715_DIR.mkdir(parents=True,exist_ok=True);P.to_csv(V715_ROWS,index=False,compression='gzip')
+        _v715_write(status='running',phase='audit',message=f'Coverage={cov:.1%}。比较 STOP / Non-STOP / +50 / +100 的 D5/D10 failure timing。',processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+        feats=['d5_close_ret','d5_mfe','d5_mae','d5_never_green','d10_close_ret','d10_mfe','d10_mae','d10_never_green']
+        targets={'NONSTOP':(~P.is_stop).astype(int),'WIN50':P.is_50.astype(int),'WIN100':P.is_100.astype(int)}
+        audits={}
+        for name,y in targets.items():
+            rr=[]
+            for f in feats:
+                x=pd.to_numeric(P[f],errors='coerce');a=_v715_auc(y,x)
+                if not np.isfinite(a):continue
+                rr.append({'feature':f,'direction':'HIGHER_BETTER' if a>=.5 else 'LOWER_BETTER','oriented_auc':float(max(a,1-a)),'coverage':float(x.notna().mean()),'positive_median':float(x[y.eq(1)].median()) if int(y.sum()) else None,'stop_median':float(x[P.is_stop].median())})
+            audits[name]=sorted(rr,key=lambda z:(z['oriented_auc'],z['coverage']),reverse=True)
+        maps={k:{x['feature']:x for x in v} for k,v in audits.items()};shared=[]
+        for f in feats:
+            a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+            if not(a and b and c):continue
+            same=len({a['direction'],b['direction'],c['direction']})==1;aucs=[a['oriented_auc'],b['oriented_auc'],c['oriented_auc']]
+            shared.append({'feature':f,'direction':a['direction'] if same else 'MIXED','mean_oriented_auc':float(np.mean(aucs)),'min_oriented_auc':float(min(aucs)),'coverage':float(min(a['coverage'],b['coverage'],c['coverage'])),'robust':bool(same and min(aucs)>=.70 and min(a['coverage'],b['coverage'],c['coverage'])>=.90)})
+        shared=sorted(shared,key=lambda z:(z['robust'],z['mean_oriented_auc'],z['min_oriented_auc']),reverse=True);robust=[x for x in shared if x['robust']]
+        timing={'stop_hold_td_median':float(pd.to_numeric(P.loc[P.is_stop,'hold_td'],errors='coerce').median()),'stop_hold_td_p25':float(pd.to_numeric(P.loc[P.is_stop,'hold_td'],errors='coerce').quantile(.25)),'win50_hold_td_median':float(pd.to_numeric(P.loc[P.is_50,'hold_td'],errors='coerce').median()) if int(P.is_50.sum()) else None,'win100_hold_td_median':float(pd.to_numeric(P.loc[P.is_100,'hold_td'],errors='coerce').median()) if int(P.is_100.sum()) else None,'stop_never_green_d5_rate':float(pd.to_numeric(P.loc[P.is_stop,'d5_never_green'],errors='coerce').mean()),'win50_never_green_d5_rate':float(pd.to_numeric(P.loc[P.is_50,'d5_never_green'],errors='coerce').mean()) if int(P.is_50.sum()) else None,'win100_never_green_d5_rate':float(pd.to_numeric(P.loc[P.is_100,'d5_never_green'],errors='coerce').mean()) if int(P.is_100.sum()) else None}
+        verdict='EARLY_FAILURE_PATH_DNA_FOUND' if robust else 'NO_ROBUST_EARLY_FAILURE_PATH_DNA'
+        result={'version':'V7.15 STOP Failure-Timing Path Audit','build_id':V715_BUILD_ID,'verdict':verdict,'actual_buy_rows':291,'path_rows':int(len(P)),'path_coverage':cov,'diagnostics':{'manifest_miss':mm,'price_miss':pm,'entry_day_miss':em},'timing_summary':timing,'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],'acceptance':'Promote only if one fixed D5/D10 path feature has same direction for Non-STOP/+50/+100, min oriented AUC >=0.70, coverage >=90%. No cutoff.','history_dedup':'Does NOT rerun or reopen V6.95–V7.00 early-exit/capital-recycling. This is fixed-horizon path diagnosis only.','boundaries':'No account replay, no time-stop, no exit rule, no threshold sweep, no universe scan, no admission change.','next_step':('If robust DNA exists, only design a genuinely new causal hypothesis distinct from closed V6.95–V7.00.' if robust else 'Close failure-timing branch; do not sweep days/cutoffs. Move to a different drawdown mechanism.')}
+        V715_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v715_write(status='done',phase='done',message=f'V7.15 完成：{verdict}',processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v715_write(status='error',phase='error',message=f'V7.15 失败：{type(ex).__name__}: {ex}',processed=0,total=6,elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v715_thread=None
+
+def _v715_start():
+    global v715_thread
+    if _v715_alive():return False
+    _v715_write(status='starting',phase='starting',message='V7.15 starting · preflight first',processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v715_thread=threading.Thread(target=_v715_run,daemon=True);v715_thread.start();return True
+
+@APP.route('/v715/run',methods=['GET','POST'])
+def v715_run():_v715_start();return redirect('/v715')
+@APP.get('/api/v715/status')
+def v715_status():return jsonify(_v715_status())
+@APP.get('/v715')
+def v715_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v715_status();R={}
+    if V715_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V715_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    C=R.get('shared_candidates') or [];T=R.get('timing_summary') or {}
+    rows=''.join(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td><td>{n3(x.get('mean_oriented_auc'))}</td><td>{n3(x.get('min_oriented_auc'))}</td><td>{pc(x.get('coverage'))}</td><td>{'✅' if x.get('robust') else '—'}</td></tr>" for x in C)
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v715/run'><button>▶ Run V7.15 Timing Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>⏱️ V7.15 STOP Failure-Timing Path Audit</h1><div class='ok'><b>只诊断，不改 Exit：</b>291 exact Actual Buys，固定 D5/D10 路径；不重开 V6.95–V7.00 early-exit/capital-recycling。</div></div><div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div><div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Path coverage={pc(R.get('path_coverage'))} · rows={R.get('path_rows','—')}/291</p></div><div class='c'><h2>Timing Summary</h2><p>STOP hold median={T.get('stop_hold_td_median','—')} td · p25={T.get('stop_hold_td_p25','—')} td<br>+50 hold median={T.get('win50_hold_td_median','—')} td · +100 hold median={T.get('win100_hold_td_median','—')} td<br>STOP D5 never-green={pc(T.get('stop_never_green_d5_rate'))} · +50={pc(T.get('win50_never_green_d5_rate'))} · +100={pc(T.get('win100_never_green_d5_rate'))}</p></div><div class='c'><h2>Shared Early-Path DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Robust</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div><div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div><script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v715/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
+
+# HARD dashboard card: wrap actual current home endpoint last.
+_v715_home_base=APP.view_functions.get('home')
+if _v715_home_base is not None:
+    def _v715_home_wrap(*args,**kwargs):
+        resp=_v715_home_base(*args,**kwargs)
+        card="""<div id='v715-home-card-hard' style='background:#fff;border:5px solid #8b5cf6;border-radius:24px;padding:24px;margin:20px'><h2>⏱️ V7.15 STOP Failure-Timing Path Audit</h2><p>291 Actual Buys · D5/D10 failure timing · diagnostic only.</p><a href='/v715'><button style='background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.15</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v715-home-card-hard' not in body:
+                p=body.find('<body');g=body.find('>',p) if p>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body;resp.set_data(body)
+                try:resp.headers['Content-Length']=str(len(resp.get_data()))
+                except Exception:pass
+            return resp
+        body=str(resp)
+        if 'v715-home-card-hard' not in body:
+            p=body.find('<body');g=body.find('>',p) if p>=0 else -1;body=(body[:g+1]+card+body[g+1:]) if g>=0 else card+body
+        return body
+    APP.view_functions['home']=_v715_home_wrap
