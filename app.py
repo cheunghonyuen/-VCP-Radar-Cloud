@@ -6161,6 +6161,15 @@ details.card>summary,details.section-fold>summary{-webkit-tap-highlight-color:tr
 }
 
 </style></head><body><div class="wrap">
+<div id="v715-dashboard-card" class="card" style="border:5px solid #8b5cf6">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <h2 style="margin:0">⏱️ V7.15 STOP Failure-Timing Path Audit</h2>
+      <div class="muted">291 Actual Buys · D5/D10 failure timing · diagnostic only</div>
+    </div>
+    <a href="/v715"><button type="button">打开 V7.15</button></a>
+  </div>
+</div>
 <div class="top"><div><h1>VCP Radar Cloud · V6.17</h1><div class="muted">Production Candidate · 主规则已冻结；今晚可运行全历史股票池 Final Validation，不调参数</div></div>
 <form method="post" action="/scan"><button>立即更新</button></form></div>
 
@@ -50264,7 +50273,7 @@ V715_DIR=DATA_DIR/'v715_stop_failure_timing_path_audit'
 V715_STATUS=V715_DIR/'status.json'
 V715_RESULT=V715_DIR/'result.json'
 V715_ROWS=V715_DIR/'actual_buy_early_path_rows.csv.gz'
-V715_BUILD_ID='V715_STOP_TIMING_20260830A'
+V715_BUILD_ID='V715_STOP_TIMING_20260830B_FINAL'
 v715_thread=None
 
 def _v715_status():
@@ -50347,8 +50356,11 @@ def _v715_run():
         M=_v615b_read_manifest()
         if M is None or M.empty or 'listing_id' not in M.columns:raise RuntimeError('Historical listing manifest missing')
         M=M.copy();M['listing_id']=M.listing_id.astype(str)
-        if M.listing_id.duplicated().any():raise RuntimeError('Historical manifest listing_id not unique')
-        M=M.set_index('listing_id',drop=False)
+        manifest_duplicate_rows=int(M.duplicated('listing_id',keep=False).sum())
+        manifest_duplicate_ids=int(M.loc[M.duplicated('listing_id',keep=False),'listing_id'].nunique())
+        # Reuse V7.13B's validated canonicalization. No schema guess, no admission reconstruction.
+        # V7.13B achieved 100% exact manifest + price coverage with keep='last'.
+        M=M.drop_duplicates('listing_id',keep='last').set_index('listing_id',drop=False)
         L=L.copy();L['listing_id']=L.listing_id.astype(str);L['entry_date']=pd.to_datetime(L.entry_date,errors='coerce').dt.normalize();L['exit_date']=pd.to_datetime(L.exit_date,errors='coerce').dt.normalize();L['ret']=pd.to_numeric(L.ret,errors='coerce');L['is_stop']=L.is_stop.astype(str).str.lower().isin(['true','1','yes'])
         if L[['entry_date','exit_date']].isna().any().any():raise RuntimeError('V7.04 invalid dates')
         _v715_write(status='running',phase='path_build',message='读取 291 个 exact listing_id；只算固定 D5/D10 路径。',processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
