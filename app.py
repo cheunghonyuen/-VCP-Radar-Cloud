@@ -50762,7 +50762,7 @@ V717_DIR=DATA_DIR/'v717_stop_cluster_market_breadth_audit'
 V717_STATUS=V717_DIR/'status.json'
 V717_RESULT=V717_DIR/'result.json'
 V717_ROWS=V717_DIR/'actual_buy_breadth_rows.csv.gz'
-V717_BUILD_ID='V717_BREADTH_AUDIT_20260830A'
+V717_BUILD_ID='V717_BREADTH_AUDIT_20260830B_COVERAGE_VERDICT'
 v717_thread=None
 
 def _v717_status():
@@ -50894,8 +50894,8 @@ def _v717_run():
 
         X=pd.DataFrame(rows)
         cov=float(len(X)/291.0)
-        if cov<.95:raise RuntimeError(f'Breadth feature coverage too low {cov:.1%}')
         if not X['v704_row_id'].is_unique:raise RuntimeError('Breadth rows duplicate v704_row_id')
+        coverage_sufficient=bool(cov>=.95)
         V717_DIR.mkdir(parents=True,exist_ok=True)
         X.to_csv(V717_ROWS,index=False,compression='gzip')
 
@@ -50965,13 +50965,17 @@ def _v717_run():
         }
 
         # Promote only if robust AND top candidate stable across 5y blocks.
-        actionable=bool(robust and cons is not None and cons>=.60 and weakest is not None and weakest>=.55)
-        verdict='MARKET_BREADTH_BREAKDOWN_SIGNAL_FOUND' if actionable else 'NO_ROBUST_MARKET_BREADTH_BREAKDOWN_SIGNAL'
+        actionable=bool(coverage_sufficient and robust and cons is not None and cons>=.60 and weakest is not None and weakest>=.55)
+        verdict=('INSUFFICIENT_BREADTH_COVERAGE_STOP_BRANCH' if not coverage_sufficient
+                 else 'MARKET_BREADTH_BREAKDOWN_SIGNAL_FOUND' if actionable
+                 else 'NO_ROBUST_MARKET_BREADTH_BREAKDOWN_SIGNAL')
 
         result={
             'version':'V7.17 STOP Cluster / Market Breadth Breakdown Audit',
             'build_id':V717_BUILD_ID,'verdict':verdict,
             'actual_buy_rows':291,'feature_rows':int(len(X)),'coverage':cov,
+            'coverage_sufficient':coverage_sufficient,
+            'coverage_conclusion':('Breadth source covers less than 95% of exact Actual Buys; this branch is not eligible for a causal A/B and is closed without changing strategy.' if not coverage_sufficient else 'Coverage gate passed.'),
             'breadth_proxy':'PIT cross-sectional breadth of available 11 SPDR sector ETFs: fraction above MA20, above MA50, positive 20D return, mean sector 20D return; plus SPY 20D return.',
             'sector_etfs_available':available,'sector_etf_count':len(available),
             'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],
