@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v817b-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>💰 V8.18 Big Winner vs STOP Economic Test</h2>
+        <p>Actual Buy +50/+100 vs STOP · frozen PIT features · economic signal test · 0 rescan.</p>
+        <a href='/v818'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.18</button></a>
+        </div>
+        <div id='v817b-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧹 V8.17B Fundamental Semantic Fix</h2>
         <p>Exclude breakout_margin false positive · lock true PIT-fundamental inventory · 0 strategy test.</p>
         <a href='/v817b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.17B</button></a>
@@ -55539,3 +55544,267 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v817b/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script>
 </div></body></html>"""
+
+
+# ================= V8.18 BIG WINNER vs STOP ECONOMIC TEST =================
+# Economic test only: existing frozen V6.94 PIT features + exact V7.04 Actual Buys.
+# NO universe scan, NO Historical Cache reread, NO feature rebuild, NO account replay.
+V818_DIR=DATA_DIR/'v818_big_winner_vs_stop_economic_test'
+V818_STATUS=V818_DIR/'status.json'
+V818_RESULT=V818_DIR/'result.json'
+V818_FEATURES=V818_DIR/'feature_separation.csv.gz'
+V818_BUYS=V818_DIR/'actual_buy_labeled.csv.gz'
+V818_BUILD_ID='V818_BIGWIN_STOP_20260830A'
+v818_thread=None
+
+def _v818_status():
+    x={'build_id':V818_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · frozen features + exact Actual Buys only',
+       'processed':0,'total':7,'elapsed_sec':0,'error':None,'traceback':None}
+    if V818_STATUS.exists():
+        try:
+            q=json.loads(V818_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V818_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v818_write(**kw):
+    V818_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v818_status();x.update(kw);x['build_id']=V818_BUILD_ID
+    V818_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v818_alive(): return v818_thread is not None and v818_thread.is_alive()
+
+def _v818_auc(y,x):
+    y=np.asarray(y,dtype=int); x=np.asarray(x,dtype=float)
+    m=np.isfinite(x)
+    y=y[m];x=x[m]
+    if len(y)<10 or len(np.unique(y))<2:return np.nan
+    # Mann-Whitney rank AUC; no sklearn dependency.
+    r=pd.Series(x).rank(method='average').to_numpy()
+    n1=int((y==1).sum()); n0=int((y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v818_run():
+    global v818_thread
+    t0=time.time()
+    try:
+        _v818_write(status='running',phase='preflight',
+                    message='Preflight：真实文件/列名/唯一键/重复/Exact Actual-Buy join，一次检查完再跑。',
+                    processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+
+        fpath=V694_DIR/'clean_candidate_path_features.csv.gz'
+        lpath=V704_LEDGER
+        if not fpath.exists(): raise RuntimeError(f'V6.94 feature store missing: {fpath}')
+        if not lpath.exists(): raise RuntimeError(f'V7.04 Actual Buy ledger missing: {lpath}')
+
+        F=pd.read_csv(fpath,compression='gzip')
+        L=pd.read_csv(lpath,compression='gzip')
+
+        requiredF=['listing_id','entry_date','ret','is_stop']
+        requiredL=['listing_id','entry_date']
+        missF=[c for c in requiredF if c not in F.columns]
+        missL=[c for c in requiredL if c not in L.columns]
+        if missF or missL: raise RuntimeError(f'Schema mismatch F={missF}, L={missL}')
+
+        for D in [F,L]:
+            D['listing_id']=D['listing_id'].astype(str)
+            D['entry_date']=pd.to_datetime(D['entry_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        if F['is_stop'].dtype != bool:
+            F['is_stop']=F['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+
+        # Exact join key audit. Never guess another key.
+        k=['listing_id','entry_date']
+        fdup=int(F.duplicated(k,keep=False).sum())
+        ldup=int(L.duplicated(k,keep=False).sum())
+        if fdup:
+            raise RuntimeError(f'V6.94 exact key not unique: {fdup} duplicate rows on {k}')
+        if ldup:
+            raise RuntimeError(f'V7.04 Actual Buy exact key not unique: {ldup} duplicate rows on {k}')
+
+        A=L[k].merge(F,on=k,how='left',validate='one_to_one',indicator=True)
+        matched=int((A['_merge']=='both').sum())
+        coverage=float(matched/len(L)) if len(L) else 0.0
+        if coverage < .95:
+            raise RuntimeError(f'Exact Actual-Buy→Feature join coverage too low: {coverage:.1%}')
+        A=A[A['_merge']=='both'].drop(columns=['_merge']).copy()
+
+        _v818_write(status='running',phase='labels',
+                    message='建立经济标签：STOP / +50% / +100%；只用真实 Actual Buys。',
+                    processed=2,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        A['label_stop']=A['is_stop'].astype(bool)
+        A['label_50']=A['ret'].ge(.50)
+        A['label_100']=A['ret'].ge(1.00)
+        A['year']=A['entry_date'].dt.year
+
+        nstop=int(A.label_stop.sum()); n50=int(A.label_50.sum()); n100=int(A.label_100.sum())
+        if nstop<10 or n50<5:
+            raise RuntimeError(f'Insufficient economic labels: STOP={nstop}, +50={n50}, +100={n100}')
+
+        # Strict PIT feature exclusion: outcomes, identifiers, dates, lineage metadata, prices/exit fields.
+        deny_exact=set([
+          'ret','is_stop','winner50','winner100','listing_id','entry_date','exit_date','exit_reason',
+          'entry_px','entry_px_raw','exit_px','exit_px_raw','control_ret','low10_ret',
+          'parent_opportunity_id','stage2_row_id','parent_entry_date','source_generator_id'
+        ])
+        deny_tokens=['exit','winner','stop_reason','future','mfe','mae','forward','label','outcome','ret_']
+        num=[]
+        for c in A.columns:
+            if c in deny_exact or c.startswith('label_') or c=='year':continue
+            lc=c.lower()
+            if any(t in lc for t in deny_tokens):continue
+            z=pd.to_numeric(A[c],errors='coerce')
+            if z.notna().sum()>=max(20,int(.50*len(A))) and z.nunique(dropna=True)>=5:
+                A[c]=z;num.append(c)
+        if not num: raise RuntimeError('No eligible numeric PIT features after leakage exclusions')
+
+        _v818_write(status='running',phase='feature_separation',
+                    message=f'一次扫描 {len(num)} 个已有 PIT features：STOP vs +50/+100 separation。',
+                    processed=3,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        rows=[]
+        # Primary contrast: +50 winner vs STOP. Secondary: +100 vs STOP.
+        for c in num:
+            for target,lab in [('+50','label_50'),('+100','label_100')]:
+                D=A[A.label_stop | A[lab]].copy()
+                # mutually exclusive by construction for positive winners; defensive guard:
+                D=D[~(D.label_stop & D[lab])]
+                if D[lab].sum()<5 or D.label_stop.sum()<10:continue
+                y=D[lab].astype(int).to_numpy()
+                x=pd.to_numeric(D[c],errors='coerce').to_numpy()
+                auc=_v818_auc(y,x)
+                if not np.isfinite(auc):continue
+                direction=1 if auc>=.5 else -1
+                sep_auc=max(auc,1-auc)
+
+                # 5-year non-overlapping entry blocks, using SAME direction as pooled.
+                block_aucs=[]
+                y0=int(D.entry_date.dt.year.min()); y1=int(D.entry_date.dt.year.max())
+                start=(y0//5)*5
+                for b in range(start,y1+1,5):
+                    B=D[(D.year>=b)&(D.year<=b+4)]
+                    if B[lab].sum()<3 or B.label_stop.sum()<5:continue
+                    ba=_v818_auc(B[lab].astype(int),pd.to_numeric(B[c],errors='coerce')*direction)
+                    if np.isfinite(ba):block_aucs.append(float(ba))
+                stable_blocks=int(sum(v>=.55 for v in block_aucs))
+                adverse_blocks=int(sum(v<.50 for v in block_aucs))
+                rows.append({
+                  'feature':c,'target':target,'n':int(len(D)),
+                  'winner_n':int(D[lab].sum()),'stop_n':int(D.label_stop.sum()),
+                  'raw_auc':float(auc),'direction':'HIGHER_IS_WINNER' if direction==1 else 'LOWER_IS_WINNER',
+                  'separation_auc':float(sep_auc),
+                  'block_count':int(len(block_aucs)),
+                  'stable_blocks_auc55':stable_blocks,
+                  'adverse_blocks_below50':adverse_blocks,
+                  'block_auc_median':float(np.median(block_aucs)) if block_aucs else np.nan,
+                  'block_auc_min':float(np.min(block_aucs)) if block_aucs else np.nan
+                })
+
+        R=pd.DataFrame(rows)
+        if R.empty: raise RuntimeError('No valid feature separation rows')
+        R=R.sort_values(['target','separation_auc','block_auc_median'],ascending=[True,False,False])
+        V818_DIR.mkdir(parents=True,exist_ok=True)
+        R.to_csv(V818_FEATURES,index=False,compression='gzip')
+        A.to_csv(V818_BUYS,index=False,compression='gzip')
+
+        _v818_write(status='running',phase='economic_gate',
+                    message='Economic gate：只认 pooled separation + 时间块稳定；不为漂亮结果调阈值。',
+                    processed=5,total=7,elapsed_sec=round(time.time()-t0,2))
+
+        P=R[R.target.eq('+50')].copy()
+        # Predeclared useful signal gate, intentionally not a trading threshold:
+        # AUC>=.60 and median block AUC>=.55, at least 3 evaluable blocks, <=1 adverse block.
+        P['passes_signal_gate']=(P.separation_auc>=.60)&(P.block_auc_median>=.55)&(P.block_count>=3)&(P.adverse_blocks_below50<=1)
+        passed=P[P.passes_signal_gate].sort_values(['separation_auc','block_auc_median'],ascending=False)
+
+        if len(passed):
+            verdict='ACTIONABLE_PIT_SEPARATION_FOUND_PROCEED_TO_SINGLE_OOS_RANKING_REPLAY'
+            next_step=(
+              'Use only the pre-entry features that passed this stability gate to build ONE parsimonious ranking/admission challenger, '
+              'freeze its direction before replay, then run a single OOS/account replay against the V7.04 benchmark. '
+              'No broad threshold sweep.'
+            )
+        else:
+            verdict='NO_ACTIONABLE_PIT_SEPARATION_EXISTING_FEATURE_SET_EXHAUSTED'
+            next_step=(
+              'Stop tuning the existing price/volume PIT feature set. It does not robustly separate +50 winners from STOP Actual Buys. '
+              'Do not create another admission/STOP threshold version from these same features; new information would be required.'
+            )
+
+        top=P.sort_values(['separation_auc','block_auc_median'],ascending=False).head(12).to_dict('records')
+        result={
+          'version':'V8.18 Big Winner vs STOP Economic Test',
+          'build_id':V818_BUILD_ID,'verdict':verdict,
+          'preflight':{
+            'feature_rows':int(len(F)),'actual_buy_rows':int(len(L)),
+            'exact_join_rows':matched,'exact_join_coverage':coverage,
+            'feature_key_duplicate_rows':fdup,'ledger_key_duplicate_rows':ldup,
+            'eligible_pit_features':len(num)
+          },
+          'economics':{
+            'actual_buys_analyzed':int(len(A)),
+            'stops':nstop,'winners_50':n50,'winners_100':n100,
+            'stop_rate':float(nstop/len(A)) if len(A) else np.nan,
+            'winner50_rate':float(n50/len(A)) if len(A) else np.nan,
+            'winner100_rate':float(n100/len(A)) if len(A) else np.nan
+          },
+          'signal_gate':'Primary +50 vs STOP: separation AUC >= 0.60; median 5-year block AUC >= 0.55; >=3 evaluable blocks; <=1 adverse block below 0.50.',
+          'passing_features':passed.head(20).to_dict('records'),
+          'top_features':top,
+          'next_step':next_step,
+          'boundaries':'Frozen V6.94 features + exact V7.04 Actual Buys only. 0 universe scan, 0 Historical Cache reread, 0 feature rebuild, 0 account replay, 0 threshold sweep.'
+        }
+        V818_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v818_write(status='done',phase='done',message=f'V8.18 完成：{verdict}',
+                    processed=7,total=7,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v818_write(status='error',phase='error',message=f'V8.18 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',
+                    traceback=traceback.format_exc())
+    finally:v818_thread=None
+
+def _v818_start():
+    global v818_thread
+    if _v818_alive():return False
+    _v818_write(status='starting',phase='starting',message='V8.18 starting · economic test only',
+                processed=0,total=7,elapsed_sec=0,error=None,traceback=None)
+    v818_thread=threading.Thread(target=_v818_run,daemon=True);v818_thread.start();return True
+
+@APP.route('/v818/run',methods=['GET','POST'])
+def v818_run():_v818_start();return redirect('/v818')
+
+@APP.get('/api/v818/status')
+def v818_status_api():return jsonify(_v818_status())
+
+@APP.get('/v818')
+def v818_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v818_status();R={}
+    if V818_RESULT.exists():
+        try:R=json.loads(V818_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    E=R.get('economics') or {};P=R.get('preflight') or {}
+    tops=R.get('top_features') or []
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('target'))}</td><td>{e(x.get('direction'))}</td>"
+      f"<td>{float(x.get('separation_auc',0)):.3f}</td><td>{float(x.get('block_auc_median',0)):.3f}</td>"
+      f"<td>{e(x.get('block_count'))}</td><td>{e(x.get('adverse_blocks_below50'))}</td></tr>"
+      for x in tops
+    )
+    passed=R.get('passing_features') or []
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v818/run'><button>▶ Run V8.18 Big Winner vs STOP</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>💰 V8.18 Big Winner vs STOP Economic Test</h1><div class='g'><b>只做有经济意义的测试：</b>Actual Buy 买入当时的 PIT features，能不能把未来 +50%/+100% Big Winner 与 STOP 分开。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<div class='b'>Actual Buys: <b>{e(E.get('actual_buys_analyzed','—'))}</b> · STOP: <b>{e(E.get('stops','—'))}</b> · +50: <b>{e(E.get('winners_50','—'))}</b> · +100: <b>{e(E.get('winners_100','—'))}</b><br><br>Exact join: <b>{(float(P.get('exact_join_coverage',0))*100):.1f}%</b> · PIT features tested: <b>{e(P.get('eligible_pit_features','—'))}</b> · Passing stable features: <b>{len(passed)}</b></div></div>
+<div class='c'><h2>Top Pre-Entry Separators</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Target</th><th>Direction</th><th>Pooled Sep AUC</th><th>Median 5Y AUC</th><th>Blocks</th><th>Adverse</th></tr>{rows or "<tr><td colspan='7'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='o'><b>Signal gate:</b> {e(R.get('signal_gate',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v818/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
