@@ -46783,7 +46783,7 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>💰 V8.18 Big Winner vs STOP Economic Test</h2>
+        <h2>💰 V8.18B Big Winner vs STOP Economic Test</h2>
         <p>Actual Buy +50/+100 vs STOP · frozen PIT features · economic signal test · 0 rescan.</p>
         <a href='/v818'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.18</button></a>
         </div>
@@ -55554,7 +55554,7 @@ V818_STATUS=V818_DIR/'status.json'
 V818_RESULT=V818_DIR/'result.json'
 V818_FEATURES=V818_DIR/'feature_separation.csv.gz'
 V818_BUYS=V818_DIR/'actual_buy_labeled.csv.gz'
-V818_BUILD_ID='V818_BIGWIN_STOP_20260830A'
+V818_BUILD_ID='V818B_BIGWIN_STOP_DUP_GRAIN_SAFE_20260830A'
 v818_thread=None
 
 def _v818_status():
@@ -55615,20 +55615,66 @@ def _v818_run():
         if F['is_stop'].dtype != bool:
             F['is_stop']=F['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
 
-        # Exact join key audit. Never guess another key.
+        # Grain-safe duplicate audit. Do NOT guess a new key and do NOT blindly drop_duplicates.
+        # A duplicated (listing_id, entry_date) is collapsible only when every persisted payload
+        # field is identical (NaN-safe). Otherwise stop and report a true grain conflict.
         k=['listing_id','entry_date']
-        fdup=int(F.duplicated(k,keep=False).sum())
-        ldup=int(L.duplicated(k,keep=False).sum())
-        if fdup:
-            raise RuntimeError(f'V6.94 exact key not unique: {fdup} duplicate rows on {k}')
-        if ldup:
-            raise RuntimeError(f'V7.04 Actual Buy exact key not unique: {ldup} duplicate rows on {k}')
+
+        def _collapse_exact_payload_dupes(D, name):
+            dupmask=D.duplicated(k,keep=False)
+            dup_rows=int(dupmask.sum())
+            if not dup_rows:
+                return D, {'duplicate_rows':0,'duplicate_keys':0,'collapsed_rows':0}
+
+            G=D.loc[dupmask].copy()
+            duplicate_keys=int(G[k].drop_duplicates().shape[0])
+            payload=[c for c in D.columns if c not in k]
+
+            conflict_cols=set()
+            conflict_keys=0
+            for _,g in G.groupby(k,dropna=False,sort=False):
+                bad=[]
+                for c in payload:
+                    # stringify only for equality audit; preserves NaN equivalence.
+                    z=g[c].where(g[c].notna(),'__NA__').astype(str)
+                    if z.nunique(dropna=False)>1:
+                        bad.append(c)
+                if bad:
+                    conflict_keys+=1
+                    conflict_cols.update(bad)
+
+            if conflict_keys:
+                cols=sorted(conflict_cols)[:20]
+                raise RuntimeError(
+                    f'{name} true grain conflict: {dup_rows} duplicate rows / '
+                    f'{duplicate_keys} duplicate keys on {k}; {conflict_keys} keys have '
+                    f'non-identical payload. Conflicting columns(sample)={cols}. '
+                    f'No rows were silently dropped.'
+                )
+
+            before=len(D)
+            D=D.drop_duplicates(k,keep='first').copy()
+            return D, {
+                'duplicate_rows':dup_rows,
+                'duplicate_keys':duplicate_keys,
+                'collapsed_rows':before-len(D)
+            }
+
+        F,faudit=_collapse_exact_payload_dupes(F,'V6.94')
+        L,laudit=_collapse_exact_payload_dupes(L,'V7.04 Actual Buy')
+
+        # After only lossless collapse, the exact key MUST be unique.
+        if F.duplicated(k).any() or L.duplicated(k).any():
+            raise RuntimeError('Post-audit exact key uniqueness failed; refusing join.')
 
         A=L[k].merge(F,on=k,how='left',validate='one_to_one',indicator=True)
         matched=int((A['_merge']=='both').sum())
         coverage=float(matched/len(L)) if len(L) else 0.0
         if coverage < .95:
-            raise RuntimeError(f'Exact Actual-Buy→Feature join coverage too low: {coverage:.1%}')
+            raise RuntimeError(
+                f'Exact Actual-Buy→Feature join coverage too low: {coverage:.1%}; '
+                f'V6.94 duplicate audit={faudit}; ledger duplicate audit={laudit}'
+            )
         A=A[A['_merge']=='both'].drop(columns=['_merge']).copy()
 
         _v818_write(status='running',phase='labels',
