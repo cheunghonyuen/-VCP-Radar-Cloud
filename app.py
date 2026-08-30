@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v808-home-card-real' style='background:#ecfeff;border:6px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v809-home-card-real' style='background:#f0fdf4;border:6px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧬 V8.09 Low Cheat Exact-Spec Reconstruction</h2>
+        <p>Source-only geometry lock · no invented thresholds · no replay.</p>
+        <a href='/v809'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.09</button></a>
+        </div>
+        <div id='v808-home-card-real' style='background:#ecfeff;border:6px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧩 V8.08 Alternate Generator Source Audit</h2>
         <p>Low Cheat / Cup of Handle / non-VCP Pivot source evidence · no replay · no proxy.</p>
         <a href='/v808'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.08</button></a>
@@ -53291,3 +53296,179 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Hard Rules</h2><ul>{rules or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v808/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.09 LOW CHEAT EXACT-SPEC RECONSTRUCTION =================
+# Source reconstruction only.
+# Uses already-cached JLaw subtitle evidence; does not invent geometry, thresholds, or a trading rule.
+V809_DIR=DATA_DIR/'v809_low_cheat_exact_spec_reconstruction'
+V809_STATUS=V809_DIR/'status.json'
+V809_RESULT=V809_DIR/'result.json'
+V809_BUILD_ID='V809_LOW_CHEAT_SPEC_20260830A'
+v809_thread=None
+
+def _v809_status():
+    x={'build_id':V809_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · source reconstruction only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V809_STATUS.exists():
+        try:
+            q=json.loads(V809_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V809_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v809_write(**kw):
+    V809_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v809_status();x.update(kw);x['build_id']=V809_BUILD_ID
+    V809_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v809_alive():return v809_thread is not None and v809_thread.is_alive()
+
+def _v809_run():
+    global v809_thread
+    t0=time.time()
+    try:
+        _v809_write(status='running',phase='preflight',
+                    message='锁定 V8.08 选中的 LOW_CHEAT；只重建原字幕明确支持的几何语义。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        # Locked source evidence from the cached JLaw transcript corpus.
+        # Do NOT silently fill in anything beyond these phrases.
+        locked=[
+          {
+            'field':'SETUP_NAME',
+            'status':'EXPLICIT',
+            'source_meaning':'The source explicitly names the ABT example as Low Cheat (低位作弊形态).',
+            'machine_value':'LOW_CHEAT'
+          },
+          {
+            'field':'BASE_CHARACTER',
+            'status':'EXPLICIT_QUALITATIVE',
+            'source_meaning':'The ABT example is described as a relatively short Base.',
+            'machine_value':'SHORT_BASE_CONTEXT_ONLY'
+          },
+          {
+            'field':'CONSOLIDATION',
+            'status':'EXPLICIT_QUALITATIVE',
+            'source_meaning':'The example is described as doing a meaningful consolidation.',
+            'machine_value':'MEANINGFUL_CONSOLIDATION_CONTEXT_ONLY'
+          },
+          {
+            'field':'PIVOT_DEVELOPMENT',
+            'status':'EXPLICIT',
+            'source_meaning':'If the consolidation develops further, it may develop a Pivot / least-resistance area.',
+            'machine_value':'PIVOT_MAY_FORM_AFTER_FURTHER_CONSOLIDATION'
+          },
+          {
+            'field':'CANDIDATE_STAGE',
+            'status':'EXPLICIT_CONTEXT',
+            'source_meaning':'The example appears in visual screening / watchlist selection, before a machine-exact buy rule is stated.',
+            'machine_value':'WATCHLIST_SETUP_CONTEXT'
+          }
+        ]
+
+        _v809_write(status='running',phase='gap_map',
+                    message='明确列出字幕没有支持的参数，禁止把一般 VCP 规则偷渡进 Low Cheat。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        unresolved=[
+          'Exact number of trading days that makes a Base "relatively short".',
+          'Exact depth / percent correction allowed for Low Cheat.',
+          'Exact location relative to 52-week high or prior major high.',
+          'Required number of contractions, if any.',
+          'Required volatility contraction percentages.',
+          'Required volume dry-up / volume expansion formula.',
+          'Exact Pivot construction formula.',
+          'Exact invalidation condition before Pivot breakout.',
+          'Whether Low Cheat can be entered before Pivot breakout.',
+          'Exact buy trigger, stop placement, and execution timing specific to Low Cheat.'
+        ]
+
+        forbidden=[
+          'Do not reuse generic VCP contraction thresholds as Low Cheat geometry.',
+          'Do not assign a fixed Base-day window from model preference.',
+          'Do not infer a max depth from unrelated Minervini/VCP rules unless the source explicitly ties it to Low Cheat.',
+          'Do not assume Low Cheat requires 2/3 contractions.',
+          'Do not convert "meaningful consolidation" into an arbitrary ATR/range cutoff.',
+          'Do not materialize a Low Cheat candidate stream from one qualitative example.',
+          'Do not run portfolio A/B before a source-supported machine spec exists.'
+        ]
+
+        _v809_write(status='running',phase='spec_verdict',
+                    message='评估是否已达到 machine-exact generator 标准。',
+                    processed=4,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        verdict='LOW_CHEAT_SOURCE_CONCEPT_CONFIRMED_EXACT_GENERATOR_UNVERIFIED'
+        result={
+          'version':'V8.09 Low Cheat Exact-Spec Reconstruction',
+          'build_id':V809_BUILD_ID,
+          'verdict':verdict,
+          'source_examples_used':1,
+          'source_example_note':'Only one explicit Low Cheat example was located in the cached corpus for this audit: ABT.',
+          'locked_source_components':locked,
+          'unresolved_exact_mechanics':unresolved,
+          'forbidden_inference':forbidden,
+          'architecture_conclusion':(
+              'LOW_CHEAT is a real source-named setup family, but the cached evidence currently supports only '
+              'qualitative setup context: relatively short Base, meaningful consolidation, and possible Pivot development. '
+              'That is not enough to create a machine-exact candidate generator without inventing geometry.'
+          ),
+          'next_step':(
+              'Do NOT materialize LOW_CHEAT yet. Search the existing JLaw source corpus specifically for additional '
+              'Low Cheat examples or a direct definition. If no additional direct evidence exists, close Low Cheat as '
+              'SOURCE_CONCEPT_ONLY and move to CUP_OF_HANDLE exact-spec reconstruction, which has an explicit named pattern '
+              'and a clearer right-side-narrowing -> Pivot -> alert sequence.'
+          ),
+          'boundaries':'Source reconstruction only. 0 universe scan, 0 Historical Cache reread, 0 candidate generation, 0 account replay, 0 threshold sweep, 0 trading-rule activation.'
+        }
+
+        V809_DIR.mkdir(parents=True,exist_ok=True)
+        V809_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v809_write(status='done',phase='done',message=f'V8.09 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v809_write(status='error',phase='error',message=f'V8.09 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v809_thread=None
+
+def _v809_start():
+    global v809_thread
+    if _v809_alive():return False
+    _v809_write(status='starting',phase='starting',message='V8.09 starting · source reconstruction only',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v809_thread=threading.Thread(target=_v809_run,daemon=True);v809_thread.start();return True
+
+@APP.route('/v809/run',methods=['GET','POST'])
+def v809_run():_v809_start();return redirect('/v809')
+
+@APP.get('/api/v809/status')
+def v809_status_api():return jsonify(_v809_status())
+
+@APP.get('/v809')
+def v809_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v809_status();R={}
+    if V809_RESULT.exists():
+        try:R=json.loads(V809_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    L=R.get('locked_source_components') or []
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('field'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('source_meaning'))}</td><td>{e(x.get('machine_value'))}</td></tr>"
+      for x in L
+    )
+    U=''.join(f"<li>{e(x)}</li>" for x in R.get('unresolved_exact_mechanics',[]))
+    F=''.join(f"<li>{e(x)}</li>" for x in R.get('forbidden_inference',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v809/run'><button>▶ Run V8.09 Low Cheat Spec</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.09 Low Cheat Exact-Spec Reconstruction</h1><div class='g'><b>只认原文：</b>锁定 Low Cheat 原字幕明确支持的 setup geometry；没有明说的天数、深度、收缩次数、量能公式全部禁止补猜。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Explicit Low Cheat examples used: <b>{e(R.get('source_examples_used','—'))}</b></p><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+<div class='c'><h2>Source-Locked Low Cheat Components</h2><div style='overflow:auto'><table><tr><th>Field</th><th>Status</th><th>Source Meaning</th><th>Machine-Safe Lock</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Still Unverified — Do Not Invent</h2><ul>{U or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Forbidden Inference</h2><ul>{F or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v809/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
