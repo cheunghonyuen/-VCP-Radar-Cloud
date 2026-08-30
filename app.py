@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v717-home-card-real' style='background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v800-home-card-real' style='background:#fff7ed;border:6px solid #f97316;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🏗️ V8.00 JLaw Gap & Architecture Review</h2>
+        <p>阶段收口 · 读取 V7.04–V7.17 frozen results · 0 replay · 0 universe scan.</p>
+        <a href='/v800'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.00</button></a>
+        </div>
+        <div id='v717-home-card-real' style='background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🌐 V7.17 STOP Cluster / Market Breadth Audit</h2>
         <p>最后三步第1步 · SPY + 11 sector ETF PIT breadth · diagnostic only.</p>
         <a href='/v717'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.17</button></a>
@@ -51039,3 +51044,333 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>2007–2009 MaxDD Window</h2><p>Window breadth median={pc(D.get('window_breadth_composite_median'))} · Outside={pc(D.get('outside_breadth_composite_median'))}<br>Window STOP%={pc(D.get('window_stop_rate'))} · Outside STOP%={pc(D.get('outside_stop_rate'))}</p></div>
 <div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v717/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
+
+
+# ================= V8.00 JLAW GAP & ARCHITECTURE REVIEW =================
+# Report only. Reads frozen V7 result artifacts. No backtest, no replay, no universe scan.
+V800_DIR=DATA_DIR/'v800_jlaw_gap_architecture_review'
+V800_STATUS=V800_DIR/'status.json'
+V800_RESULT=V800_DIR/'result.json'
+V800_BUILD_ID='V800_ARCH_REVIEW_20260830A'
+v800_thread=None
+
+def _v800_status():
+    d={'build_id':V800_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · report-only architecture review',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V800_STATUS.exists():
+        try:
+            x=json.loads(V800_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V800_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v800_write(**kw):
+    V800_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v800_status();x.update(kw);x['build_id']=V800_BUILD_ID
+    V800_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v800_alive():return v800_thread is not None and v800_thread.is_alive()
+
+def _v800_read(path):
+    try:
+        p=Path(path)
+        if not p.exists():return None
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:return None
+
+def _v800_num(x):
+    try:
+        x=float(x)
+        return x if np.isfinite(x) else None
+    except Exception:return None
+
+def _v800_metric_row(name,z):
+    z=z or {}
+    return {
+        'name':name,
+        'cagr':_v800_num(z.get('cagr')),
+        'pf':_v800_num(z.get('profit_factor')),
+        'maxdd':_v800_num(z.get('maxdd')),
+        'calmar':_v800_num(z.get('calmar')),
+        'wr':_v800_num(z.get('win_rate')),
+        'avg_trade':_v800_num(z.get('avg_trade')),
+        'stop_rate':_v800_num(z.get('stop_rate')),
+        'winner50_capture':_v800_num(z.get('winner50_capture')),
+        'winner100_capture':_v800_num(z.get('winner100_capture')),
+        'admissions':z.get('admitted_positions')
+    }
+
+def _v800_run():
+    global v800_thread
+    t0=time.time()
+    try:
+        _v800_write(status='running',phase='preflight',
+                    message='读取 V7.04–V7.17 已落盘结果；不重跑任何历史实验。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        sources={
+            'V7.04':_v800_read(V704_RESULT),
+            'V7.05':_v800_read(V705_RESULT),
+            'V7.06':_v800_read(V706_RESULT),
+            'V7.11':_v800_read(V711_RESULT),
+            'V7.13B':_v800_read(V713B_RESULT),
+            'V7.14':_v800_read(V714_RESULT),
+            'V7.15':_v800_read(V715_RESULT),
+            'V7.16':_v800_read(V716_RESULT),
+            'V7.17':_v800_read(V717_RESULT),
+        }
+        present={k:(v is not None) for k,v in sources.items()}
+        if sources['V7.04'] is None:
+            raise RuntimeError('V7.04 frozen benchmark missing; architecture review cannot anchor metrics')
+
+        _v800_write(status='running',phase='benchmark',
+                    message='锁定当前主基准 V7.04；提取风险控制与失败分支证据。',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        v704=sources['V7.04'];base=v704.get('B') or {}
+        base_row=_v800_metric_row('V7.04 Current Benchmark',base)
+
+        v706=sources.get('V7.06') or {}
+        hard_row=_v800_metric_row('V7.06 DEFENSIVE Hard Block',v706.get('B') or {})
+
+        v711=sources.get('V7.11') or {}
+        half_row=_v800_metric_row('V7.11 DEFENSIVE Half-Risk',v711.get('B') or {})
+
+        # Current core benchmark facts.
+        stop_rate=base_row['stop_rate']
+        wr=base_row['wr']
+        cagr=base_row['cagr']
+        pf=base_row['pf']
+        maxdd=base_row['maxdd']
+        calmar=base_row['calmar']
+
+        # Evidence registry: actual result artifacts only.
+        evidence=[]
+        def ev(version,verdict,meaning,category):
+            evidence.append({'version':version,'verdict':verdict or '—','meaning':meaning,'category':category})
+
+        ev('V7.04',v704.get('verdict'),
+           'Range20→Breakout50 lifted the economic benchmark, but the account still has very high STOP concentration and extreme drawdown.',
+           'benchmark')
+
+        if sources.get('V7.06'):
+            ev('V7.06',v706.get('verdict'),
+               'Blocking all new DEFENSIVE admissions materially improved MaxDD, but sacrificed CAGR; blunt regime blocking is not the final architecture.',
+               'risk')
+        if sources.get('V7.11'):
+            ev('V7.11',v711.get('verdict'),
+               'Fixed 0.50x DEFENSIVE sizing did not meet economic acceptance; nearby sizing-multiplier search remains closed.',
+               'risk')
+        if sources.get('V7.13B'):
+            ev('V7.13B',sources['V7.13B'].get('verdict'),
+               'PIT feature coverage was repaired to usable levels, yet selective DEFENSIVE entry DNA was not robust.',
+               'admission')
+        if sources.get('V7.14'):
+            ev('V7.14',sources['V7.14'].get('verdict'),
+               'Portfolio heat did not reliably separate STOP from Big Winner outcomes.',
+               'risk')
+        if sources.get('V7.15'):
+            top=(sources['V7.15'].get('top_robust') or [{}])[0]
+            ev('V7.15',sources['V7.15'].get('verdict'),
+               f"Early path geometry found one robust signal: {top.get('feature','d10_mae')} (diagnostic only); this did not justify reopening closed early-exit logic.",
+               'path')
+        if sources.get('V7.16'):
+            ev('V7.16',sources['V7.16'].get('verdict'),
+               'Lagged recent-cohort health did not robustly predict future admissions; no lookback/min-N/cutoff sweep.',
+               'context')
+        if sources.get('V7.17'):
+            ev('V7.17',sources['V7.17'].get('verdict'),
+               'Market breadth explains the bad 2007–2009 background descriptively, but lacked stable trade-level predictive strength; MaxDD micro-rule search closed.',
+               'context')
+
+        _v800_write(status='running',phase='gap_analysis',
+                    message='Architecture gap analysis：把“已证伪微规则”与“仍未解决结构问题”分开。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        # Architecture diagnosis. "Inference" is explicitly labeled and derives from elimination across frozen tests.
+        gaps=[]
+
+        # 1. Admission/source quality.
+        admission_severity='CRITICAL' if (stop_rate is not None and stop_rate>=.75) else 'HIGH'
+        gaps.append({
+            'rank':1,'gap':'Candidate Source / Admission Quality',
+            'severity':admission_severity,
+            'evidence':f"V7.04 STOP rate={stop_rate:.1%}, WR={wr:.1%}" if stop_rate is not None and wr is not None else 'V7.04 shows persistent STOP concentration.',
+            'interpretation':'The system is still admitting far too many setups that eventually stop. V7.13B/V7.14/V7.16/V7.17 show that small post-hoc filters are not fixing this.',
+            'status':'PRIMARY BOTTLENECK · inference by elimination',
+            'action':'Next research must change source-semantic candidate quality / setup-family architecture, not another numeric cutoff on the same candidate stream.'
+        })
+
+        # 2. Risk architecture.
+        if hard_row['maxdd'] is not None and maxdd is not None:
+            dd_imp=hard_row['maxdd']-maxdd
+        else:dd_imp=None
+        if hard_row['cagr'] is not None and cagr is not None:
+            cg_delta=hard_row['cagr']-cagr
+        else:cg_delta=None
+        gaps.append({
+            'rank':2,'gap':'Market/Risk Permission Architecture',
+            'severity':'HIGH',
+            'evidence':(
+                f"V7.06 MaxDD improvement={dd_imp:.1%}, CAGR delta={cg_delta:.1%}"
+                if dd_imp is not None and cg_delta is not None else
+                'V7.06 improved drawdown but reduced growth.'
+            ),
+            'interpretation':'There is real regime sensitivity, but all-or-nothing DEFENSIVE blocking and fixed half-risk are too blunt.',
+            'status':'REAL EFFECT, WRONG GRANULARITY',
+            'action':'Do not reopen regime threshold grids. Revisit only after candidate-source architecture changes, so risk control acts on a cleaner stream.'
+        })
+
+        # 3. Winner/exit.
+        v715=sources.get('V7.15') or {}
+        t=v715.get('timing_summary') or {}
+        gaps.append({
+            'rank':3,'gap':'Winner Capture / Exit',
+            'severity':'MEDIUM',
+            'evidence':(
+                f"V7.15 robust early-path DNA exists; +50/+100 median holding ≈ {t.get('win50_hold_td_median','—')}/{t.get('win100_hold_td_median','—')} trading days."
+            ),
+            'interpretation':'There is evidence that winners and stops differ early, but the closed V6.95–V7.00 early-exit branch already showed that simply recycling/early-exiting is not the answer.',
+            'status':'NOT PRIMARY UNTIL ENTRY QUALITY IMPROVES',
+            'action':'Freeze current winner-exit logic for the next architecture step.'
+        })
+
+        # 4. Position/heat.
+        gaps.append({
+            'rank':4,'gap':'Portfolio Heat / Fixed Sizing',
+            'severity':'LOW-MEDIUM',
+            'evidence':'V7.14 heat signal not robust; V7.11 fixed half-risk failed acceptance.',
+            'interpretation':'Position-count heat and one fixed risk multiplier do not explain the core edge gap.',
+            'status':'CLOSED FOR NOW',
+            'action':'No heat-cap or sizing-multiplier sweeps.'
+        })
+
+        # 5. Context/breadth.
+        gaps.append({
+            'rank':5,'gap':'External Market Context',
+            'severity':'MEDIUM',
+            'evidence':'V7.17 MaxDD window breadth was much weaker than outside, but pooled/stability AUCs were not robust.',
+            'interpretation':'Market context matters descriptively, but current breadth proxy is not a reliable standalone admission rule.',
+            'status':'BACKGROUND FACTOR, NOT STANDALONE EDGE',
+            'action':'Keep as context metadata; do not use as a hard rule yet.'
+        })
+
+        _v800_write(status='running',phase='jlaw_gap',
+                    message='JLaw gap：区分项目参考目标与当前实测，不虚构未验证指标。',
+                    processed=3,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        # Project reference supplied by user/materials; explicitly not independently validated here.
+        jlaw_ref={
+            'source':'Project/JLaw reference supplied in prior project materials; not independently re-measured in V8.00.',
+            'win_rate_reference':'roughly 40–50%',
+            'loss_behavior':'cut losses quickly / small controlled losses',
+            'winner_behavior':'allow relatively few winners to become very large',
+            'architecture_principle':'quality of what gets bought + asymmetric payoff matters more than maximizing hit rate alone'
+        }
+
+        # Quantitative gap we can safely compute from current benchmark.
+        wr_gap=None
+        if wr is not None:
+            wr_gap_low=.40-wr
+            wr_gap_high=.50-wr
+            wr_gap={'to_40pct':wr_gap_low,'to_50pct':wr_gap_high}
+
+        architecture_verdict='ARCHITECTURE_GAP_DOMINATED_BY_CANDIDATE_SOURCE_AND_ADMISSION_QUALITY'
+        if stop_rate is not None and stop_rate<.60:
+            architecture_verdict='ARCHITECTURE_GAP_MIXED_REQUIRES_REVIEW'
+
+        result={
+            'version':'V8.00 JLaw Gap & Architecture Review',
+            'build_id':V800_BUILD_ID,
+            'verdict':architecture_verdict,
+            'report_only':True,
+            'source_presence':present,
+            'current_benchmark':base_row,
+            'comparison_rows':[base_row,hard_row,half_row],
+            'evidence_registry':evidence,
+            'architecture_gaps':gaps,
+            'jlaw_project_reference':jlaw_ref,
+            'jlaw_win_rate_gap':wr_gap,
+            'hard_conclusions':[
+                'Stop searching V7.x MaxDD micro-rules: V7.17 closed that branch.',
+                'Do not reopen V6.15/V6.16/V6.95–V7.00 or V7.06–V7.17 parameter sweeps.',
+                'The next research axis must change candidate-source/setup-family semantics rather than add another cutoff to the same Actual-Buy stream.',
+                'Keep cache / Feature Store / Replay infrastructure frozen and reusable; no universe rescan is required for the next diagnostic.'
+            ],
+            'next_step':{
+                'version':'V8.01',
+                'name':'Source-Semantic Candidate Architecture Audit',
+                'goal':'Decompose existing candidate/Actual-Buy stream by setup-family/source semantics and identify which source families create STOP concentration vs +50/+100 winners.',
+                'constraints':'Use existing candidate cache + Actual-Buy ledger only. No universe rescan, no account replay, no threshold grid, no incumbent replacement, no early-exit.'
+            }
+        }
+
+        V800_DIR.mkdir(parents=True,exist_ok=True)
+        V800_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v800_write(status='done',phase='done',message=f'V8.00 完成：{architecture_verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v800_write(status='error',phase='error',message=f'V8.00 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v800_thread=None
+
+def _v800_start():
+    global v800_thread
+    if _v800_alive():return False
+    _v800_write(status='starting',phase='starting',message='V8.00 starting · report only',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v800_thread=threading.Thread(target=_v800_run,daemon=True);v800_thread.start();return True
+
+@APP.route('/v800/run',methods=['GET','POST'])
+def v800_run():_v800_start();return redirect('/v800')
+
+@APP.get('/api/v800/status')
+def v800_status():return jsonify(_v800_status())
+
+@APP.get('/v800')
+def v800_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v800_status();R={}
+    if V800_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V800_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.2f}%'
+        except:return '—'
+    def n2(x):
+        try:return f'{float(x):.2f}'
+        except:return '—'
+    rows=R.get('comparison_rows') or []
+    mrows=''.join(
+        f"<tr><td><b>{e(z.get('name'))}</b></td><td>{pc(z.get('cagr'))}</td><td>{n2(z.get('pf'))}</td><td>{pc(z.get('maxdd'))}</td><td>{n2(z.get('calmar'))}</td><td>{pc(z.get('wr'))}</td><td>{pc(z.get('stop_rate'))}</td><td>{z.get('admissions','—')}</td></tr>"
+        for z in rows
+    )
+    gaps=R.get('architecture_gaps') or []
+    grows=''.join(
+        f"<tr><td><b>#{z.get('rank')} {e(z.get('gap'))}</b></td><td>{e(z.get('severity'))}</td><td>{e(z.get('status'))}</td><td>{e(z.get('evidence'))}</td><td>{e(z.get('action'))}</td></tr>"
+        for z in gaps
+    )
+    evs=R.get('evidence_registry') or []
+    erows=''.join(
+        f"<tr><td><b>{e(z.get('version'))}</b></td><td>{e(z.get('verdict'))}</td><td>{e(z.get('meaning'))}</td></tr>"
+        for z in evs
+    )
+    J=R.get('jlaw_project_reference') or {}
+    N=R.get('next_step') or {}
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v800/run'><button>▶ Build / Refresh V8.00 Review</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.crit{{background:#fef2f2;border:2px solid #ef4444;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🏗️ V8.00 JLaw Gap & Architecture Review</h1><div class='ok'><b>阶段收口，不再磨 V7.x 小规则：</b>只读取 V7.04–V7.17 已落盘结果，回答真正差距在哪里。0 universe rescan · 0 account replay · 0 threshold sweep。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Architecture Verdict</h2><div class='crit'><b>{e(R.get('verdict','—'))}</b><br><br>当前最主要问题不是再找一个 MaxDD cutoff，而是 <b>Candidate Source / Admission Quality</b>：买进去的候选本身 STOP 浓度仍然太高。</div></div>
+<div class='c'><h2>Current Account Benchmark</h2><div style='overflow:auto'><table><tr><th>Version</th><th>CAGR</th><th>PF</th><th>MaxDD</th><th>Calmar</th><th>WR</th><th>STOP%</th><th>Admissions</th></tr>{mrows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Architecture Gap Ranking</h2><div style='overflow:auto'><table><tr><th>Gap</th><th>Severity</th><th>Status</th><th>Evidence</th><th>Action</th></tr>{grows or "<tr><td colspan='5'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>V7 Evidence Ledger</h2><div style='overflow:auto'><table><tr><th>Version</th><th>Verdict</th><th>What it means</th></tr>{erows or "<tr><td colspan='3'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>JLaw Project Reference</h2><p><b>参考胜率：</b>{e(J.get('win_rate_reference','—'))}<br><b>亏损：</b>{e(J.get('loss_behavior','—'))}<br><b>赢家：</b>{e(J.get('winner_behavior','—'))}</p><div class='warn'>这部分是项目中此前提供的 JLaw 参考框架，V8.00 不重新测量或虚构 JLaw 的公开业绩数字。</div></div>
+<div class='c'><h2>Next: {e(N.get('version','—'))} {e(N.get('name',''))}</h2><div class='warn'><b>目标：</b>{e(N.get('goal',''))}<br><br><b>约束：</b>{e(N.get('constraints',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v800/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
