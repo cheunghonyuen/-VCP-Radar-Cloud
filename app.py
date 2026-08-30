@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v716-home-card-real' style='background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v717-home-card-real' style='background:#f0fdf4;border:5px solid #16a34a;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🌐 V7.17 STOP Cluster / Market Breadth Audit</h2>
+        <p>最后三步第1步 · SPY + 11 sector ETF PIT breadth · diagnostic only.</p>
+        <a href='/v717'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.17</button></a>
+        </div>
+        <div id='v716-home-card-real' style='background:#ecfeff;border:5px solid #0891b2;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🩺 V7.16 Recent-Cohort Health Admission Audit</h2>
         <p>Lagged D10 MAE cohort health · diagnostic only · no exit/replay.</p>
         <a href='/v716'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V7.16</button></a>
@@ -50748,3 +50753,285 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>2007–2009 MaxDD Window</h2><p>Window health median={pc(D.get('window_health_median'))} · Outside={pc(D.get('outside_health_median'))}<br>Window STOP%={pc(D.get('window_stop_rate'))} · Outside STOP%={pc(D.get('outside_stop_rate'))}</p></div>
 <div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v716/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
+
+
+# ================= V7.17 STOP CLUSTER / MARKET BREADTH BREAKDOWN AUDIT =================
+# Diagnostic only. Uses existing SPY + 11 sector ETF caches as PIT breadth proxy.
+# No universe scan, no account replay, no admission rule, no threshold sweep.
+V717_DIR=DATA_DIR/'v717_stop_cluster_market_breadth_audit'
+V717_STATUS=V717_DIR/'status.json'
+V717_RESULT=V717_DIR/'result.json'
+V717_ROWS=V717_DIR/'actual_buy_breadth_rows.csv.gz'
+V717_BUILD_ID='V717_BREADTH_AUDIT_20260830A'
+v717_thread=None
+
+def _v717_status():
+    d={'build_id':V717_BUILD_ID,'status':'idle','phase':'idle','message':'Ready',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V717_STATUS.exists():
+        try:
+            x=json.loads(V717_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V717_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v717_write(**kw):
+    V717_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v717_status();x.update(kw);x['build_id']=V717_BUILD_ID
+    V717_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v717_alive():return v717_thread is not None and v717_thread.is_alive()
+
+def _v717_auc(y,x):
+    y=np.asarray(y,dtype=int);x=np.asarray(x,dtype=float)
+    ok=np.isfinite(x);y=y[ok];x=x[ok]
+    if len(y)<8 or len(set(y.tolist()))<2:return np.nan
+    p=x[y==1];n=x[y==0]
+    if not len(p) or not len(n):return np.nan
+    rr=pd.Series(np.r_[p,n]).rank(method='average').to_numpy()
+    rp=rr[:len(p)].sum()
+    return float((rp-len(p)*(len(p)+1)/2)/(len(p)*len(n)))
+
+def _v717_norm_market(d):
+    if d is None or len(d)==0:return None
+    x=d.copy()
+    try:x=x.reset_index()
+    except Exception:pass
+    lc={str(c).lower():c for c in x.columns}
+    dc=lc.get('date') or x.columns[0]
+    cc=lc.get('close') or lc.get('adjclose')
+    if cc is None:return None
+    z=pd.DataFrame({
+        'date':pd.to_datetime(x[dc],errors='coerce').dt.normalize(),
+        'close':pd.to_numeric(x[cc],errors='coerce')
+    }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+    if z.empty:return None
+    z['ma20']=z['close'].rolling(20).mean()
+    z['ma50']=z['close'].rolling(50).mean()
+    z['ret20']=z['close']/z['close'].shift(20)-1
+    return z.reset_index(drop=True)
+
+def _v717_asof_row(d,dt):
+    if d is None or len(d)==0:return None
+    x=d[d['date']<=pd.Timestamp(dt).normalize()]
+    return x.iloc[-1] if len(x) else None
+
+def _v717_run():
+    global v717_thread
+    t0=time.time()
+    try:
+        _v717_write(status='running',phase='preflight',
+                    message='Preflight：锁定 V7.04 exact 291 Actual Buys + SPY/11 sector ETF PIT caches。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 exact ledger missing')
+        if not V704_RESULT.exists():raise RuntimeError('V7.04 result missing')
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+        if len(L)!=291:raise RuntimeError(f'V7.04 ledger rows {len(L)} != 291')
+        for c in ['v704_row_id','listing_id','entry_date','ret','is_stop']:
+            if c not in L.columns:raise RuntimeError(f'V7.04 ledger missing {c}')
+        if not L['v704_row_id'].is_unique:raise RuntimeError('v704_row_id not unique')
+
+        R704=json.loads(V704_RESULT.read_text(encoding='utf-8'))
+        ref=R704.get('B') or {}
+        if int(ref.get('admitted_positions',0))!=291:
+            raise RuntimeError(f'V7.04 result admissions {ref.get("admitted_positions")} != 291')
+
+        L=L.copy()
+        L['entry_date']=pd.to_datetime(L['entry_date'],errors='coerce').dt.normalize()
+        L['ret']=pd.to_numeric(L['ret'],errors='coerce')
+        L['is_stop']=L['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+        L['is_50']=L['ret'].ge(.50)
+        L['is_100']=L['ret'].ge(1.0)
+
+        etfs=['XLK','XLY','XLC','XLF','XLV','XLP','XLI','XLE','XLU','XLB','XLRE']
+        caches={'SPY':_v717_norm_market(load_cached('SPY'))}
+        for e in etfs:caches[e]=_v717_norm_market(load_cached(e))
+
+        available=[e for e in etfs if caches.get(e) is not None and len(caches[e])>=60]
+        if caches['SPY'] is None or len(caches['SPY'])<60:
+            raise RuntimeError('SPY PIT cache unavailable')
+        if len(available)<8:
+            raise RuntimeError(f'Sector ETF breadth coverage too low: {len(available)}/11')
+
+        _v717_write(status='running',phase='breadth_build',
+                    message=f'构建 PIT breadth：sector ETFs available={len(available)}/11；不扫 universe。',
+                    processed=1,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        rows=[]
+        for _,r in L.iterrows():
+            dt=r.entry_date
+            vals=[]
+            for e in available:
+                rr=_v717_asof_row(caches[e],dt)
+                if rr is None:continue
+                vals.append({
+                    'above20':float(rr['close']>rr['ma20']) if np.isfinite(rr['ma20']) else np.nan,
+                    'above50':float(rr['close']>rr['ma50']) if np.isfinite(rr['ma50']) else np.nan,
+                    'ret20pos':float(rr['ret20']>0) if np.isfinite(rr['ret20']) else np.nan,
+                    'ret20':float(rr['ret20']) if np.isfinite(rr['ret20']) else np.nan
+                })
+            spyrow=_v717_asof_row(caches['SPY'],dt)
+            if not vals or spyrow is None:continue
+            V=pd.DataFrame(vals)
+            breadth20=float(V.above20.mean())
+            breadth50=float(V.above50.mean())
+            breadth_ret20=float(V.ret20pos.mean())
+            mean_sector_ret20=float(V.ret20.mean())
+            spy_ret20=float(spyrow['ret20']) if np.isfinite(spyrow['ret20']) else np.nan
+            row={
+                'v704_row_id':int(r.v704_row_id),'entry_date':dt,
+                'ret':float(r.ret) if np.isfinite(r.ret) else np.nan,
+                'is_stop':bool(r.is_stop),'is_50':bool(r.is_50),'is_100':bool(r.is_100),
+                'breadth_above20':breadth20,
+                'breadth_above50':breadth50,
+                'breadth_ret20_positive':breadth_ret20,
+                'mean_sector_ret20':mean_sector_ret20,
+                'spy_ret20':spy_ret20,
+                'breadth_composite':float(np.nanmean([breadth20,breadth50,breadth_ret20]))
+            }
+            rows.append(row)
+
+        X=pd.DataFrame(rows)
+        cov=float(len(X)/291.0)
+        if cov<.95:raise RuntimeError(f'Breadth feature coverage too low {cov:.1%}')
+        if not X['v704_row_id'].is_unique:raise RuntimeError('Breadth rows duplicate v704_row_id')
+        V717_DIR.mkdir(parents=True,exist_ok=True)
+        X.to_csv(V717_ROWS,index=False,compression='gzip')
+
+        _v717_write(status='running',phase='audit',
+                    message=f'Coverage={cov:.1%}。比较 STOP / +50 / +100 与市场广度恶化。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        features=['breadth_composite','breadth_above20','breadth_above50',
+                  'breadth_ret20_positive','mean_sector_ret20','spy_ret20']
+        targets={'NONSTOP':(~X.is_stop).astype(int),'WIN50':X.is_50.astype(int),'WIN100':X.is_100.astype(int)}
+        audits={}
+        for name,y in targets.items():
+            rr=[]
+            for f in features:
+                xv=pd.to_numeric(X[f],errors='coerce')
+                auc=_v717_auc(y,xv)
+                if not np.isfinite(auc):continue
+                direction='HIGHER_BETTER' if auc>=.5 else 'LOWER_BETTER'
+                rr.append({'feature':f,'direction':direction,
+                           'auc':float(auc),'oriented_auc':float(max(auc,1-auc)),
+                           'coverage':float(xv.notna().mean())})
+            audits[name]=sorted(rr,key=lambda z:(z['oriented_auc'],z['coverage']),reverse=True)
+
+        maps={k:{x['feature']:x for x in v} for k,v in audits.items()}
+        shared=[]
+        for f in features:
+            a=maps.get('NONSTOP',{}).get(f);b=maps.get('WIN50',{}).get(f);c=maps.get('WIN100',{}).get(f)
+            if not(a and b and c):continue
+            dirs=[a['direction'],b['direction'],c['direction']]
+            aucs=[a['oriented_auc'],b['oriented_auc'],c['oriented_auc']]
+            same=len(set(dirs))==1
+            robust=bool(same and dirs[0]=='HIGHER_BETTER' and min(aucs)>=.60 and min(a['coverage'],b['coverage'],c['coverage'])>=.95)
+            shared.append({'feature':f,'direction':dirs[0] if same else 'MIXED',
+                           'mean_oriented_auc':float(np.mean(aucs)),
+                           'min_oriented_auc':float(min(aucs)),
+                           'coverage':float(min(a['coverage'],b['coverage'],c['coverage'])),
+                           'robust':robust})
+        shared=sorted(shared,key=lambda z:(z['robust'],z['mean_oriented_auc'],z['min_oriented_auc']),reverse=True)
+        robust=[x for x in shared if x['robust']]
+
+        # Five-year stability on top candidate, fixed direction from pooled sample.
+        topf=shared[0]['feature'] if shared else 'breadth_composite'
+        main_dir=shared[0]['direction'] if shared else 'MIXED'
+        X['year']=pd.to_datetime(X.entry_date).dt.year
+        blocks=[]
+        ymin=int(X.year.min());ymax=int(X.year.max())
+        for lo in range(ymin,ymax+1,5):
+            g=X[X.year.between(lo,lo+4)]
+            a=_v717_auc((~g.is_stop).astype(int),pd.to_numeric(g[topf],errors='coerce'))
+            if np.isfinite(a):
+                d='HIGHER_BETTER' if a>=.5 else 'LOWER_BETTER'
+                blocks.append({'block':f'{lo}-{lo+4}','n':int(len(g)),
+                               'direction':d,'oriented_auc':float(max(a,1-a))})
+        cons=float(np.mean([b['direction']==main_dir for b in blocks])) if blocks and main_dir!='MIXED' else None
+        weakest=float(min([b['oriented_auc'] for b in blocks])) if blocks else None
+
+        # Known V7.05 MaxDD window.
+        dd_start=pd.Timestamp('2007-01-17');dd_end=pd.Timestamp('2009-03-03')
+        W=X[X.entry_date.between(dd_start,dd_end)]
+        O=X[~X.entry_date.between(dd_start,dd_end)]
+        dd={
+            'window_n':int(len(W)),
+            'window_breadth_composite_median':float(W.breadth_composite.median()) if len(W) else None,
+            'outside_breadth_composite_median':float(O.breadth_composite.median()) if len(O) else None,
+            'window_stop_rate':float(W.is_stop.mean()) if len(W) else None,
+            'outside_stop_rate':float(O.is_stop.mean()) if len(O) else None
+        }
+
+        # Promote only if robust AND top candidate stable across 5y blocks.
+        actionable=bool(robust and cons is not None and cons>=.60 and weakest is not None and weakest>=.55)
+        verdict='MARKET_BREADTH_BREAKDOWN_SIGNAL_FOUND' if actionable else 'NO_ROBUST_MARKET_BREADTH_BREAKDOWN_SIGNAL'
+
+        result={
+            'version':'V7.17 STOP Cluster / Market Breadth Breakdown Audit',
+            'build_id':V717_BUILD_ID,'verdict':verdict,
+            'actual_buy_rows':291,'feature_rows':int(len(X)),'coverage':cov,
+            'breadth_proxy':'PIT cross-sectional breadth of available 11 SPDR sector ETFs: fraction above MA20, above MA50, positive 20D return, mean sector 20D return; plus SPY 20D return.',
+            'sector_etfs_available':available,'sector_etf_count':len(available),
+            'audits':audits,'shared_candidates':shared,'top_robust':robust[:4],
+            'five_year_stability':{'feature':topf,'blocks':blocks,'direction_consistency':cons,'weakest_oriented_auc':weakest},
+            'maxdd_window':dd,
+            'acceptance':'Promote to V7.18 only if one breadth feature is HIGHER_BETTER for Non-STOP/+50/+100, min oriented AUC >=0.60, >=95% coverage, 5-year direction consistency >=60%, and weakest 5-year oriented AUC >=0.55. No cutoff selected here.',
+            'history_dedup':'Does not reopen V7.06/V7.11 DEFENSIVE blocking/sizing, V7.14 heat, V7.15 early-exit path, or V7.16 recent-cohort health. This is external market breadth context only.',
+            'boundaries':'Diagnostic only. No universe scan, no account replay, no admission block, no exit/sizing change, no threshold sweep.',
+            'next_step':('V7.18: exactly ONE predeclared breadth permission Native A/B, then V7.19 holdout confirmation if it passes.' if actionable
+                         else 'STOP the MaxDD micro-rule search here. Do not proceed to V7.18; move to architecture-level review against JLaw.')
+        }
+        V717_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v717_write(status='done',phase='done',message=f'V7.17 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v717_write(status='error',phase='error',message=f'V7.17 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=6,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v717_thread=None
+
+def _v717_start():
+    global v717_thread
+    if _v717_alive():return False
+    _v717_write(status='starting',phase='starting',message='V7.17 starting · preflight first',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v717_thread=threading.Thread(target=_v717_run,daemon=True);v717_thread.start();return True
+
+@APP.route('/v717/run',methods=['GET','POST'])
+def v717_run():_v717_start();return redirect('/v717')
+
+@APP.get('/api/v717/status')
+def v717_status():return jsonify(_v717_status())
+
+@APP.get('/v717')
+def v717_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v717_status();R={}
+    if V717_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V717_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    C=R.get('shared_candidates') or []
+    rows=''.join(f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('direction'))}</td><td>{n3(x.get('mean_oriented_auc'))}</td><td>{n3(x.get('min_oriented_auc'))}</td><td>{pc(x.get('coverage'))}</td><td>{'✅' if x.get('robust') else '—'}</td></tr>" for x in C)
+    S=R.get('five_year_stability') or {};D=R.get('maxdd_window') or {}
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v717/run'><button>▶ Run V7.17 Breadth Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🌐 V7.17 STOP Cluster / Market Breadth Breakdown Audit</h1><div class='ok'><b>最后三步 · 第1步：</b>只诊断市场广度是否解释 STOP cluster / MaxDD。使用现有 SPY + 11 sector ETF PIT caches，不扫 universe、不 replay、不调 threshold。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Coverage={pc(R.get('coverage'))} · Sector ETFs={R.get('sector_etf_count','—')}/11</p></div>
+<div class='c'><h2>Market Breadth DNA</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Dir</th><th>Mean AUC</th><th>Min AUC</th><th>Coverage</th><th>Robust</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>5-Year Stability</h2><p>Top={e(S.get('feature','—'))} · Direction consistency={pc(S.get('direction_consistency'))} · Weakest AUC={n3(S.get('weakest_oriented_auc'))}</p></div>
+<div class='c'><h2>2007–2009 MaxDD Window</h2><p>Window breadth median={pc(D.get('window_breadth_composite_median'))} · Outside={pc(D.get('outside_breadth_composite_median'))}<br>Window STOP%={pc(D.get('window_stop_rate'))} · Outside STOP%={pc(D.get('outside_stop_rate'))}</p></div>
+<div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v717/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1800)</script></div></body></html>"""
