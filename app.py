@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v813-home-card-real' style='background:#fff1f2;border:6px solid #e11d48;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v814-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧭 V8.14 Remaining-Open-Mechanism Ledger</h2>
+        <p>PASS / FAIL / CLOSED / DIAGNOSTIC / UNTESTED · 全历史架构查重 · 0 strategy test.</p>
+        <a href='/v814'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.14</button></a>
+        </div>
+        <div id='v813-home-card-real' style='background:#fff1f2;border:6px solid #e11d48;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧯 V8.13 STOP Failure Architecture Closure</h2>
         <p>Dedup V6.76–V6.83 + V7.15 · close repeated STOP-path research · 0 replay.</p>
         <a href='/v813'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.13</button></a>
@@ -54345,3 +54350,164 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>还剩什么：</b>{e(R.get('what_remains_open',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v813/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.14 REMAINING-OPEN-MECHANISM LEDGER =================
+# Ledger/dedup only. No strategy test.
+V814_DIR=DATA_DIR/'v814_remaining_open_mechanism_ledger'
+V814_STATUS=V814_DIR/'status.json'
+V814_RESULT=V814_DIR/'result.json'
+V814_BUILD_ID='V814_OPEN_MECHANISM_LEDGER_20260830A'
+v814_thread=None
+
+def _v814_status():
+    x={'build_id':V814_BUILD_ID,'status':'idle','phase':'idle','message':'Ready · ledger only',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V814_STATUS.exists():
+        try:
+            q=json.loads(V814_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V814_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v814_write(**kw):
+    V814_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v814_status();x.update(kw);x['build_id']=V814_BUILD_ID
+    V814_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v814_alive(): return v814_thread is not None and v814_thread.is_alive()
+
+def _v814_read_path(v):
+    try:
+        p=globals().get(v)
+        if p and Path(p).exists(): return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception: pass
+    return None
+
+def _v814_run():
+    global v814_thread
+    t0=time.time()
+    try:
+        _v814_write(status='running',phase='preflight',
+                    message='V8.14 只做架构总账：PASS / FAIL / CLOSED / DIAGNOSTIC / UNTESTED；禁止策略测试。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        # Explicit history ledger from frozen V6/V7 evidence. This is intentionally architecture-level:
+        # no threshold inference, no new trading semantics.
+        ledger=[
+          {'lever':'Candidate source / upstream generator semantics','history':'V6.44, V6.69, V6.94; V8.01–V8.12 audit',
+           'state':'CLOSED','economic':'Current three persisted paths share the same frozen Stage-2 stream; no economically distinct persisted non-current source was found.',
+           'why':'Source diversification cannot be claimed from downstream trigger variants.'},
+          {'lever':'Generic numeric candidate/admission ranking','history':'V6.90–V6.94; V7.01–V7.03/7.13B',
+           'state':'CLOSED','economic':'Entry-DNA / selective DEFENSIVE separation did not produce a robust source-consistent admission rule.',
+           'why':'Do not retune score/cutoff grids.'},
+          {'lever':'Hard market/regime admission block','history':'V7.06',
+           'state':'FAIL','economic':'MaxDD improved materially, but CAGR was sacrificed; blunt blocking failed final economics.',
+           'why':'Do not revive binary DEFENSIVE blocking.'},
+          {'lever':'Fixed defensive risk sizing / half-risk','history':'V7.11',
+           'state':'FAIL','economic':'Fixed 0.50x DEFENSIVE sizing did not meet economic acceptance.',
+           'why':'Nearby sizing-multiplier sweep closed.'},
+          {'lever':'Portfolio heat / crowding filter','history':'V7.14',
+           'state':'CLOSED','economic':'Portfolio heat did not robustly separate STOP from Big Winner outcomes.',
+           'why':'No heat-cap or sizing sweep.'},
+          {'lever':'Recent-cohort health admission','history':'V7.16',
+           'state':'CLOSED','economic':'Lagged recent-cohort health did not robustly predict future admissions.',
+           'why':'No lookback/min-N/cutoff sweep.'},
+          {'lever':'External market breadth / sector context','history':'V7.17',
+           'state':'DIAGNOSTIC','economic':'Breadth helped describe the 2007–2009 drawdown window but pooled/stability AUCs were not robust.',
+           'why':'Context metadata only; not a standalone admission edge.'},
+          {'lever':'Post-entry STOP timing/path management','history':'V6.76–V6.83; V6.95–V7.00; V7.15; V8.13 closure',
+           'state':'CLOSED','economic':'Washout, quick-profit ordering, STOP-day events, delayed entry, proved-strength states, early exit and D5/D10 path DNA already studied.',
+           'why':'No D-day sweep, stop widening, early-exit or capital-recycling reopen.'},
+          {'lever':'Winner exit / hold logic','history':'V6.7 winner-capture lineage + frozen current exit',
+           'state':'PASS','economic':'Existing winner-capture logic is a preserved strength; current architecture review does not identify exit as the dominant gap.',
+           'why':'Freeze while source/admission problem is unresolved.'},
+          {'lever':'Capacity / same-day opportunity selection','history':'V7.04 benchmark / Range20→Breakout50 economic A/B',
+           'state':'PASS','economic':'Range20→Breakout50 lifted the benchmark but STOP concentration and MaxDD remained extreme.',
+           'why':'Preserve current benchmark; not sufficient by itself.'},
+          {'lever':'Source-faithful alternate setup generator from existing corpus','history':'V8.04–V8.12 source audits',
+           'state':'CLOSED','economic':'Low Cheat / Cup-of-Handle / Pullback / Re-strength / Power Play lacked reproducible exact generator geometry in available source evidence.',
+           'why':'Do not invent proxy geometry or labels.'},
+          {'lever':'Opportunity-level parent lineage before Stage-2 / generator-level attribution','history':'V8.02–V8.12 provenance audits',
+           'state':'UNTESTED','economic':'Persisted caches preserve downstream identity but not the parent Stage-2 opportunity identity needed to attribute which upstream opportunity family creates STOP vs +50/+100 before trigger selection.',
+           'why':'This is data architecture, not another trading cutoff; exact parent lineage was the missing identity caveat in stream-diversity work.'},
+          {'lever':'Capacity competition / displacement quality at admission time','history':'V7.04 benchmark establishes 10-slot competition; no complete parent-opportunity counterfactual ledger',
+           'state':'UNTESTED','economic':'Current account results reveal which candidates were bought, but not whether a losing admission displaced a better same-day eligible opportunity from the same pre-trigger opportunity pool.',
+           'why':'Potentially explains poor capital allocation without changing exit/stop rules, but requires exact opportunity lineage first.'},
+        ]
+
+        _v814_write(status='running',phase='classify',
+                    message='历史杠杆已分类；现在只从真正 UNTESTED 中选最高价值下一步。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        open_rows=[x for x in ledger if x['state']=='UNTESTED']
+        # Predeclared ranking: prerequisite first, then direct relation to source/admission quality.
+        priority=[
+          {'rank':1,'lever':'Opportunity-level parent lineage before Stage-2 / generator-level attribution',
+           'reason':'Prerequisite for any honest upstream-source or displacement test. Without it, source-family attribution can be false.'},
+          {'rank':2,'lever':'Capacity competition / displacement quality at admission time',
+           'reason':'High economic relevance to 10-slot capital allocation, but cannot be tested causally until rank #1 lineage exists.'}
+        ]
+        selected=priority[0]['lever']
+
+        verdict='OPEN_LEDGER_COMPLETE_PARENT_OPPORTUNITY_LINEAGE_IS_HIGHEST_VALUE_UNTESTED_LEVER'
+        result={
+          'version':'V8.14 Remaining-Open-Mechanism Ledger',
+          'build_id':V814_BUILD_ID,'verdict':verdict,
+          'ledger':ledger,'open_mechanisms':open_rows,'priority':priority,
+          'selected_next':selected,
+          'architecture_conclusion':(
+            'The remaining gap is no longer another STOP micro-rule, defensive cutoff, heat filter, breadth filter, or alternate named setup. '
+            'The highest-value genuinely untested prerequisite is exact parent-opportunity lineage before Stage-2/trigger selection. '
+            'Until that identity is persisted, the system cannot honestly distinguish an upstream opportunity-quality problem from a downstream trigger/admission problem.'
+          ),
+          'v815_spec':(
+            'V8.15 must be a DATA-LINEAGE FEASIBILITY / RECOVERY audit only: determine whether existing Feature Store / historical artifacts contain '
+            'a stable parent opportunity identity (ticker/listing + opportunity date + source/generator identity) that can be joined through V6.44→V6.69→V6.94→V7.04. '
+            'If recoverable, persist the mapping. If not recoverable, return NOT_RECOVERABLE and stop. No universe rescan, no portfolio replay, no trading-rule test.'
+          ),
+          'boundaries':'0 universe scan, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 exit/stop/sizing/admission mutation.'
+        }
+        V814_DIR.mkdir(parents=True,exist_ok=True)
+        V814_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v814_write(status='done',phase='done',message=f'V8.14 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v814_write(status='error',phase='error',message=f'V8.14 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v814_thread=None
+
+def _v814_start():
+    global v814_thread
+    if _v814_alive():return False
+    _v814_write(status='starting',phase='starting',message='V8.14 starting · architecture ledger only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v814_thread=threading.Thread(target=_v814_run,daemon=True);v814_thread.start();return True
+
+@APP.route('/v814/run',methods=['GET','POST'])
+def v814_run():_v814_start();return redirect('/v814')
+
+@APP.get('/api/v814/status')
+def v814_status_api():return jsonify(_v814_status())
+
+@APP.get('/v814')
+def v814_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v814_status();R={}
+    if V814_RESULT.exists():
+        try:R=json.loads(V814_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    rows=''.join(f"<tr><td><b>{e(x['lever'])}</b></td><td>{e(x['history'])}</td><td><b>{e(x['state'])}</b></td><td>{e(x['economic'])}</td><td>{e(x['why'])}</td></tr>" for x in R.get('ledger',[]))
+    prs=''.join(f"<tr><td>#{x['rank']}</td><td><b>{e(x['lever'])}</b></td><td>{e(x['reason'])}</td></tr>" for x in R.get('priority',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v814/run'><button>▶ Run V8.14 Open-Ledger Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.14 Remaining-Open-Mechanism Ledger</h1><div class='g'><b>不再边做边发现重复：</b>一次把历史架构杠杆归档成 PASS / FAIL / CLOSED / DIAGNOSTIC / UNTESTED。V8.14 本身不做策略测试。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+<div class='c'><h2>Architecture Ledger</h2><div style='overflow:auto'><table><tr><th>Lever</th><th>History</th><th>State</th><th>Economic finding</th><th>Do / Don't</th></tr>{rows or "<tr><td colspan='5'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>真正还没做过的机制</h2><div style='overflow:auto'><table><tr><th>Priority</th><th>UNTESTED lever</th><th>Why now</th></tr>{prs or "<tr><td colspan='3'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='b'><b>Selected next:</b> {e(R.get('selected_next','—'))}<br><br><b>V8.15：</b>{e(R.get('v815_spec',''))}</div></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v814/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
