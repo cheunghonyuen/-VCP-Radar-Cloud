@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v811-home-card-real' style='background:#fef2f2;border:6px solid #dc2626;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v812-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧪 V8.12 Candidate-Stream Diversity Audit</h2>
+        <p>Frozen V6.44 paths · overlap + STOP/+50/+100/PF · no replay · no fake second source.</p>
+        <a href='/v812'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.12</button></a>
+        </div>
+        <div id='v811-home-card-real' style='background:#fef2f2;border:6px solid #dc2626;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🔒 V8.11 Cup-of-Handle Source Closure</h2>
         <p>Corpus-level dedup · count only independent source cases · close exact-geometry branch if still unsupported.</p>
         <a href='/v811'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.11</button></a>
@@ -53854,3 +53859,287 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>Architecture implication:</b> {e(R.get('architecture_implication',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v811/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.12 CANDIDATE-STREAM DIVERSITY AUDIT =================
+# Frozen-cache audit only. No universe scan, no Historical Cache reread, no account replay.
+# Purpose: test whether non-current persisted candidate/trigger paths already in V6.44 contain
+# economically different opportunities, while being explicit that they all originate from the
+# SAME upstream frozen Stage-2 candidate source and therefore do NOT prove source diversification.
+V812_DIR=DATA_DIR/'v812_candidate_stream_diversity_audit'
+V812_STATUS=V812_DIR/'status.json'
+V812_RESULT=V812_DIR/'result.json'
+V812_BUILD_ID='V812_STREAM_DIVERSITY_20260830A'
+v812_thread=None
+
+def _v812_status():
+    x={'build_id':V812_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · frozen-cache audit only',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V812_STATUS.exists():
+        try:
+            q=json.loads(V812_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V812_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v812_write(**kw):
+    V812_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v812_status();x.update(kw);x['build_id']=V812_BUILD_ID
+    V812_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v812_alive(): return v812_thread is not None and v812_thread.is_alive()
+
+def _v812_pf(ret):
+    a=pd.to_numeric(pd.Series(ret),errors='coerce').dropna()
+    if a.empty:return np.nan
+    gp=float(a[a>0].sum()); gl=float(-a[a<0].sum())
+    return float(gp/gl) if gl>0 else (np.inf if gp>0 else np.nan)
+
+def _v812_stats(df):
+    if df is None or df.empty:
+        return {'n':0,'listings':0,'years':0,'mean_ret':None,'median_ret':None,
+                'stop_rate':None,'winner50_rate':None,'winner100_rate':None,'pf':None}
+    z=df.copy()
+    z['ret']=pd.to_numeric(z.get('ret'),errors='coerce')
+    return {
+      'n':int(len(z)),
+      'listings':int(z['listing_id'].astype(str).nunique()) if 'listing_id' in z.columns else 0,
+      'years':int(pd.to_datetime(z['entry_date'],errors='coerce').dt.year.nunique()) if 'entry_date' in z.columns else 0,
+      'mean_ret':float(z['ret'].mean()) if z['ret'].notna().any() else None,
+      'median_ret':float(z['ret'].median()) if z['ret'].notna().any() else None,
+      'stop_rate':float(z['is_stop'].mean()) if 'is_stop' in z.columns and len(z) else None,
+      'winner50_rate':float(z['winner50'].mean()) if 'winner50' in z.columns and len(z) else None,
+      'winner100_rate':float(z['winner100'].mean()) if 'winner100' in z.columns and len(z) else None,
+      'pf':_v812_pf(z['ret'])
+    }
+
+def _v812_run():
+    global v812_thread
+    t0=time.time()
+    try:
+        _v812_write(status='running',phase='preflight',
+                    message='读取 V6.44 frozen trade cache；禁止 account replay / universe scan。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        if not V644_TRADE_CACHE.exists():
+            raise RuntimeError('V6.44 frozen trade cache missing')
+
+        X=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
+        need=['variant','listing_id','entry_date','entry_px','exit_date','exit_px','exit_reason']
+        miss=[c for c in need if c not in X.columns]
+        if miss: raise RuntimeError('V6.44 cache missing columns: '+','.join(miss))
+
+        X=X.copy()
+        X['variant']=X['variant'].astype(str)
+        X['listing_id']=X['listing_id'].astype(str)
+        X['entry_date']=pd.to_datetime(X['entry_date'],errors='coerce').dt.normalize()
+        X['exit_date']=pd.to_datetime(X['exit_date'],errors='coerce').dt.normalize()
+        X['entry_px']=pd.to_numeric(X['entry_px'],errors='coerce')
+        X['exit_px']=pd.to_numeric(X['exit_px'],errors='coerce')
+        X=X.dropna(subset=['entry_date','exit_date','entry_px','exit_px'])
+        X=X[(X.entry_px>0)&(X.exit_px>0)].copy()
+        X['ret']=X['exit_px']/X['entry_px']-1.0
+        X['is_stop']=X['exit_reason'].astype(str).str.upper().str.contains('STOP')
+        X['winner50']=X['ret']>=0.50
+        X['winner100']=X['ret']>=1.00
+        X['event_key']=X['listing_id']+'|'+X['entry_date'].dt.strftime('%Y-%m-%d')
+
+        variants=['CURRENT_TRIPLE_GATE','PIVOT_BREAKOUT_ALERT','TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT']
+        present=[v for v in variants if (X.variant==v).any()]
+        if 'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT' not in present:
+            raise RuntimeError('Current TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT path missing')
+
+        _v812_write(status='running',phase='inventory',
+                    message='构建 3 条已持久化 trigger paths 的 candidate-level经济画像。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        current='TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT'
+        C=X[X.variant.eq(current)].copy()
+        ckeys=set(C.event_key)
+        clids=set(C.listing_id)
+
+        rows=[]
+        for v in present:
+            Z=X[X.variant.eq(v)].copy()
+            keys=set(Z.event_key); lids=set(Z.listing_id)
+            exact_overlap=len(keys & ckeys)
+            exact_unique=len(keys-ckeys)
+            listing_overlap=len(lids & clids)
+            listing_unique=len(lids-clids)
+            st=_v812_stats(Z)
+            uniq=Z[~Z.event_key.isin(ckeys)].copy() if v!=current else Z.iloc[0:0].copy()
+            us=_v812_stats(uniq)
+            rows.append({
+              'variant':v,
+              'role':'CURRENT' if v==current else 'NON_CURRENT_PERSISTED_PATH',
+              **st,
+              'exact_event_overlap_with_current':int(exact_overlap),
+              'exact_event_overlap_rate':float(exact_overlap/max(1,len(keys))),
+              'exact_event_unique_vs_current':int(exact_unique),
+              'listing_overlap_with_current':int(listing_overlap),
+              'listing_overlap_rate':float(listing_overlap/max(1,len(lids))),
+              'listing_unique_vs_current':int(listing_unique),
+              'unique_event_stats_vs_current':us
+            })
+
+        _v812_write(status='running',phase='block_stability',
+                    message='检查 non-current unique trigger events 的 5-year block payoff 是否稳定。',
+                    processed=3,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        block_rows=[]
+        for v in [x for x in present if x!=current]:
+            Z=X[X.variant.eq(v) & ~X.event_key.isin(ckeys)].copy()
+            Z['year']=Z.entry_date.dt.year
+            if Z.empty:continue
+            y0=int(Z.year.min()); y1=int(Z.year.max())
+            start=(y0//5)*5
+            for a in range(start,y1+1,5):
+                g=Z[(Z.year>=a)&(Z.year<=a+4)]
+                if len(g)<20:continue
+                ss=_v812_stats(g)
+                block_rows.append({'variant':v,'block':f'{a}-{a+4}',**ss})
+
+        # Economic distinctness is descriptive only. It does NOT mean source diversification.
+        # Require meaningful exact-event uniqueness AND at least 3 usable 5Y blocks, then report
+        # whether unique-event payoff differs materially from the current path.
+        cur_stats=_v812_stats(C)
+        candidate_flags=[]
+        for r in rows:
+            if r['variant']==current:continue
+            u=r['unique_event_stats_vs_current']
+            blocks=[b for b in block_rows if b['variant']==r['variant']]
+            unique_share=float(r['exact_event_unique_vs_current']/max(1,r['n']))
+            enough_unique=bool(r['exact_event_unique_vs_current']>=500 and unique_share>=.10)
+            enough_blocks=bool(len(blocks)>=3)
+            econ_signal=bool(
+                u.get('n',0)>=500 and
+                u.get('pf') is not None and np.isfinite(u.get('pf')) and
+                (
+                    abs(float(u.get('winner100_rate') or 0)-float(cur_stats.get('winner100_rate') or 0))>=.01 or
+                    abs(float(u.get('stop_rate') or 0)-float(cur_stats.get('stop_rate') or 0))>=.03 or
+                    abs(float(u.get('median_ret') or 0)-float(cur_stats.get('median_ret') or 0))>=.03
+                )
+            )
+            candidate_flags.append({
+              'variant':r['variant'],
+              'unique_share':unique_share,
+              'usable_5y_blocks':len(blocks),
+              'enough_unique_events':enough_unique,
+              'enough_blocks':enough_blocks,
+              'economically_different_descriptive':econ_signal,
+              'candidate_path_diversity_signal':bool(enough_unique and enough_blocks and econ_signal)
+            })
+
+        _v812_write(status='running',phase='architecture_verdict',
+                    message='区分 trigger-path diversity 与真正 source diversification；禁止把同源路径误称第二水源。',
+                    processed=5,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        any_signal=any(x['candidate_path_diversity_signal'] for x in candidate_flags)
+        if any_signal:
+            verdict='PERSISTED_TRIGGER_PATH_DIVERSITY_FOUND_BUT_NOT_SOURCE_DIVERSIFICATION'
+            next_step=(
+              'V8.13 may inspect exactly ONE signaled non-current path as a descriptive challenger stream, '
+              'using frozen candidate rows only. Before any account A/B, provenance must explicitly record that '
+              'it shares the same upstream Stage-2 source and differs only in trigger archetype.'
+            )
+        else:
+            verdict='NO_ECONOMICALLY_DISTINCT_PERSISTED_NONCURRENT_PATH'
+            next_step=(
+              'Close frozen-path source-diversification. Do not rerun V6.44 or invent new pattern labels. '
+              'Move to the existing current stream and attack STOP reduction / Big-Winner capture / capital efficiency '
+              'with mechanisms not already closed by V7/V8 history.'
+            )
+
+        result={
+          'version':'V8.12 Candidate-Stream Diversity Audit',
+          'build_id':V812_BUILD_ID,
+          'verdict':verdict,
+          'current_path':current,
+          'cache_rows':int(len(X)),
+          'path_summary':rows,
+          'five_year_unique_event_blocks':block_rows,
+          'diversity_flags':candidate_flags,
+          'identity_caveat':(
+              'V6.44 persisted trigger entry identity (listing_id + trigger entry_date) but did not persist the parent Stage-2 '
+              'opportunity id/date for each variant row. Exact-event overlap is therefore conservative trigger-event overlap, '
+              'not exact parent-opportunity lineage overlap.'
+          ),
+          'architecture_fact':(
+              'All three V6.44 variants are generated from the same frozen Stage-2 candidate stream. '
+              'Even if non-current trigger events are economically different, they are NOT a genuinely different upstream source family.'
+          ),
+          'hard_rules':[
+              'Do not call CURRENT_TRIPLE_GATE or PIVOT_BREAKOUT_ALERT a second source family.',
+              'Do not rerun V6.44 account replay.',
+              'Do not use fuzzy listing/date matching to fabricate parent-opportunity identity.',
+              'Do not add a threshold/grid based on this descriptive audit.',
+              'Do not rebuild Historical Cache or universe.'
+          ],
+          'next_step':next_step,
+          'boundaries':'Frozen V6.44 cache only. 0 universe scan, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 strategy mutation.'
+        }
+
+        V812_DIR.mkdir(parents=True,exist_ok=True)
+        V812_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v812_write(status='done',phase='done',message=f'V8.12 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v812_write(status='error',phase='error',message=f'V8.12 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v812_thread=None
+
+def _v812_start():
+    global v812_thread
+    if _v812_alive():return False
+    _v812_write(status='starting',phase='starting',message='V8.12 starting · frozen cache only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v812_thread=threading.Thread(target=_v812_run,daemon=True);v812_thread.start();return True
+
+@APP.route('/v812/run',methods=['GET','POST'])
+def v812_run():_v812_start();return redirect('/v812')
+
+@APP.get('/api/v812/status')
+def v812_status_api():return jsonify(_v812_status())
+
+@APP.get('/v812')
+def v812_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v812_status();R={}
+    if V812_RESULT.exists():
+        try:R=json.loads(V812_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    def pc(x):
+        try:return f'{float(x)*100:.1f}%'
+        except:return '—'
+    def n2(x):
+        try:return f'{float(x):.2f}'
+        except:return '—'
+    rows=''
+    for x in R.get('path_summary',[]) or []:
+        u=x.get('unique_event_stats_vs_current') or {}
+        rows += (
+          f"<tr><td><b>{e(x.get('variant'))}</b></td><td>{e(x.get('role'))}</td><td>{x.get('n','—')}</td>"
+          f"<td>{pc(x.get('stop_rate'))}</td><td>{pc(x.get('winner50_rate'))}</td><td>{pc(x.get('winner100_rate'))}</td>"
+          f"<td>{n2(x.get('pf'))}</td><td>{pc(x.get('exact_event_overlap_rate'))}</td>"
+          f"<td>{x.get('exact_event_unique_vs_current','—')}</td><td>{u.get('n','—')}</td><td>{pc(u.get('stop_rate'))}</td>"
+          f"<td>{pc(u.get('winner100_rate'))}</td><td>{n2(u.get('pf'))}</td></tr>"
+        )
+    flags=''.join(
+      f"<tr><td><b>{e(x.get('variant'))}</b></td><td>{pc(x.get('unique_share'))}</td><td>{x.get('usable_5y_blocks')}</td>"
+      f"<td>{'✅' if x.get('enough_unique_events') else '—'}</td><td>{'✅' if x.get('enough_blocks') else '—'}</td>"
+      f"<td>{'✅' if x.get('economically_different_descriptive') else '—'}</td><td>{'✅' if x.get('candidate_path_diversity_signal') else '—'}</td></tr>"
+      for x in R.get('diversity_flags',[]) or []
+    )
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v812/run'><button>▶ Run V8.12 Diversity Audit</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧪 V8.12 Candidate-Stream Diversity Audit</h1><div class='g'><b>只查现有 frozen paths：</b>比较 V6.44 三条已持久化 trigger paths 的 exact trigger-event overlap 与 STOP/+50/+100/PF；绝不把同一 Stage-2 水源的不同 trigger 误称为“第二 source family”。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'><b>Architecture fact:</b> {e(R.get('architecture_fact',''))}<br><br><b>Identity caveat:</b> {e(R.get('identity_caveat',''))}</div></div>
+<div class='c'><h2>Persisted Path Economics</h2><div style='overflow:auto'><table><tr><th>Path</th><th>Role</th><th>N</th><th>STOP%</th><th>+50%</th><th>+100%</th><th>PF</th><th>Exact overlap</th><th>Unique events</th><th>Unique N</th><th>Unique STOP%</th><th>Unique +100%</th><th>Unique PF</th></tr>{rows or "<tr><td colspan='13'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Diversity Gate</h2><div style='overflow:auto'><table><tr><th>Path</th><th>Unique Share</th><th>5Y Blocks</th><th>Enough Unique</th><th>Enough Blocks</th><th>Economic Difference</th><th>Signal</th></tr>{flags or "<tr><td colspan='7'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v812/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
