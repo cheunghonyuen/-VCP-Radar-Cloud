@@ -46753,8 +46753,8 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v803-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>🧬 V8.03 Candidate Provenance Recovery</h2>
-        <p>Recover V6.44→V7.04 lineage · persist metadata only · 0 replay · 0 universe scan.</p>
+        <h2>🧬 V8.03B Candidate Provenance Recovery</h2>
+        <p>Fix verdict gate · recover V6.44→V7.04 lineage · persist metadata only · 0 replay.</p>
         <a href='/v803'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.03</button></a>
         </div>
         <div id='v802-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
@@ -51914,7 +51914,7 @@ V803_STATUS=V803_DIR/'status.json'
 V803_RESULT=V803_DIR/'result.json'
 V803_OVERLAY=V803_DIR/'candidate_provenance_overlay.csv.gz'
 V803_CONTRACT=V803_DIR/'provenance_contract.json'
-V803_BUILD_ID='V803_PROVENANCE_RECOVERY_20260830A'
+V803_BUILD_ID='V803B_PROVENANCE_RECOVERY_20260830B_VERDICT_FIX'
 v803_thread=None
 
 def _v803_status():
@@ -52040,7 +52040,11 @@ def _v803_run():
                     message=f'下游 lineage min coverage={chain_min:.1%}；构建 provenance overlay（仅在身份链充分时）。',
                     processed=4,total=7,elapsed_sec=round(time.time()-t0,2))
 
-        recoverable=bool(chain_min>=.99 and non_source_tags==0)
+        # Recovery gate is exact downstream lineage + the explicit V6.69 source filter.
+        # DO NOT require identities to be exclusive to one V6.44 variant:
+        # the same listing_id/entry_date can legitimately satisfy multiple V6.44 variants.
+        source_filter_verified=bool(o669['coverage']>=.99)
+        recoverable=bool(chain_min>=.99 and source_filter_verified)
         overlay_rows=0
 
         if recoverable:
@@ -52087,18 +52091,18 @@ def _v803_run():
                     processed=6,total=7,elapsed_sec=round(time.time()-t0,2))
 
         if recoverable:
-            verdict='SINGLE_SOURCE_LINEAGE_RECOVERED_AND_PERSISTED'
+            verdict='SOURCE_LINEAGE_RECOVERED_AND_PERSISTED'
             conclusion=(
-                'Current candidate stream is not a mixture of multiple upstream source families. '
-                'Its persisted lineage recovers to one source-supported trigger archetype: '
-                'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT. Therefore source-family filtering cannot solve '
-                'the admission-quality problem inside this stream; true architecture improvement '
-                'requires adding distinct upstream candidate/setup families with provenance preserved.'
+                'The V6.69 candidate stream is recoverable to the explicitly selected V6.44 source variant '
+                'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT, and every downstream identity handoff through V7.04 '
+                'passes at >=99% coverage. V6.44 identities may also appear in other variant outputs; that '
+                'overlap is diagnostic overlap, not evidence that V6.69 mixed those sources. Provenance is '
+                'therefore persisted from the code-selected source branch into a dedicated overlay.'
             )
             next_step=(
-                'V8.04 should be an upstream candidate-generator architecture design audit: identify '
-                'which genuinely distinct JLaw/Minervini setup families can be produced from existing '
-                'Feature Store without universe rescan. No portfolio replay yet.'
+                'V8.04: upstream candidate-generator architecture design audit. Identify genuinely distinct '
+                'JLaw/Minervini setup generators that can be built from the existing Feature Store, while '
+                'preserving literal provenance from generation time. No portfolio replay yet.'
             )
         else:
             verdict='PARTIAL_PROVENANCE_RECOVERY_IDENTITY_CHAIN_INCOMPLETE'
@@ -52116,7 +52120,9 @@ def _v803_run():
             'build_id':V803_BUILD_ID,'verdict':verdict,
             'v644_variant_counts':variants,
             'v669_matched_variant_counts':tag_counts,
-            'non_source_variant_matches':non_source_tags,
+            'non_source_variant_identity_overlaps':non_source_tags,
+            'identity_overlap_note':'Same listing_id/entry_date may satisfy multiple V6.44 variants; overlap is not treated as mixed provenance.',
+            'source_filter_verified':source_filter_verified,
             'source_variant':source_variant,
             'lineage_checks':chain,
             'lineage_min_coverage':chain_min,
@@ -52174,7 +52180,7 @@ def v803_page():
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>🧬 V8.03 Candidate Provenance Recovery / Persistence Repair</h1><div class='ok'><b>只修数据血缘：</b>验证 V6.44 → V6.69 → V6.94 → V7.02 → V7.04 exact identity lineage。身份链够完整才写 provenance overlay；不够就只报告断点。</div></div>
+<div class='c'><h1>🧬 V8.03B Candidate Provenance Recovery / Verdict Fix</h1><div class='ok'><b>只修数据血缘：</b>验证 V6.44 → V6.69 → V6.94 → V7.02 → V7.04 exact identity lineage。身份链够完整才写 provenance overlay；不够就只报告断点。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',7)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
 <div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Source variant: <b>{e(R.get('source_variant','—'))}</b><br>Lineage min coverage={pc(R.get('lineage_min_coverage'))} · Overlay rows={R.get('overlay_rows','—')}</p></div>
 <div class='c'><h2>V6.44 Source Variants</h2><table><tr><th>Variant</th><th>Rows</th></tr>{vrows or "<tr><td colspan='2'>—</td></tr>"}</table></div>
