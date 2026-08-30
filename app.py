@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v804-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v805-home-card-real' style='background:#fff7ed;border:6px solid #ea580c;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>📜 V8.05 Source-Faithful Generator Spec Lock</h2>
+        <p>Lock JLaw-supported semantics · dedup V6.39 · no proxy invention · report only.</p>
+        <a href='/v805'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.05</button></a>
+        </div>
+        <div id='v804-home-card-real' style='background:#fefce8;border:6px solid #ca8a04;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.04 Distinct Generator Architecture Audit</h2>
         <p>Do not rerun Breakout · audit Pullback / Re-strength / Power-Play prototypes · report only.</p>
         <a href='/v804'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.04</button></a>
@@ -52522,3 +52527,216 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Genuinely Distinct Generator Candidates</h2><div style='overflow:auto'><table><tr><th>Generator</th><th>Family</th><th>Prototype</th><th>Coverage</th><th>Avg MAE</th><th>BW20 Retention</th><th>Source Hits</th><th>Source Status</th><th>Feasible</th></tr>{crows or "<tr><td colspan='9'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='warn'><b>历史查重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v804/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.05 SOURCE-FAITHFUL GENERATOR SPEC LOCK =================
+# Report/spec lock only. Reuses V6.38/V6.39/V6.40 frozen artifacts.
+# No new backtest, no universe scan, no proxy rule invention.
+V805_DIR=DATA_DIR/'v805_source_faithful_generator_spec_lock'
+V805_STATUS=V805_DIR/'status.json'
+V805_RESULT=V805_DIR/'result.json'
+V805_BUILD_ID='V805_SOURCE_SPEC_LOCK_20260830A'
+v805_thread=None
+
+def _v805_status():
+    d={'build_id':V805_BUILD_ID,'status':'idle','phase':'idle','message':'Ready · source-spec lock only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V805_STATUS.exists():
+        try:
+            x=json.loads(V805_STATUS.read_text(encoding='utf-8'))
+            if x.get('build_id')==V805_BUILD_ID:d.update(x)
+        except Exception:pass
+    return d
+
+def _v805_write(**kw):
+    V805_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v805_status();x.update(kw);x['build_id']=V805_BUILD_ID
+    V805_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v805_alive(): return v805_thread is not None and v805_thread.is_alive()
+
+def _v805_read(path):
+    try:
+        p=Path(path)
+        if not p.exists():return None
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:return None
+
+def _v805_run():
+    global v805_thread
+    t0=time.time()
+    try:
+        _v805_write(status='running',phase='preflight',
+                    message='读取 V6.38 source audit + V6.39 stateful A/B + V6.40 bottleneck；不重跑。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        r638=_v805_read(V638_RESULT) if 'V638_RESULT' in globals() else None
+        r639=_v805_read(V639_RESULT) if 'V639_RESULT' in globals() else None
+        r640=_v805_read(V640_RESULT) if 'V640_RESULT' in globals() else None
+        r804=_v805_read(V804_RESULT)
+
+        if r638 is None: raise RuntimeError('V6.38 source audit result missing')
+        if r638.get('verdict')!='PULLBACK_ARM_SPEC_DRIFT_CONFIRMED':
+            raise RuntimeError(f'V6.38 source verdict drift: {r638.get("verdict")}')
+
+        _v805_write(status='running',phase='source_lock',
+                    message='锁定 source-supported 概念，并把 exact-rule-unverified 项明确列为禁止伪造。',
+                    processed=1,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        locked=[
+            {
+                'component':'SUPPORT_CONTEXT',
+                'status':'SOURCE_CONTEXT_SUPPORTED',
+                'locked_spec':'Treat Pivot / 10MA / 20MA as a support AREA / CONTEXT around the pullback.',
+                'forbidden_proxy':'Do not require same-day mathematical high/low overlap with an exact anchor unless source explicitly says so.'
+            },
+            {
+                'component':'PULLBACK_VOLUME_BEHAVIOR',
+                'status':'CONCEPT_SUPPORTED_EXACT_RULE_UNVERIFIED',
+                'locked_spec':'Treat quieter / drying volume as behavior over the pullback segment.',
+                'forbidden_proxy':'Do not require same-day volume < breakout volume AND volume < rolling-20 median as if it were JLaw exact.'
+            },
+            {
+                'component':'CONSTRUCTIVE_PULLBACK',
+                'status':'SOURCE_CONTEXT_SUPPORTED',
+                'locked_spec':'Model holds-support / tightens / does-not-break-down as a multi-bar state.',
+                'forbidden_proxy':'Do not reduce constructive behavior to one same-day close-above-anchor boolean.'
+            },
+            {
+                'component':'ARM_VS_TRIGGER',
+                'status':'SOURCE_CONTEXT_SUPPORTED',
+                'locked_spec':'Separate pullback setup state from execution trigger: STATEFUL_PULLBACK_AREA -> RE_STRENGTH.',
+                'forbidden_proxy':'Do not force support + quiet + constructive to occur on one bar.'
+            }
+        ]
+
+        unresolved=[
+            'Exact mechanical definition of re-strength confirmation.',
+            'Exact quantitative definition of quiet/drying volume.',
+            'Exact boundaries of the support area around Pivot/10MA/20MA.',
+            'Exact definition/timing of “first pullback”.',
+            'Exact execution timing / chase tolerance after confirmation.'
+        ]
+
+        _v805_write(status='running',phase='history_dedup',
+                    message='历史查重：V6.39 已经实现 STATEFUL_PULLBACK_AREA；禁止 V8.05 再包装成新策略。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        v639_summary={}
+        if r639:
+            v639_summary={
+                'verdict':r639.get('verdict'),
+                'opportunity_summary':r639.get('opportunity_summary'),
+                'changed_only':r639.get('changed_only'),
+                'source_basis':r639.get('source_basis'),
+                'acceptance':r639.get('acceptance')
+            }
+
+        v640_summary={}
+        dominant=None
+        if r640:
+            sm=r640.get('summary') or {}
+            dominant=sm.get('dominant_missed_100_stage')
+            v640_summary={
+                'verdict':r640.get('verdict'),
+                'summary':sm,
+                'definition':r640.get('definition')
+            }
+
+        # Decide what is genuinely still missing after V6.39/V6.40.
+        if r639 and r639.get('verdict')=='STATEFUL_ARM_CANDIDATE':
+            stateful_status='ALREADY_TESTED_AND_CANDIDATE'
+        elif r639:
+            stateful_status='ALREADY_TESTED_NOT_PASS'
+        else:
+            stateful_status='FROZEN_RESULT_MISSING'
+
+        if dominant:
+            next_question=f'Exact source-faithful mechanics for bottleneck stage: {dominant}'
+        else:
+            next_question='Exact re-strength trigger mechanics from source examples'
+
+        # No generator is production-ready until unresolved mechanics are source-verified.
+        verdict='SOURCE_SPEC_LOCKED_EXACT_TRIGGER_STILL_UNVERIFIED'
+        next_step=(
+            'V8.06 must be a SOURCE-EVIDENCE audit only: inspect the existing JLaw transcript/example cache '
+            f'for {next_question}. No backtest, no threshold grid, no new generator materialization until the '
+            'exact trigger semantics are supported. If source remains insufficient, mark the generator '
+            'UNVERIFIED rather than inventing a proxy.'
+        )
+
+        result={
+            'version':'V8.05 Source-Faithful Generator Spec Lock',
+            'build_id':V805_BUILD_ID,
+            'verdict':verdict,
+            'source_basis':'V6.38 transcript audit across 43 cached subtitle videos.',
+            'locked_components':locked,
+            'unresolved_exact_mechanics':unresolved,
+            'v639_stateful_history':v639_summary,
+            'v639_stateful_status':stateful_status,
+            'v640_bottleneck_history':v640_summary,
+            'dominant_missed_100_stage':dominant,
+            'v804_context':{
+                'verdict':(r804 or {}).get('verdict'),
+                'selected_generator':(r804 or {}).get('selected_generator')
+            },
+            'hard_dedup_rules':[
+                'Do not rerun V6.39 STATEFUL_PULLBACK_AREA as V8.x.',
+                'Do not restore V6.36 same-day exact-overlap + double-volume gate as “source faithful”.',
+                'Do not tune pullback-day windows, support tolerances, volume thresholds, or chase thresholds.',
+                'Do not call POWER_PLAY_PB source-faithful without direct source proof.'
+            ],
+            'boundaries':'Source/spec lock only. 0 universe scan, 0 Historical Cache replay, 0 account replay, 0 threshold sweep, 0 trading-rule activation.',
+            'next_step':next_step
+        }
+
+        V805_DIR.mkdir(parents=True,exist_ok=True)
+        V805_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v805_write(status='done',phase='done',message=f'V8.05 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v805_write(status='error',phase='error',message=f'V8.05 失败：{type(ex).__name__}: {ex}',
+                    processed=0,total=5,elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v805_thread=None
+
+def _v805_start():
+    global v805_thread
+    if _v805_alive():return False
+    _v805_write(status='starting',phase='starting',message='V8.05 starting · source-spec only',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v805_thread=threading.Thread(target=_v805_run,daemon=True);v805_thread.start();return True
+
+@APP.route('/v805/run',methods=['GET','POST'])
+def v805_run():_v805_start();return redirect('/v805')
+
+@APP.get('/api/v805/status')
+def v805_status():return jsonify(_v805_status())
+
+@APP.get('/v805')
+def v805_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    st=_v805_status();R={}
+    if V805_RESULT.exists() and st.get('status')=='done':
+        try:R=json.loads(V805_RESULT.read_text(encoding='utf-8'))
+        except Exception:R={}
+    L=R.get('locked_components') or []
+    rows=''.join(
+        f"<tr><td><b>{e(x.get('component'))}</b></td><td>{e(x.get('status'))}</td><td>{e(x.get('locked_spec'))}</td><td>{e(x.get('forbidden_proxy'))}</td></tr>"
+        for x in L
+    )
+    U=R.get('unresolved_exact_mechanics') or []
+    ul=''.join(f"<li>{e(x)}</li>" for x in U)
+    btn="" if st.get('status') in ['running','starting'] else "<form method='post' action='/v805/run'><button>▶ Build V8.05 Source Spec</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>📜 V8.05 Source-Faithful Generator Spec Lock</h1><div class='ok'><b>不再把 proxy 当 JLaw 原规则：</b>直接锁定字幕审计真正支持的 Pullback / Support / Volume / Re-strength 概念，并把 exact-rule-unverified 项列为禁止伪造。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{("<pre>"+e(st.get('traceback'))+"</pre>") if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>V6.39 stateful status: <b>{e(R.get('v639_stateful_status','—'))}</b><br>V6.40 dominant missed +100 stage: <b>{e(R.get('dominant_missed_100_stage','—'))}</b></p></div>
+<div class='c'><h2>Locked Source-Faithful Components</h2><div style='overflow:auto'><table><tr><th>Component</th><th>Status</th><th>Locked Spec</th><th>Forbidden Proxy</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Still Unverified — Do Not Invent</h2><ul>{ul or '<li>—</li>'}</ul></div>
+<div class='c'><div class='warn'><b>历史查重：</b>V6.39 已经做过 STATEFUL_PULLBACK_AREA A/B；V8.05 不重跑、不改名重做。<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v805/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
