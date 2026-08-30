@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v812-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v813-home-card-real' style='background:#fff1f2;border:6px solid #e11d48;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧯 V8.13 STOP Failure Architecture Closure</h2>
+        <p>Dedup V6.76–V6.83 + V7.15 · close repeated STOP-path research · 0 replay.</p>
+        <a href='/v813'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.13</button></a>
+        </div>
+        <div id='v812-home-card-real' style='background:#eff6ff;border:6px solid #2563eb;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧪 V8.12 Candidate-Stream Diversity Audit</h2>
         <p>Frozen V6.44 paths · overlap + STOP/+50/+100/PF · no replay · no fake second source.</p>
         <a href='/v812'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.12</button></a>
@@ -54143,3 +54148,200 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Diversity Gate</h2><div style='overflow:auto'><table><tr><th>Path</th><th>Unique Share</th><th>5Y Blocks</th><th>Enough Unique</th><th>Enough Blocks</th><th>Economic Difference</th><th>Signal</th></tr>{flags or "<tr><td colspan='7'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v812/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.13 STOP FAILURE ARCHITECTURE CLOSURE =================
+# Historical dedup/closure only.
+# IMPORTANT: STOP failure decomposition was already studied extensively in V6.76-V6.83 and V7.15.
+# V8.13 MUST NOT repeat D5/D10 MAE/MFE, washout recovery, STOP-day event classifiers, entry-delay,
+# or proved-then-stopped state diagnostics.
+V813_DIR=DATA_DIR/'v813_stop_failure_architecture_closure'
+V813_STATUS=V813_DIR/'status.json'
+V813_RESULT=V813_DIR/'result.json'
+V813_BUILD_ID='V813_STOP_FAILURE_CLOSURE_20260830A'
+v813_thread=None
+
+def _v813_status():
+    x={'build_id':V813_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · historical closure only',
+       'processed':0,'total':5,'elapsed_sec':0,'error':None,'traceback':None}
+    if V813_STATUS.exists():
+        try:
+            q=json.loads(V813_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V813_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v813_write(**kw):
+    V813_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v813_status();x.update(kw);x['build_id']=V813_BUILD_ID
+    V813_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v813_alive():return v813_thread is not None and v813_thread.is_alive()
+
+def _v813_read(name):
+    p=globals().get(name)
+    try:
+        if p and Path(p).exists():
+            return json.loads(Path(p).read_text(encoding='utf-8'))
+    except Exception:pass
+    return None
+
+def _v813_run():
+    global v813_thread
+    t0=time.time()
+    try:
+        _v813_write(status='running',phase='preflight',
+                    message='历史查重：STOP failure timing/path/recovery/state branches 已在 V6.76–V6.83、V7.15 做过。',
+                    processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+
+        artifacts={}
+        for ver,var in [
+            ('V6.76','V676_RESULT'),('V6.77','V677_RESULT'),('V6.78','V678_RESULT'),
+            ('V6.79','V679_RESULT'),('V6.80','V680_RESULT'),('V6.81','V681_RESULT'),
+            ('V6.82','V682_RESULT'),('V6.83','V683_RESULT'),('V7.15','V715_RESULT')
+        ]:
+            r=_v813_read(var)
+            artifacts[ver]={'present':bool(r),'verdict':(r or {}).get('verdict'),'version':(r or {}).get('version')}
+
+        _v813_write(status='running',phase='history_map',
+                    message='整理已关闭的 STOP 机制：washout、quick-profit、stop-day classifier、entry delay、proved-strength state、D5/D10 path DNA。',
+                    processed=2,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        ledger=[
+          {
+            'branch':'Big-Winner washout / recovery after STOP',
+            'history':'V6.76 / V6.78',
+            'state':'DONE_DIAGNOSTIC',
+            'conclusion':'Post-stop recovery/washout was explicitly measured. This does not authorize wider stops or breakeven changes.'
+          },
+          {
+            'branch':'Quick-profit path ordering',
+            'history':'V6.77',
+            'state':'DONE_DIAGNOSTIC',
+            'conclusion':'Short-horizon target-before-adverse-path ordering was already measured with same-day ambiguity handled conservatively.'
+          },
+          {
+            'branch':'Close-confirmed / STOP-day price-volume event classifier',
+            'history':'V6.79 / V6.80 / V6.81',
+            'state':'CLOSED',
+            'conclusion':'Simple STOP-day confirmation / price-volume separation was too weak for a safe regime switch.'
+          },
+          {
+            'branch':'Mechanical D+1 / D+3 entry delay',
+            'history':'V6.82',
+            'state':'CLOSED',
+            'conclusion':'Mechanical delayed entry was already tested and rejected as the STOP solution.'
+          },
+          {
+            'branch':'Proved-then-stopped winner state',
+            'history':'V6.83',
+            'state':'DONE_DIAGNOSTIC',
+            'conclusion':'Proof-before-stop states were explicitly analyzed with completed-session ordering; no mechanical stop switch was approved.'
+          },
+          {
+            'branch':'D5 / D10 early failure path DNA',
+            'history':'V7.15',
+            'state':'DONE_DIAGNOSTIC',
+            'conclusion':'D5/D10 close return, MFE, MAE and never-green were already compared across STOP / Non-STOP / +50 / +100. Do not rerun or sweep days.'
+          },
+          {
+            'branch':'Early-exit / capital recycling',
+            'history':'V6.95–V7.00',
+            'state':'CLOSED',
+            'conclusion':'Early-exit/capital-recycling branch was already explored and explicitly excluded from V7.15 reopening.'
+          }
+        ]
+
+        closed=[
+          'Do not rerun D5/D10 MAE/MFE/never-green diagnostics.',
+          'Do not sweep D3/D5/D7/D10/D15 failure days.',
+          'Do not reopen close-confirmed STOP or STOP-day volume classifiers.',
+          'Do not retry D+1/D+3 delayed entry as a new V8 idea.',
+          'Do not widen fixed stop because some stopped names later recover.',
+          'Do not create a proved-strength stop regime switch without new source-supported semantics.',
+          'Do not reopen V6.95–V7.00 early-exit/capital-recycling.'
+        ]
+
+        _v813_write(status='running',phase='closure',
+                    message='STOP failure-decomposition branch formally closed; prevent duplicate V8 experiments.',
+                    processed=4,total=5,elapsed_sec=round(time.time()-t0,2))
+
+        verdict='STOP_FAILURE_DECOMPOSITION_ALREADY_EXHAUSTIVELY_STUDIED_BRANCH_CLOSED'
+        result={
+          'version':'V8.13 STOP Failure Architecture Closure',
+          'build_id':V813_BUILD_ID,
+          'verdict':verdict,
+          'runtime_artifacts':artifacts,
+          'closure_ledger':ledger,
+          'closed_actions':closed,
+          'architecture_conclusion':(
+              'The ~90% STOP burden is real, but post-entry failure timing/path anatomy is NOT an unstudied area. '
+              'Multiple earlier branches already decomposed early MAE/MFE, never-green behavior, washout recovery, STOP-day events, '
+              'entry delay, proved-strength states and early-exit/capital-recycling. Repeating those diagnostics under V8 would be duplicate research.'
+          ),
+          'what_remains_open':(
+              'A genuinely new mechanism must live outside the closed post-entry timing/stop-management family. '
+              'The next candidate should be selected only after a full architecture-ledger dedup against V6.84–V7.17, '
+              'rather than naming another STOP micro-rule first.'
+          ),
+          'next_step':(
+              'V8.14 should be a REMAINING-OPEN-MECHANISM ledger: scan the existing V6.84–V7.17 result artifacts and classify every '
+              'architecture lever as PASS / FAIL / CLOSED / DIAGNOSTIC / UNTESTED. Only the highest-value truly UNTESTED lever may become V8.15. '
+              'No strategy test in V8.14.'
+          ),
+          'boundaries':'Historical closure only. 0 universe scan, 0 Historical Cache reread, 0 account replay, 0 threshold sweep, 0 strategy mutation.'
+        }
+
+        V813_DIR.mkdir(parents=True,exist_ok=True)
+        V813_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v813_write(status='done',phase='done',message=f'V8.13 完成：{verdict}',
+                    processed=5,total=5,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+    except Exception as ex:
+        _v813_write(status='error',phase='error',message=f'V8.13 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v813_thread=None
+
+def _v813_start():
+    global v813_thread
+    if _v813_alive():return False
+    _v813_write(status='starting',phase='starting',message='V8.13 starting · history closure first',
+                processed=0,total=5,elapsed_sec=0,error=None,traceback=None)
+    v813_thread=threading.Thread(target=_v813_run,daemon=True);v813_thread.start();return True
+
+@APP.route('/v813/run',methods=['GET','POST'])
+def v813_run():_v813_start();return redirect('/v813')
+
+@APP.get('/api/v813/status')
+def v813_status_api():return jsonify(_v813_status())
+
+@APP.get('/v813')
+def v813_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v813_status();R={}
+    if V813_RESULT.exists():
+        try:R=json.loads(V813_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    L=R.get('closure_ledger') or []
+    rows=''.join(
+      f"<tr><td><b>{e(x.get('branch'))}</b></td><td>{e(x.get('history'))}</td><td>{e(x.get('state'))}</td><td>{e(x.get('conclusion'))}</td></tr>"
+      for x in L
+    )
+    A=R.get('runtime_artifacts') or {}
+    arows=''.join(
+      f"<tr><td><b>{e(k)}</b></td><td>{'✅' if v.get('present') else '—'}</td><td>{e(v.get('verdict') or '—')}</td></tr>"
+      for k,v in A.items()
+    )
+    closed=''.join(f"<li>{e(x)}</li>" for x in R.get('closed_actions',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v813/run'><button>▶ Run V8.13 STOP Closure</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧯 V8.13 STOP Failure Architecture Closure</h1><div class='g'><b>先查重，避免再做一次：</b>STOP 的 D5/D10 path、washout、STOP-day classifier、entry delay、proved-strength state 其实都已经在 V6/V7 做过。V8.13 正式关闭重复分支。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',5)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='o'>{e(R.get('architecture_conclusion',''))}</div></div>
+<div class='c'><h2>STOP Branch Closure Ledger</h2><div style='overflow:auto'><table><tr><th>Mechanism</th><th>History</th><th>State</th><th>Conclusion</th></tr>{rows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Runtime Artifact Check</h2><div style='overflow:auto'><table><tr><th>Version</th><th>Present</th><th>Verdict</th></tr>{arows or "<tr><td colspan='3'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>还剩什么：</b>{e(R.get('what_remains_open',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v813/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
