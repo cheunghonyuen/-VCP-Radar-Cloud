@@ -55554,7 +55554,7 @@ V818_STATUS=V818_DIR/'status.json'
 V818_RESULT=V818_DIR/'result.json'
 V818_FEATURES=V818_DIR/'feature_separation.csv.gz'
 V818_BUYS=V818_DIR/'actual_buy_labeled.csv.gz'
-V818_BUILD_ID='V818B_BIGWIN_STOP_DUP_GRAIN_SAFE_20260830A'
+V818_BUILD_ID='V818C_IDENTITY_SAFE_ECON_GRAIN_20260830A'
 v818_thread=None
 
 def _v818_status():
@@ -55628,7 +55628,14 @@ def _v818_run():
 
             G=D.loc[dupmask].copy()
             duplicate_keys=int(G[k].drop_duplicates().shape[0])
-            payload=[c for c in D.columns if c not in k]
+            # Row IDs / lineage IDs are technical identity metadata, not economic grain.
+            # They may legitimately differ for duplicated ledger representations of the
+            # same listing_id + entry_date. Never let them create a false economic conflict.
+            identity_cols={
+                'v704_row_id','v702_row_id','stage2_row_id','parent_opportunity_id',
+                'candidate_order','row_id','source_row_id','ledger_row_id'
+            }
+            payload=[c for c in D.columns if c not in k and c not in identity_cols]
 
             conflict_cols=set()
             conflict_keys=0
