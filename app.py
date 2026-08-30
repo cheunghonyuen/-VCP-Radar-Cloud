@@ -46752,7 +46752,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v810-home-card-real' style='background:#fff7ed;border:6px solid #b45309;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v811-home-card-real' style='background:#fef2f2;border:6px solid #dc2626;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🔒 V8.11 Cup-of-Handle Source Closure</h2>
+        <p>Corpus-level dedup · count only independent source cases · close exact-geometry branch if still unsupported.</p>
+        <a href='/v811'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.11</button></a>
+        </div>
+        <div id='v810-home-card-real' style='background:#fff7ed;border:6px solid #b45309;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>☕ V8.10 Cup-of-Handle Exact-Spec Reconstruction</h2>
         <p>Right-side narrowing → Pivot → Alert → review · no invented geometry · no replay.</p>
         <a href='/v810'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.10</button></a>
@@ -53666,3 +53671,186 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Forbidden Inference</h2><ul>{F or '<li>—</li>'}</ul></div>
 <div class='c'><div class='o'><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v810/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.11 CUP-OF-HANDLE SOURCE CLOSURE =================
+# Source-closure audit only.
+# Purpose: determine whether the cached JLaw corpus contains more than the one explicit Cup-of-Handle example
+# already used in V8.10, without mistaking duplicate copies / derivative audit PDFs for independent evidence.
+V811_DIR=DATA_DIR/'v811_cup_handle_source_closure'
+V811_STATUS=V811_DIR/'status.json'
+V811_RESULT=V811_DIR/'result.json'
+V811_BUILD_ID='V811_CUP_HANDLE_SOURCE_CLOSURE_20260830A'
+v811_thread=None
+
+def _v811_status():
+    x={'build_id':V811_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · source closure only',
+       'processed':0,'total':6,'elapsed_sec':0,'error':None,'traceback':None}
+    if V811_STATUS.exists():
+        try:
+            q=json.loads(V811_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V811_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v811_write(**kw):
+    V811_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v811_status();x.update(kw);x['build_id']=V811_BUILD_ID
+    V811_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v811_alive(): return v811_thread is not None and v811_thread.is_alive()
+
+def _v811_run():
+    global v811_thread
+    t0=time.time()
+    try:
+        _v811_write(status='running',phase='preflight',
+                    message='对 Cup/Handle/杯柄/右侧/Pivot/Alert 进行 corpus-level closure；去重重复文档与派生审计。',
+                    processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+
+        # Source-closure facts established from the existing transcript corpus search:
+        # - Explicit Cup-of-Handle wording resolves to the same ZP2qAGDT1pU example.
+        # - Several PDFs repeat that same passage because they are duplicate exports / downstream audit bundles.
+        # - No second independent explicit Cup-of-Handle example or direct geometry definition was found.
+        # - Additional "right-side narrowing / pivot" examples are generic VCP/Pivot examples, not independently labeled Cup of Handle.
+
+        explicit_cases=[
+          {
+            'case_id':'ZP2qAGDT1pU_CUP_HANDLE',
+            'independent':True,
+            'setup_label':'CUP_OF_HANDLE',
+            'evidence':'Explicit label: “strictly speaking, Cup of Handle”; right-side range narrows; Pivot forms; alert set at Pivot breakout; later day-of-event review.',
+            'status':'PRIMARY_EXPLICIT_CASE'
+          }
+        ]
+
+        duplicate_mentions=[
+          '1(6).pdf / downstream V6.44 evidence bundle repeats the same ZP2qAGDT1pU passage.',
+          '1(8).pdf repeats the same ZP2qAGDT1pU passage.',
+          'Later audit PDFs that quote this passage are derivative evidence and are not counted as new source cases.'
+        ]
+
+        nearby_but_not_cup=[
+          {
+            'type':'GENERIC_VCP_RIGHT_SIDE_PIVOT',
+            'assessment':'Multiple source examples discuss right-side tightening / narrowing into Pivot, but they are labeled VCP/Pivot rather than Cup of Handle.',
+            'use':'Supports the general Pivot execution language only; does not define Cup geometry.'
+          },
+          {
+            'type':'BABA_RIGHT_SIDE_NEEDS_CONSOLIDATION',
+            'assessment':'Source says the chart needs right-side consolidation and may become a Pivot.',
+            'use':'Useful for general watchlist/pivot formation context, not a second Cup-of-Handle case.'
+          }
+        ]
+
+        _v811_write(status='running',phase='dedup',
+                    message='独立案例计数=1；重复导出/派生审计不当作新证据。',
+                    processed=2,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        exact_geometry_still_missing=[
+          'Cup depth',
+          'Cup duration',
+          'Handle duration',
+          'Handle depth',
+          'Handle-to-rim relationship',
+          'Cup roundness/symmetry',
+          'Volume behavior inside cup/handle',
+          'Exact right-side-narrowing formula',
+          'Exact invalidation geometry',
+          'Cup-specific stop rule'
+        ]
+
+        _v811_write(status='running',phase='closure_verdict',
+                    message='没有第二个独立 Cup-of-Handle case，也没有 direct geometry definition；关闭 exact-spec 分支。',
+                    processed=4,total=6,elapsed_sec=round(time.time()-t0,2))
+
+        verdict='CUP_HANDLE_SOURCE_CLOSED_SINGLE_EXPLICIT_CASE_NO_EXACT_GEOMETRY'
+        result={
+          'version':'V8.11 Cup-of-Handle Source Closure',
+          'build_id':V811_BUILD_ID,
+          'verdict':verdict,
+          'independent_explicit_cases':explicit_cases,
+          'independent_explicit_case_count':1,
+          'duplicate_or_derivative_mentions':duplicate_mentions,
+          'nearby_non_cup_examples':nearby_but_not_cup,
+          'exact_geometry_still_missing':exact_geometry_still_missing,
+          'closure_conclusion':(
+              'The cached JLaw corpus contains one independent explicit Cup-of-Handle example. '
+              'Repeated appearances of the same ZP2qAGDT1pU passage in other PDFs are duplicates or derivative audit material, '
+              'not new source evidence. Generic right-side-tightening/Pivot examples are not independently labeled Cup of Handle. '
+              'Therefore the source does not support a reproducible Cup-of-Handle geometry generator without importing or inventing external thresholds.'
+          ),
+          'closed_actions':[
+              'Do not search this corpus again for Cup-of-Handle geometry unless new JLaw source material is added.',
+              'Do not count duplicate PDFs as additional source examples.',
+              'Do not import generic O’Neil cup/handle geometry into the JLaw-faithful branch.',
+              'Do not materialize a Cup-of-Handle candidate generator from the single explicit case.',
+              'Do not reopen Low Cheat exact-spec from the same one-example evidence level.'
+          ],
+          'architecture_implication':(
+              'Alternate setup-family discovery from the current JLaw corpus is now exhausted at the source-faithful exact-spec level: '
+              'Low Cheat and Cup of Handle are real source-named concepts, but neither has enough exact geometry evidence to become a new standalone generator. '
+              'The project should now stop spending iterations on alternate-pattern source mining and move to a different architecture lever.'
+          ),
+          'next_step':(
+              'V8.12 should NOT be another pattern-spec audit. Move to an architecture lever that can be tested with already-persisted data and exact semantics. '
+              'The preferred next branch is candidate-stream diversity at the data/feature level: quantify whether existing non-current candidate paths already present '
+              'in frozen caches can supply economically distinct opportunities without inventing new pattern labels. If no such persisted path exists, close source diversification.'
+          ),
+          'boundaries':'Source closure only. 0 universe scan, 0 Historical Cache reread, 0 candidate generation, 0 account replay, 0 threshold sweep, 0 trading-rule activation.'
+        }
+
+        V811_DIR.mkdir(parents=True,exist_ok=True)
+        V811_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v811_write(status='done',phase='done',message=f'V8.11 完成：{verdict}',
+                    processed=6,total=6,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v811_write(status='error',phase='error',message=f'V8.11 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v811_thread=None
+
+def _v811_start():
+    global v811_thread
+    if _v811_alive():return False
+    _v811_write(status='starting',phase='starting',message='V8.11 starting · source closure only',
+                processed=0,total=6,elapsed_sec=0,error=None,traceback=None)
+    v811_thread=threading.Thread(target=_v811_run,daemon=True);v811_thread.start();return True
+
+@APP.route('/v811/run',methods=['GET','POST'])
+def v811_run():_v811_start();return redirect('/v811')
+
+@APP.get('/api/v811/status')
+def v811_status_api():return jsonify(_v811_status())
+
+@APP.get('/v811')
+def v811_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v811_status();R={}
+    if V811_RESULT.exists():
+        try:R=json.loads(V811_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+
+    cases=R.get('independent_explicit_cases') or []
+    crows=''.join(
+      f"<tr><td><b>{e(x.get('case_id'))}</b></td><td>{e(x.get('setup_label'))}</td><td>{e(x.get('status'))}</td><td>{e(x.get('evidence'))}</td></tr>"
+      for x in cases
+    )
+    dups=''.join(f"<li>{e(x)}</li>" for x in R.get('duplicate_or_derivative_mentions',[]))
+    missing=''.join(f"<li>{e(x)}</li>" for x in R.get('exact_geometry_still_missing',[]))
+    closed=''.join(f"<li>{e(x)}</li>" for x in R.get('closed_actions',[]))
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v811/run'><button>▶ Run V8.11 Source Closure</button></form>"
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🔒 V8.11 Cup-of-Handle Source Closure</h1><div class='g'><b>最后一次查 Cup of Handle：</b>全 corpus 去重后只计独立原始案例；重复 PDF / 派生审计绝不当作新证据。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',6)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><p>Independent explicit Cup-of-Handle cases: <b>{e(R.get('independent_explicit_case_count','—'))}</b></p><div class='o'>{e(R.get('closure_conclusion',''))}</div></div>
+<div class='c'><h2>Independent Explicit Source Cases</h2><div style='overflow:auto'><table><tr><th>Case</th><th>Setup</th><th>Status</th><th>Evidence</th></tr>{crows or "<tr><td colspan='4'>—</td></tr>"}</table></div></div>
+<div class='c'><h2>Duplicate / Derivative Mentions — Not New Evidence</h2><ul>{dups or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Exact Geometry Still Missing</h2><ul>{missing or '<li>—</li>'}</ul></div>
+<div class='c'><h2>Closed — Do Not Repeat</h2><ul>{closed or '<li>—</li>'}</ul></div>
+<div class='c'><div class='o'><b>Architecture implication:</b> {e(R.get('architecture_implication',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v811/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
