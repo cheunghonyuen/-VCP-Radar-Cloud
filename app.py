@@ -46783,9 +46783,9 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>🧭 V8.20 New-Information OOS Test</h2>
+        <h2>🧭 V8.20B New-Information OOS Test</h2>
         <p>Sector/Industry Leadership + TRUE PIT Fundamentals · final research version before any replay.</p>
-        <a href='/v820'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.20</button></a>
+        <a href='/v820'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.20B</button></a>
         </div>
         <div id='v819-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧠 V8.19B Multivariate OOS Upper-Bound</h2>
@@ -56374,7 +56374,7 @@ V820_RESULT=V820_DIR/'result.json'
 V820_ROWS=V820_DIR/'actual_buy_new_information_rows.csv.gz'
 V820_OOS=V820_DIR/'oos_predictions.csv.gz'
 V820_FUND_DIR=V820_DIR/'fundamentals_cache'
-V820_BUILD_ID='V820_NEW_INFO_OOS_20260831A'
+V820_BUILD_ID='V820B_NO_HANG_SECTOR_FIRST_20260831A'
 v820_thread=None
 
 def _v820_status():
@@ -56450,18 +56450,20 @@ def _v820_get_json(url,timeout=45):
         return json.loads(r.read().decode('utf-8',errors='replace'))
 
 def _v820_fund_access_probe():
+    # V8.20B: NEVER block the research run on a live entitlement/network probe.
+    # If a previously persisted definitions snapshot exists, use it.
+    # Otherwise mark fundamentals unavailable for THIS run and finish sector OOS.
+    fp=V820_DIR/'fundamental_definitions.json'
+    if fp.exists():
+        try:
+            arr=json.loads(fp.read_text(encoding='utf-8'))
+            if isinstance(arr,list) and arr:
+                return True,'LOCAL_DEFINITIONS_CACHE',arr
+        except Exception:
+            pass
     if not TIINGO_TOKEN:
-        return False,'TIINGO_TOKEN_MISSING',None
-    url=f"https://api.tiingo.com/tiingo/fundamentals/definitions?token={quote(TIINGO_TOKEN)}"
-    try:
-        arr=_v820_get_json(url)
-        if not isinstance(arr,list) or not arr:
-            return False,'FUNDAMENTAL_DEFINITIONS_EMPTY',None
-        return True,'OK',arr
-    except HTTPError as ex:
-        return False,f'HTTP_{ex.code}',None
-    except Exception as ex:
-        return False,f'{type(ex).__name__}:{ex}',None
+        return False,'TIINGO_TOKEN_MISSING__SECTOR_TEST_CONTINUES',None
+    return False,'REMOTE_FUNDAMENTAL_PROBE_SKIPPED_TO_PREVENT_RUNTIME_HANG',None
 
 def _v820_pick_codes(defs):
     out={'revenue':[],'eps':[],'net_income':[]}
@@ -56494,15 +56496,9 @@ def _v820_statement_rows(ticker,start_date,end_date,code_map):
         try:arr=json.loads(fp.read_text(encoding='utf-8'))
         except Exception:arr=None
     if arr is None:
-        url=(f"https://api.tiingo.com/tiingo/fundamentals/{quote(ticker)}/statements"
-             f"?startDate={start_date}&endDate={end_date}&asReported=true&token={quote(TIINGO_TOKEN)}")
-        try:
-            arr=_v820_get_json(url)
-            if isinstance(arr,list):fp.write_text(json.dumps(arr,ensure_ascii=False),encoding='utf-8')
-        except HTTPError as ex:
-            if ex.code==429:raise TiingoRateLimitPause('V8.20 Fundamentals hit Tiingo HTTP 429; cached progress preserved.')
-            return []
-        except Exception:return []
+        # No live network call in V8.20B. A missing ticker cache simply means
+        # fundamentals coverage is unavailable; sector OOS still completes.
+        return []
     rows=[]
     for r in arr if isinstance(arr,list) else []:
         try:
@@ -56747,7 +56743,7 @@ def _v820_run():
                          'rel_sector20','rel_sector60','sector_candidate_count','sector_candidate_median_ret20']
 
         _v820_write(status='running',phase='fundamental_access',
-                    message='检查 Tiingo TRUE as-reported fundamentals entitlement；无权限则不伪造。',
+                    message='先完成 Sector Leadership OOS；Fundamentals 只读已有本地缓存，绝不再因网络权限探测卡死。',
                     processed=4,total=9,elapsed_sec=round(time.time()-tstart,2))
 
         faccess,freason,defs=_v820_fund_access_probe()
@@ -56790,10 +56786,10 @@ def _v820_run():
                 'sample':{'rows':int(len(X)),'stops':int((X.y==0).sum()),'plus50':int(X.y.sum()),
                           'exact_join_coverage':cov},
                 'fundamentals':{'access':bool(faccess),'reason':freason,'selected_codes':code_map,
-                                'note':'Tiingo statements are queried with asReported=true and used only when statement release date <= entry date.'},
+                                'note':'V8.20B does not make live Tiingo fundamentals calls. Only previously persisted as-reported fundamentals caches are eligible, and only when release_date <= entry_date.'},
                 'tests':tests,'next_step':next_step,
                 'history_dedup':'Does NOT rerun V6.33/V6.83/V7.15 D1-D10 post-entry confirmation. Does NOT retune V8.18/V8.19 price-volume features.',
-                'boundaries':'Frozen Actual Buys + existing Historical/ETF cache + Tiingo as-reported fundamentals only if entitled. 0 universe scan, 0 account replay, 0 threshold sweep.'}
+                'boundaries':'Frozen Actual Buys + existing Historical/ETF cache. Fundamentals are local-cache-only in V8.20B; 0 live Tiingo fundamentals requests, 0 universe scan, 0 account replay, 0 threshold sweep.'}
         V820_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
 
         _v820_write(status='done',phase='done',message=f'V8.20 完成：{verdict}',
@@ -56835,11 +56831,11 @@ def v820_page():
     rows=''
     for t in tests:
         rows+=f"<tr><td><b>{e(t.get('name'))}</b></td><td>{'✅' if t.get('available') else '—'}</td><td>{f3(t.get('pooled_auc'))}</td><td>{f3(t.get('median_fold_auc'))}</td><td>{f3(t.get('median_top20_lift'))}x</td><td>{'✅ PASS' if t.get('pass') else '—'}</td></tr>"
-    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v820/run'><button>▶ Run V8.20 New-Information OOS</button></form>"
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v820/run'><button>▶ Run V8.20B New-Information OOS</button></form>"
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>🧭 V8.20 New-Information OOS Test</h1><div class='g'><b>第二个也是最后一个研究版：</b>不再磨旧价量。直接测试 Sector/Industry Leadership + TRUE PIT Fundamentals。D1–D10 历史已经做过，不重复。</div></div>
+<div class='c'><h1>🧭 V8.20B New-Information OOS Test</h1><div class='g'><b>第二个也是最后一个研究版：</b>不再磨旧价量。直接测试 Sector/Industry Leadership + TRUE PIT Fundamentals。D1–D10 历史已经做过，不重复。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',9)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
 <div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='b'>Rows: <b>{e(S.get('rows','—'))}</b> · STOP: <b>{e(S.get('stops','—'))}</b> · +50: <b>{e(S.get('plus50','—'))}</b><br><br>Tiingo TRUE fundamentals access: <b>{'YES' if F.get('access') else 'NO/UNKNOWN'}</b> · {e(F.get('reason',''))}</div></div>
 <div class='c'><h2>New Information OOS</h2><div style='overflow:auto'><table><tr><th>Feature Set</th><th>Available</th><th>Pooled OOS AUC</th><th>Median Fold AUC</th><th>Median Top20 Lift</th><th>Pass</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
