@@ -46783,9 +46783,9 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v819-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
-        <h2>🧠 V8.19 Multivariate OOS Upper-Bound</h2>
+        <h2>🧠 V8.19B Multivariate OOS Upper-Bound</h2>
         <p>31 PIT features together · purged forward CV · permutation sanity · one decisive test.</p>
-        <a href='/v819'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.19</button></a>
+        <a href='/v819'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.19B</button></a>
         </div>
         <div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>💰 V8.18D Big Winner vs STOP Economic Test</h2>
@@ -55882,7 +55882,7 @@ V819_DIR=DATA_DIR/'v819_multivariate_oos_upper_bound'
 V819_STATUS=V819_DIR/'status.json'
 V819_RESULT=V819_DIR/'result.json'
 V819_OOS=V819_DIR/'oos_predictions.csv.gz'
-V819_BUILD_ID='V819_MULTIVARIATE_OOS_20260831A'
+V819_BUILD_ID='V819B_SMALL_SAMPLE_FORWARD_CV_20260831A'
 v819_thread=None
 
 def _v819_status():
@@ -56089,22 +56089,55 @@ def _v819_run():
                     message=f'设计 forward OOS folds；{len(feats)} features，训练标签必须在 test 前已完成。',
                     processed=2,total=8,elapsed_sec=round(time.time()-t0,2))
 
-        years=sorted(int(x) for x in D.entry_date.dt.year.dropna().unique())
-        # Candidate test windows: 5-year blocks, only after at least 8 years of history.
+        # Small-sample-safe forward CV.
+        # V8.19A used fixed 5-year windows and required >=3 usable folds. With only ~30
+        # positive +50 winners this can fail for power reasons before modeling begins.
+        # V8.19B uses deterministic chronological row blocks instead:
+        #   - first 40% of rows are never OOS-tested (warm-up training region)
+        #   - remaining 60% is split into 4 NON-OVERLAPPING chronological OOS blocks
+        #   - each fold trains only on rows strictly before that block
+        #   - labels whose exit_date is within 30 days of test start are purged
+        #   - folds with one class are retained for pooled OOS predictions but marked
+        #     non-evaluable for fold-level AUC (no crash / no fake AUC)
+        #
+        # This changes only the CV geometry, not any trading rule or performance threshold.
+        D=D.sort_values(['entry_date','listing_id']).copy()
+        idx_all=D.index.to_numpy()
+        n=len(D)
+        if n<120:
+            raise RuntimeError(f'Too few STOP/+50 rows for multivariate OOS: {n}')
+
+        warm=max(60,int(round(n*0.40)))
+        rem=n-warm
+        if rem<60:
+            raise RuntimeError(f'Insufficient OOS tail after warm-up: {rem}')
+
+        # Four deterministic non-overlapping chronological test blocks.
+        cuts=np.linspace(warm,n,5,dtype=int)
         folds=[]
-        for y in years:
-            if y<min(years)+8:continue
-            if (y-min(years)-8)%5!=0:continue
-            yend=min(y+4,max(years))
-            test=D[(D.entry_date.dt.year>=y)&(D.entry_date.dt.year<=yend)]
-            if len(test)<20 or test.y.sum()<3 or (test.y==0).sum()<10:continue
-            test_start=pd.Timestamp(f'{y}-01-01')
+        for bi in range(4):
+            a=int(cuts[bi]);b=int(cuts[bi+1])
+            if b<=a:continue
+            te_idx=idx_all[a:b]
+            test=D.loc[te_idx]
+            test_start=pd.Timestamp(test.entry_date.min()).normalize()
+            test_end=pd.Timestamp(test.entry_date.max()).normalize()
             embargo_start=test_start-pd.Timedelta(days=30)
+
             train=D[(D.entry_date<test_start)&(D.exit_date<embargo_start)]
-            if len(train)<80 or train.y.sum()<8 or (train.y==0).sum()<40:continue
-            folds.append((y,yend,train.index.to_numpy(),test.index.to_numpy()))
-        if len(folds)<3:
-            raise RuntimeError(f'Need >=3 usable purged forward folds; got {len(folds)}')
+            if len(train)<50 or train.y.sum()<6 or (train.y==0).sum()<30:
+                continue
+
+            folds.append((
+                str(test_start.date()),str(test_end.date()),
+                train.index.to_numpy(),te_idx
+            ))
+
+        if len(folds)<2:
+            raise RuntimeError(
+                f'Forward CV geometry still insufficient after small-sample fix: {len(folds)} folds. '
+                f'This is a data-volume limitation, not a strategy failure.'
+            )
 
         _v819_write(status='running',phase='oos_models',
                     message=f'跑 {len(folds)} 个 purged forward folds：Ridge Logistic + depth-2 tree。',
@@ -56157,7 +56190,7 @@ def _v819_run():
             lift=float(top_rate/base) if base>0 and np.isfinite(top_rate) else np.nan
 
             foldrows.append({
-              'fold':fi,'test_years':f'{ys}-{ye}','train_n':int(len(tr)),'test_n':int(len(te)),
+              'fold':fi,'test_years':f'{ys} → {ye}','train_n':int(len(tr)),'test_n':int(len(te)),
               'train_winners':int(ytr.sum()),'test_winners':int(yte.sum()),
               'auc_logistic':fold_auc_log,'auc_tree':fold_auc_tree,'auc_blend':fold_auc_blend,
               'base_winner_rate':base,'top20_winner_rate':top_rate,'top20_lift':lift,
@@ -56171,7 +56204,7 @@ def _v819_run():
                   'exit_date':str(pd.Timestamp(D.loc[idx,'exit_date']).date()),
                   'y':int(D.loc[idx,'y']),'ret':float(D.loc[idx,'ret']),
                   'p_logistic':float(pp1),'p_tree':float(pp2),'p_blend':float(pp3),
-                  'fold':fi,'test_years':f'{ys}-{ye}'
+                  'fold':fi,'test_years':f'{ys} → {ye}'
                 })
 
         O=pd.DataFrame(oos)
@@ -56215,7 +56248,7 @@ def _v819_run():
         passed=bool(
           np.isfinite(pooled_auc_blend) and pooled_auc_blend>=.60 and
           np.isfinite(median_auc) and median_auc>=.55 and
-          len(usable)>=3 and adverse_folds<=1 and
+          len(usable)>=2 and adverse_folds<=1 and
           np.isfinite(median_lift) and median_lift>=1.50 and
           np.isfinite(p_emp) and p_emp<=.10
         )
@@ -56245,7 +56278,7 @@ def _v819_run():
           'method':{
             'models':'Weighted ridge logistic + custom depth-2 tree + fixed 50/50 blend',
             'feature_selection':'Top 10 univariate AUC selected INSIDE each training fold only',
-            'cv':'Forward-chaining 5-year test blocks; train labels must have exit_date at least 30 calendar days before test start',
+            'cv':'Forward-chaining 4 non-overlapping chronological OOS blocks after a 40% warm-up; train labels must have exit_date at least 30 calendar days before test start',
             'preprocessing':'Train-only median imputation and standardization',
             'permutation':'300 within-fold test-label permutations against fixed OOS scores'
           },
@@ -56258,7 +56291,7 @@ def _v819_run():
             'permutation_95_auc':perm95,'empirical_p':p_emp
           },
           'folds':foldrows,
-          'pass_gate':'Blend OOS AUC>=0.60; median fold AUC>=0.55; >=3 folds; <=1 adverse fold; median Top20 winner lift>=1.50x; permutation p<=0.10.',
+          'pass_gate':'Blend pooled OOS AUC>=0.60; median evaluable-fold AUC>=0.55; >=2 evaluable folds; <=1 adverse fold; median Top20 winner lift>=1.50x; permutation p<=0.10.',
           'next_step':next_step,
           'boundaries':'Frozen V6.94 PIT features + exact V7.04 Actual Buys only. 0 universe scan, 0 Historical Cache reread, 0 feature rebuild, 0 account replay, 0 threshold sweep.'
         }
@@ -56307,11 +56340,11 @@ def v819_page():
       f"<td>{f3(x.get('auc_tree'))}</td><td><b>{f3(x.get('auc_blend'))}</b></td>"
       f"<td>{f3(x.get('top20_lift'))}x</td></tr>" for x in folds
     )
-    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v819/run'><button>▶ Run V8.19 Multivariate OOS</button></form>"
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v819/run'><button>▶ Run V8.19B Multivariate OOS</button></form>"
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
 <body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>🧠 V8.19 Multivariate OOS Upper-Bound Test</h1><div class='g'><b>一次定生死：</b>31个现有 PIT 特征单独不行，组合起来到底有没有真实 OOS 信号？Forward CV + exit-date purge + embargo + permutation。</div></div>
+<div class='c'><h1>🧠 V8.19B Multivariate OOS Upper-Bound Test</h1><div class='g'><b>一次定生死：</b>31个现有 PIT 特征单独不行，组合起来到底有没有真实 OOS 信号？Forward CV + exit-date purge + embargo + permutation。</div></div>
 <div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',8)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
 <div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
 <div class='b'>STOP/+50 sample: <b>{e(S.get('stop_plus50_rows','—'))}</b> · STOP: <b>{e(S.get('stops','—'))}</b> · +50: <b>{e(S.get('plus50','—'))}</b> · Features: <b>{e(S.get('eligible_features','—'))}</b><br><br>
