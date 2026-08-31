@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v819-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧠 V8.19 Multivariate OOS Upper-Bound</h2>
+        <p>31 PIT features together · purged forward CV · permutation sanity · one decisive test.</p>
+        <a href='/v819'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.19</button></a>
+        </div>
+        <div id='v818-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>💰 V8.18D Big Winner vs STOP Economic Test</h2>
         <p>Actual Buy +50/+100 vs STOP · frozen PIT features · economic signal test · 0 rescan.</p>
         <a href='/v818'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.18D</button></a>
@@ -55861,3 +55866,456 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>Top Pre-Entry Separators</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>Target</th><th>Direction</th><th>Pooled Sep AUC</th><th>Median 5Y AUC</th><th>Blocks</th><th>Adverse</th></tr>{rows or "<tr><td colspan='7'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='o'><b>Signal gate:</b> {e(R.get('signal_gate',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v818/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.19 MULTIVARIATE OOS UPPER-BOUND TEST =================
+# Purpose: one decisive test of whether the EXISTING pre-entry PIT feature set has
+# useful MULTIVARIATE signal that V8.18D's univariate gate could have missed.
+#
+# Uses exact Actual Buys only, forward-chaining time splits, exit-date purge,
+# 30-calendar-day embargo, train-only preprocessing/feature selection,
+# ridge logistic + shallow depth-2 tree, and permutation sanity check.
+#
+# NO universe scan, NO Historical Cache reread, NO feature rebuild,
+# NO account replay, NO threshold sweep.
+V819_DIR=DATA_DIR/'v819_multivariate_oos_upper_bound'
+V819_STATUS=V819_DIR/'status.json'
+V819_RESULT=V819_DIR/'result.json'
+V819_OOS=V819_DIR/'oos_predictions.csv.gz'
+V819_BUILD_ID='V819_MULTIVARIATE_OOS_20260831A'
+v819_thread=None
+
+def _v819_status():
+    x={'build_id':V819_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · decisive multivariate OOS test',
+       'processed':0,'total':8,'elapsed_sec':0,'error':None,'traceback':None}
+    if V819_STATUS.exists():
+        try:
+            q=json.loads(V819_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V819_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v819_write(**kw):
+    V819_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v819_status();x.update(kw);x['build_id']=V819_BUILD_ID
+    V819_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v819_alive(): return v819_thread is not None and v819_thread.is_alive()
+
+def _v819_auc(y,score):
+    y=np.asarray(y,dtype=int);score=np.asarray(score,dtype=float)
+    m=np.isfinite(score)
+    y=y[m];score=score[m]
+    if len(y)<5 or len(np.unique(y))<2:return np.nan
+    r=pd.Series(score).rank(method='average').to_numpy()
+    n1=int((y==1).sum());n0=int((y==0).sum())
+    if n1==0 or n0==0:return np.nan
+    return float((r[y==1].sum()-n1*(n1+1)/2)/(n1*n0))
+
+def _v819_sigmoid(z):
+    z=np.clip(np.asarray(z,dtype=float),-35,35)
+    return 1.0/(1.0+np.exp(-z))
+
+def _v819_fit_logistic(X,y,l2=2.0,steps=450,lr=.035):
+    # Dependency-free weighted ridge logistic.
+    X=np.asarray(X,dtype=float);y=np.asarray(y,dtype=float)
+    X1=np.column_stack([np.ones(len(X)),X])
+    w=np.zeros(X1.shape[1],dtype=float)
+    n1=max(1,float((y==1).sum()));n0=max(1,float((y==0).sum()))
+    sw=np.where(y==1,0.5/n1,0.5/n0)*len(y)
+    for _ in range(steps):
+        p=_v819_sigmoid(X1@w)
+        grad=(X1.T@((p-y)*sw))/len(y)
+        reg=np.r_[0.0,w[1:]]*l2/len(y)
+        w-=lr*(grad+reg)
+    return w
+
+def _v819_predict_logistic(X,w):
+    X=np.asarray(X,dtype=float)
+    X1=np.column_stack([np.ones(len(X)),X])
+    return _v819_sigmoid(X1@w)
+
+def _v819_tree_candidates(x):
+    x=np.asarray(x,dtype=float)
+    x=x[np.isfinite(x)]
+    if len(x)<20:return []
+    return sorted(set(float(v) for v in np.quantile(x,[.2,.35,.5,.65,.8])))
+
+def _v819_gini(y):
+    y=np.asarray(y,dtype=int)
+    if len(y)==0:return 0.0
+    p=float(y.mean())
+    return 2*p*(1-p)
+
+def _v819_best_split(X,y,features):
+    base=_v819_gini(y);best=None
+    for j in features:
+        for t in _v819_tree_candidates(X[:,j]):
+            left=X[:,j]<=t; right=~left
+            if left.sum()<8 or right.sum()<8:continue
+            gain=base-(left.mean()*_v819_gini(y[left]) + right.mean()*_v819_gini(y[right]))
+            if best is None or gain>best[0]:
+                best=(float(gain),int(j),float(t))
+    return best
+
+def _v819_fit_depth2_tree(X,y,features):
+    # Small custom tree to test simple nonlinear interactions without sklearn.
+    root=_v819_best_split(X,y,features)
+    model={'root':root,'left':None,'right':None,'global_p':float(np.mean(y))}
+    if root is None:return model
+    _,j,t=root
+    masks=[X[:,j]<=t,X[:,j]>t]
+    for side,mask in zip(['left','right'],masks):
+        yy=y[mask];XX=X[mask]
+        child=_v819_best_split(XX,yy,features) if len(yy)>=20 else None
+        node={'split':child,'p':float(np.mean(yy)) if len(yy) else model['global_p']}
+        if child is not None:
+            _,cj,ct=child
+            lm=XX[:,cj]<=ct
+            node['p_left']=float(np.mean(yy[lm])) if lm.any() else node['p']
+            node['p_right']=float(np.mean(yy[~lm])) if (~lm).any() else node['p']
+        model[side]=node
+    return model
+
+def _v819_predict_tree(X,m):
+    X=np.asarray(X,dtype=float)
+    out=np.full(len(X),float(m.get('global_p',.5)),dtype=float)
+    root=m.get('root')
+    if root is None:return out
+    _,j,t=root
+    for side,mask in [('left',X[:,j]<=t),('right',X[:,j]>t)]:
+        node=m.get(side) or {}
+        if not mask.any():continue
+        child=node.get('split')
+        if child is None:
+            out[mask]=float(node.get('p',m['global_p']))
+        else:
+            _,cj,ct=child
+            idx=np.where(mask)[0]
+            lm=X[idx,cj]<=ct
+            out[idx[lm]]=float(node.get('p_left',node.get('p',m['global_p'])))
+            out[idx[~lm]]=float(node.get('p_right',node.get('p',m['global_p'])))
+    return out
+
+def _v819_exact_collapse(D,k,name):
+    # Lossless duplicate collapse: identity metadata may differ; economic payload may not.
+    identity_cols={
+      'v704_row_id','v702_row_id','stage2_row_id','parent_opportunity_id',
+      'candidate_order','row_id','source_row_id','ledger_row_id'
+    }
+    dup=D.duplicated(k,keep=False)
+    if not dup.any():return D,{'duplicate_rows':0,'collapsed_rows':0}
+    G=D.loc[dup].copy()
+    payload=[c for c in D.columns if c not in k and c not in identity_cols]
+    badkeys=0;badcols=set()
+    for _,g in G.groupby(k,dropna=False,sort=False):
+        bad=[]
+        for c in payload:
+            z=g[c].where(g[c].notna(),'__NA__').astype(str)
+            if z.nunique(dropna=False)>1:bad.append(c)
+        if bad:
+            badkeys+=1;badcols.update(bad)
+    if badkeys:
+        raise RuntimeError(f'{name} true economic grain conflict: {badkeys} keys; cols={sorted(badcols)[:15]}')
+    n0=len(D);D=D.drop_duplicates(k,keep='first').copy()
+    return D,{'duplicate_rows':int(dup.sum()),'collapsed_rows':int(n0-len(D))}
+
+def _v819_run():
+    global v819_thread
+    t0=time.time()
+    try:
+        _v819_write(status='running',phase='preflight',
+                    message='一次性 Preflight：exact join、标签、PIT列、exit-date purge 能否成立。',
+                    processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+
+        fpath=V694_DIR/'clean_candidate_path_features.csv.gz'
+        lpath=V704_LEDGER
+        if not fpath.exists():raise RuntimeError(f'V6.94 feature store missing: {fpath}')
+        if not lpath.exists():raise RuntimeError(f'V7.04 Actual Buy ledger missing: {lpath}')
+
+        F=pd.read_csv(fpath,compression='gzip')
+        L=pd.read_csv(lpath,compression='gzip')
+        needF=['listing_id','entry_date','exit_date','ret','is_stop']
+        needL=['listing_id','entry_date']
+        missF=[c for c in needF if c not in F.columns];missL=[c for c in needL if c not in L.columns]
+        if missF or missL:raise RuntimeError(f'Schema mismatch F={missF}, L={missL}')
+
+        for D in [F,L]:
+            D['listing_id']=D['listing_id'].astype(str)
+            D['entry_date']=pd.to_datetime(D['entry_date'],errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F['exit_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        if F['is_stop'].dtype!=bool:
+            F['is_stop']=F['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+
+        k=['listing_id','entry_date']
+        F,faudit=_v819_exact_collapse(F,k,'V6.94')
+        L,laudit=_v819_exact_collapse(L,k,'V7.04')
+        A=L[k].merge(F,on=k,how='left',validate='one_to_one',indicator=True)
+        cov=float((A['_merge']=='both').mean()) if len(A) else 0.0
+        if cov<.95:raise RuntimeError(f'Exact join coverage too low: {cov:.1%}')
+        A=A[A['_merge']=='both'].drop(columns=['_merge']).copy()
+        A=A.dropna(subset=['entry_date','exit_date','ret']).copy()
+        A['label_stop']=A['is_stop'].astype(bool)
+        A['label_50']=A['ret'].ge(.50)
+        A['label_100']=A['ret'].ge(1.00)
+
+        # Only STOP vs +50 for primary model; ambiguous middle outcomes are excluded.
+        D=A[A.label_stop | A.label_50].copy()
+        D=D[~(D.label_stop & D.label_50)].copy()
+        D['y']=D.label_50.astype(int)
+        if D.y.sum()<20 or (D.y==0).sum()<50:
+            raise RuntimeError(f'Insufficient STOP/+50 sample: winner={int(D.y.sum())}, stop={int((D.y==0).sum())}')
+
+        deny_exact=set([
+          'ret','is_stop','winner50','winner100','listing_id','entry_date','exit_date','exit_reason',
+          'entry_px','entry_px_raw','exit_px','exit_px_raw','control_ret','low10_ret',
+          'parent_opportunity_id','stage2_row_id','parent_entry_date','source_generator_id',
+          'label_stop','label_50','label_100','y'
+        ])
+        deny_tokens=['exit','future','forward','label','outcome','mfe','mae']
+        feats=[]
+        for c in D.columns:
+            if c in deny_exact:continue
+            lc=c.lower()
+            if any(t in lc for t in deny_tokens):continue
+            z=pd.to_numeric(D[c],errors='coerce')
+            if z.notna().sum()>=max(50,int(.60*len(D))) and z.nunique(dropna=True)>=5:
+                D[c]=z;feats.append(c)
+        if len(feats)<5:raise RuntimeError(f'Too few eligible PIT features: {len(feats)}')
+
+        _v819_write(status='running',phase='fold_design',
+                    message=f'设计 forward OOS folds；{len(feats)} features，训练标签必须在 test 前已完成。',
+                    processed=2,total=8,elapsed_sec=round(time.time()-t0,2))
+
+        years=sorted(int(x) for x in D.entry_date.dt.year.dropna().unique())
+        # Candidate test windows: 5-year blocks, only after at least 8 years of history.
+        folds=[]
+        for y in years:
+            if y<min(years)+8:continue
+            if (y-min(years)-8)%5!=0:continue
+            yend=min(y+4,max(years))
+            test=D[(D.entry_date.dt.year>=y)&(D.entry_date.dt.year<=yend)]
+            if len(test)<20 or test.y.sum()<3 or (test.y==0).sum()<10:continue
+            test_start=pd.Timestamp(f'{y}-01-01')
+            embargo_start=test_start-pd.Timedelta(days=30)
+            train=D[(D.entry_date<test_start)&(D.exit_date<embargo_start)]
+            if len(train)<80 or train.y.sum()<8 or (train.y==0).sum()<40:continue
+            folds.append((y,yend,train.index.to_numpy(),test.index.to_numpy()))
+        if len(folds)<3:
+            raise RuntimeError(f'Need >=3 usable purged forward folds; got {len(folds)}')
+
+        _v819_write(status='running',phase='oos_models',
+                    message=f'跑 {len(folds)} 个 purged forward folds：Ridge Logistic + depth-2 tree。',
+                    processed=3,total=8,elapsed_sec=round(time.time()-t0,2))
+
+        oos=[]
+        foldrows=[]
+        rng=np.random.default_rng(20260831)
+
+        for fi,(ys,ye,tr_idx,te_idx) in enumerate(folds,1):
+            tr=D.loc[tr_idx].copy();te=D.loc[te_idx].copy()
+
+            # Train-only median imputation + standardization.
+            med=tr[feats].median(numeric_only=True)
+            Xtr=tr[feats].fillna(med).to_numpy(dtype=float)
+            Xte=te[feats].fillna(med).to_numpy(dtype=float)
+            mu=np.nanmean(Xtr,axis=0);sd=np.nanstd(Xtr,axis=0)
+            sd=np.where((~np.isfinite(sd))|(sd<1e-9),1.0,sd)
+            Xtr=(Xtr-mu)/sd;Xte=(Xte-mu)/sd
+            Xtr=np.nan_to_num(Xtr);Xte=np.nan_to_num(Xte)
+            ytr=tr.y.to_numpy(dtype=int);yte=te.y.to_numpy(dtype=int)
+
+            # Train-only univariate ranking to cap dimensionality vs tiny positive count.
+            rank=[]
+            for j,c in enumerate(feats):
+                a=_v819_auc(ytr,Xtr[:,j])
+                if np.isfinite(a):rank.append((max(a,1-a),j,c))
+            rank=sorted(rank,reverse=True)
+            keep=[j for _,j,_ in rank[:min(10,len(rank))]]
+            keep_names=[feats[j] for j in keep]
+
+            w=_v819_fit_logistic(Xtr[:,keep],ytr,l2=2.0)
+            plog=_v819_predict_logistic(Xte[:,keep],w)
+
+            tree=_v819_fit_depth2_tree(Xtr,ytr,keep)
+            ptree=_v819_predict_tree(Xte,tree)
+
+            # Blend is fixed 50/50; not tuned.
+            pblend=.5*plog+.5*ptree
+
+            fold_auc_log=_v819_auc(yte,plog)
+            fold_auc_tree=_v819_auc(yte,ptree)
+            fold_auc_blend=_v819_auc(yte,pblend)
+
+            # Top-quintile winner concentration, relative to fold base rate.
+            q=np.quantile(pblend,.80)
+            top=pblend>=q
+            base=float(yte.mean())
+            top_rate=float(yte[top].mean()) if top.any() else np.nan
+            lift=float(top_rate/base) if base>0 and np.isfinite(top_rate) else np.nan
+
+            foldrows.append({
+              'fold':fi,'test_years':f'{ys}-{ye}','train_n':int(len(tr)),'test_n':int(len(te)),
+              'train_winners':int(ytr.sum()),'test_winners':int(yte.sum()),
+              'auc_logistic':fold_auc_log,'auc_tree':fold_auc_tree,'auc_blend':fold_auc_blend,
+              'base_winner_rate':base,'top20_winner_rate':top_rate,'top20_lift':lift,
+              'selected_features':keep_names
+            })
+
+            for idx,pp1,pp2,pp3 in zip(te.index,plog,ptree,pblend):
+                oos.append({
+                  'row_index':int(idx),'listing_id':str(D.loc[idx,'listing_id']),
+                  'entry_date':str(pd.Timestamp(D.loc[idx,'entry_date']).date()),
+                  'exit_date':str(pd.Timestamp(D.loc[idx,'exit_date']).date()),
+                  'y':int(D.loc[idx,'y']),'ret':float(D.loc[idx,'ret']),
+                  'p_logistic':float(pp1),'p_tree':float(pp2),'p_blend':float(pp3),
+                  'fold':fi,'test_years':f'{ys}-{ye}'
+                })
+
+        O=pd.DataFrame(oos)
+        if O.empty:raise RuntimeError('No OOS predictions produced')
+        O.to_csv(V819_OOS,index=False,compression='gzip')
+
+        pooled_auc_log=_v819_auc(O.y,O.p_logistic)
+        pooled_auc_tree=_v819_auc(O.y,O.p_tree)
+        pooled_auc_blend=_v819_auc(O.y,O.p_blend)
+
+        _v819_write(status='running',phase='permutation',
+                    message='Permutation sanity check：标签乱序后不应产生同等级 OOS AUC。',
+                    processed=5,total=8,elapsed_sec=round(time.time()-t0,2))
+
+        # Fast permutation sanity: within each fold, permute TEST labels against fixed OOS scores.
+        # This tests whether observed OOS separation exceeds chance for this realized score vector.
+        perm=[]
+        yy=O.y.to_numpy(dtype=int);ss=O.p_blend.to_numpy(dtype=float)
+        for _ in range(300):
+            yp=yy.copy()
+            for f in sorted(O.fold.unique()):
+                ii=np.where(O.fold.to_numpy()==f)[0]
+                yp[ii]=rng.permutation(yp[ii])
+            a=_v819_auc(yp,ss)
+            if np.isfinite(a):perm.append(float(a))
+        perm95=float(np.quantile(perm,.95)) if perm else np.nan
+        p_emp=float((1+sum(v>=pooled_auc_blend for v in perm))/(1+len(perm))) if perm else np.nan
+
+        _v819_write(status='running',phase='economic_gate',
+                    message='最终 gate：OOS AUC + 各fold稳定性 + Top20 Big-Winner concentration。',
+                    processed=7,total=8,elapsed_sec=round(time.time()-t0,2))
+
+        FR=pd.DataFrame(foldrows)
+        usable=FR.auc_blend.dropna()
+        positive_folds=int((usable>=.55).sum())
+        adverse_folds=int((usable<.50).sum())
+        median_auc=float(usable.median()) if len(usable) else np.nan
+        median_lift=float(pd.to_numeric(FR.top20_lift,errors='coerce').median())
+
+        # Predeclared research gate, not a trading threshold.
+        passed=bool(
+          np.isfinite(pooled_auc_blend) and pooled_auc_blend>=.60 and
+          np.isfinite(median_auc) and median_auc>=.55 and
+          len(usable)>=3 and adverse_folds<=1 and
+          np.isfinite(median_lift) and median_lift>=1.50 and
+          np.isfinite(p_emp) and p_emp<=.10
+        )
+
+        if passed:
+            verdict='MULTIVARIATE_PRICE_VOLUME_SIGNAL_SURVIVES_PURGED_OOS'
+            next_step=(
+              'This existing feature set has genuine multivariate ranking value. Freeze this exact modeling recipe '
+              'and run ONE portfolio replay versus the current benchmark; no model/threshold sweep.'
+            )
+        else:
+            verdict='EXISTING_PRICE_VOLUME_FEATURE_SET_FAILS_MULTIVARIATE_PURGED_OOS'
+            next_step=(
+              'Close the existing price/volume feature family. Do not retune these 31 features again. '
+              'Proceed directly to the second and final research version: genuinely new information '
+              '(industry/sector leadership + PIT fundamentals), then apply the same OOS standard.'
+            )
+
+        result={
+          'version':'V8.19 Multivariate OOS Upper-Bound Test',
+          'build_id':V819_BUILD_ID,'verdict':verdict,
+          'sample':{
+            'stop_plus50_rows':int(len(D)),'stops':int((D.y==0).sum()),'plus50':int(D.y.sum()),
+            'eligible_features':len(feats),'exact_join_coverage':cov,
+            'feature_duplicate_audit':faudit,'ledger_duplicate_audit':laudit
+          },
+          'method':{
+            'models':'Weighted ridge logistic + custom depth-2 tree + fixed 50/50 blend',
+            'feature_selection':'Top 10 univariate AUC selected INSIDE each training fold only',
+            'cv':'Forward-chaining 5-year test blocks; train labels must have exit_date at least 30 calendar days before test start',
+            'preprocessing':'Train-only median imputation and standardization',
+            'permutation':'300 within-fold test-label permutations against fixed OOS scores'
+          },
+          'oos':{
+            'rows':int(len(O)),
+            'auc_logistic':pooled_auc_log,'auc_tree':pooled_auc_tree,'auc_blend':pooled_auc_blend,
+            'median_fold_auc_blend':median_auc,
+            'positive_folds_auc55':positive_folds,'adverse_folds_below50':adverse_folds,
+            'median_top20_winner_lift':median_lift,
+            'permutation_95_auc':perm95,'empirical_p':p_emp
+          },
+          'folds':foldrows,
+          'pass_gate':'Blend OOS AUC>=0.60; median fold AUC>=0.55; >=3 folds; <=1 adverse fold; median Top20 winner lift>=1.50x; permutation p<=0.10.',
+          'next_step':next_step,
+          'boundaries':'Frozen V6.94 PIT features + exact V7.04 Actual Buys only. 0 universe scan, 0 Historical Cache reread, 0 feature rebuild, 0 account replay, 0 threshold sweep.'
+        }
+        V819_DIR.mkdir(parents=True,exist_ok=True)
+        V819_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v819_write(status='done',phase='done',message=f'V8.19 完成：{verdict}',
+                    processed=8,total=8,elapsed_sec=round(time.time()-t0,2),error=None,traceback=None)
+
+    except Exception as ex:
+        _v819_write(status='error',phase='error',
+                    message=f'V8.19 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-t0,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v819_thread=None
+
+def _v819_start():
+    global v819_thread
+    if _v819_alive():return False
+    _v819_write(status='starting',phase='starting',
+                message='V8.19 starting · decisive multivariate OOS test',
+                processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+    v819_thread=threading.Thread(target=_v819_run,daemon=True);v819_thread.start();return True
+
+@APP.route('/v819/run',methods=['GET','POST'])
+def v819_run():_v819_start();return redirect('/v819')
+
+@APP.get('/api/v819/status')
+def v819_status_api():return jsonify(_v819_status())
+
+@APP.get('/v819')
+def v819_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v819_status();R={}
+    if V819_RESULT.exists():
+        try:R=json.loads(V819_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    O=R.get('oos') or {};S=R.get('sample') or {}
+    folds=R.get('folds') or []
+    def f3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    rows=''.join(
+      f"<tr><td>{e(x.get('test_years'))}</td><td>{e(x.get('train_n'))}</td><td>{e(x.get('test_n'))}</td>"
+      f"<td>{e(x.get('test_winners'))}</td><td>{f3(x.get('auc_logistic'))}</td>"
+      f"<td>{f3(x.get('auc_tree'))}</td><td><b>{f3(x.get('auc_blend'))}</b></td>"
+      f"<td>{f3(x.get('top20_lift'))}x</td></tr>" for x in folds
+    )
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v819/run'><button>▶ Run V8.19 Multivariate OOS</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧠 V8.19 Multivariate OOS Upper-Bound Test</h1><div class='g'><b>一次定生死：</b>31个现有 PIT 特征单独不行，组合起来到底有没有真实 OOS 信号？Forward CV + exit-date purge + embargo + permutation。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',8)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2>
+<div class='b'>STOP/+50 sample: <b>{e(S.get('stop_plus50_rows','—'))}</b> · STOP: <b>{e(S.get('stops','—'))}</b> · +50: <b>{e(S.get('plus50','—'))}</b> · Features: <b>{e(S.get('eligible_features','—'))}</b><br><br>
+Blend OOS AUC: <b>{f3(O.get('auc_blend'))}</b> · Median fold AUC: <b>{f3(O.get('median_fold_auc_blend'))}</b> · Median Top20 lift: <b>{f3(O.get('median_top20_winner_lift'))}x</b> · Permutation p: <b>{f3(O.get('empirical_p'))}</b></div></div>
+<div class='c'><h2>Forward OOS Folds</h2><div style='overflow:auto'><table><tr><th>Test</th><th>Train N</th><th>Test N</th><th>Winners</th><th>Logit AUC</th><th>Tree AUC</th><th>Blend AUC</th><th>Top20 Lift</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='o'><b>Pass gate:</b> {e(R.get('pass_gate',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v819/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
