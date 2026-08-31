@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v819-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>🧭 V8.20 New-Information OOS Test</h2>
+        <p>Sector/Industry Leadership + TRUE PIT Fundamentals · final research version before any replay.</p>
+        <a href='/v820'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.20</button></a>
+        </div>
+        <div id='v819-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧠 V8.19B Multivariate OOS Upper-Bound</h2>
         <p>31 PIT features together · purged forward CV · permutation sanity · one decisive test.</p>
         <a href='/v819'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.19B</button></a>
@@ -56352,3 +56357,491 @@ Blend OOS AUC: <b>{f3(O.get('auc_blend'))}</b> · Median fold AUC: <b>{f3(O.get(
 <div class='c'><h2>Forward OOS Folds</h2><div style='overflow:auto'><table><tr><th>Test</th><th>Train N</th><th>Test N</th><th>Winners</th><th>Logit AUC</th><th>Tree AUC</th><th>Blend AUC</th><th>Top20 Lift</th></tr>{rows or "<tr><td colspan='8'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='o'><b>Pass gate:</b> {e(R.get('pass_gate',''))}<br><br><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v819/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1200)</script></div></body></html>"""
+
+
+# ================= V8.20 NEW-INFORMATION OOS TEST =================
+# Second and final research version promised after V8.19:
+#   A) sector/industry leadership context built point-in-time
+#   B) true Tiingo as-reported quarterly fundamentals when entitlement exists
+#
+# IMPORTANT HISTORY DEDUP:
+# Do NOT reopen D1/D3/D5/D10 post-entry confirmation here. V6.33/V6.83/V7.15 already studied it.
+#
+# No portfolio replay in this version. One OOS decision only.
+V820_DIR=DATA_DIR/'v820_new_information_oos'
+V820_STATUS=V820_DIR/'status.json'
+V820_RESULT=V820_DIR/'result.json'
+V820_ROWS=V820_DIR/'actual_buy_new_information_rows.csv.gz'
+V820_OOS=V820_DIR/'oos_predictions.csv.gz'
+V820_FUND_DIR=V820_DIR/'fundamentals_cache'
+V820_BUILD_ID='V820_NEW_INFO_OOS_20260831A'
+v820_thread=None
+
+def _v820_status():
+    x={'build_id':V820_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · sector leadership + true PIT fundamentals',
+       'processed':0,'total':9,'elapsed_sec':0,'error':None,'traceback':None}
+    if V820_STATUS.exists():
+        try:
+            q=json.loads(V820_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V820_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v820_write(**kw):
+    V820_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v820_status();x.update(kw);x['build_id']=V820_BUILD_ID
+    V820_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v820_alive():return v820_thread is not None and v820_thread.is_alive()
+
+def _v820_norm_price(d):
+    if d is None or len(d)==0:return None
+    x=d.copy()
+    try:x=x.reset_index()
+    except Exception:pass
+    lc={str(c).lower():c for c in x.columns}
+    dc=lc.get('date') or x.columns[0]
+    cc=lc.get('close') or lc.get('adjclose')
+    if cc is None:return None
+    z=pd.DataFrame({
+      'date':pd.to_datetime(x[dc],errors='coerce').dt.normalize(),
+      'close':pd.to_numeric(x[cc],errors='coerce')
+    }).dropna().sort_values('date').drop_duplicates('date',keep='last')
+    if len(z)<25:return None
+    z['ret1']=z['close'].pct_change()
+    z['ret20']=z['close']/z['close'].shift(20)-1
+    z['ret60']=z['close']/z['close'].shift(60)-1
+    z['ma50']=z['close'].rolling(50).mean()
+    return z.reset_index(drop=True)
+
+def _v820_asof(d,dt):
+    if d is None or len(d)==0:return None
+    x=d[d.date<=pd.Timestamp(dt).normalize()]
+    return x.iloc[-1] if len(x) else None
+
+def _v820_sector_for_trade(stock,dt,etf_cache,ticker=None):
+    # Prefer the project's existing static sector map when available.
+    t=(ticker or '').upper().strip()
+    sec=SECTOR.get(t)
+    if sec in etf_cache and etf_cache.get(sec) is not None:
+        return sec,'STATIC_MAP'
+
+    # PIT fallback: 60-session return correlation against 11 sector ETFs.
+    if stock is None or len(stock)<70:return None,'UNAVAILABLE'
+    end=pd.Timestamp(dt).normalize()
+    sp=stock[stock.date<=end].tail(70)[['date','ret1']].dropna()
+    if len(sp)<45:return None,'UNAVAILABLE'
+    best=None
+    for e,ep in etf_cache.items():
+        if ep is None:continue
+        q=ep[ep.date<=end].tail(70)[['date','ret1']].dropna()
+        m=sp.merge(q,on='date',suffixes=('_s','_e'))
+        if len(m)<40:continue
+        c=float(m.ret1_s.corr(m.ret1_e))
+        if not np.isfinite(c):continue
+        if best is None or c>best[0]:best=(c,e)
+    return (best[1],'PIT_CORRELATION') if best else (None,'UNAVAILABLE')
+
+def _v820_get_json(url,timeout=45):
+    req=Request(url,headers={'Accept':'application/json','User-Agent':'VCP-Radar-Cloud/8.20'})
+    _rate_wait()
+    with urlopen(req,timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8',errors='replace'))
+
+def _v820_fund_access_probe():
+    if not TIINGO_TOKEN:
+        return False,'TIINGO_TOKEN_MISSING',None
+    url=f"https://api.tiingo.com/tiingo/fundamentals/definitions?token={quote(TIINGO_TOKEN)}"
+    try:
+        arr=_v820_get_json(url)
+        if not isinstance(arr,list) or not arr:
+            return False,'FUNDAMENTAL_DEFINITIONS_EMPTY',None
+        return True,'OK',arr
+    except HTTPError as ex:
+        return False,f'HTTP_{ex.code}',None
+    except Exception as ex:
+        return False,f'{type(ex).__name__}:{ex}',None
+
+def _v820_pick_codes(defs):
+    out={'revenue':[],'eps':[],'net_income':[]}
+    for d in defs or []:
+        code=str(d.get('dataCode',''))
+        name=str(d.get('name',''))
+        low=(code+' '+name).lower()
+        st=str(d.get('statementType','')).lower()
+        if st!='incomestatement':continue
+        if ('revenue' in low or 'sales' in low) and not any(x in low for x in ['deferred','unearned']):
+            out['revenue'].append(code)
+        if ('earnings per share' in low or re.search(r'(^|[^a-z])eps([^a-z]|$)',low)) and 'dilut' in low:
+            out['eps'].append(code)
+        if ('net income' in low) and ('common' in low or code.lower()=='netincome'):
+            out['net_income'].append(code)
+    # fallback broader EPS match if diluted code absent
+    if not out['eps']:
+        for d in defs or []:
+            code=str(d.get('dataCode',''));name=str(d.get('name',''))
+            low=(code+' '+name).lower()
+            if str(d.get('statementType','')).lower()=='incomestatement' and ('earnings per share' in low or 'eps' in low):
+                out['eps'].append(code)
+    return {k:list(dict.fromkeys(v))[:4] for k,v in out.items()}
+
+def _v820_statement_rows(ticker,start_date,end_date,code_map):
+    V820_FUND_DIR.mkdir(parents=True,exist_ok=True)
+    fp=V820_FUND_DIR/f"{re.sub(r'[^A-Za-z0-9._-]','_',ticker)}.json"
+    arr=None
+    if fp.exists():
+        try:arr=json.loads(fp.read_text(encoding='utf-8'))
+        except Exception:arr=None
+    if arr is None:
+        url=(f"https://api.tiingo.com/tiingo/fundamentals/{quote(ticker)}/statements"
+             f"?startDate={start_date}&endDate={end_date}&asReported=true&token={quote(TIINGO_TOKEN)}")
+        try:
+            arr=_v820_get_json(url)
+            if isinstance(arr,list):fp.write_text(json.dumps(arr,ensure_ascii=False),encoding='utf-8')
+        except HTTPError as ex:
+            if ex.code==429:raise TiingoRateLimitPause('V8.20 Fundamentals hit Tiingo HTTP 429; cached progress preserved.')
+            return []
+        except Exception:return []
+    rows=[]
+    for r in arr if isinstance(arr,list) else []:
+        try:
+            q=int(r.get('quarter') or 0)
+            if q not in [1,2,3,4]:continue
+            dt=pd.to_datetime(r.get('date'),errors='coerce')
+            if pd.isna(dt):continue
+            vals={}
+            sd=r.get('statementData') or {}
+            inc=sd.get('incomeStatement') or []
+            dd={str(x.get('dataCode')):x.get('value') for x in inc if isinstance(x,dict)}
+            for key,codes in code_map.items():
+                val=np.nan
+                for c in codes:
+                    if c in dd:
+                        try:val=float(dd[c])
+                        except Exception:val=np.nan
+                        if np.isfinite(val):break
+                vals[key]=val
+            rows.append({'release_date':pd.Timestamp(dt).normalize(),
+                         'year':int(r.get('year') or 0),'quarter':q,**vals})
+        except Exception:continue
+    return rows
+
+def _v820_attach_fundamental_features(A,code_map):
+    # As-reported only. A statement can be used only if release_date <= entry_date.
+    out=A.copy()
+    for c in ['rev_yoy','eps_yoy','ni_yoy','rev_yoy_accel','eps_yoy_accel']:
+        out[c]=np.nan
+    tickers=sorted(set(out.ticker.dropna().astype(str)))
+    earliest=str((out.entry_date.min()-pd.Timedelta(days=800)).date())
+    latest=str(out.entry_date.max().date())
+    total=len(tickers)
+    for n,t in enumerate(tickers,1):
+        rows=_v820_statement_rows(t,earliest,latest,code_map)
+        if not rows:continue
+        S=pd.DataFrame(rows).sort_values('release_date')
+        lookup={(int(r.year),int(r.quarter)):r for _,r in S.iterrows()}
+        idx=out.index[out.ticker.eq(t)]
+        for i in idx:
+            ed=pd.Timestamp(out.at[i,'entry_date'])
+            avail=S[S.release_date<=ed]
+            if avail.empty:continue
+            r=avail.iloc[-1]
+            y=int(r.year);q=int(r.quarter)
+            p=lookup.get((y-1,q));pp=lookup.get((y-2,q))
+            if p is None:continue
+            def grow(a,b):
+                try:
+                    a=float(a);b=float(b)
+                    if not np.isfinite(a) or not np.isfinite(b) or abs(b)<1e-12:return np.nan
+                    return a/abs(b)-1 if b<0 else a/b-1
+                except Exception:return np.nan
+            gy={}
+            for key,col in [('revenue','rev_yoy'),('eps','eps_yoy'),('net_income','ni_yoy')]:
+                gy[col]=grow(r.get(key),p.get(key))
+                out.at[i,col]=gy[col]
+            if pp is not None:
+                prev_rev=grow(p.get('revenue'),pp.get('revenue'))
+                prev_eps=grow(p.get('eps'),pp.get('eps'))
+                if np.isfinite(gy['rev_yoy']) and np.isfinite(prev_rev):
+                    out.at[i,'rev_yoy_accel']=gy['rev_yoy']-prev_rev
+                if np.isfinite(gy['eps_yoy']) and np.isfinite(prev_eps):
+                    out.at[i,'eps_yoy_accel']=gy['eps_yoy']-prev_eps
+        if n==1 or n%20==0 or n==total:
+            _v820_write(status='running',phase='fundamentals',
+                        message=f'As-reported fundamentals {n}/{total} tickers · cache reusable',
+                        processed=5,total=9,elapsed_sec=0)
+    return out
+
+def _v820_eval_feature_set(D,features,label):
+    features=[c for c in features if c in D.columns and pd.to_numeric(D[c],errors='coerce').notna().mean()>=.45]
+    if len(features)<2:return {'name':label,'available':False,'reason':'INSUFFICIENT_FEATURE_COVERAGE','features':features}
+
+    D=D.sort_values(['entry_date','listing_id']).copy()
+    idx_all=D.index.to_numpy();n=len(D);warm=max(60,int(round(n*.40)))
+    cuts=np.linspace(warm,n,5,dtype=int);folds=[];preds=[];foldrows=[]
+    for bi in range(4):
+        a=int(cuts[bi]);b=int(cuts[bi+1])
+        if b<=a:continue
+        te_idx=idx_all[a:b];te=D.loc[te_idx]
+        t0=pd.Timestamp(te.entry_date.min()).normalize()
+        embargo=t0-pd.Timedelta(days=30)
+        tr=D[(D.entry_date<t0)&(D.exit_date<embargo)]
+        if len(tr)<50 or tr.y.sum()<6 or (tr.y==0).sum()<30:continue
+
+        med=tr[features].median(numeric_only=True)
+        Xtr=tr[features].fillna(med).to_numpy(float)
+        Xte=te[features].fillna(med).to_numpy(float)
+        mu=np.nanmean(Xtr,axis=0);sd=np.nanstd(Xtr,axis=0)
+        sd=np.where((~np.isfinite(sd))|(sd<1e-9),1.0,sd)
+        Xtr=np.nan_to_num((Xtr-mu)/sd);Xte=np.nan_to_num((Xte-mu)/sd)
+        ytr=tr.y.to_numpy(int);yte=te.y.to_numpy(int)
+
+        # fixed model family inherited from V8.19; no retuning.
+        w=_v819_fit_logistic(Xtr,ytr,l2=2.0)
+        pl=_v819_predict_logistic(Xte,w)
+        tree=_v819_fit_depth2_tree(Xtr,ytr,list(range(len(features))))
+        pt=_v819_predict_tree(Xte,tree)
+        pb=.5*pl+.5*pt
+
+        auc=_v819_auc(yte,pb)
+        base=float(yte.mean()) if len(yte) else np.nan
+        q=np.quantile(pb,.80)
+        top=pb>=q
+        top_rate=float(yte[top].mean()) if top.any() else np.nan
+        lift=float(top_rate/base) if np.isfinite(base) and base>0 and np.isfinite(top_rate) else np.nan
+        foldrows.append({'test':f"{te.entry_date.min().date()} → {te.entry_date.max().date()}",
+                         'n':int(len(te)),'winners':int(yte.sum()),
+                         'auc':float(auc) if np.isfinite(auc) else None,
+                         'top20_lift':lift})
+        for idx,p in zip(te.index,pb):
+            preds.append((idx,float(p),int(D.loc[idx,'y'])))
+
+    if len(preds)<50:return {'name':label,'available':False,'reason':'INSUFFICIENT_OOS_ROWS','features':features,'folds':foldrows}
+    O=pd.DataFrame(preds,columns=['idx','score','y'])
+    auc=_v819_auc(O.y,O.score)
+    usable=[x['auc'] for x in foldrows if x.get('auc') is not None]
+    med_auc=float(np.median(usable)) if usable else np.nan
+    med_lift=float(np.nanmedian([x.get('top20_lift',np.nan) for x in foldrows]))
+    adverse=int(sum(float(x)<.50 for x in usable))
+    # same research gate as V8.19, minus permutation because this is a fixed second-stage comparison.
+    passed=bool(np.isfinite(auc) and auc>=.60 and np.isfinite(med_auc) and med_auc>=.55
+                and len(usable)>=2 and adverse<=1 and np.isfinite(med_lift) and med_lift>=1.50)
+    return {'name':label,'available':True,'features':features,'oos_rows':int(len(O)),
+            'pooled_auc':float(auc) if np.isfinite(auc) else None,
+            'median_fold_auc':med_auc,'median_top20_lift':med_lift,
+            'adverse_folds':adverse,'pass':passed,'folds':foldrows}
+
+def _v820_run():
+    global v820_thread
+    tstart=time.time()
+    try:
+        _v820_write(status='running',phase='preflight',
+                    message='V8.20：只测试真正新信息；不重复 D1–D10、不重跑旧 price/volume。',
+                    processed=0,total=9,elapsed_sec=0,error=None,traceback=None)
+
+        fpath=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fpath.exists():raise RuntimeError('V6.94 feature store missing')
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 Actual Buy ledger missing')
+        F=pd.read_csv(fpath,compression='gzip')
+        L=pd.read_csv(V704_LEDGER,compression='gzip')
+
+        for D0 in [F,L]:
+            D0['listing_id']=D0['listing_id'].astype(str)
+            D0['entry_date']=pd.to_datetime(D0['entry_date'],errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F['exit_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        if F['is_stop'].dtype!=bool:
+            F['is_stop']=F['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+
+        # Use V8.19's tested lossless grain handling.
+        k=['listing_id','entry_date']
+        F,_fa=_v819_exact_collapse(F,k,'V6.94')
+        L,_la=_v819_exact_collapse(L,k,'V7.04')
+        A=L[k].merge(F,on=k,how='left',validate='one_to_one',indicator=True)
+        cov=float((A._merge=='both').mean()) if len(A) else 0
+        if cov<.95:raise RuntimeError(f'Exact join coverage too low: {cov:.1%}')
+        A=A[A._merge.eq('both')].drop(columns=['_merge']).copy()
+        A=A.dropna(subset=['entry_date','exit_date','ret']).copy()
+        A['ticker']=A.listing_id.str.split('__').str[0].str.upper().str.strip()
+        A['label_stop']=A.is_stop.astype(bool)
+        A['label_50']=A.ret.ge(.50)
+        A=A[A.label_stop|A.label_50].copy()
+        A=A[~(A.label_stop&A.label_50)].copy()
+        A['y']=A.label_50.astype(int)
+
+        _v820_write(status='running',phase='sector_context',
+                    message='构建个股相对所属 sector ETF 的 PIT leadership + 同日板块候选共振。',
+                    processed=2,total=9,elapsed_sec=round(time.time()-tstart,2))
+
+        etfs=['XLK','XLY','XLC','XLF','XLV','XLP','XLI','XLE','XLU','XLB','XLRE']
+        ec={e:_v820_norm_price(load_cached(e)) for e in etfs}
+        good=[e for e in etfs if ec.get(e) is not None and len(ec[e])>=80]
+        if len(good)<8:raise RuntimeError(f'Sector ETF cache coverage too low: {len(good)}/11')
+
+        # candidate density by mapped sector/date from the full frozen candidate store
+        FC=F[['listing_id','entry_date']+[c for c in ['ret_20'] if c in F.columns]].copy()
+        FC['ticker']=FC.listing_id.str.split('__').str[0].str.upper().str.strip()
+        FC['sector_etf']=FC.ticker.map(SECTOR)
+        den=(FC.dropna(subset=['sector_etf']).groupby(['entry_date','sector_etf'])
+             .size().rename('sector_candidate_count').reset_index())
+        medret=None
+        if 'ret_20' in FC.columns:
+            medret=(FC.dropna(subset=['sector_etf']).groupby(['entry_date','sector_etf'])['ret_20']
+                    .median().rename('sector_candidate_median_ret20').reset_index())
+
+        M=_v615b_read_manifest()
+        if M is None or M.empty:raise RuntimeError('V6.17 Historical manifest missing')
+        lidcol=next((c for c in ['listing_id','ListingID','listingId'] if c in M.columns),None)
+        if lidcol is None:raise RuntimeError('Historical manifest missing listing_id')
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+
+        rows=[]
+        for n,(_,r) in enumerate(A.iterrows(),1):
+            lid=str(r.listing_id);dt=pd.Timestamp(r.entry_date)
+            mr=mmap.get(lid)
+            stock=None
+            if mr is not None:
+                try:stock=_v820_norm_price(_v617fv1_read_price(mr))
+                except Exception:stock=None
+            sec,method=_v820_sector_for_trade(stock,dt,{e:ec[e] for e in good},r.ticker)
+            if sec is None:continue
+            sr=_v820_asof(stock,dt);er=_v820_asof(ec.get(sec),dt)
+            if sr is None or er is None:continue
+
+            # sector rank among available ETFs at the SAME date
+            vals20=[];vals60=[]
+            for e in good:
+                z=_v820_asof(ec[e],dt)
+                if z is None:continue
+                if np.isfinite(z.ret20):vals20.append((e,float(z.ret20)))
+                if np.isfinite(z.ret60):vals60.append((e,float(z.ret60)))
+            def pct_rank(vals,e):
+                vv=[v for _,v in vals]
+                me=next((v for k,v in vals if k==e),np.nan)
+                if not np.isfinite(me) or not vv:return np.nan
+                return float(np.mean(np.asarray(vv)<=me))
+
+            row={'listing_id':lid,'entry_date':dt,'exit_date':r.exit_date,'ret':float(r.ret),
+                 'ticker':r.ticker,'y':int(r.y),'sector_etf':sec,'sector_method':method,
+                 'stock_ret20':float(sr.ret20) if np.isfinite(sr.ret20) else np.nan,
+                 'stock_ret60':float(sr.ret60) if np.isfinite(sr.ret60) else np.nan,
+                 'sector_ret20':float(er.ret20) if np.isfinite(er.ret20) else np.nan,
+                 'sector_ret60':float(er.ret60) if np.isfinite(er.ret60) else np.nan,
+                 'sector_above50':float(er.close>er.ma50) if np.isfinite(er.ma50) else np.nan,
+                 'sector_rank20':pct_rank(vals20,sec),'sector_rank60':pct_rank(vals60,sec)}
+            row['rel_sector20']=row['stock_ret20']-row['sector_ret20'] if np.isfinite(row['stock_ret20']) and np.isfinite(row['sector_ret20']) else np.nan
+            row['rel_sector60']=row['stock_ret60']-row['sector_ret60'] if np.isfinite(row['stock_ret60']) and np.isfinite(row['sector_ret60']) else np.nan
+            rows.append(row)
+            if n==1 or n%50==0 or n==len(A):
+                _v820_write(status='running',phase='sector_context',
+                            message=f'Sector leadership {n}/{len(A)} Actual Buys',
+                            processed=3,total=9,elapsed_sec=round(time.time()-tstart,2))
+
+        X=pd.DataFrame(rows)
+        if len(X)<100:raise RuntimeError(f'Sector leadership rows too low: {len(X)}')
+        X=X.merge(den,on=['entry_date','sector_etf'],how='left')
+        if medret is not None:X=X.merge(medret,on=['entry_date','sector_etf'],how='left')
+
+        sector_features=['sector_ret20','sector_ret60','sector_above50','sector_rank20','sector_rank60',
+                         'rel_sector20','rel_sector60','sector_candidate_count','sector_candidate_median_ret20']
+
+        _v820_write(status='running',phase='fundamental_access',
+                    message='检查 Tiingo TRUE as-reported fundamentals entitlement；无权限则不伪造。',
+                    processed=4,total=9,elapsed_sec=round(time.time()-tstart,2))
+
+        faccess,freason,defs=_v820_fund_access_probe()
+        code_map=_v820_pick_codes(defs) if faccess else {}
+        if faccess and any(code_map.values()):
+            X=_v820_attach_fundamental_features(X,code_map)
+        fundamental_features=['rev_yoy','eps_yoy','ni_yoy','rev_yoy_accel','eps_yoy_accel']
+
+        V820_DIR.mkdir(parents=True,exist_ok=True)
+        X.to_csv(V820_ROWS,index=False,compression='gzip')
+
+        _v820_write(status='running',phase='oos',
+                    message='同一套 purged forward OOS：Sector-only / Fundamental-only / Combined。',
+                    processed=7,total=9,elapsed_sec=round(time.time()-tstart,2))
+
+        tests=[]
+        tests.append(_v820_eval_feature_set(X,sector_features,'SECTOR_LEADERSHIP'))
+        if faccess:
+            tests.append(_v820_eval_feature_set(X,fundamental_features,'PIT_FUNDAMENTALS'))
+            tests.append(_v820_eval_feature_set(X,sector_features+fundamental_features,'COMBINED_NEW_INFO'))
+
+        available=[t for t in tests if t.get('available')]
+        passing=[t for t in available if t.get('pass')]
+        if passing:
+            best=sorted(passing,key=lambda z:(z.get('pooled_auc') or 0,z.get('median_top20_lift') or 0),reverse=True)[0]
+            verdict='NEW_INFORMATION_OOS_SIGNAL_FOUND__ONE_FINAL_PORTFOLIO_REPLAY_ALLOWED'
+            next_step=f"Freeze {best['name']} exactly as tested and run ONE final portfolio replay versus V7.04. No threshold/model sweep."
+        else:
+            if not faccess:
+                verdict='SECTOR_LEADERSHIP_FAILS_OOS__TRUE_FUNDAMENTALS_NOT_ENTITLED'
+                next_step=('Sector/leadership context did not pass. Tiingo true fundamentals are not accessible under the current token '
+                           f'({freason}); do not pretend they were tested. If fundamentals access is added, rerun V8.20 from cache. '
+                           'Otherwise reassess whether the JLaw discretionary edge is reproducible from available data.')
+            else:
+                verdict='NEW_INFORMATION_SET_FAILS_PURGED_OOS__RADAR_ARCHITECTURE_REASSESSMENT_REQUIRED'
+                next_step=('Sector leadership and accessible true PIT fundamentals both failed the same OOS standard. '
+                           'Do not create more neighboring feature versions; reassess candidate-generation/source semantics.')
+
+        result={'version':'V8.20 New-Information OOS Test','build_id':V820_BUILD_ID,'verdict':verdict,
+                'sample':{'rows':int(len(X)),'stops':int((X.y==0).sum()),'plus50':int(X.y.sum()),
+                          'exact_join_coverage':cov},
+                'fundamentals':{'access':bool(faccess),'reason':freason,'selected_codes':code_map,
+                                'note':'Tiingo statements are queried with asReported=true and used only when statement release date <= entry date.'},
+                'tests':tests,'next_step':next_step,
+                'history_dedup':'Does NOT rerun V6.33/V6.83/V7.15 D1-D10 post-entry confirmation. Does NOT retune V8.18/V8.19 price-volume features.',
+                'boundaries':'Frozen Actual Buys + existing Historical/ETF cache + Tiingo as-reported fundamentals only if entitled. 0 universe scan, 0 account replay, 0 threshold sweep.'}
+        V820_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+        _v820_write(status='done',phase='done',message=f'V8.20 完成：{verdict}',
+                    processed=9,total=9,elapsed_sec=round(time.time()-tstart,2),error=None,traceback=None)
+
+    except TiingoRateLimitPause as ex:
+        _v820_write(status='error',phase='rate_limit',message=str(ex),
+                    elapsed_sec=round(time.time()-tstart,2),error=str(ex),traceback=traceback.format_exc())
+    except Exception as ex:
+        _v820_write(status='error',phase='error',message=f'V8.20 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-tstart,2),error=f'{type(ex).__name__}: {ex}',
+                    traceback=traceback.format_exc())
+    finally:v820_thread=None
+
+def _v820_start():
+    global v820_thread
+    if _v820_alive():return False
+    _v820_write(status='starting',phase='starting',message='V8.20 starting · new information only',
+                processed=0,total=9,elapsed_sec=0,error=None,traceback=None)
+    v820_thread=threading.Thread(target=_v820_run,daemon=True);v820_thread.start();return True
+
+@APP.route('/v820/run',methods=['GET','POST'])
+def v820_run():_v820_start();return redirect('/v820')
+
+@APP.get('/api/v820/status')
+def v820_status_api():return jsonify(_v820_status())
+
+@APP.get('/v820')
+def v820_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v820_status();R={}
+    if V820_RESULT.exists():
+        try:R=json.loads(V820_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    tests=R.get('tests') or [];F=R.get('fundamentals') or {};S=R.get('sample') or {}
+    def f3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    rows=''
+    for t in tests:
+        rows+=f"<tr><td><b>{e(t.get('name'))}</b></td><td>{'✅' if t.get('available') else '—'}</td><td>{f3(t.get('pooled_auc'))}</td><td>{f3(t.get('median_fold_auc'))}</td><td>{f3(t.get('median_top20_lift'))}x</td><td>{'✅ PASS' if t.get('pass') else '—'}</td></tr>"
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v820/run'><button>▶ Run V8.20 New-Information OOS</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.20 New-Information OOS Test</h1><div class='g'><b>第二个也是最后一个研究版：</b>不再磨旧价量。直接测试 Sector/Industry Leadership + TRUE PIT Fundamentals。D1–D10 历史已经做过，不重复。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',9)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='b'>Rows: <b>{e(S.get('rows','—'))}</b> · STOP: <b>{e(S.get('stops','—'))}</b> · +50: <b>{e(S.get('plus50','—'))}</b><br><br>Tiingo TRUE fundamentals access: <b>{'YES' if F.get('access') else 'NO/UNKNOWN'}</b> · {e(F.get('reason',''))}</div></div>
+<div class='c'><h2>New Information OOS</h2><div style='overflow:auto'><table><tr><th>Feature Set</th><th>Available</th><th>Pooled OOS AUC</th><th>Median Fold AUC</th><th>Median Top20 Lift</th><th>Pass</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
+<div class='c'><div class='o'><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>历史去重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v820/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
