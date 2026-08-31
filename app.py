@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v821-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:24px;margin:20px 0'>
+        <h2>📊 V8.21 TRUE PIT Fundamentals</h2>
+        <p>8s hard timeout · as-reported quarterly data · Actual-Buy tickers only · decisive OOS test.</p>
+        <a href='/v821'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.21</button></a>
+        </div>
+        <div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.20B New-Information OOS Test</h2>
         <p>Sector/Industry Leadership + TRUE PIT Fundamentals · final research version before any replay.</p>
         <a href='/v820'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.20B</button></a>
@@ -56841,3 +56846,313 @@ body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.
 <div class='c'><h2>New Information OOS</h2><div style='overflow:auto'><table><tr><th>Feature Set</th><th>Available</th><th>Pooled OOS AUC</th><th>Median Fold AUC</th><th>Median Top20 Lift</th><th>Pass</th></tr>{rows or "<tr><td colspan='6'>—</td></tr>"}</table></div></div>
 <div class='c'><div class='o'><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>历史去重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
 <script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v820/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
+
+
+# ================= V8.21 TRUE PIT FUNDAMENTALS — DECISIVE TEST =================
+V821_DIR=DATA_DIR/'v821_true_pit_fundamentals'
+V821_STATUS=V821_DIR/'status.json'
+V821_RESULT=V821_DIR/'result.json'
+V821_CACHE=V821_DIR/'statement_cache'
+V821_ROWS=V821_DIR/'fundamental_rows.csv.gz'
+V821_BUILD_ID='V821_TRUE_PIT_FUNDAMENTALS_20260831A'
+v821_thread=None
+
+def _v821_status():
+    x={'build_id':V821_BUILD_ID,'status':'idle','phase':'idle',
+       'message':'Ready · bounded Tiingo fundamentals test',
+       'processed':0,'total':8,'elapsed_sec':0,'error':None,'traceback':None}
+    if V821_STATUS.exists():
+        try:
+            q=json.loads(V821_STATUS.read_text(encoding='utf-8'))
+            if q.get('build_id')==V821_BUILD_ID:x.update(q)
+        except Exception:pass
+    return x
+
+def _v821_write(**kw):
+    V821_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v821_status();x.update(kw);x['build_id']=V821_BUILD_ID
+    V821_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+
+def _v821_alive(): return v821_thread is not None and v821_thread.is_alive()
+
+def _v821_get_json(url, timeout=8):
+    req=Request(url,headers={'Accept':'application/json','User-Agent':'VCP-Radar-Cloud/8.21'})
+    _rate_wait()
+    with urlopen(req,timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8',errors='replace'))
+
+def _v821_probe_definitions():
+    if not TIINGO_TOKEN:return False,'TIINGO_TOKEN_MISSING',None,0.0
+    url=f"https://api.tiingo.com/tiingo/fundamentals/definitions?token={quote(TIINGO_TOKEN)}"
+    t=time.time()
+    try:
+        arr=_v821_get_json(url,timeout=8)
+        dt=time.time()-t
+        if not isinstance(arr,list) or not arr:return False,'DEFINITIONS_EMPTY',None,dt
+        return True,'OK',arr,dt
+    except HTTPError as ex:return False,f'HTTP_{ex.code}',None,time.time()-t
+    except Exception as ex:return False,f'{type(ex).__name__}:{ex}',None,time.time()-t
+
+def _v821_pick_codes(defs):
+    cats={'revenue':[],'eps':[],'net_income':[]}
+    for d in defs or []:
+        code=str(d.get('dataCode',''));name=str(d.get('name',''))
+        low=(code+' '+name).lower(); st=str(d.get('statementType','')).lower()
+        if st!='incomestatement':continue
+        if ('revenue' in low or 'sales' in low) and not any(x in low for x in ['deferred','unearned','cost of']):
+            cats['revenue'].append(code)
+        if ('earnings per share' in low or re.search(r'(^|[^a-z])eps([^a-z]|$)',low)) and ('dilut' in low or 'basic' in low):
+            cats['eps'].append(code)
+        if ('net income' in low) and not any(x in low for x in ['margin','per share']):
+            cats['net_income'].append(code)
+    return {k:list(dict.fromkeys(v))[:6] for k,v in cats.items()}
+
+def _v821_fetch_statements(ticker,start_date,end_date):
+    V821_CACHE.mkdir(parents=True,exist_ok=True)
+    fp=V821_CACHE/f"{re.sub(r'[^A-Za-z0-9._-]','_',ticker)}.json"
+    if fp.exists():
+        try:
+            arr=json.loads(fp.read_text(encoding='utf-8'))
+            if isinstance(arr,list):return arr,'CACHE'
+        except Exception:pass
+    url=(f"https://api.tiingo.com/tiingo/fundamentals/{quote(ticker)}/statements"
+         f"?startDate={start_date}&endDate={end_date}&asReported=true&token={quote(TIINGO_TOKEN)}")
+    try:
+        arr=_v821_get_json(url,timeout=8)
+        if isinstance(arr,list):
+            fp.write_text(json.dumps(arr,ensure_ascii=False),encoding='utf-8')
+            return arr,'LIVE'
+        return [],'EMPTY'
+    except HTTPError as ex:
+        return [],f'HTTP_{ex.code}'
+    except Exception as ex:
+        return [],f'{type(ex).__name__}'
+
+def _v821_parse_quarters(arr,code_map):
+    rows=[]
+    for r in arr if isinstance(arr,list) else []:
+        try:
+            q=int(r.get('quarter') or 0)
+            if q not in [1,2,3,4]:continue
+            rd=pd.to_datetime(r.get('date'),errors='coerce')
+            if pd.isna(rd):continue
+            inc=((r.get('statementData') or {}).get('incomeStatement') or [])
+            dd={str(x.get('dataCode')):x.get('value') for x in inc if isinstance(x,dict)}
+            vals={}
+            for key,codes in code_map.items():
+                v=np.nan
+                for c in codes:
+                    if c in dd:
+                        try:v=float(dd[c])
+                        except Exception:v=np.nan
+                        if np.isfinite(v):break
+                vals[key]=v
+            rows.append({'release_date':pd.Timestamp(rd).normalize(),
+                         'year':int(r.get('year') or 0),'quarter':q,**vals})
+        except Exception:continue
+    if not rows:return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values('release_date')
+
+def _v821_growth(a,b):
+    try:
+        a=float(a);b=float(b)
+        if not np.isfinite(a) or not np.isfinite(b) or abs(b)<1e-12:return np.nan
+        return (a-b)/abs(b)
+    except Exception:return np.nan
+
+def _v821_attach_features(A,code_map,tstart):
+    out=A.copy()
+    fcols=['rev_yoy','eps_yoy','ni_yoy','rev_yoy_accel','eps_yoy_accel','ni_yoy_accel']
+    for c in fcols:out[c]=np.nan
+    tickers=sorted(set(out.ticker.dropna().astype(str)))
+    earliest=str((out.entry_date.min()-pd.Timedelta(days=1100)).date())
+    latest=str(out.entry_date.max().date())
+    stats={'tickers_total':len(tickers),'tickers_with_rows':0,'cache_hits':0,'live_hits':0,
+           'rate_limited':0,'errors':0}
+    deadline=tstart+240
+
+    for n,t in enumerate(tickers,1):
+        if time.time()>deadline:
+            stats['budget_exhausted']=True
+            break
+        arr,src=_v821_fetch_statements(t,earliest,latest)
+        if src=='CACHE':stats['cache_hits']+=1
+        elif src=='LIVE':stats['live_hits']+=1
+        elif src=='HTTP_429':stats['rate_limited']+=1
+        elif src not in ('EMPTY',):stats['errors']+=1
+
+        S=_v821_parse_quarters(arr,code_map)
+        if S.empty:continue
+        stats['tickers_with_rows']+=1
+
+        idx=out.index[out.ticker.eq(t)]
+        for i in idx:
+            ed=pd.Timestamp(out.at[i,'entry_date']).normalize()
+            avail=S[S.release_date<=ed]
+            if avail.empty:continue
+            r=avail.iloc[-1]; y=int(r.year); q=int(r.quarter)
+
+            def prior(yy,qq):
+                z=avail[(avail.year==yy)&(avail.quarter==qq)]
+                return z.iloc[-1] if len(z) else None
+
+            p=prior(y-1,q); pp=prior(y-2,q)
+            if p is None:continue
+
+            gy={}
+            for key,col in [('revenue','rev_yoy'),('eps','eps_yoy'),('net_income','ni_yoy')]:
+                gy[col]=_v821_growth(r.get(key),p.get(key))
+                out.at[i,col]=gy[col]
+
+            if pp is not None:
+                prev_rev=_v821_growth(p.get('revenue'),pp.get('revenue'))
+                prev_eps=_v821_growth(p.get('eps'),pp.get('eps'))
+                prev_ni=_v821_growth(p.get('net_income'),pp.get('net_income'))
+                if np.isfinite(gy['rev_yoy']) and np.isfinite(prev_rev):out.at[i,'rev_yoy_accel']=gy['rev_yoy']-prev_rev
+                if np.isfinite(gy['eps_yoy']) and np.isfinite(prev_eps):out.at[i,'eps_yoy_accel']=gy['eps_yoy']-prev_eps
+                if np.isfinite(gy['ni_yoy']) and np.isfinite(prev_ni):out.at[i,'ni_yoy_accel']=gy['ni_yoy']-prev_ni
+
+        if n==1 or n%15==0 or n==len(tickers):
+            _v821_write(status='running',phase='fundamental_fetch',
+                        message=f'Fundamentals {n}/{len(tickers)} tickers · cache={stats["cache_hits"]} live={stats["live_hits"]}',
+                        processed=5,total=8,elapsed_sec=round(time.time()-tstart,2))
+    return out,fcols,stats
+
+def _v821_run():
+    global v821_thread
+    tstart=time.time()
+    try:
+        _v821_write(status='running',phase='preflight',
+                    message='最后一个 fundamentals 测试：严格 PIT、限时、不改交易规则。',
+                    processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+
+        fpath=V694_DIR/'clean_candidate_path_features.csv.gz'
+        if not fpath.exists():raise RuntimeError('V6.94 feature store missing')
+        if not V704_LEDGER.exists():raise RuntimeError('V7.04 Actual Buy ledger missing')
+        F=pd.read_csv(fpath,compression='gzip');L=pd.read_csv(V704_LEDGER,compression='gzip')
+
+        for D0 in [F,L]:
+            D0['listing_id']=D0['listing_id'].astype(str)
+            D0['entry_date']=pd.to_datetime(D0['entry_date'],errors='coerce').dt.normalize()
+        F['exit_date']=pd.to_datetime(F['exit_date'],errors='coerce').dt.normalize()
+        F['ret']=pd.to_numeric(F['ret'],errors='coerce')
+        if F['is_stop'].dtype!=bool:
+            F['is_stop']=F['is_stop'].astype(str).str.lower().isin(['true','1','yes'])
+
+        F,_=_v819_exact_collapse(F,['listing_id','entry_date'],'V6.94')
+        L,_=_v819_exact_collapse(L,['listing_id','entry_date'],'V7.04')
+        A=L[['listing_id','entry_date']].merge(F,on=['listing_id','entry_date'],how='left',
+                                               validate='one_to_one',indicator=True)
+        cov=float((A._merge=='both').mean()) if len(A) else 0
+        if cov<.95:raise RuntimeError(f'Exact join coverage too low: {cov:.1%}')
+        A=A[A._merge.eq('both')].drop(columns=['_merge']).dropna(subset=['entry_date','exit_date','ret']).copy()
+        A['ticker']=A.listing_id.str.split('__').str[0].str.upper().str.strip()
+        A['label_stop']=A.is_stop.astype(bool);A['label_50']=A.ret.ge(.50)
+        A=A[A.label_stop|A.label_50].copy()
+        A=A[~(A.label_stop&A.label_50)].copy()
+        A['y']=A.label_50.astype(int)
+
+        _v821_write(status='running',phase='entitlement_probe',
+                    message='Tiingo fundamentals 权限探测（8秒硬超时）。',
+                    processed=2,total=8,elapsed_sec=round(time.time()-tstart,2))
+
+        ok,reason,defs,probe_sec=_v821_probe_definitions()
+        if not ok:
+            result={'version':'V8.21 True PIT Fundamentals Decisive Test',
+                    'build_id':V821_BUILD_ID,
+                    'verdict':'TRUE_PIT_FUNDAMENTALS_UNAVAILABLE__NOT_TESTED',
+                    'sample':{'rows':int(len(A)),'stops':int((A.y==0).sum()),'plus50':int(A.y.sum()),
+                              'exact_join_coverage':cov},
+                    'access':{'ok':False,'reason':reason,'probe_sec':probe_sec},
+                    'next_step':'Do NOT claim fundamentals failed. They were not testable under the current Tiingo access.',
+                    'boundaries':'Access/PIT gate only; 0 universe scan, 0 account replay, 0 strategy mutation.'}
+            V821_DIR.mkdir(parents=True,exist_ok=True)
+            V821_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+            _v821_write(status='done',phase='done',
+                        message='V8.21 完成：TRUE_PIT_FUNDAMENTALS_UNAVAILABLE__NOT_TESTED',
+                        processed=8,total=8,elapsed_sec=round(time.time()-tstart,2))
+            return
+
+        code_map=_v821_pick_codes(defs)
+        if not code_map.get('revenue') or not (code_map.get('eps') or code_map.get('net_income')):
+            raise RuntimeError(f'Fundamental definitions accessible but required codes not found: {code_map}')
+
+        X,fcols,stats=_v821_attach_features(A,code_map,tstart)
+        V821_DIR.mkdir(parents=True,exist_ok=True)
+        X.to_csv(V821_ROWS,index=False,compression='gzip')
+
+        coverage={c:float(pd.to_numeric(X[c],errors='coerce').notna().mean()) for c in fcols}
+        usable=[c for c in fcols if coverage[c]>=.45]
+
+        if len(usable)<2:
+            verdict='TRUE_PIT_FUNDAMENTALS_ACCESSIBLE_BUT_COVERAGE_INSUFFICIENT'
+            test={'available':False,'features':usable,'coverage':coverage}
+            next_step='Do not loosen PIT semantics or invent missing values.'
+        else:
+            _v821_write(status='running',phase='oos',
+                        message=f'运行 purged forward OOS：{len(usable)} 个真实 fundamentals features。',
+                        processed=6,total=8,elapsed_sec=round(time.time()-tstart,2))
+            test=_v820_eval_feature_set(X,usable,'TRUE_PIT_FUNDAMENTALS')
+            if test.get('pass'):
+                verdict='TRUE_PIT_FUNDAMENTALS_OOS_SIGNAL_FOUND__ONE_FINAL_REPLAY_ALLOWED'
+                next_step='Freeze this exact feature set/model and run ONE final portfolio replay versus V7.04.'
+            else:
+                verdict='TRUE_PIT_FUNDAMENTALS_FAIL_PURGED_OOS__FEATURE_EXPANSION_ROUTE_CLOSED'
+                next_step='Do not add neighboring fundamentals thresholds. Reassess candidate-generation/source semantics.'
+
+        result={'version':'V8.21 True PIT Fundamentals Decisive Test',
+                'build_id':V821_BUILD_ID,'verdict':verdict,
+                'sample':{'rows':int(len(X)),'stops':int((X.y==0).sum()),'plus50':int(X.y.sum()),
+                          'exact_join_coverage':cov},
+                'access':{'ok':True,'reason':reason,'probe_sec':probe_sec,'selected_codes':code_map},
+                'fetch_stats':stats,'coverage':coverage,'test':test,
+                'next_step':next_step,
+                'pit_contract':'asReported=true; release_date <= Actual Buy entry_date.',
+                'history_dedup':'No D1-D10 retest. No V8.18/V8.19 price-volume retune. No V8.20 sector retune.',
+                'boundaries':'Actual Buy tickers only; 8s per HTTP request; 4-minute total fundamentals I/O budget; 0 universe scan, 0 account replay, 0 threshold sweep.'}
+        V821_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+        _v821_write(status='done',phase='done',message=f'V8.21 完成：{verdict}',
+                    processed=8,total=8,elapsed_sec=round(time.time()-tstart,2),error=None,traceback=None)
+    except Exception as ex:
+        _v821_write(status='error',phase='error',
+                    message=f'V8.21 failed: {type(ex).__name__}: {ex}',
+                    elapsed_sec=round(time.time()-tstart,2),
+                    error=f'{type(ex).__name__}: {ex}',traceback=traceback.format_exc())
+    finally:v821_thread=None
+
+def _v821_start():
+    global v821_thread
+    if _v821_alive():return False
+    _v821_write(status='starting',phase='starting',
+                message='V8.21 starting · bounded TRUE PIT fundamentals test',
+                processed=0,total=8,elapsed_sec=0,error=None,traceback=None)
+    v821_thread=threading.Thread(target=_v821_run,daemon=True);v821_thread.start();return True
+
+@APP.route('/v821/run',methods=['GET','POST'])
+def v821_run():_v821_start();return redirect('/v821')
+
+@APP.get('/api/v821/status')
+def v821_status_api():return jsonify(_v821_status())
+
+@APP.get('/v821')
+def v821_page():
+    import html
+    e=lambda x:html.escape(str(x));st=_v821_status();R={}
+    if V821_RESULT.exists():
+        try:R=json.loads(V821_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    S=R.get('sample') or {};A=R.get('access') or {};T=R.get('test') or {};C=R.get('coverage') or {}
+    def f3(x):
+        try:return f'{float(x):.3f}'
+        except:return '—'
+    covrows=''.join(f"<tr><td>{e(k)}</td><td>{float(v):.1%}</td></tr>" for k,v in C.items())
+    btn='' if st.get('status') in ('starting','running') else "<form method='post' action='/v821/run'><button>▶ Run V8.21 TRUE PIT Fundamentals</button></form>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system;background:#f3f6fa;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:20px;padding:22px;margin:15px 0}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:14px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px;border-bottom:1px solid #ddd;text-align:left}}</style></head>
+<body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>📊 V8.21 TRUE PIT Fundamentals — Decisive Test</h1><div class='g'><b>最后一刀：</b>8秒硬超时确认 Tiingo fundamentals 权限；有权限就做真实 as-reported fundamentals OOS，没有就明确 NOT TESTED。</div></div>
+<div class='c'><h2>状态：{e(st.get('status'))}</h2><p>{e(st.get('message'))}</p><p>{e(st.get('phase'))} · {st.get('processed',0)}/{st.get('total',8)} · {st.get('elapsed_sec',0)}s</p><p style='font-size:12px'>Build: {e(st.get('build_id'))}</p>{btn}{('<pre>'+e(st.get('traceback'))+'</pre>') if st.get('status')=='error' else ''}</div>
+<div class='c'><h2>Verdict: {e(R.get('verdict','—'))}</h2><div class='b'>Rows: <b>{e(S.get('rows','—'))}</b> · STOP: <b>{e(S.get('stops','—'))}</b> · +50: <b>{e(S.get('plus50','—'))}</b><br><br>Fundamentals access: <b>{'YES' if A.get('ok') else 'NO/UNKNOWN'}</b> · {e(A.get('reason',''))} · Probe: {f3(A.get('probe_sec'))}s<br><br>Pooled OOS AUC: <b>{f3(T.get('pooled_auc'))}</b> · Median Fold AUC: <b>{f3(T.get('median_fold_auc'))}</b> · Top20 Lift: <b>{f3(T.get('median_top20_lift'))}x</b></div></div>
+<div class='c'><h2>Fundamental Coverage</h2><table><tr><th>Feature</th><th>Coverage</th></tr>{covrows or "<tr><td colspan='2'>—</td></tr>"}</table></div>
+<div class='c'><div class='o'><b>下一步：</b>{e(R.get('next_step',''))}<br><br><b>PIT：</b>{e(R.get('pit_contract',''))}<br><br><b>历史去重：</b>{e(R.get('history_dedup',''))}<br><br><b>边界：</b>{e(R.get('boundaries',''))}</div></div>
+<script>setTimeout(async()=>{{try{{let x=await (await fetch('/api/v821/status',{{cache:'no-store'}})).json();if(['starting','running'].includes(x.status))location.reload()}}catch(e){{}}}},1500)</script></div></body></html>"""
