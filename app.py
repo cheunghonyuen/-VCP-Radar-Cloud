@@ -57386,3 +57386,273 @@ if _v822_home_base is not None:
         if _vf is _v822_home_base:
             APP.view_functions[_ep]=_v822_home_wrap
 
+
+
+# ================= V8.23 PIT FUNDAMENTALS ACCESS / SCHEMA AUDIT =================
+V823_DIR = DATA_DIR / "v823_pit_fundamentals_access_audit"
+V823_RESULT = V823_DIR / "result.json"
+V823_DEFINITIONS = V823_DIR / "fundamental_definitions.json"
+V823_AAPL_SAMPLE = V823_DIR / "aapl_statements_sample.json"
+
+def _v823_http_json(url, timeout=20):
+    req = Request(url, headers={
+        "Accept":"application/json",
+        "User-Agent":"VCP-Radar-Cloud/8.23"
+    })
+    try:
+        _rate_wait()
+    except Exception:
+        pass
+    try:
+        with urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+            body = json.loads(raw) if raw else None
+            return {"ok":True,"status":getattr(r,"status",200),"body":body,"error":None}
+    except HTTPError as e:
+        raw=e.read().decode("utf-8",errors="replace")
+        try:body=json.loads(raw)
+        except Exception:body={"raw":raw[:1000]}
+        return {"ok":False,"status":e.code,"body":body,"error":f"HTTPError {e.code}"}
+    except Exception as e:
+        return {"ok":False,"status":None,"body":None,"error":f"{type(e).__name__}: {e}"}
+
+def _v823_url(path, params=None):
+    from urllib.parse import urlencode
+    params = dict(params or {})
+    if TIINGO_TOKEN:
+        params["token"] = TIINGO_TOKEN
+    q = urlencode(params)
+    return "https://api.tiingo.com" + path + (("?" + q) if q else "")
+
+def _v823_pick_codes(defs):
+    # Reuse the same semantic mapper as V8.20, but audit the actual definitions first.
+    if "_v820_pick_codes" in globals():
+        try:return _v820_pick_codes(defs)
+        except Exception:pass
+    out={"revenue":[],"eps":[],"net_income":[]}
+    for d in defs or []:
+        code=str(d.get("dataCode",""))
+        name=str(d.get("name",""))
+        low=(code+" "+name).lower()
+        st=str(d.get("statementType","")).lower()
+        if st!="incomestatement":continue
+        if ("revenue" in low or "sales" in low) and not any(x in low for x in ["deferred","unearned"]):
+            out["revenue"].append(code)
+        if ("earnings per share" in low or " eps" in " "+low) and "dilut" in low:
+            out["eps"].append(code)
+        if "net income" in low and ("common" in low or code.lower()=="netincome"):
+            out["net_income"].append(code)
+    return {k:list(dict.fromkeys(v))[:6] for k,v in out.items()}
+
+def _v823_schema_rows(arr):
+    rows=[]
+    for r in arr or []:
+        if not isinstance(r,dict):continue
+        sd=r.get("statementData") or {}
+        rows.append({
+            "date":r.get("date"),
+            "year":r.get("year"),
+            "quarter":r.get("quarter"),
+            "top_keys":sorted(r.keys()),
+            "statement_groups":sorted(sd.keys()) if isinstance(sd,dict) else [],
+            "income_fields":len((sd.get("incomeStatement") or [])) if isinstance(sd,dict) else 0,
+            "balance_fields":len((sd.get("balanceSheet") or [])) if isinstance(sd,dict) else 0,
+            "cashflow_fields":len((sd.get("cashFlow") or [])) if isinstance(sd,dict) else 0,
+            "overview_fields":len((sd.get("overview") or [])) if isinstance(sd,dict) else 0,
+        })
+    return rows
+
+def _v823_run_now():
+    V823_DIR.mkdir(parents=True, exist_ok=True)
+
+    # This is intentionally tiny: 1 definitions request + 1 DOW-30 sample request.
+    # No symbol loop, no universe scan, no replay.
+    if not TIINGO_TOKEN:
+        result={
+            "version":"V8.23 PIT Fundamentals Access / Schema Audit",
+            "verdict":"TOKEN_MISSING",
+            "token_present":False,
+            "next_action":"RESTORE_TIINGO_TOKEN_THEN_RERUN_AUDIT",
+            "boundaries":"0 universe scan · 0 replay · 0 cache rebuild · 0 strategy change."
+        }
+        V823_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
+        return result
+
+    defs_resp=_v823_http_json(_v823_url("/tiingo/fundamentals/definitions"), timeout=20)
+    defs=defs_resp.get("body") if defs_resp.get("ok") and isinstance(defs_resp.get("body"),list) else []
+    if defs:
+        V823_DEFINITIONS.write_text(json.dumps(defs,ensure_ascii=False,indent=2),encoding="utf-8")
+
+    codes=_v823_pick_codes(defs)
+    defs_schema={
+        "rows":len(defs),
+        "top_keys":sorted(set(k for x in defs if isinstance(x,dict) for k in x.keys())),
+        "statement_types":sorted(set(str(x.get("statementType")) for x in defs if isinstance(x,dict) and x.get("statementType") is not None)),
+        "selected_codes":codes
+    }
+
+    # AAPL is intentionally used because Tiingo documents DOW 30 as free/evaluation coverage.
+    # Query only a recent small range; 'date' is then audited as public release date semantics.
+    sample_resp=_v823_http_json(
+        _v823_url("/tiingo/fundamentals/AAPL/statements", {"startDate":"2023-01-01"}),
+        timeout=25
+    )
+    sample=sample_resp.get("body") if sample_resp.get("ok") and isinstance(sample_resp.get("body"),list) else []
+    if sample:
+        V823_AAPL_SAMPLE.write_text(json.dumps(sample,ensure_ascii=False,indent=2),encoding="utf-8")
+
+    schema_rows=_v823_schema_rows(sample)
+    dates=[]
+    for r in sample:
+        try:
+            dt=pd.to_datetime(r.get("date"),errors="coerce")
+            if not pd.isna(dt):dates.append(str(pd.Timestamp(dt).date()))
+        except Exception:pass
+
+    # Inspect whether selected codes are actually present in returned incomeStatement arrays.
+    present={k:set() for k in codes}
+    for r in sample:
+        sd=(r.get("statementData") or {}) if isinstance(r,dict) else {}
+        inc=sd.get("incomeStatement") or []
+        got=set(str(x.get("dataCode")) for x in inc if isinstance(x,dict))
+        for family,cc in codes.items():
+            present[family].update(c for c in cc if c in got)
+
+    access = bool(defs_resp.get("ok") and sample_resp.get("ok") and len(defs)>0 and len(sample)>0)
+    schema_ok = bool(
+        sample and
+        all(isinstance(r,dict) and "date" in r and "year" in r and "quarter" in r and "statementData" in r for r in sample[:min(5,len(sample))])
+    )
+    code_ok = bool(codes.get("revenue") and codes.get("eps") and codes.get("net_income"))
+    values_seen = {k:sorted(v) for k,v in present.items()}
+    values_ok = all(bool(values_seen.get(k)) for k in ["revenue","eps","net_income"])
+
+    if access and schema_ok and code_ok and values_ok:
+        verdict="PIT_FUNDAMENTALS_ACCESS_CONFIRMED"
+        next_action="BUILD_SMALL_AS_REPORTED_CACHE_FOR_FROZEN_ACTUAL_BUY_TICKERS_THEN_RERUN_V820_FROM_CACHE_ONLY"
+    elif defs_resp.get("status") in (401,403) or sample_resp.get("status") in (401,403):
+        verdict="FUNDAMENTALS_NOT_ENTITLED_OR_AUTH_BLOCKED"
+        next_action="ENABLE_TIINGO_FUNDAMENTALS_ADDON_OR_USE_ANOTHER_RELIABLE_PIT_SOURCE"
+    elif defs_resp.get("ok") and not sample_resp.get("ok"):
+        verdict="DEFINITIONS_ACCESS_ONLY__STATEMENTS_BLOCKED"
+        next_action="CHECK_FUNDAMENTALS_ENTITLEMENT_BEFORE_ANY_MODEL_WORK"
+    elif not defs_resp.get("ok"):
+        verdict="FUNDAMENTALS_DEFINITIONS_ACCESS_FAILED"
+        next_action="FIX_ACCESS_OR_ENTITLEMENT_ONLY"
+    else:
+        verdict="ACCESS_PARTIAL_SCHEMA_NOT_PROVEN"
+        next_action="DO_NOT_BUILD_MODEL__RESOLVE_SCHEMA_OR_ENTITLEMENT_FIRST"
+
+    result={
+        "version":"V8.23 PIT Fundamentals Access / Schema Audit",
+        "build_id":"V823_PIT_FUND_ACCESS_20260902A",
+        "verdict":verdict,
+        "token_present":True,
+        "definitions":{
+            "http_ok":defs_resp.get("ok"),
+            "http_status":defs_resp.get("status"),
+            "error":defs_resp.get("error"),
+            **defs_schema
+        },
+        "aapl_statements":{
+            "http_ok":sample_resp.get("ok"),
+            "http_status":sample_resp.get("status"),
+            "error":sample_resp.get("error"),
+            "rows":len(sample),
+            "release_dates_tail":dates[-8:],
+            "schema_sample":schema_rows[:5],
+            "selected_codes_present":values_seen
+        },
+        "pit_rules":[
+            "Use statement 'date' as the public release date.",
+            "For any entry date, only statements with release_date <= entry_date are eligible.",
+            "Never join by fiscal period end alone.",
+            "As-reported historical values must be used; do not backfill prior periods using later restatements.",
+            "No synthetic price/volume proxy can substitute for missing business fundamentals."
+        ],
+        "next_action":next_action,
+        "boundaries":"Tiny access/schema preflight only: max 2 Tiingo fundamentals requests, 0 universe scan, 0 replay, 0 cache build, 0 parameter tuning."
+    }
+    V823_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+@APP.route("/v823/run",methods=["GET","POST"])
+def v823_run():
+    _v823_run_now()
+    return redirect("/v823")
+
+@APP.get("/api/v823")
+def v823_api():
+    if V823_RESULT.exists():
+        try:return jsonify(json.loads(V823_RESULT.read_text(encoding="utf-8")))
+        except Exception:pass
+    return jsonify({"verdict":"NOT_RUN"})
+
+@APP.get("/v823")
+def v823_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R={}
+    if V823_RESULT.exists():
+        try:R=json.loads(V823_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    D=R.get("definitions") or {}
+    S=R.get("aapl_statements") or {}
+    rules="".join(f"<li>{e(x)}</li>" for x in (R.get("pit_rules") or []))
+    sample_rows=""
+    for x in S.get("schema_sample") or []:
+        sample_rows+=f"<tr><td>{e(x.get('date'))}</td><td>{e(x.get('year'))}</td><td>{e(x.get('quarter'))}</td><td>{e(', '.join(x.get('statement_groups') or []))}</td><td>{e(x.get('income_fields'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.r{{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.23 PIT Fundamentals Access / Schema Audit</h1>
+<div class='o'><b>只做两次轻量访问。</b> Definitions + AAPL statements。先确认权限、字段和 release-date 语义，再决定要不要建立 fundamentals cache。</div></div>
+<div class='c'><form method='post' action='/v823/run'><button>▶ Run PIT Fundamentals Access Audit</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<p><b>Boundaries:</b> {e(R.get('boundaries',''))}</p></div>
+<div class='c'><h2>Definitions Access</h2>
+<div class='g'>HTTP: <b>{e(D.get('http_status','—'))}</b> · OK: <b>{e(D.get('http_ok','—'))}</b> · Rows: <b>{e(D.get('rows','—'))}</b><br>
+Statement types: {e(', '.join(D.get('statement_types') or []))}<br>
+Selected Revenue codes: {e(', '.join((D.get('selected_codes') or {}).get('revenue',[])))}<br>
+Selected EPS codes: {e(', '.join((D.get('selected_codes') or {}).get('eps',[])))}<br>
+Selected Net Income codes: {e(', '.join((D.get('selected_codes') or {}).get('net_income',[])))}</div></div>
+<div class='c'><h2>AAPL Statement Sample</h2>
+<p>HTTP: <b>{e(S.get('http_status','—'))}</b> · OK: <b>{e(S.get('http_ok','—'))}</b> · Rows: <b>{e(S.get('rows','—'))}</b></p>
+<p>Release dates: {e(', '.join(S.get('release_dates_tail') or []))}</p>
+<div style='overflow:auto'><table><tr><th>Release date</th><th>Fiscal year</th><th>Quarter</th><th>Groups</th><th>Income fields</th></tr>{sample_rows or "<tr><td colspan=5>—</td></tr>"}</table></div>
+<p><b>Selected codes present:</b> {e(json.dumps(S.get('selected_codes_present') or {},ensure_ascii=False))}</p></div>
+<div class='c'><h2>PIT Safety Rules</h2><ul>{rules}</ul></div>
+<div class='c'><div class='g'><b>Next action:</b> {e(R.get('next_action','Run audit first'))}</div></div>
+</div></body></html>"""
+
+# Required home card.
+_v823_home_base=APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v823_home_base is not None:
+    def _v823_home_wrap(*args,**kwargs):
+        resp=_v823_home_base(*args,**kwargs)
+        card="""<div id='v823-home-card' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧾 V8.23 PIT Fundamentals Access / Schema Audit</h2>
+        <p>只查 Tiingo fundamentals 权限 + definitions + AAPL statement schema。最多2次请求，0 rescan / 0 replay。</p>
+        <a href='/v823'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.23</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True);pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos);txt=txt[:gt+1]+card+txt[gt+1:]
+                else:txt=card+txt
+                resp.set_data(txt);return resp
+            txt=str(resp);pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos);return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v823_home_base:APP.view_functions[_ep]=_v823_home_wrap
