@@ -58515,3 +58515,480 @@ if _v824a_home_base is not None:
         except Exception:return resp
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v824a_home_base:APP.view_functions[_ep]=_v824a_home_wrap
+
+
+# ================= V8.25 FREE DOW-30 PIT FUNDAMENTALS PILOT =================
+# Zero-paid-data feasibility gate:
+# A) preflight current free Dow-30 sample against the existing V6.94 candidate store
+# B) build/resume only the free PIT statements cache for supported Dow tickers
+# C) frozen purged-forward comparison: price/volume Control vs +PIT fundamentals
+# No threshold rescue, no full-market scan, no account replay.
+V825_DIR = DATA_DIR / "v825_free_dow30_pit_pilot"
+V825_FUND_DIR = V825_DIR / "fundamentals_cache"
+V825_PREFLIGHT = V825_DIR / "preflight.json"
+V825_CHECKPOINT = V825_DIR / "checkpoint.json"
+V825_STATUS = V825_DIR / "status.json"
+V825_RESULT = V825_DIR / "result.json"
+V825_OOS = V825_DIR / "oos_rows.csv.gz"
+V825_BUILD_ID = "V825_FREE_DOW30_PIT_20260902A"
+v825_thread = None
+
+# Fixed research universe for this FREE feasibility test only.
+# Membership is NOT used as historical Dow membership; it is simply the present free API test basket.
+V825_DOW30 = sorted(set("""
+AAPL AMGN AMZN AXP BA CAT CRM CSCO CVX DIS DOW GS HD HON IBM JNJ JPM KO
+MCD MMM MRK MSFT NKE NVDA PG SHW TRV UNH V WMT
+""".split()))
+
+def _v825_jread(path, default=None):
+    try:
+        if Path(path).exists():
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {} if default is None else default
+
+def _v825_jwrite(path,obj):
+    Path(path).parent.mkdir(parents=True,exist_ok=True)
+    Path(path).write_text(json.dumps(obj,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+
+def _v825_status():
+    x={"build_id":V825_BUILD_ID,"status":"idle","phase":"idle","progress":0,
+       "message":"尚未开始","processed":0,"total":0,"errors":0,"result":None}
+    q=_v825_jread(V825_STATUS,{})
+    if q.get("build_id")==V825_BUILD_ID:x.update(q)
+    return x
+
+def _v825_set(**kw):
+    x=_v825_status();x.update(kw);x["build_id"]=V825_BUILD_ID;_v825_jwrite(V825_STATUS,x)
+
+def _v825_alive():
+    return v825_thread is not None and v825_thread.is_alive()
+
+def _v825_feature_store():
+    fp=V694_DIR/"clean_candidate_path_features.csv.gz"
+    if not fp.exists():raise RuntimeError("V6.94 feature store missing")
+    D=pd.read_csv(fp,compression="gzip")
+    need=["listing_id","entry_date","exit_date","ret","is_stop"]
+    miss=[c for c in need if c not in D.columns]
+    if miss:raise RuntimeError("V6.94 schema missing: "+",".join(miss))
+    D["listing_id"]=D["listing_id"].astype(str)
+    D["ticker"]=D["listing_id"].str.split("__").str[0].str.upper().str.strip()
+    D["entry_date"]=pd.to_datetime(D["entry_date"],errors="coerce").dt.normalize()
+    D["exit_date"]=pd.to_datetime(D["exit_date"],errors="coerce").dt.normalize()
+    D["ret"]=pd.to_numeric(D["ret"],errors="coerce")
+    if D["is_stop"].dtype!=bool:
+        D["is_stop"]=D["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+    D=D.dropna(subset=["entry_date","exit_date","ret"]).copy()
+    return D
+
+def _v825_defs():
+    candidates=[V823_DEFINITIONS,V820_DIR/"fundamental_definitions.json"]
+    for p in candidates:
+        try:
+            if Path(p).exists():
+                arr=json.loads(Path(p).read_text(encoding="utf-8"))
+                if isinstance(arr,list) and arr:return Path(p),arr
+        except Exception:pass
+    raise RuntimeError("Run V8.23B first: no fundamentals definitions snapshot")
+
+def _v825_cache_audit(arr):
+    if not isinstance(arr,list):return {"ok":False,"rows":0,"reason":"NOT_LIST"}
+    good=0
+    for r in arr:
+        if isinstance(r,dict) and pd.notna(pd.to_datetime(r.get("date"),errors="coerce")) and isinstance(r.get("statementData"),dict):
+            good+=1
+    ok=bool(arr and good/max(1,len(arr))>=.95)
+    return {"ok":ok,"rows":len(arr),"valid":good,"reason":"PASS" if ok else "SCHEMA"}
+
+def _v825_preflight():
+    V825_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v825_feature_store()
+    dp,defs=_v825_defs()
+    codes=_v820_pick_codes(defs)
+    if not all(codes.get(k) for k in ["revenue","eps","net_income"]):
+        raise RuntimeError("Required Revenue/EPS/NetIncome semantic codes not resolved")
+
+    Z=D[D["ticker"].isin(V825_DOW30)].copy()
+    if Z.empty:raise RuntimeError("No Dow-30 rows in V6.94 feature store")
+    Z["label_stop"]=Z["is_stop"].astype(bool)
+    Z["label_50"]=Z["ret"].ge(.50)
+    P=Z[Z.label_stop|Z.label_50].copy()
+    P=P[~(P.label_stop&P.label_50)].copy()
+
+    tickers=sorted(set(Z["ticker"]))
+    existing=[];pending=[]
+    for t in tickers:
+        fp=V825_FUND_DIR/f"{t}.json"
+        if fp.exists():
+            try:
+                if _v825_cache_audit(json.loads(fp.read_text(encoding="utf-8")))["ok"]:
+                    existing.append(t);continue
+            except Exception:pass
+        pending.append(t)
+
+    start=str((Z.entry_date.min()-pd.Timedelta(days=800)).date())
+    out={
+      "version":"V8.25 Free Dow-30 PIT Fundamentals Pilot",
+      "build_id":V825_BUILD_ID,
+      "verdict":"PASS",
+      "universe":{"fixed_free_test_basket":V825_DOW30,"present_in_feature_store":tickers,
+                  "ticker_count":len(tickers)},
+      "sample":{"candidate_rows":int(len(Z)),"stop_or_plus50_rows":int(len(P)),
+                "stops":int(P.label_stop.sum()),"plus50":int(P.label_50.sum()),
+                "entry_min":str(Z.entry_date.min().date()),"entry_max":str(Z.entry_date.max().date())},
+      "definitions":{"path":str(dp),"rows":len(defs),"codes":codes},
+      "cache_plan":{"existing":len(existing),"pending":len(pending),"pending_tickers":pending,
+                    "start_date":start,"gap_seconds":float(current_gap),
+                    "estimated_min_minutes":round(len(pending)*float(current_gap)/60,1)},
+      "gate":{
+        "purpose":"Feasibility only: does real PIT fundamentals improve OOS selection on a free large-cap basket?",
+        "pass_rule":"Overlay must beat Control on pooled/median-fold AUC AND top20 trade PF/AvgTrade, with no material deterioration in MaxDD; no rescue tuning.",
+        "not_claimed":"A PASS does not prove broad-market VCP effectiveness. It only justifies a paid broad-universe second-stage test."
+      },
+      "boundaries":"Free-data pilot only. No paid add-on, no universe scan, no V6.44 modification, no portfolio replay."
+    }
+    _v825_jwrite(V825_PREFLIGHT,out)
+    return out
+
+def _v825_fetch(t,start):
+    return _v823_http_json(_v823_url(f"/tiingo/fundamentals/{t}/statements",{"startDate":start}),timeout=35)
+
+def _v825_build_worker():
+    global v825_thread
+    try:
+        P=_v825_jread(V825_PREFLIGHT,{})
+        if P.get("verdict")!="PASS":raise RuntimeError("Run V8.25 Preflight first")
+        V825_FUND_DIR.mkdir(parents=True,exist_ok=True)
+        tickers=P["universe"]["present_in_feature_store"]
+        start=P["cache_plan"]["start_date"]
+
+        ck=_v825_jread(V825_CHECKPOINT,{"build_id":V825_BUILD_ID,"completed":[],"errors":{}})
+        if ck.get("build_id")!=V825_BUILD_ID:ck={"build_id":V825_BUILD_ID,"completed":[],"errors":{}}
+        completed=set(ck.get("completed") or [])
+        errors=dict(ck.get("errors") or {})
+
+        # Recover completed files even if checkpoint was lost.
+        for t in tickers:
+            fp=V825_FUND_DIR/f"{t}.json"
+            if fp.exists():
+                try:
+                    if _v825_cache_audit(json.loads(fp.read_text(encoding="utf-8")))["ok"]:completed.add(t)
+                except Exception:pass
+
+        for t in tickers:
+            if t in completed:continue
+            _v825_set(status="running",phase="cache",progress=int(100*len(completed)/max(1,len(tickers))),
+                      message=f"{t} · free PIT statements · {len(completed)+1}/{len(tickers)}",
+                      processed=len(completed),total=len(tickers),errors=len(errors))
+            r=_v825_fetch(t,start)
+            arr=r.get("body")
+            aud=_v825_cache_audit(arr) if isinstance(arr,list) else {"ok":False,"rows":0,"reason":"NOT_LIST"}
+            if r.get("ok") and aud["ok"]:
+                tmp=(V825_FUND_DIR/f"{t}.json.tmp")
+                tmp.write_text(json.dumps(arr,ensure_ascii=False,indent=2),encoding="utf-8")
+                tmp.replace(V825_FUND_DIR/f"{t}.json")
+                completed.add(t);errors.pop(t,None)
+            else:
+                errors[t]={"http":r.get("status"),"error":r.get("error"),
+                           "body":str(arr)[:500],"schema":aud}
+            ck={"build_id":V825_BUILD_ID,"completed":sorted(completed),"errors":errors,
+                "updated_at":datetime.now(timezone.utc).isoformat()}
+            _v825_jwrite(V825_CHECKPOINT,ck)
+
+        cov=len(completed)/max(1,len(tickers))
+        verdict="FREE_DOW30_CACHE_READY" if cov>=.90 else "FREE_CACHE_INCOMPLETE"
+        result={"verdict":verdict,"valid":len(completed),"total":len(tickers),"coverage":cov,
+                "errors":errors,"next_action":"RUN_PILOT" if verdict=="FREE_DOW30_CACHE_READY" else "REVIEW_ONLY_FAILED_TICKERS"}
+        _v825_set(status="done",phase="cache_done",progress=100,
+                  message=f"{verdict} · {len(completed)}/{len(tickers)}",
+                  processed=len(completed),total=len(tickers),errors=len(errors),result=result)
+    except Exception as ex:
+        _v825_set(status="error",phase="error",progress=_v825_status().get("progress",0),
+                  message=f"{type(ex).__name__}: {ex}")
+    finally:
+        v825_thread=None
+
+def _v825_start_build():
+    global v825_thread
+    if _v825_alive():return False
+    v825_thread=threading.Thread(target=_v825_build_worker,daemon=True);v825_thread.start();return True
+
+def _v825_statement_rows(t,code_map):
+    fp=V825_FUND_DIR/f"{t}.json"
+    if not fp.exists():return []
+    try:arr=json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:return []
+    rows=[]
+    for r in arr if isinstance(arr,list) else []:
+        try:
+            q=int(r.get("quarter") or 0)
+            if q not in (1,2,3,4):continue
+            dt=pd.to_datetime(r.get("date"),errors="coerce")
+            if pd.isna(dt):continue
+            inc=((r.get("statementData") or {}).get("incomeStatement") or [])
+            dd={str(x.get("dataCode")):x.get("value") for x in inc if isinstance(x,dict)}
+            vals={}
+            for fam,cc in code_map.items():
+                v=np.nan
+                for c in cc:
+                    if c in dd:
+                        try:v=float(dd[c])
+                        except Exception:v=np.nan
+                        if np.isfinite(v):break
+                vals[fam]=v
+            rows.append({"release_date":pd.Timestamp(dt).normalize(),
+                         "year":int(r.get("year") or 0),"quarter":q,**vals})
+        except Exception:continue
+    return rows
+
+def _v825_attach(D,code_map):
+    X=D.copy()
+    for c in ["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]:X[c]=np.nan
+    def grow(a,b):
+        try:
+            a=float(a);b=float(b)
+            if not np.isfinite(a) or not np.isfinite(b) or abs(b)<1e-12:return np.nan
+            return a/abs(b)-1 if b<0 else a/b-1
+        except Exception:return np.nan
+    for t in sorted(set(X.ticker)):
+        rows=_v825_statement_rows(t,code_map)
+        if not rows:continue
+        S=pd.DataFrame(rows).sort_values("release_date")
+        lookup={(int(r.year),int(r.quarter)):r for _,r in S.iterrows()}
+        for i in X.index[X.ticker.eq(t)]:
+            ed=pd.Timestamp(X.at[i,"entry_date"])
+            A=S[S.release_date<=ed]
+            if A.empty:continue
+            r=A.iloc[-1];y=int(r.year);q=int(r.quarter);p=lookup.get((y-1,q));pp=lookup.get((y-2,q))
+            if p is None:continue
+            vals={}
+            for fam,col in [("revenue","rev_yoy"),("eps","eps_yoy"),("net_income","ni_yoy")]:
+                vals[col]=grow(r.get(fam),p.get(fam));X.at[i,col]=vals[col]
+            if pp is not None:
+                pr=grow(p.get("revenue"),pp.get("revenue"));pe=grow(p.get("eps"),pp.get("eps"))
+                if np.isfinite(vals["rev_yoy"]) and np.isfinite(pr):X.at[i,"rev_yoy_accel"]=vals["rev_yoy"]-pr
+                if np.isfinite(vals["eps_yoy"]) and np.isfinite(pe):X.at[i,"eps_yoy_accel"]=vals["eps_yoy"]-pe
+    return X
+
+def _v825_metrics(ret):
+    r=pd.to_numeric(pd.Series(ret),errors="coerce").dropna()
+    if r.empty:return {"trades":0}
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    pf=gp/gl if gl>0 else (999.0 if gp>0 else 0.0)
+    eq=r.cumsum();dd=eq-eq.cummax()
+    return {"trades":int(len(r)),"win_rate":float((r>0).mean()),"pf":float(pf),
+            "avg_trade":float(r.mean()),"median_trade":float(r.median()),
+            "big50_rate":float((r>=.50).mean()),"stop_rate":float((r<=-.069).mean()),
+            "max_dd":float(dd.min()) if len(dd) else 0.0,"net":float(r.sum())}
+
+def _v825_oos(D,features,label):
+    features=[c for c in features if c in D.columns and pd.to_numeric(D[c],errors="coerce").notna().mean()>=.45]
+    if len(features)<2:return {"available":False,"reason":"INSUFFICIENT_FEATURE_COVERAGE","features":features}
+    D=D.sort_values(["entry_date","listing_id"]).copy()
+    idx=D.index.to_numpy();n=len(D);warm=max(60,int(n*.40))
+    if n-warm<40:return {"available":False,"reason":"INSUFFICIENT_ROWS","n":n,"features":features}
+    cuts=np.linspace(warm,n,5,dtype=int);pred=[];folds=[]
+    for fi in range(4):
+        a,b=int(cuts[fi]),int(cuts[fi+1])
+        if b<=a:continue
+        te=D.loc[idx[a:b]]
+        t0=pd.Timestamp(te.entry_date.min()).normalize()
+        tr=D[(D.entry_date<t0)&(D.exit_date<t0-pd.Timedelta(days=30))]
+        if len(tr)<50 or tr.y.sum()<5 or (tr.y==0).sum()<20:continue
+        med=tr[features].median(numeric_only=True)
+        Xtr=tr[features].fillna(med).to_numpy(float);Xte=te[features].fillna(med).to_numpy(float)
+        mu=np.nanmean(Xtr,axis=0);sd=np.nanstd(Xtr,axis=0);sd=np.where((~np.isfinite(sd))|(sd<1e-9),1,sd)
+        Xtr=np.nan_to_num((Xtr-mu)/sd);Xte=np.nan_to_num((Xte-mu)/sd)
+        ytr=tr.y.to_numpy(int);yte=te.y.to_numpy(int)
+        # Same fixed family as V8.19/V8.20.
+        rank=[]
+        for j,c in enumerate(features):
+            au=_v819_auc(ytr,Xtr[:,j])
+            if np.isfinite(au):rank.append((max(au,1-au),j,c))
+        keep=[j for _,j,_ in sorted(rank,reverse=True)[:min(10,len(rank))]]
+        if len(keep)<2:continue
+        w=_v819_fit_logistic(Xtr[:,keep],ytr,l2=2.0)
+        pl=_v819_predict_logistic(Xte[:,keep],w)
+        tree=_v819_fit_depth2_tree(Xtr,ytr,keep)
+        pt=_v819_predict_tree(Xte,tree);pb=.5*pl+.5*pt
+        auc=_v819_auc(yte,pb);q=np.quantile(pb,.80);sel=pb>=q
+        topret=te.loc[sel,"ret"].to_numpy(float)
+        folds.append({"fold":fi+1,"test":f"{te.entry_date.min().date()} → {te.entry_date.max().date()}",
+                      "n":int(len(te)),"auc":float(auc) if np.isfinite(auc) else None,
+                      "selected":int(sel.sum()),"metrics":_v825_metrics(topret)})
+        for ix,p in zip(te.index,pb):pred.append((ix,float(p),int(D.at[ix,"y"]),float(D.at[ix,"ret"]),fi+1))
+    if len(pred)<30:return {"available":False,"reason":"INSUFFICIENT_OOS","features":features,"folds":folds}
+    O=pd.DataFrame(pred,columns=["idx","score","y","ret","fold"])
+    auc=_v819_auc(O.y,O.score);usable=[x["auc"] for x in folds if x["auc"] is not None]
+    # Select top quintile inside each fold, exactly as fold evaluation.
+    picked=[]
+    for f,g in O.groupby("fold"):
+        q=np.quantile(g.score,.80);picked.extend(g.loc[g.score>=q,"ret"].tolist())
+    return {"available":True,"label":label,"features":features,"oos_rows":int(len(O)),
+            "pooled_auc":float(auc) if np.isfinite(auc) else None,
+            "median_fold_auc":float(np.median(usable)) if usable else None,
+            "top20_metrics":_v825_metrics(picked),"folds":folds}
+
+def _v825_run_pilot():
+    P=_v825_jread(V825_PREFLIGHT,{})
+    if P.get("verdict")!="PASS":raise RuntimeError("Run V8.25 Preflight first")
+    coverage=_v825_status().get("result") or {}
+    if coverage.get("verdict")!="FREE_DOW30_CACHE_READY":
+        # Recover by auditing files if page state was lost after deploy/restart.
+        tickers=P["universe"]["present_in_feature_store"]
+        valid=0
+        for t in tickers:
+            fp=V825_FUND_DIR/f"{t}.json"
+            try:
+                if fp.exists() and _v825_cache_audit(json.loads(fp.read_text(encoding="utf-8")))["ok"]:valid+=1
+            except Exception:pass
+        if valid/max(1,len(tickers))<.90:raise RuntimeError(f"Free cache coverage only {valid}/{len(tickers)}")
+
+    D=_v825_feature_store()
+    D=D[D.ticker.isin(P["universe"]["present_in_feature_store"])].copy()
+    D["label_stop"]=D.is_stop.astype(bool);D["label_50"]=D.ret.ge(.50)
+    D=D[D.label_stop|D.label_50].copy();D=D[~(D.label_stop&D.label_50)].copy();D["y"]=D.label_50.astype(int)
+
+    # Eligible price/volume/control features are PIT columns only, same deny logic as V8.19.
+    deny=set(["ret","is_stop","winner50","winner100","listing_id","ticker","entry_date","exit_date","exit_reason",
+              "entry_px","entry_px_raw","exit_px","exit_px_raw","control_ret","low10_ret",
+              "parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id",
+              "label_stop","label_50","y"])
+    deny_tokens=["exit","future","forward","label","outcome","mfe","mae"]
+    control=[]
+    for c in D.columns:
+        if c in deny or any(tok in c.lower() for tok in deny_tokens):continue
+        z=pd.to_numeric(D[c],errors="coerce")
+        if z.notna().sum()>=max(40,int(.60*len(D))) and z.nunique(dropna=True)>=5:
+            D[c]=z;control.append(c)
+
+    _,defs=_v825_defs();codes=_v820_pick_codes(defs)
+    X=_v825_attach(D,codes)
+    fund=["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]
+
+    C=_v825_oos(X,control,"CONTROL_PRICE_VOLUME")
+    O=_v825_oos(X,control+fund,"OVERLAY_PRICE_VOLUME_PLUS_PIT_FUNDAMENTALS")
+
+    if not C.get("available") or not O.get("available"):
+        verdict="PILOT_INCONCLUSIVE_SAMPLE_OR_COVERAGE"
+    else:
+        cm=C["top20_metrics"];om=O["top20_metrics"]
+        auc_gain=(O.get("pooled_auc") or 0)-(C.get("pooled_auc") or 0)
+        med_gain=(O.get("median_fold_auc") or 0)-(C.get("median_fold_auc") or 0)
+        pf_gain=om.get("pf",0)-cm.get("pf",0)
+        avg_gain=om.get("avg_trade",0)-cm.get("avg_trade",0)
+        dd_ok=om.get("max_dd",0)>=cm.get("max_dd",0)-0.25
+        passed=bool(auc_gain>=.03 and med_gain>=.02 and pf_gain>0 and avg_gain>0 and dd_ok)
+        verdict="FREE_PIT_PILOT_PASS__PAID_BROAD_TEST_JUSTIFIED" if passed else "FREE_PIT_PILOT_FAIL__DO_NOT_PAY_FOR_BROAD_TEST"
+
+    result={"version":"V8.25 Free Dow-30 PIT Fundamentals Pilot","build_id":V825_BUILD_ID,
+            "verdict":verdict,"sample":P.get("sample"),"control":C,"overlay":O,
+            "decision_rule":"PASS only if overlay gains >=0.03 pooled AUC, >=0.02 median-fold AUC, improves top20 PF and AvgTrade, and does not materially worsen MaxDD. No rescue tuning.",
+            "interpretation":"This is a free feasibility gate on a large-cap basket, not proof of broad-market VCP effectiveness.",
+            "next_action":("CONSIDER_PAID_BROAD_UNIVERSE_PIT_TEST" if "PASS__PAID" in verdict else
+                           "STOP_PIT_FUNDAMENTALS_PAID_EXPANSION" if "FAIL__DO_NOT_PAY" in verdict else
+                           "DO_NOT_PAY__RESOLVE_SAMPLE_OR_COVERAGE_ONLY")}
+    _v825_jwrite(V825_RESULT,result)
+    return result
+
+@APP.route("/v825/preflight",methods=["GET","POST"])
+def v825_preflight():
+    try:
+        r=_v825_preflight()
+        _v825_set(status="preflight_pass",phase="preflight",progress=0,
+                  message=f"PASS · {r['universe']['ticker_count']} tickers · {r['sample']['stop_or_plus50_rows']} STOP/+50 rows",
+                  processed=r["cache_plan"]["existing"],total=r["universe"]["ticker_count"],errors=0)
+    except Exception as ex:
+        _v825_set(status="preflight_fail",phase="preflight",progress=0,message=f"{type(ex).__name__}: {ex}",errors=1)
+    return redirect("/v825")
+
+@APP.post("/v825/cache/start")
+def v825_cache_start():
+    return jsonify({"started":_v825_start_build(),**_v825_status()})
+
+@APP.post("/v825/pilot/run")
+def v825_pilot_run():
+    try:
+        r=_v825_run_pilot()
+        _v825_set(status="pilot_done",phase="pilot",progress=100,message=r["verdict"],result=r)
+    except Exception as ex:
+        _v825_set(status="pilot_error",phase="pilot",progress=100,message=f"{type(ex).__name__}: {ex}")
+    return redirect("/v825")
+
+@APP.get("/api/v825")
+def v825_api():
+    return jsonify(_v825_status())
+
+@APP.get("/v825")
+def v825_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P=_v825_jread(V825_PREFLIGHT,{})
+    R=_v825_jread(V825_RESULT,{})
+    S=_v825_status()
+    sm=P.get("sample") or {};cp=P.get("cache_plan") or {};u=P.get("universe") or {}
+    def metrics_block(x):
+        if not x or not x.get("available"):return "Unavailable: "+e((x or {}).get("reason","—"))
+        m=x.get("top20_metrics") or {}
+        return (f"OOS rows <b>{e(x.get('oos_rows'))}</b> · pooled AUC <b>{e(round(float(x.get('pooled_auc') or 0),4))}</b> · "
+                f"median-fold AUC <b>{e(round(float(x.get('median_fold_auc') or 0),4))}</b><br>"
+                f"Top20 trades <b>{e(m.get('trades'))}</b> · Win {e(round(float(m.get('win_rate',0))*100,1))}% · "
+                f"PF <b>{e(round(float(m.get('pf',0)),3))}</b> · AvgTrade <b>{e(round(float(m.get('avg_trade',0))*100,2))}%</b> · "
+                f"Big50 {e(round(float(m.get('big50_rate',0))*100,1))}% · Stop {e(round(float(m.get('stop_rate',0))*100,1))}% · "
+                f"MaxDD {e(round(float(m.get('max_dd',0))*100,1))}%")
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900;margin:5px 0}}
+.track{{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden}}.bar{{height:100%;width:{int(S.get('progress',0))}%;background:#16a34a}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🆓 V8.25 Free Dow-30 PIT Fundamentals Pilot</h1>
+<div class='o'><b>先免费证明“值不值得付钱”。</b> Control = price/volume；Overlay = 同一 Control + 真实 PIT Revenue/EPS/Net Income growth & acceleration。固定规则、purged-forward OOS、禁止 rescue tuning。</div></div>
+<div class='c'><form method='post' action='/v825/preflight'><button>A. Run Free-Pilot Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<p>Dow tickers present: <b>{e(u.get('ticker_count','—'))}</b> · Candidate rows: <b>{e(sm.get('candidate_rows','—'))}</b> · STOP/+50 rows: <b>{e(sm.get('stop_or_plus50_rows','—'))}</b> · Stops {e(sm.get('stops','—'))} · +50 {e(sm.get('plus50','—'))}</p>
+<div class='g'>Cache existing <b>{e(cp.get('existing','—'))}</b> · pending <b>{e(cp.get('pending','—'))}</b> · estimated minimum <b>{e(cp.get('estimated_min_minutes','—'))} min</b></div></div>
+<div class='c'><button id='cache'>B. Build / Resume FREE Dow Cache</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2><div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>{e(S.get('progress',0))}%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span> · errors <span id='err'>{e(S.get('errors',0))}</span></p></div>
+<div class='c'><form method='post' action='/v825/pilot/run'><button>C. Run Frozen Control vs PIT Overlay OOS</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<h3>Control · Price/Volume</h3><div class='g'>{metrics_block(R.get('control')) if R else '—'}</div>
+<h3>Overlay · + PIT Fundamentals</h3><div class='g'>{metrics_block(R.get('overlay')) if R else '—'}</div>
+<p><b>Next:</b> {e(R.get('next_action','—'))}</p><p>{e(R.get('interpretation',''))}</p></div>
+</div>
+<script>
+const $=x=>document.getElementById(x);
+function render(s){{$('msg').textContent=s.message||'';$('pct').textContent=(s.progress||0)+'%';$('bar').style.width=(s.progress||0)+'%';$('cnt').textContent=(s.processed||0)+'/'+(s.total||0);$('err').textContent=s.errors||0}}
+async function poll(){{try{{const s=await (await fetch('/api/v825',{{cache:'no-store'}})).json();render(s);if(s.status==='running')setTimeout(poll,1500)}}catch(e){{$('msg').textContent='status error '+e}}}}
+$('cache').onclick=async()=>{{const s=await (await fetch('/v825/cache/start',{{method:'POST'}})).json();render(s);poll()}};
+poll();
+</script></body></html>"""
+
+# REQUIRED homepage card on every delivery.
+_v825_home_base=APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v825_home_base is not None:
+    def _v825_home_wrap(*args,**kwargs):
+        resp=_v825_home_base(*args,**kwargs)
+        card="""<div id='v825-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🆓 V8.25 Free Dow-30 PIT Fundamentals Pilot</h2>
+        <p>第一关：免费 PIT fundamentals feasibility test。A Preflight → B free cache → C Control vs Overlay OOS。通过才考虑付费全市场。</p>
+        <a href='/v825'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True);pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos);txt=txt[:gt+1]+card+txt[gt+1:]
+                else:txt=card+txt
+                resp.set_data(txt);return resp
+            txt=str(resp);pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos);return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v825_home_base:APP.view_functions[_ep]=_v825_home_wrap
