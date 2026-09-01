@@ -58316,3 +58316,202 @@ if _v824_home_base is not None:
         except Exception:return resp
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v824_home_base:APP.view_functions[_ep]=_v824_home_wrap
+
+
+# ================= V8.24A FIRST-5 FUNDAMENTALS REQUEST DIAGNOSTIC =================
+V824A_DIR = DATA_DIR / "v824a_first5_fundamentals_diag"
+V824A_RESULT = V824A_DIR / "result.json"
+V824A_STATE = {"running":False,"progress":0,"message":"尚未开始","result":None,"error":None}
+V824A_LOCK = threading.Lock()
+
+def _v824a_set(**kw):
+    with V824A_LOCK:
+        V824A_STATE.update(kw)
+
+def _v824a_body_summary(body):
+    if body is None:
+        return {"type":"null"}
+    if isinstance(body,list):
+        sample=body[0] if body else None
+        return {"type":"list","len":len(body),"first_type":type(sample).__name__ if sample is not None else None,
+                "first_keys":sorted(sample.keys()) if isinstance(sample,dict) else None}
+    if isinstance(body,dict):
+        return {"type":"dict","keys":sorted(body.keys())[:30],
+                "detail":str(body)[:800]}
+    return {"type":type(body).__name__,"detail":str(body)[:800]}
+
+def _v824a_worker():
+    try:
+        V824A_DIR.mkdir(parents=True,exist_ok=True)
+        _v824a_set(running=True,progress=2,message="读取 V7.04 Actual-Buy 前5个 ticker…",result=None,error=None)
+
+        L=_v824_actual_buy_source()
+        tickers=sorted(set(L["ticker"]))[:5]
+        P=_v824_json(V824_PREFLIGHT,{})
+        start_date=((P.get("request_plan") or {}).get("start_date") or "1994-01-01")
+
+        rows=[]
+        total=len(tickers)
+        for i,t in enumerate(tickers,1):
+            _v824a_set(progress=5+int((i-1)*90/max(1,total)),
+                       message=f"{t} · diagnostic {i}/{total} · request fundamentals statements")
+
+            # Use the exact same endpoint and helper as V8.24 build.
+            resp=_v824_get_statements(t,start_date)
+            body=resp.get("body")
+            schema=_v824_cache_schema_audit(body) if isinstance(body,list) else {"ok":False,"reason":"NOT_LIST","rows":0}
+
+            row={
+                "ticker":t,
+                "http_ok":resp.get("ok"),
+                "http_status":resp.get("status"),
+                "error":resp.get("error"),
+                "body_summary":_v824a_body_summary(body),
+                "schema":schema,
+                "would_save":bool(resp.get("ok") and schema.get("ok")),
+            }
+            # Detect common systematic failure families.
+            txt=(str(resp.get("error") or "")+" "+str(body)[:1200]).lower()
+            if resp.get("status") in (401,403):
+                row["classification"]="ENTITLEMENT_OR_AUTH"
+            elif resp.get("status")==404:
+                row["classification"]="TICKER_OR_ENDPOINT_UNSUPPORTED"
+            elif resp.get("status")==429:
+                row["classification"]="RATE_LIMIT"
+            elif resp.get("ok") and isinstance(body,list) and len(body)==0:
+                row["classification"]="EMPTY_HISTORY"
+            elif resp.get("ok") and not schema.get("ok"):
+                row["classification"]="SCHEMA_MISMATCH"
+            elif resp.get("ok") and schema.get("ok"):
+                row["classification"]="PASS"
+            else:
+                row["classification"]="OTHER_HTTP_OR_NETWORK"
+            rows.append(row)
+
+            # No 75-second forced gap in this diagnostic beyond the existing helper behavior.
+            # Stop early if auth/entitlement is proven.
+            if row["classification"]=="ENTITLEMENT_OR_AUTH":
+                break
+
+        classes={}
+        for r in rows:
+            classes[r["classification"]]=classes.get(r["classification"],0)+1
+
+        if rows and all(r["classification"]=="PASS" for r in rows):
+            verdict="FIRST5_PASS__BUILD_FAILURE_IS_LOCAL_LOGIC_OR_CHECKPOINT"
+            next_action="AUDIT_V824_SAVE_CHECKPOINT_PATH_ONLY"
+        elif classes.get("ENTITLEMENT_OR_AUTH",0):
+            verdict="SYSTEMATIC_ENTITLEMENT_OR_AUTH_FAILURE"
+            next_action="DO_NOT_CONTINUE_BUILD__FIX_FUNDAMENTALS_ENTITLEMENT_OR_TOKEN_SCOPE"
+        elif len(rows)>=3 and classes.get("EMPTY_HISTORY",0)>=3:
+            verdict="SYSTEMATIC_EMPTY_HISTORY"
+            next_action="AUDIT_TICKER_MAPPING_OR_DATE_RANGE_BEFORE_BUILD"
+        elif len(rows)>=3 and classes.get("TICKER_OR_ENDPOINT_UNSUPPORTED",0)>=3:
+            verdict="SYSTEMATIC_TICKER_OR_ENDPOINT_FAILURE"
+            next_action="FIX_SYMBOL_MAPPING_OR_ENDPOINT_ONLY"
+        elif len(rows)>=3 and classes.get("SCHEMA_MISMATCH",0)>=3:
+            verdict="SYSTEMATIC_SCHEMA_MISMATCH"
+            next_action="FIX_RESPONSE_SCHEMA_ADAPTER_ONLY"
+        elif len(rows)>=3 and classes.get("RATE_LIMIT",0)>=2:
+            verdict="RATE_LIMIT_DOMINANT"
+            next_action="INCREASE_REQUEST_GAP_OR_USE_BATCHED_RESUME"
+        else:
+            verdict="MIXED_FAILURES__NO_SINGLE_CAUSE_YET"
+            next_action="READ_FIRST5_HTTP_DETAILS_BEFORE_ANY_MORE_BUILD"
+
+        result={
+            "version":"V8.24A First-5 Fundamentals Request Diagnostic",
+            "build_id":"V824A_FIRST5_DIAG_20260902A",
+            "verdict":verdict,
+            "tickers_tested":[r["ticker"] for r in rows],
+            "start_date":start_date,
+            "classification_counts":classes,
+            "rows":rows,
+            "next_action":next_action,
+            "boundaries":"Diagnostic only. Max 5 tickers, no cache writes, no strategy changes, no universe scan, no replay."
+        }
+        _v824_write_json(V824A_RESULT,result)
+        _v824a_set(running=False,progress=100,message=f"完成 · {verdict}",result=result,error=None)
+    except Exception as ex:
+        _v824a_set(running=False,progress=100,message=f"失败 · {type(ex).__name__}: {ex}",error=str(ex))
+
+@APP.post("/v824a/start")
+def v824a_start():
+    with V824A_LOCK:
+        if V824A_STATE.get("running"):
+            return jsonify(V824A_STATE)
+        V824A_STATE.update({"running":True,"progress":1,"message":"已启动 First-5 diagnostic…","result":None,"error":None})
+    threading.Thread(target=_v824a_worker,daemon=True).start()
+    return jsonify(V824A_STATE)
+
+@APP.get("/api/v824a")
+def v824a_api():
+    with V824A_LOCK:
+        return jsonify(dict(V824A_STATE))
+
+@APP.get("/v824a")
+def v824a_page():
+    return """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}
+.w{max-width:1100px;margin:auto}.c{background:#fff;border-radius:22px;padding:22px;margin:15px 0}
+.r{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}
+.g{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}
+button{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}
+.track{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden}.bar{height:100%;width:0;background:#16a34a}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}
+pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:10px;border-radius:10px;font-size:11px}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧪 V8.24A First-5 Fundamentals Request Diagnostic</h1>
+<div class='r'><b>不要继续盲跑271只。</b> 只测试前5个 ticker，直接显示 HTTP status、response摘要、schema和失败分类。</div></div>
+<div class='c'><button id='go'>▶ Run First-5 Diagnostic</button>
+<h3 id='msg'>尚未开始</h3><div class='track'><div id='bar' class='bar'></div></div><p id='pct'>0%</p><div id='result'></div></div></div>
+<script>
+const $=x=>document.getElementById(x);
+function render(d){
+ $('msg').textContent=d.message||'';
+ $('pct').textContent=(d.progress||0)+'%';
+ $('bar').style.width=(d.progress||0)+'%';
+ if(d.result){
+  const r=d.result;
+  let h='<h2>Verdict: '+r.verdict+'</h2><p><b>Next:</b> '+r.next_action+'</p>';
+  h+='<table><tr><th>Ticker</th><th>HTTP</th><th>Class</th><th>Rows</th><th>Schema</th><th>Body</th></tr>';
+  (r.rows||[]).forEach(x=>{
+   h+='<tr><td>'+x.ticker+'</td><td>'+String(x.http_status)+'</td><td>'+x.classification+'</td><td>'+String((x.schema||{}).rows||0)+'</td><td>'+String((x.schema||{}).reason||'')+'</td><td><pre>'+JSON.stringify(x.body_summary||{},null,2)+'</pre></td></tr>';
+  });
+  h+='</table>';
+  $('result').innerHTML=h;
+ }
+}
+async function poll(){
+ try{const d=await (await fetch('/api/v824a',{cache:'no-store'})).json();render(d);if(d.running)setTimeout(poll,1000)}
+ catch(e){$('msg').textContent='状态读取失败: '+e}
+}
+$('go').onclick=async()=>{const d=await (await fetch('/v824a/start',{method:'POST'})).json();render(d);poll()};
+poll();
+</script></body></html>"""
+
+# REQUIRED HOME CARD
+_v824a_home_base=APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v824a_home_base is not None:
+    def _v824a_home_wrap(*args,**kwargs):
+        resp=_v824a_home_base(*args,**kwargs)
+        card="""<div id='v824a-home-card' style='background:#fef2f2;border:7px solid #dc2626;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧪 V8.24A First-5 Fundamentals Diagnostic</h2>
+        <p>只测前5只：HTTP / body / schema / entitlement / ticker mapping。不要让271只继续盲跑。</p>
+        <a href='/v824a'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.24A</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True);pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos);txt=txt[:gt+1]+card+txt[gt+1:]
+                else:txt=card+txt
+                resp.set_data(txt);return resp
+            txt=str(resp);pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos);return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v824a_home_base:APP.view_functions[_ep]=_v824a_home_wrap
