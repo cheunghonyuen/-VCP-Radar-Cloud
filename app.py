@@ -57883,3 +57883,436 @@ if _v823b_home_base is not None:
         except Exception:return resp
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v823b_home_base:APP.view_functions[_ep]=_v823b_home_wrap
+
+
+# ================= V8.24 PIT FUNDAMENTALS CACHE BUILDER =================
+# Purpose: build the missing as-reported fundamentals cache ONCE for the frozen
+# V7.04 Actual-Buy ticker universe, then allow V8.20B to rerun cache-only.
+# No strategy changes. No universe scan. No account replay.
+V824_DIR = DATA_DIR / "v824_pit_fundamentals_cache"
+V824_PREFLIGHT = V824_DIR / "preflight.json"
+V824_STATUS = V824_DIR / "status.json"
+V824_CHECKPOINT = V824_DIR / "checkpoint.json"
+V824_BUILD_RESULT = V824_DIR / "build_result.json"
+V824_BUILD_ID = "V824_PIT_FUND_CACHE_20260902A"
+v824_thread = None
+
+def _v824_json(path, default=None):
+    try:
+        if Path(path).exists():
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {} if default is None else default
+
+def _v824_write_json(path, obj):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+def _v824_status():
+    x={
+        "build_id":V824_BUILD_ID, "status":"idle", "phase":"idle",
+        "progress":0, "message":"尚未开始", "processed":0, "total":0,
+        "errors":0, "elapsed_sec":0, "result":None
+    }
+    q=_v824_json(V824_STATUS,{})
+    if q.get("build_id")==V824_BUILD_ID:
+        x.update(q)
+    return x
+
+def _v824_write(**kw):
+    x=_v824_status()
+    x.update(kw)
+    x["build_id"]=V824_BUILD_ID
+    _v824_write_json(V824_STATUS,x)
+
+def _v824_alive():
+    return v824_thread is not None and v824_thread.is_alive()
+
+def _v824_actual_buy_source():
+    # Canonical source is V7.04 persisted ledger. Never reconstruct admission.
+    if not V704_LEDGER.exists():
+        raise RuntimeError("V7.04 challenger_actual_buy_ledger.csv.gz missing")
+    L=pd.read_csv(V704_LEDGER, compression="gzip")
+    required={"v704_row_id","listing_id","entry_date"}
+    miss=sorted(required-set(L.columns))
+    if miss:
+        raise RuntimeError("V7.04 ledger schema missing: "+",".join(miss))
+    if L["v704_row_id"].isna().any() or L["v704_row_id"].duplicated().any():
+        raise RuntimeError("V7.04 v704_row_id must be unique/non-null")
+    L["listing_id"]=L["listing_id"].astype(str)
+    L["entry_date"]=pd.to_datetime(L["entry_date"],errors="coerce").dt.normalize()
+    if L["entry_date"].isna().any():
+        raise RuntimeError("V7.04 entry_date contains invalid dates")
+    L["ticker"]=L["listing_id"].str.split("__").str[0].str.upper().str.strip()
+    L=L[L["ticker"].str.match(r"^[A-Z][A-Z0-9.\-]{0,11}$",na=False)].copy()
+    if L.empty:
+        raise RuntimeError("No valid tickers resolved from V7.04 ledger")
+    return L
+
+def _v824_definitions_source():
+    # Prefer the already proven V8.23 definitions snapshot.
+    candidates=[
+        V823_DEFINITIONS,
+        V820_DIR/"fundamental_definitions.json",
+    ]
+    for p in candidates:
+        try:
+            if Path(p).exists():
+                arr=json.loads(Path(p).read_text(encoding="utf-8"))
+                if isinstance(arr,list) and arr:
+                    return Path(p),arr
+        except Exception:
+            pass
+    raise RuntimeError("No persisted Tiingo fundamental definitions snapshot. Run V8.23B first.")
+
+def _v824_cache_schema_audit(raw):
+    if not isinstance(raw,list):
+        return {"ok":False,"reason":"ROOT_NOT_LIST","rows":0}
+    bad=0; quarters=0; release=0; statement_data=0
+    for r in raw:
+        if not isinstance(r,dict):
+            bad+=1; continue
+        q=int(r.get("quarter") or 0) if str(r.get("quarter") or "").isdigit() else 0
+        if q in (1,2,3,4): quarters+=1
+        if pd.notna(pd.to_datetime(r.get("date"),errors="coerce")): release+=1
+        if isinstance(r.get("statementData"),dict): statement_data+=1
+    n=len(raw)
+    ok=bool(n>0 and release/n>=.95 and statement_data/n>=.95)
+    return {
+        "ok":ok,"rows":n,"valid_release_dates":release,
+        "quarterly_rows":quarters,"statement_data_rows":statement_data,
+        "reason":"PASS" if ok else "LOW_SCHEMA_COVERAGE"
+    }
+
+def _v824_run_preflight():
+    V824_DIR.mkdir(parents=True,exist_ok=True)
+    t0=time.time()
+    L=_v824_actual_buy_source()
+    dp,defs=_v824_definitions_source()
+    codes=_v820_pick_codes(defs)
+    needed=["revenue","eps","net_income"]
+    missing_codes=[k for k in needed if not codes.get(k)]
+    if missing_codes:
+        raise RuntimeError("Definitions missing required semantic code families: "+",".join(missing_codes))
+
+    tickers=sorted(set(L["ticker"]))
+    earliest=pd.Timestamp(L["entry_date"].min())
+    latest=pd.Timestamp(L["entry_date"].max())
+    start=(earliest-pd.Timedelta(days=800)).date().isoformat()
+    end=latest.date().isoformat()
+
+    # Existing per-ticker V8.20 cache inventory.
+    existing=[]; invalid=[]
+    for t in tickers:
+        fp=V820_FUND_DIR/f"{re.sub(r'[^A-Za-z0-9._-]','_',t)}.json"
+        if not fp.exists():
+            continue
+        try:
+            arr=json.loads(fp.read_text(encoding="utf-8"))
+            aud=_v824_cache_schema_audit(arr)
+            if aud["ok"]:existing.append(t)
+            else:invalid.append({"ticker":t,"reason":aud["reason"],"rows":aud["rows"]})
+        except Exception as ex:
+            invalid.append({"ticker":t,"reason":f"{type(ex).__name__}: {ex}","rows":0})
+
+    pending=[t for t in tickers if t not in set(existing)]
+    gap=float(current_gap)
+    est_sec=max(0,len(pending)*gap)
+    est_mb=max(0.1,len(pending)*0.035)  # transparent rough storage estimate only
+
+    result={
+        "version":"V8.24 PIT Fundamentals Cache Builder",
+        "build_id":V824_BUILD_ID,
+        "verdict":"PASS" if not invalid else "PASS_WITH_INVALID_CACHE_TO_REDOWNLOAD",
+        "source":{
+            "ledger":str(V704_LEDGER),"rows":int(len(L)),
+            "unique_v704_row_id":int(L["v704_row_id"].nunique()),
+            "unique_tickers":len(tickers),
+            "earliest_entry":str(earliest.date()),"latest_entry":str(latest.date())
+        },
+        "definitions":{
+            "path":str(dp),"rows":len(defs),"selected_codes":codes
+        },
+        "request_plan":{
+            "start_date":start,"end_date":end,
+            "existing_valid_cache":len(existing),
+            "pending_tickers":len(pending),
+            "invalid_existing_cache":len(invalid),
+            "request_gap_seconds":gap,
+            "estimated_min_minutes":round(est_sec/60,1),
+            "estimated_storage_mb":round(est_mb,1)
+        },
+        "pending_tickers":pending,
+        "existing_tickers":existing,
+        "invalid_cache":invalid,
+        "schema_contract":{
+            "root":"list[statement]","required_statement_keys":["date","year","quarter","statementData"],
+            "pit_key":"date = public release date",
+            "fundamental_families":needed,
+            "cache_path":str(V820_FUND_DIR/"<TICKER>.json"),
+            "definitions_target":str(V820_DIR/"fundamental_definitions.json")
+        },
+        "hard_rules":[
+            "Only V7.04 frozen Actual-Buy tickers are eligible.",
+            "Never reconstruct or rescan admission/universe.",
+            "Raw as-reported statement JSON is persisted once per ticker.",
+            "V8.20B may only use statements whose release_date <= entry_date.",
+            "Checkpoint after every ticker; restart resumes pending tickers.",
+            "Do not start build unless this preflight PASSes."
+        ],
+        "elapsed_sec":round(time.time()-t0,3)
+    }
+    _v824_write_json(V824_PREFLIGHT,result)
+    return result
+
+def _v824_get_statements(ticker,start_date):
+    url=_v823_url(f"/tiingo/fundamentals/{ticker}/statements",{"startDate":start_date})
+    return _v823_http_json(url,timeout=35)
+
+def _v824_build():
+    global v824_thread
+    t0=time.time()
+    try:
+        P=_v824_json(V824_PREFLIGHT,{})
+        if P.get("verdict") not in ("PASS","PASS_WITH_INVALID_CACHE_TO_REDOWNLOAD"):
+            raise RuntimeError("V8.24 Preflight must PASS before build")
+
+        # Re-audit actual source at runtime; no stale guessed list.
+        L=_v824_actual_buy_source()
+        dp,defs=_v824_definitions_source()
+        codes=_v820_pick_codes(defs)
+        tickers=sorted(set(L["ticker"]))
+        start_date=P["request_plan"]["start_date"]
+
+        # Make V8.20B see the exact definitions snapshot after build.
+        V820_DIR.mkdir(parents=True,exist_ok=True)
+        (V820_DIR/"fundamental_definitions.json").write_text(
+            json.dumps(defs,ensure_ascii=False,indent=2),encoding="utf-8"
+        )
+        V820_FUND_DIR.mkdir(parents=True,exist_ok=True)
+
+        ck=_v824_json(V824_CHECKPOINT,{
+            "build_id":V824_BUILD_ID,"completed":[],"errors":{},"started_at":datetime.now(timezone.utc).isoformat()
+        })
+        if ck.get("build_id")!=V824_BUILD_ID:
+            ck={"build_id":V824_BUILD_ID,"completed":[],"errors":{},"started_at":datetime.now(timezone.utc).isoformat()}
+        completed=set(ck.get("completed") or [])
+        errors=dict(ck.get("errors") or {})
+
+        # Treat already-valid cache as completed even if checkpoint was lost.
+        for t in tickers:
+            fp=V820_FUND_DIR/f"{re.sub(r'[^A-Za-z0-9._-]','_',t)}.json"
+            if fp.exists():
+                try:
+                    arr=json.loads(fp.read_text(encoding="utf-8"))
+                    if _v824_cache_schema_audit(arr)["ok"]:
+                        completed.add(t)
+                except Exception:
+                    pass
+
+        pending=[t for t in tickers if t not in completed]
+        total=len(tickers)
+        _v824_write(status="running",phase="build",progress=int(100*len(completed)/max(1,total)),
+                    message=f"Cache resume · valid {len(completed)}/{total} · pending {len(pending)}",
+                    processed=len(completed),total=total,errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+
+        for t in pending:
+            idx=len(completed)+1
+            _v824_write(status="running",phase="download",
+                        progress=int(100*len(completed)/max(1,total)),
+                        message=f"{t} · request {idx}/{total} · raw as-reported statements",
+                        processed=len(completed),total=total,errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+
+            resp=_v824_get_statements(t,start_date)
+            if not resp.get("ok"):
+                status=resp.get("status")
+                err=resp.get("error") or f"HTTP {status}"
+                errors[t]={"status":status,"error":err,"at":datetime.now(timezone.utc).isoformat()}
+                ck["completed"]=sorted(completed);ck["errors"]=errors
+                _v824_write_json(V824_CHECKPOINT,ck)
+                # Hard fail on auth/entitlement; otherwise continue so one ticker does not waste whole run.
+                if status in (401,403):
+                    raise RuntimeError(f"{t}: fundamentals entitlement/auth failed HTTP {status}")
+                _v824_write(status="running",phase="download",
+                            progress=int(100*len(completed)/max(1,total)),
+                            message=f"{t} failed ({err}) · checkpointed · continuing",
+                            processed=len(completed),total=total,errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+                continue
+
+            arr=resp.get("body")
+            aud=_v824_cache_schema_audit(arr)
+            if not aud["ok"]:
+                errors[t]={"status":resp.get("status"),"error":"SCHEMA_"+aud["reason"],"rows":aud["rows"],
+                           "at":datetime.now(timezone.utc).isoformat()}
+                ck["completed"]=sorted(completed);ck["errors"]=errors
+                _v824_write_json(V824_CHECKPOINT,ck)
+                continue
+
+            fp=V820_FUND_DIR/f"{re.sub(r'[^A-Za-z0-9._-]','_',t)}.json"
+            tmp=fp.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(arr,ensure_ascii=False,indent=2),encoding="utf-8")
+            tmp.replace(fp)
+
+            completed.add(t)
+            errors.pop(t,None)
+            ck["completed"]=sorted(completed);ck["errors"]=errors
+            ck["updated_at"]=datetime.now(timezone.utc).isoformat()
+            _v824_write_json(V824_CHECKPOINT,ck)
+
+            _v824_write(status="running",phase="download",
+                        progress=int(100*len(completed)/max(1,total)),
+                        message=f"Saved {t} · {aud['rows']} statements · {len(completed)}/{total}",
+                        processed=len(completed),total=total,errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+
+        # Final cache audit: exact ticker coverage and schema.
+        valid=[];missing=[];bad=[]
+        rows_total=0
+        for t in tickers:
+            fp=V820_FUND_DIR/f"{re.sub(r'[^A-Za-z0-9._-]','_',t)}.json"
+            if not fp.exists():
+                missing.append(t);continue
+            try:
+                arr=json.loads(fp.read_text(encoding="utf-8"))
+                aud=_v824_cache_schema_audit(arr)
+                if aud["ok"]:
+                    valid.append(t);rows_total+=aud["rows"]
+                else:bad.append({"ticker":t,**aud})
+            except Exception as ex:
+                bad.append({"ticker":t,"reason":f"{type(ex).__name__}: {ex}"})
+
+        coverage=len(valid)/max(1,len(tickers))
+        verdict="CACHE_READY_FOR_V820_CACHE_ONLY_RERUN" if coverage>=.95 and not bad else "CACHE_INCOMPLETE"
+        result={
+            "version":"V8.24 PIT Fundamentals Cache Builder",
+            "build_id":V824_BUILD_ID,"verdict":verdict,
+            "tickers_total":len(tickers),"valid_cache":len(valid),"coverage":coverage,
+            "raw_statement_rows":rows_total,"missing_tickers":missing,"bad_cache":bad,
+            "errors":errors,"definitions_copied_to":str(V820_DIR/"fundamental_definitions.json"),
+            "cache_dir":str(V820_FUND_DIR),
+            "next_action":("RUN_V820_CACHE_ONLY_OOS" if verdict=="CACHE_READY_FOR_V820_CACHE_ONLY_RERUN"
+                           else "RESUME_V824_AFTER_REVIEWING_ONLY_REMAINING_ERRORS"),
+            "boundaries":"No strategy change · no universe scan · no Historical Cache rebuild · no Feature Store rebuild · no account replay."
+        }
+        _v824_write_json(V824_BUILD_RESULT,result)
+        _v824_write(status="done",phase="done",progress=100,
+                    message=f"V8.24 complete · {len(valid)}/{len(tickers)} valid · {verdict}",
+                    processed=len(valid),total=len(tickers),errors=len(errors),
+                    elapsed_sec=round(time.time()-t0,1),result=result)
+    except Exception as ex:
+        _v824_write(status="error",phase="error",progress=_v824_status().get("progress",0),
+                    message=f"{type(ex).__name__}: {ex}",errors=_v824_status().get("errors",0),
+                    elapsed_sec=round(time.time()-t0,1))
+    finally:
+        v824_thread=None
+
+def _v824_start():
+    global v824_thread
+    if _v824_alive():return False
+    P=_v824_json(V824_PREFLIGHT,{})
+    if P.get("verdict") not in ("PASS","PASS_WITH_INVALID_CACHE_TO_REDOWNLOAD"):
+        return False
+    v824_thread=threading.Thread(target=_v824_build,daemon=True)
+    v824_thread.start()
+    return True
+
+@APP.route("/v824/preflight/run",methods=["GET","POST"])
+def v824_preflight_run():
+    try:
+        r=_v824_run_preflight()
+        _v824_write(status="preflight_pass",phase="preflight",progress=0,
+                    message=f"Preflight {r['verdict']} · {r['source']['unique_tickers']} tickers · pending {r['request_plan']['pending_tickers']}",
+                    processed=r["request_plan"]["existing_valid_cache"],
+                    total=r["source"]["unique_tickers"],errors=0,elapsed_sec=r["elapsed_sec"])
+    except Exception as ex:
+        _v824_write(status="preflight_fail",phase="preflight",progress=0,
+                    message=f"{type(ex).__name__}: {ex}",processed=0,total=0,errors=1)
+    return redirect("/v824")
+
+@APP.post("/v824/build/start")
+def v824_build_start():
+    ok=_v824_start()
+    return jsonify({"started":ok,**_v824_status()})
+
+@APP.get("/api/v824/status")
+def v824_status_api():
+    return jsonify(_v824_status())
+
+@APP.get("/v824")
+def v824_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P=_v824_json(V824_PREFLIGHT,{})
+    S=_v824_status()
+    B=_v824_json(V824_BUILD_RESULT,{})
+    plan=P.get("request_plan") or {}
+    src=P.get("source") or {}
+    defs=P.get("definitions") or {}
+    inv=""
+    for x in (P.get("invalid_cache") or [])[:20]:
+        inv+=f"<tr><td>{e(x.get('ticker'))}</td><td>{e(x.get('reason'))}</td><td>{e(x.get('rows'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:{int(S.get('progress',0))}%}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.24 PIT Fundamentals Cache Builder</h1>
+<div class='o'><b>先 Preflight，后 Build。</b> 只处理 V7.04 Frozen Actual-Buy tickers；每个 ticker 落盘一次，Railway 中断可续跑。0 universe rescan / 0 strategy tuning。</div></div>
+<div class='c'><form method='post' action='/v824/preflight/run'><button>A. Run Runtime / Schema Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<p>Ledger rows: <b>{e(src.get('rows','—'))}</b> · Unique tickers: <b>{e(src.get('unique_tickers','—'))}</b> · Entry range: {e(src.get('earliest_entry','—'))} → {e(src.get('latest_entry','—'))}</p>
+<p>Definitions rows: <b>{e(defs.get('rows','—'))}</b> · Codes: {e(json.dumps(defs.get('selected_codes') or {},ensure_ascii=False))}</p>
+<div class='g'>Existing valid cache: <b>{e(plan.get('existing_valid_cache','—'))}</b> · Pending: <b>{e(plan.get('pending_tickers','—'))}</b> · Gap: <b>{e(plan.get('request_gap_seconds','—'))}s/request</b><br>
+Estimated minimum time: <b>{e(plan.get('estimated_min_minutes','—'))} min</b> · Estimated storage: <b>{e(plan.get('estimated_storage_mb','—'))} MB</b></div></div>
+<div class='c'><button id='build'>B. Build / Resume PIT Fundamentals Cache</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2><div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>{e(S.get('progress',0))}%</span> · <span id='counts'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span> · errors <span id='errs'>{e(S.get('errors',0))}</span></p>
+<div id='final'>{("<div class='g'><b>"+e(B.get('verdict'))+"</b> · coverage "+e(round(float(B.get('coverage',0))*100,1))+"%<br>Next: "+e(B.get('next_action'))+"</div>") if B else ""}</div></div>
+<div class='c'><h2>Invalid existing cache detected by Preflight</h2><table><tr><th>Ticker</th><th>Reason</th><th>Rows</th></tr>{inv or "<tr><td colspan=3>None</td></tr>"}</table></div>
+</div>
+<script>
+const $=x=>document.getElementById(x);
+function render(s){{
+ $('msg').textContent=s.message||'';
+ $('pct').textContent=(s.progress||0)+'%';
+ $('bar').style.width=(s.progress||0)+'%';
+ $('counts').textContent=(s.processed||0)+'/'+(s.total||0);
+ $('errs').textContent=s.errors||0;
+ if(s.result) $('final').innerHTML='<div class="g"><b>'+s.result.verdict+'</b> · coverage '+((s.result.coverage||0)*100).toFixed(1)+'%<br>Next: '+s.result.next_action+'</div>';
+}}
+async function poll(){{
+ try{{let s=await (await fetch('/api/v824/status',{{cache:'no-store'}})).json();render(s);if(s.status==='running'||s.phase==='download')setTimeout(poll,1500)}}catch(e){{$('msg').textContent='Status read failed: '+e}}
+}}
+$('build').onclick=async()=>{{let s=await (await fetch('/v824/build/start',{{method:'POST'}})).json();render(s);poll()}};
+poll();
+</script></body></html>"""
+
+# REQUIRED: newest homepage card
+_v824_home_base=APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v824_home_base is not None:
+    def _v824_home_wrap(*args,**kwargs):
+        resp=_v824_home_base(*args,**kwargs)
+        card="""<div id='v824-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧾 V8.24 PIT Fundamentals Cache Builder</h2>
+        <p>Preflight → one-time as-reported fundamentals cache → resumable by ticker → prepare V8.20 cache-only OOS. 0 universe rescan / 0 tuning。</p>
+        <a href='/v824'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.24</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True);pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos);txt=txt[:gt+1]+card+txt[gt+1:]
+                else:txt=card+txt
+                resp.set_data(txt);return resp
+            txt=str(resp);pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos);return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v824_home_base:APP.view_functions[_ep]=_v824_home_wrap
