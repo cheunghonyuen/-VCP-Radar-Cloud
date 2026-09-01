@@ -57656,3 +57656,230 @@ if _v823_home_base is not None:
         except Exception:return resp
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v823_home_base:APP.view_functions[_ep]=_v823_home_wrap
+
+
+# ================= V8.23B NO-HANG ASYNC FUNDAMENTALS AUDIT =================
+V823B_STATE = {"running":False,"progress":0,"message":"尚未开始","result":None,"error":None}
+V823B_LOCK = threading.Lock()
+
+def _v823b_set(**kwargs):
+    with V823B_LOCK:
+        V823B_STATE.update(kwargs)
+
+def _v823b_worker():
+    try:
+        _v823b_set(running=True,progress=3,message="启动 PIT Fundamentals 轻量审计…",result=None,error=None)
+
+        if not TIINGO_TOKEN:
+            r={
+                "version":"V8.23B PIT Fundamentals No-Hang Audit",
+                "verdict":"TOKEN_MISSING",
+                "next_action":"RESTORE_TIINGO_TOKEN_THEN_RERUN_AUDIT",
+                "boundaries":"0 universe scan · 0 replay · 0 cache rebuild · 0 strategy change."
+            }
+            V823_RESULT.write_text(json.dumps(r,ensure_ascii=False,indent=2),encoding="utf-8")
+            _v823b_set(running=False,progress=100,message="TOKEN_MISSING",result=r)
+            return
+
+        # Request 1. Do NOT use the old blocking page request path.
+        _v823b_set(progress=10,message="Request 1/2 · Tiingo fundamentals definitions…")
+        defs_resp=_v823_http_json(_v823_url("/tiingo/fundamentals/definitions"), timeout=20)
+        defs=defs_resp.get("body") if defs_resp.get("ok") and isinstance(defs_resp.get("body"),list) else []
+        if defs:
+            V823_DEFINITIONS.write_text(json.dumps(defs,ensure_ascii=False,indent=2),encoding="utf-8")
+
+        codes=_v823_pick_codes(defs)
+        defs_schema={
+            "rows":len(defs),
+            "top_keys":sorted(set(k for x in defs if isinstance(x,dict) for k in x.keys())),
+            "statement_types":sorted(set(str(x.get("statementType")) for x in defs if isinstance(x,dict) and x.get("statementType") is not None)),
+            "selected_codes":codes
+        }
+
+        # If entitlement is already denied, stop immediately: no pointless second wait/request.
+        if defs_resp.get("status") in (401,403):
+            r={
+                "version":"V8.23B PIT Fundamentals No-Hang Audit",
+                "verdict":"FUNDAMENTALS_NOT_ENTITLED_OR_AUTH_BLOCKED",
+                "definitions":{
+                    "http_ok":defs_resp.get("ok"),"http_status":defs_resp.get("status"),
+                    "error":defs_resp.get("error"),**defs_schema
+                },
+                "aapl_statements":{"skipped":True,"reason":"Definitions endpoint already denied access."},
+                "next_action":"ENABLE_TIINGO_FUNDAMENTALS_ADDON_OR_USE_ANOTHER_RELIABLE_PIT_SOURCE",
+                "boundaries":"Async access/schema preflight only. No universe scan, replay, cache build, or tuning."
+            }
+            V823_RESULT.write_text(json.dumps(r,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+            _v823b_set(running=False,progress=100,message="权限已明确：definitions 被拒绝，无需第二次请求。",result=r)
+            return
+
+        if not defs_resp.get("ok"):
+            r={
+                "version":"V8.23B PIT Fundamentals No-Hang Audit",
+                "verdict":"FUNDAMENTALS_DEFINITIONS_ACCESS_FAILED",
+                "definitions":{
+                    "http_ok":defs_resp.get("ok"),"http_status":defs_resp.get("status"),
+                    "error":defs_resp.get("error"),**defs_schema
+                },
+                "aapl_statements":{"skipped":True,"reason":"Definitions request failed."},
+                "next_action":"FIX_ACCESS_OR_ENTITLEMENT_ONLY",
+                "boundaries":"Async access/schema preflight only. No universe scan, replay, cache build, or tuning."
+            }
+            V823_RESULT.write_text(json.dumps(r,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+            _v823b_set(running=False,progress=100,message="Definitions 请求失败，已停止。",result=r)
+            return
+
+        # Respect existing Tiingo throttle but show it instead of making Safari look frozen.
+        wait=max(0.0, float(current_gap) - (time.time()-float(last_request_ts)))
+        if wait > 0:
+            total=max(1,int(wait))
+            for i in range(total):
+                left=total-i
+                _v823b_set(progress=min(70,25+int(40*i/total)),
+                           message=f"Definitions OK · 等待现有 Tiingo 限速窗口 {left}s，再做 AAPL statements…")
+                time.sleep(1)
+
+        _v823b_set(progress=72,message="Request 2/2 · AAPL statements schema sample…")
+        sample_resp=_v823_http_json(
+            _v823_url("/tiingo/fundamentals/AAPL/statements", {"startDate":"2023-01-01"}),
+            timeout=25
+        )
+        sample=sample_resp.get("body") if sample_resp.get("ok") and isinstance(sample_resp.get("body"),list) else []
+        if sample:
+            V823_AAPL_SAMPLE.write_text(json.dumps(sample,ensure_ascii=False,indent=2),encoding="utf-8")
+
+        schema_rows=_v823_schema_rows(sample)
+        dates=[]
+        for rr in sample:
+            try:
+                dt=pd.to_datetime(rr.get("date"),errors="coerce")
+                if not pd.isna(dt): dates.append(str(pd.Timestamp(dt).date()))
+            except Exception: pass
+
+        present={k:set() for k in codes}
+        for rr in sample:
+            sd=(rr.get("statementData") or {}) if isinstance(rr,dict) else {}
+            inc=sd.get("incomeStatement") or []
+            got=set(str(x.get("dataCode")) for x in inc if isinstance(x,dict))
+            for fam,cc in codes.items():
+                present[fam].update(c for c in cc if c in got)
+        values_seen={k:sorted(v) for k,v in present.items()}
+
+        access=bool(defs_resp.get("ok") and sample_resp.get("ok") and defs and sample)
+        schema_ok=bool(sample and all(isinstance(rr,dict) and "date" in rr and "year" in rr and "quarter" in rr and "statementData" in rr for rr in sample[:min(5,len(sample))]))
+        code_ok=bool(codes.get("revenue") and codes.get("eps") and codes.get("net_income"))
+        values_ok=all(bool(values_seen.get(k)) for k in ["revenue","eps","net_income"])
+
+        if access and schema_ok and code_ok and values_ok:
+            verdict="PIT_FUNDAMENTALS_ACCESS_CONFIRMED"
+            next_action="BUILD_SMALL_AS_REPORTED_CACHE_FOR_FROZEN_ACTUAL_BUY_TICKERS_THEN_RERUN_V820_FROM_CACHE_ONLY"
+        elif sample_resp.get("status") in (401,403):
+            verdict="DEFINITIONS_ACCESS_ONLY__STATEMENTS_NOT_ENTITLED"
+            next_action="ENABLE_TIINGO_FUNDAMENTALS_STATEMENTS_ACCESS_OR_USE_ANOTHER_RELIABLE_PIT_SOURCE"
+        else:
+            verdict="ACCESS_PARTIAL_SCHEMA_NOT_PROVEN"
+            next_action="DO_NOT_BUILD_MODEL__RESOLVE_SCHEMA_OR_ENTITLEMENT_FIRST"
+
+        r={
+            "version":"V8.23B PIT Fundamentals No-Hang Audit",
+            "verdict":verdict,
+            "definitions":{
+                "http_ok":defs_resp.get("ok"),"http_status":defs_resp.get("status"),
+                "error":defs_resp.get("error"),**defs_schema
+            },
+            "aapl_statements":{
+                "http_ok":sample_resp.get("ok"),"http_status":sample_resp.get("status"),
+                "error":sample_resp.get("error"),"rows":len(sample),
+                "release_dates_tail":dates[-8:],"schema_sample":schema_rows[:5],
+                "selected_codes_present":values_seen
+            },
+            "next_action":next_action,
+            "boundaries":"Async access/schema preflight only. No universe scan, replay, cache build, or tuning."
+        }
+        V823_RESULT.write_text(json.dumps(r,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        _v823b_set(running=False,progress=100,message=f"完成 · {verdict}",result=r,error=None)
+    except Exception as ex:
+        _v823b_set(running=False,progress=100,message=f"失败 · {type(ex).__name__}: {ex}",error=str(ex))
+
+@APP.post("/v823b/start")
+def v823b_start():
+    with V823B_LOCK:
+        if V823B_STATE.get("running"):
+            return jsonify(V823B_STATE)
+        V823B_STATE.update({"running":True,"progress":1,"message":"已启动后台审计…","result":None,"error":None})
+    threading.Thread(target=_v823b_worker,daemon=True).start()
+    return jsonify(V823B_STATE)
+
+@APP.get("/api/v823b")
+def v823b_api():
+    with V823B_LOCK:
+        return jsonify(dict(V823B_STATE))
+
+@APP.get("/v823b")
+def v823b_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    return """<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}
+.w{max-width:1000px;margin:auto}.c{background:#fff;border-radius:22px;padding:22px;margin:15px 0}
+.o{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}
+button{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}
+.track{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden}.bar{height:100%;width:0;background:#16a34a}
+pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:12px;font-size:12px}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.23B PIT Fundamentals · No-Hang Audit</h1>
+<div class='o'><b>修复“点了像没反应”。</b> 请求在后台跑，页面每秒显示进度；如果 Tiingo 限速需要等待，会直接显示倒计时。</div></div>
+<div class='c'><button id='go'>▶ Run No-Hang PIT Audit</button>
+<h3 id='msg'>尚未开始</h3><div class='track'><div id='bar' class='bar'></div></div><p id='pct'>0%</p>
+<div id='result'></div></div></div>
+<script>
+const $=x=>document.getElementById(x);
+function render(d){
+ $('msg').textContent=d.message||'';
+ $('pct').textContent=(d.progress||0)+'%';
+ $('bar').style.width=(d.progress||0)+'%';
+ if(d.result){
+   const r=d.result, D=r.definitions||{}, S=r.aapl_statements||{};
+   $('result').innerHTML=`<h2>Verdict: ${r.verdict||''}</h2>
+   <p><b>Definitions:</b> HTTP ${D.http_status??'—'} · rows ${D.rows??'—'}</p>
+   <p><b>AAPL statements:</b> HTTP ${S.http_status??'—'} · rows ${S.rows??'—'}</p>
+   <p><b>Next:</b> ${r.next_action||''}</p><pre>${JSON.stringify(r,null,2)}</pre>`;
+ }
+}
+async function poll(){
+ try{
+  const d=await (await fetch('/api/v823b',{cache:'no-store'})).json();render(d);
+  if(d.running)setTimeout(poll,1000);
+ }catch(e){$('msg').textContent='读取进度失败: '+e}
+}
+$('go').onclick=async()=>{
+ const d=await (await fetch('/v823b/start',{method:'POST'})).json();render(d);poll();
+};
+poll();
+</script></body></html>"""
+
+# Required home card: add newest first.
+_v823b_home_base=APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v823b_home_base is not None:
+    def _v823b_home_wrap(*args,**kwargs):
+        resp=_v823b_home_base(*args,**kwargs)
+        card="""<div id='v823b-home-card' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧾 V8.23B PIT Fundamentals · No-Hang</h2>
+        <p>后台执行 + 实时进度/限速倒计时。只查 fundamentals 权限/schema，0 rescan / 0 replay。</p>
+        <a href='/v823b'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.23B</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True);pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos);txt=txt[:gt+1]+card+txt[gt+1:]
+                else:txt=card+txt
+                resp.set_data(txt);return resp
+            txt=str(resp);pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos);return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v823b_home_base:APP.view_functions[_ep]=_v823b_home_wrap
