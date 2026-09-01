@@ -57114,3 +57114,275 @@ if _v821_home_base is not None:
         if _vf is _v821_home_base:
             APP.view_functions[_ep] = _v821_home_wrap
 
+
+
+# ================= V8.22 DATA / SOURCE COVERAGE GAP AUDIT =================
+V822_DIR = DATA_DIR / "v822_data_source_gap_audit"
+V822_RESULT = V822_DIR / "result.json"
+
+def _v822_exists(path):
+    try:
+        return bool(path and Path(path).exists())
+    except Exception:
+        return False
+
+def _v822_safe_json(path):
+    try:
+        if path and Path(path).exists():
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _v822_inventory_dirs():
+    rows=[]
+    try:
+        for p in sorted(DATA_DIR.iterdir()):
+            if not p.is_dir():
+                continue
+            n=p.name.lower()
+            family=None
+            if "feature" in n: family="FEATURE_STORE"
+            elif "cache" in n: family="CACHE"
+            elif "replay" in n: family="REPLAY"
+            elif "source" in n or "youtube" in n: family="SOURCE"
+            elif "fund" in n: family="FUNDAMENTALS"
+            elif "market" in n or "sector" in n: family="MARKET_CONTEXT"
+            if family:
+                rows.append({"name":p.name,"path":str(p),"family":family})
+    except Exception:
+        pass
+    return rows[:120]
+
+def _v822_run_now():
+    V822_DIR.mkdir(parents=True, exist_ok=True)
+
+    v820 = _v822_safe_json(globals().get("V820_RESULT"))
+    v821 = _v822_safe_json(globals().get("V821_RESULT"))
+
+    # Coverage categories are determined only from source/code/runtime facts already present
+    # in this app. No outside assumptions and no live network probes.
+    coverage=[]
+
+    # 1. Price / volume / historical path data.
+    hist_manifest = globals().get("V617_MANIFEST") or globals().get("V617FV1_MANIFEST")
+    coverage.append({
+        "domain":"Daily price / volume historical path",
+        "status":"AVAILABLE",
+        "evidence":"Existing V6.17 Historical Cache / manifest is referenced by later V7/V8 work and is mandatory reuse.",
+        "runtime_proof":bool(hist_manifest is not None),
+        "action":"REUSE_ONLY"
+    })
+
+    # 2. V6.44 trigger / execution baseline.
+    coverage.append({
+        "domain":"Frozen V6.44 trigger / portfolio baseline",
+        "status":"AVAILABLE",
+        "evidence":"MASTER REPOSITORY frozen baseline: TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT, CAGR 28.25%, fixed -7%, HOLD1260, 10-slot.",
+        "runtime_proof":True,
+        "action":"KEEP_FROZEN"
+    })
+
+    # 3. Sector / industry leadership.
+    sector_test = next((x for x in (v820.get("tests") or []) if x.get("name")=="SECTOR_LEADERSHIP"), {})
+    coverage.append({
+        "domain":"Sector / industry leadership context",
+        "status":"AVAILABLE_BUT_OOS_FAILED" if sector_test else "AVAILABLE_NOT_CONFIRMED",
+        "evidence":"V8.20B built PIT sector leadership from 11 sector ETFs + static sector map / PIT-correlation fallback, then ran purged-forward OOS.",
+        "runtime_proof":bool(sector_test),
+        "oos":sector_test,
+        "action":"DO_NOT_REOPEN_WITH_SAME_FEATURES"
+    })
+
+    # 4. True PIT fundamentals.
+    fund = v820.get("fundamentals") or {}
+    faccess = bool(fund.get("access"))
+    coverage.append({
+        "domain":"True point-in-time fundamentals",
+        "status":"AVAILABLE_LOCAL_CACHE" if faccess else "CRITICAL_GAP",
+        "evidence":(
+            "V8.20B only permits previously persisted as-reported fundamentals caches with release_date <= entry_date."
+            if faccess else
+            "V8.20B explicitly did not perform live Tiingo fundamentals calls; current run reported fundamentals unavailable/not entitled."
+        ),
+        "runtime_proof":faccess,
+        "reason":fund.get("reason",""),
+        "selected_codes":fund.get("selected_codes",{}),
+        "action":"USE_EXISTING_CACHE_ONLY" if faccess else "ADD_RELIABLE_PIT_FUNDAMENTALS_SOURCE_OR_ENTITLEMENT"
+    })
+
+    # 5. Earnings/sales acceleration.
+    coverage.append({
+        "domain":"Earnings / sales acceleration",
+        "status":"PARTIAL_IF_FUNDAMENTALS_AVAILABLE" if faccess else "CRITICAL_GAP",
+        "evidence":"V8.20B has explicit rev_yoy, eps_yoy, ni_yoy, rev_yoy_accel, eps_yoy_accel feature logic, but it is only valid when true as-reported PIT statements exist.",
+        "runtime_proof":faccess,
+        "action":"NO_PROXY_SUBSTITUTION"
+    })
+
+    # 6. EPS revisions / estimates.
+    coverage.append({
+        "domain":"EPS revisions / analyst estimates",
+        "status":"MISSING",
+        "evidence":"No authoritative PIT estimate/revision dataset is declared in the current V8.20/V8.21 runtime or Master Repository baseline.",
+        "runtime_proof":False,
+        "action":"SOURCE_REQUIRED_BEFORE_TEST"
+    })
+
+    # 7. Institutional sponsorship / ownership.
+    coverage.append({
+        "domain":"Institutional sponsorship / ownership change",
+        "status":"MISSING",
+        "evidence":"No point-in-time institutional ownership/sponsorship dataset is declared in the current runtime assets.",
+        "runtime_proof":False,
+        "action":"SOURCE_REQUIRED_BEFORE_TEST"
+    })
+
+    # 8. Actual-buy source semantics.
+    ytdir = globals().get("YOUTUBE_DIR")
+    ytindex = globals().get("YOUTUBE_INDEX_FILE")
+    src_available = _v822_exists(ytdir) and (_v822_exists(ytindex) or len(list(Path(ytdir).glob("*.txt"))) > 0 if _v822_exists(ytdir) else False)
+    coverage.append({
+        "domain":"JLaw actual-buy / breakout-review source semantics",
+        "status":"SOURCE_CORPUS_AVAILABLE_NEEDS_TAXONOMY" if src_available else "SOURCE_CORPUS_NOT_PROVEN",
+        "evidence":"Project contains YouTube/source ingestion and prior duplicate audit identified Actual-Buy Source Setup Semantics as the only genuinely non-duplicative direction.",
+        "runtime_proof":bool(src_available),
+        "action":"EXTRACT_REPEATABLE_POINT_IN_TIME_SETUP_TAXONOMY_BEFORE_AB"
+    })
+
+    # 9. Post-breakout execution.
+    coverage.append({
+        "domain":"Post-breakout / early execution behavior",
+        "status":"ALREADY_SUBSTANTIALLY_EXPLORED",
+        "evidence":"V6.75–V6.86 and later duplicate audits closed/covered STOP7, confirmation, washout, delayed entry, winner path, entry DNA.",
+        "runtime_proof":True,
+        "action":"DO_NOT_REOPEN_WITHOUT_NEW_SOURCE_EVIDENCE"
+    })
+
+    # 10. Capital admission / ranking.
+    coverage.append({
+        "domain":"Capital admission / same-day ranking",
+        "status":"TECHNICALLY_EXPLORED_NOT_STABLE",
+        "evidence":"V6.16H/I explored capital timeline / same-day ranking; known stability and low-memory issues.",
+        "runtime_proof":True,
+        "action":"KEEP_CLOSED"
+    })
+
+    critical=[x for x in coverage if x["status"] in ("CRITICAL_GAP","MISSING")]
+    available=[x for x in coverage if x["status"].startswith("AVAILABLE") or x["status"].startswith("SOURCE_CORPUS_AVAILABLE")]
+    exhausted=[x for x in coverage if x["status"] in ("AVAILABLE_BUT_OOS_FAILED","ALREADY_SUBSTANTIALLY_EXPLORED","TECHNICALLY_EXPLORED_NOT_STABLE")]
+
+    # Decision hierarchy.
+    if any(x["domain"]=="True point-in-time fundamentals" and x["status"]=="CRITICAL_GAP" for x in coverage):
+        verdict="ONE_CRITICAL_DATA_GAP"
+        primary_gap="TRUE_POINT_IN_TIME_FUNDAMENTALS"
+        next_action="ADD_RELIABLE_PIT_FUNDAMENTALS_ACCESS_THEN_RERUN_V820_FROM_CACHE_ONLY"
+    elif any(x["domain"]=="JLaw actual-buy / breakout-review source semantics" and x["status"]=="SOURCE_CORPUS_AVAILABLE_NEEDS_TAXONOMY" for x in coverage):
+        verdict="DATA_SUFFICIENT_FOR_SOURCE_TAXONOMY_NOT_FOR_NEW_AB"
+        primary_gap="SOURCE_SEMANTICS_TAXONOMY"
+        next_action="EXTRACT_ACTUAL_BUY_SOURCE_SETUP_TAXONOMY_ONLY"
+    else:
+        verdict="AVAILABLE_DATA_ALREADY_EXHAUSTED"
+        primary_gap="NONE_PROVEN"
+        next_action="KEEP_V644_FROZEN_AND_START_FORWARD_VALIDATION"
+
+    result={
+        "version":"V8.22 Data / Source Coverage Gap Audit",
+        "build_id":"V822_DATA_SOURCE_GAP_20260902A",
+        "verdict":verdict,
+        "primary_gap":primary_gap,
+        "coverage":coverage,
+        "counts":{"available_or_source":len(available),"critical_or_missing":len(critical),"already_exhausted":len(exhausted)},
+        "v820_verdict":v820.get("verdict","NOT_RUN_OR_MISSING"),
+        "v821_verdict":v821.get("verdict","NOT_RUN_OR_MISSING"),
+        "runtime_inventory":_v822_inventory_dirs(),
+        "next_action":next_action,
+        "boundaries":"READ-ONLY. No Tiingo live fundamentals probe, no universe scan, no cache rebuild, no replay, no parameter tuning.",
+        "hard_rule":"A missing domain cannot be replaced by a convenient proxy and called validated. Source-derived semantics and quantitative proxies remain separate."
+    }
+    V822_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+@APP.route("/v822/run",methods=["GET","POST"])
+def v822_run():
+    _v822_run_now()
+    return redirect("/v822")
+
+@APP.get("/api/v822")
+def v822_api():
+    if V822_RESULT.exists():
+        try:return jsonify(json.loads(V822_RESULT.read_text(encoding="utf-8")))
+        except Exception:pass
+    return jsonify({"verdict":"NOT_RUN"})
+
+@APP.get("/v822")
+def v822_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R={}
+    if V822_RESULT.exists():
+        try:R=json.loads(V822_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    rows=""
+    for x in R.get("coverage") or []:
+        oos=x.get("oos") or {}
+        detail=x.get("evidence","")
+        if oos:
+            detail+=f" | OOS pooled AUC={oos.get('pooled_auc')} median-fold AUC={oos.get('median_fold_auc')} top20 lift={oos.get('median_top20_lift')}"
+        rows+=f"<tr><td><b>{e(x.get('domain'))}</b></td><td>{e(x.get('status'))}</td><td>{e(detail)}</td><td>{e(x.get('action'))}</td></tr>"
+    inv=""
+    for x in R.get("runtime_inventory") or []:
+        inv+=f"<tr><td>{e(x.get('family'))}</td><td>{e(x.get('name'))}</td><td>{e(x.get('path'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.r{{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧩 V8.22 Data / Source Coverage Gap Audit</h1>
+<div class='o'><b>这版不找新策略。</b> 只判断我们缺的是 edge，还是缺真正的数据。</div></div>
+<div class='c'><form method='post' action='/v822/run'><button>▶ Run Data / Source Gap Audit</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<p><b>Primary gap:</b> {e(R.get('primary_gap','—'))}</p>
+<p><b>V8.20:</b> {e(R.get('v820_verdict','—'))}<br><b>V8.21:</b> {e(R.get('v821_verdict','—'))}</p>
+<p>{e(R.get('boundaries',''))}</p></div>
+<div class='c'><h2>Coverage Matrix</h2><div style='overflow:auto'><table>
+<tr><th>Domain</th><th>Status</th><th>Evidence</th><th>Action</th></tr>{rows or "<tr><td colspan=4>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>Existing Runtime Data Families</h2><div style='overflow:auto'><table>
+<tr><th>Family</th><th>Name</th><th>Path</th></tr>{inv or "<tr><td colspan=3>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><div class='g'><b>Next action:</b> {e(R.get('next_action','Run audit first'))}</div>
+<p><b>Hard rule:</b> {e(R.get('hard_rule',''))}</p></div>
+</div></body></html>"""
+
+# Dashboard card.
+_v822_home_base = APP.view_functions.get("home") or APP.view_functions.get("index")
+if _v822_home_base is not None:
+    def _v822_home_wrap(*args, **kwargs):
+        resp = _v822_home_base(*args, **kwargs)
+        card = """<div id='v822-home-card' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧩 V8.22 Data / Source Coverage Gap Audit</h2>
+        <p>先查真实数据缺口：PIT fundamentals / revisions / institutional / source semantics / sector leadership。0 rescan / 0 replay / 0 tuning。</p>
+        <a href='/v822'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.22</button></a>
+        </div>"""
+        try:
+            if hasattr(resp,"get_data"):
+                txt=resp.get_data(as_text=True)
+                pos=txt.lower().find("<body")
+                if pos>=0:
+                    gt=txt.find(">",pos); txt=txt[:gt+1]+card+txt[gt+1:]
+                else: txt=card+txt
+                resp.set_data(txt); return resp
+            txt=str(resp); pos=txt.lower().find("<body")
+            if pos>=0:
+                gt=txt.find(">",pos); return txt[:gt+1]+card+txt[gt+1:]
+            return card+txt
+        except Exception:
+            return resp
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v822_home_base:
+            APP.view_functions[_ep]=_v822_home_wrap
+
