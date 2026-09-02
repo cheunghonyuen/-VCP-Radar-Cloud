@@ -1,4 +1,5 @@
 import re
+import html
 import shutil
 import base64
 import hmac
