@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826e-home-card-real' style='background:#fef3c7;border:7px solid #d97706;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v827-home-card-real' style='background:#fdf2f8;border:7px solid #be185d;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h2>
+        <p>最高优先级：查清为什么 VCP STOP 太多。区分 True Failure / False Breakout / Premature Stop / Giveback / Extended Entry；只诊断，不调参，不重扫。</p>
+        <a href='/v827'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.27</button></a>
+        </div>
+        <div id='v826e-home-card-real' style='background:#fef3c7;border:7px solid #d97706;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🛡️ V8.26E Fixed Winner-Protection Portfolio Audit</h2>
         <p>Top25 不改；复用既有 V6.31 五个固定 winner-protection variants，因果 10-slot replay。目标：减少 winner giveback，同时保住 +20/+30 tail。0参数搜索。</p>
         <a href='/v826e'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26E</button></a>
@@ -65974,3 +65979,155 @@ $('go').onclick=async()=>{{
 poll();
 </script>
 </div></body></html>"""
+
+# ================= V8.27 VCP INTEGRITY + STOP ROOT-CAUSE AUDIT =================
+# Diagnostic only. Frozen Top25/reference_rank>=.75 and frozen -7% initial stop.
+# No new entry/exit/filter/model rule, no parameter search, no Tiingo, no universe rescan.
+# Reuses V8.26A OOS + Historical Cache and audits WHY BASE_30Y trades reach STOP.
+V827_DIR = DATA_DIR / "v827_vcp_integrity_stop_root_cause"
+V827_PREFLIGHT = V827_DIR / "preflight.json"
+V827_STATUS = V827_DIR / "status.json"
+V827_RESULT = V827_DIR / "result.json"
+V827_BUILD_ID = "V827_VCP_INTEGRITY_STOP_ROOT_CAUSE_20260902A"
+v827_thread = None
+
+def _v827_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"current_listing":None,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V827_STATUS.exists():
+        try:x.update(json.loads(V827_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v827_write_status(**kw):
+    V827_DIR.mkdir(parents=True,exist_ok=True); x=_v827_status(); x.update(kw)
+    x["last_heartbeat"]=datetime.now(timezone.utc).isoformat()
+    V827_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); return x
+
+def _v827_alive(): return v827_thread is not None and v827_thread.is_alive()
+
+def _v827_preflight():
+    V827_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos(); T=D[D["reference_rank"]>=.75].copy()
+    req=["listing_id","entry_date","entry_px","reference_rank"]
+    missing=[c for c in req if c not in T.columns]
+    M,lidcol=_v826a_manifest(); mlids=set(M[lidcol].astype(str)); lids=set(T["listing_id"].astype(str)) if not missing else set()
+    cov=len(lids & mlids)/max(1,len(lids))
+    out={"version":"V8.27 VCP Integrity + STOP Root-Cause Audit","build_id":V827_BUILD_ID,
+         "verdict":"PASS" if (not missing and len(T)>=15000 and cov>=.95) else "FAIL__SCHEMA_OR_CACHE_PARITY",
+         "top25_candidate_rows":int(len(T)),"unique_listings":int(len(lids)),"manifest_mapping_coverage":float(cov),"missing_required_columns":missing,
+         "frozen_contract":"reference_rank>=0.75; BASE_30Y; initial stop=-7%; 60 sessions; diagnostic only",
+         "audit_question":"Are excessive STOPs caused by weak/false VCP structure, entry timing/extension, premature stop/recovery, or true failure?",
+         "next_action":"RUN_STOP_ROOT_CAUSE_AUDIT" if (not missing and len(T)>=15000 and cov>=.95) else "STOP__FIX_ONLY_REPORTED_SCHEMA_CACHE_GAP"}
+    V827_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); return out
+
+def _v827_metrics(pre, ep):
+    if pre is None or len(pre)<20:return {}
+    q=pre.copy().tail(60); c=pd.to_numeric(q.get("close"),errors="coerce"); h=pd.to_numeric(q.get("high"),errors="coerce"); l=pd.to_numeric(q.get("low"),errors="coerce")
+    out={}
+    for n in (5,10,20,40,60):
+        z=q.tail(n); hh=pd.to_numeric(z.get("high"),errors="coerce").max(); ll=pd.to_numeric(z.get("low"),errors="coerce").min()
+        out[f"range_{n}d"]=(hh/ll-1.0) if pd.notna(hh) and pd.notna(ll) and ll>0 else np.nan
+    out["tightening_5_vs_20"]=(out.get("range_5d")/out.get("range_20d")) if out.get("range_20d") and out.get("range_20d")>0 else np.nan
+    out["tightening_10_vs_40"]=(out.get("range_10d")/out.get("range_40d")) if out.get("range_40d") and out.get("range_40d")>0 else np.nan
+    hi20=h.tail(20).max(); hi60=h.tail(60).max(); lo60=l.tail(60).min()
+    out["entry_vs_20d_high"]=(ep/hi20-1.0) if pd.notna(hi20) and hi20>0 else np.nan
+    out["entry_vs_60d_high"]=(ep/hi60-1.0) if pd.notna(hi60) and hi60>0 else np.nan
+    out["base_depth_60d"]=(lo60/hi60-1.0) if pd.notna(lo60) and pd.notna(hi60) and hi60>0 else np.nan
+    if "volume" in q.columns:
+        v=pd.to_numeric(q["volume"],errors="coerce"); a5=v.tail(5).mean(); a20=v.tail(20).mean()
+        out["volume_dryup_5v20"]=(a5/a20) if pd.notna(a20) and a20>0 else np.nan
+    return out
+
+def _v827_classify(stop, peak_ret, post5,post10,post20,post40, entry_vs_hi):
+    mx=max([x for x in [post5,post10,post20,post40] if x is not None and np.isfinite(x)] or [-9])
+    if mx>=.20:return "PREMATURE_STOP__RECOVERED_20P"
+    if mx>=.10:return "FALSE_BREAKOUT__RECOVERED_10P"
+    if peak_ret>=.05:return "GIVEBACK_AFTER_INITIAL_PROGRESS"
+    if entry_vs_hi is not None and np.isfinite(entry_vs_hi) and entry_vs_hi>=.04:return "EXTENDED_ENTRY"
+    return "TRUE_FAILURE__NO_MEANINGFUL_RECOVERY"
+
+def _v827_run():
+    t0=time.time(); D=_v826b_load_oos(); T=D[D["reference_rank"]>=.75].copy()
+    T["entry_date"]=pd.to_datetime(T["entry_date"]).dt.normalize(); T=T.sort_values(["entry_date","reference_rank"],ascending=[True,False]).reset_index(drop=True)
+    lids=sorted(set(T["listing_id"].astype(str))); M,lidcol=_v826a_manifest(); mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    paths={}; errors=[]
+    for n,lid in enumerate(lids,1):
+        try:
+            q,hi,amb=_v826a_prepare_price(mmap[lid]); paths[lid]=q.copy() if q is not None else None
+        except Exception as ex: errors.append({"listing_id":lid,"error":f"{type(ex).__name__}: {ex}"})
+        if n==1 or n%5==0 or n==len(lids): _v827_write_status(status="running",phase="cached_path_stream",message=f"Reading Historical Cache {n}/{len(lids)} · {lid}",processed=n,total=len(lids),errors=len(errors),current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
+    rows=[]
+    for n,r in T.iterrows():
+        lid=str(r["listing_id"]); q=paths.get(lid)
+        if q is None or q.empty:continue
+        ed=pd.Timestamp(r["entry_date"]).normalize(); ep=float(r["entry_px"]); pre=q[q["date"]<=ed].tail(60); fut=q[q["date"]>ed].head(100).copy().reset_index(drop=True)
+        if len(fut)<60:continue
+        path60=fut.head(60); lows=pd.to_numeric(path60["low"],errors="coerce"); hit=np.where(lows.values<=ep*.93)[0]
+        stop=len(hit)>0
+        exit_i=int(hit[0]) if stop else 59
+        before=path60.iloc[:exit_i+1]; peak_ret=float(pd.to_numeric(before["high"],errors="coerce").max()/ep-1.0)
+        exit_date=pd.Timestamp(path60.iloc[exit_i]["date"]).normalize(); exit_ret=-.07 if stop else float(path60.iloc[59]["close"])/ep-1
+        m=_v827_metrics(pre,ep); rec={"listing_id":lid,"entry_date":ed,"entry_px":ep,"reference_rank":float(r["reference_rank"]),"outcome":"STOP" if stop else "NON_STOP","exit_date":exit_date,"exit_ret":exit_ret,"peak_ret_before_exit":peak_ret,"days_to_stop":exit_i+1 if stop else None,**m}
+        if stop:
+            after=fut.iloc[exit_i+1:]
+            for k in (5,10,20,40):
+                z=after.head(k); rec[f"poststop_mfe_{k}"]=float(pd.to_numeric(z["high"],errors="coerce").max()/ep-1.0) if len(z) else np.nan
+            rec["stop_class"]=_v827_classify(True,peak_ret,rec.get("poststop_mfe_5"),rec.get("poststop_mfe_10"),rec.get("poststop_mfe_20"),rec.get("poststop_mfe_40"),rec.get("entry_vs_20d_high"))
+        else: rec["stop_class"]="NON_STOP"
+        rows.append(rec)
+        if (n+1)%1000==0:_v827_write_status(status="running",phase="trade_autopsy",message=f"Autopsy {n+1}/{len(T)}",processed=n+1,total=len(T),errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+    A=pd.DataFrame(rows); S=A[A["outcome"]=="STOP"].copy(); N=A[A["outcome"]=="NON_STOP"].copy()
+    feats=[c for c in ["range_5d","range_10d","range_20d","range_40d","range_60d","tightening_5_vs_20","tightening_10_vs_40","entry_vs_20d_high","entry_vs_60d_high","base_depth_60d","volume_dryup_5v20"] if c in A.columns]
+    comp=[]
+    for c in feats:
+        comp.append({"feature":c,"STOP_median":float(pd.to_numeric(S[c],errors="coerce").median()),"NON_STOP_median":float(pd.to_numeric(N[c],errors="coerce").median()),"delta":float(pd.to_numeric(S[c],errors="coerce").median()-pd.to_numeric(N[c],errors="coerce").median())})
+    classes=S["stop_class"].value_counts(dropna=False).to_dict() if len(S) else {}
+    class_pct={str(k):float(v/max(1,len(S))) for k,v in classes.items()}
+    stop_rate=float(len(S)/max(1,len(A))); true_pct=class_pct.get("TRUE_FAILURE__NO_MEANINGFUL_RECOVERY",0.0); prem_pct=class_pct.get("PREMATURE_STOP__RECOVERED_20P",0.0)
+    if true_pct>=.70: diagnosis="PRIMARY_SELECTION_OR_ENTRY_PROBLEM__VCP_QUALIFICATION_TRIGGER"
+    elif prem_pct>=.20: diagnosis="MATERIAL_PREMATURE_STOP_OR_REENTRY_PROBLEM"
+    else: diagnosis="MIXED__USE_CLASS_AND_FEATURE_SEPARATION_BEFORE_ANY_RULE_CHANGE"
+    result={"version":"V8.27 VCP Integrity + STOP Root-Cause Audit","build_id":V827_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"rows_audited":int(len(A)),"stops":int(len(S)),"stop_rate":stop_rate,"non_stops":int(len(N)),"stop_class_counts":classes,"stop_class_pct":class_pct,"feature_median_STOP_vs_NON_STOP":comp,"diagnosis":diagnosis,"errors":errors[:100],"guardrail":"DIAGNOSTIC ONLY. No model/entry/stop/exit/filter change; no parameter search; no Tiingo/universe rescan."}
+    V827_DIR.mkdir(parents=True,exist_ok=True); V827_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); A.to_csv(V827_DIR/"trade_level_stop_autopsy.csv.gz",index=False,compression="gzip")
+    return result
+
+def _v827_worker():
+    global v827_thread
+    try:
+        P=json.loads(V827_PREFLIGHT.read_text(encoding="utf-8")) if V827_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":raise RuntimeError("V8.27 Preflight must PASS first")
+        _v827_write_status(status="running",phase="start",message="Starting diagnostic-only STOP autopsy",processed=0,total=0,errors=0,error=None)
+        R=_v827_run(); _v827_write_status(status="done",phase="complete",message=f"Done · STOP rate {R.get('stop_rate',0):.1%} · {R.get('diagnosis')}",processed=R.get("rows_audited",0),total=R.get("rows_audited",0),errors=len(R.get("errors",[])),elapsed_sec=R.get("elapsed_sec",0),error=None)
+    except Exception as ex:_v827_write_status(status="error",phase="failed",message="Audit failed",error=f"{type(ex).__name__}: {ex}")
+    finally:v827_thread=None
+
+@APP.route("/v827/preflight",methods=["GET","POST"])
+def v827_preflight_route():
+    try:_v827_preflight()
+    except Exception as ex:
+        V827_DIR.mkdir(parents=True,exist_ok=True); V827_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v827")
+
+@APP.post("/v827/start")
+def v827_start_route():
+    global v827_thread
+    if _v827_alive():return jsonify({"started":False,**_v827_status()})
+    P=json.loads(V827_PREFLIGHT.read_text(encoding="utf-8")) if V827_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":return jsonify({"started":False,"error":"Run Preflight and require PASS first"}),400
+    v827_thread=threading.Thread(target=_v827_worker,daemon=True); v827_thread.start(); return jsonify({"started":True,**_v827_status()})
+
+@APP.get("/api/v827")
+def v827_api():return jsonify(_v827_status())
+
+@APP.get("/v827")
+def v827_page():
+    def e(x):return html.escape(str(x))
+    P={};R={};S=_v827_status()
+    try:
+        if V827_PREFLIGHT.exists():P=json.loads(V827_PREFLIGHT.read_text(encoding="utf-8"))
+        if V827_RESULT.exists():R=json.loads(V827_RESULT.read_text(encoding="utf-8"))
+    except Exception:pass
+    cls=R.get("stop_class_pct",{})
+    cr="".join(f"<tr><td>{e(k)}</td><td>{float(v):.1%}</td></tr>" for k,v in cls.items()) or "<tr><td colspan=2>Run audit first.</td></tr>"
+    fr="".join(f"<tr><td>{e(x.get('feature'))}</td><td>{x.get('STOP_median',float('nan')):.4f}</td><td>{x.get('NON_STOP_median',float('nan')):.4f}</td><td>{x.get('delta',float('nan')):+.4f}</td></tr>" for x in R.get("feature_median_STOP_vs_NON_STOP",[])) or "<tr><td colspan=4>—</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h1><div class='warn'><b>只诊断，不调参。</b> Top25 / Entry / -7% Stop / Exit 全冻结；0 Tiingo、0 universe rescan。直接查 STOP 为什么这么多。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows: {e(P.get('top25_candidate_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><form method='post' action='/v827/preflight'><button>A. Run Preflight</button></form><br><button onclick='startRun()'>B. Start STOP Root-Cause Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Headline</h2><p><b>Rows:</b> {e(R.get('rows_audited','—'))} · <b>STOPs:</b> {e(R.get('stops','—'))} · <b>STOP Rate:</b> {float(R.get('stop_rate',0)):.1%}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>STOP Root-Cause Classes</h2><table><tr><th>Class</th><th>% of STOPs</th></tr>{cr}</table></div><div class='c'><h2>VCP / Entry Anatomy: STOP vs NON-STOP</h2><table><tr><th>Feature</th><th>STOP median</th><th>NON-STOP median</th><th>Delta</th></tr>{fr}</table></div><div class='c'><b>Decision rule:</b> 先看 True Failure、Recovered +20%、Giveback、Extended Entry 各占多少，再决定 V8.28 修 VCP Qualification / Trigger / Re-entry / Stop。禁止在看到结果前发明新阈值。</div><script>async function poll(){{try{{let s=await (await fetch('/api/v827',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v827/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
