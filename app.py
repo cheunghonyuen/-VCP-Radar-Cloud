@@ -46784,7 +46784,7 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v830-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
-        <h2>🧪 V8.30B Exact Supply-DRY Runtime-Contract A/B Replay</h2>
+        <h2>🧪 V8.30C Exact Engine DRY-Edge A/B Replay</h2>
         <p>只测试一个 source-supported 改动：把正式引擎现有的 Volume Dry-Up soft edge 提升为 Hard Gate。正式 supply() pivot / breakout / Entry / -7% Stop / Exit / Top25 排序全部冻结；10-slot causal replay。</p>
         <a href='/v830'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.30</button></a>
         </div>
@@ -66146,7 +66146,7 @@ def v827_page():
     cls=R.get("stop_class_pct",{})
     cr="".join(f"<tr><td>{e(k)}</td><td>{float(v):.1%}</td></tr>" for k,v in cls.items()) or "<tr><td colspan=2>Run audit first.</td></tr>"
     fr="".join(f"<tr><td>{e(x.get('feature'))}</td><td>{x.get('STOP_median',float('nan')):.4f}</td><td>{x.get('NON_STOP_median',float('nan')):.4f}</td><td>{x.get('delta',float('nan')):+.4f}</td></tr>" for x in R.get("feature_median_STOP_vs_NON_STOP",[])) or "<tr><td colspan=4>—</td></tr>"
-    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h1><div class='warn'><b>只诊断，不调参。</b> Top25 / Entry / -7% Stop / Exit 全冻结；0 Tiingo、0 universe rescan。直接查 STOP 为什么这么多。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows: {e(P.get('top25_candidate_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><form method='post' action='/v827/preflight'><button>A. Run Preflight</button></form><br><button onclick='startRun()'>B. Start STOP Root-Cause Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Headline</h2><p><b>Rows:</b> {e(R.get('rows_audited','—'))} · <b>STOPs:</b> {e(R.get('stops','—'))} · <b>STOP Rate:</b> {float(R.get('stop_rate',0)):.1%}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>STOP Root-Cause Classes</h2><table><tr><th>Class</th><th>% of STOPs</th></tr>{cr}</table></div><div class='c'><h2>VCP / Entry Anatomy: STOP vs NON-STOP</h2><table><tr><th>Feature</th><th>STOP median</th><th>NON-STOP median</th><th>Delta</th></tr>{fr}</table></div><div class='c'><b>Decision rule:</b> 先看 True Failure、Recovered +20%、Giveback、Extended Entry 各占多少，再决定 V8.28 修 VCP Qualification / Trigger / Re-entry / Stop。禁止在看到结果前发明新阈值。</div><script>async function poll(){{try{{let s=await (await fetch('/api/v827',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v827/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h1><div class='warn'><b>只诊断，不调参。</b> Top25 / Entry / -7% Stop / Exit 全冻结；0 Tiingo、0 universe rescan。直接查 STOP 为什么这么多。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V830_BUILD_ID))}</p><p>Top25 rows: {e(P.get('top25_candidate_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><form method='post' action='/v827/preflight'><button>A. Run Preflight</button></form><br><button onclick='startRun()'>B. Start STOP Root-Cause Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Headline</h2><p><b>Rows:</b> {e(R.get('rows_audited','—'))} · <b>STOPs:</b> {e(R.get('stops','—'))} · <b>STOP Rate:</b> {float(R.get('stop_rate',0)):.1%}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>STOP Root-Cause Classes</h2><table><tr><th>Class</th><th>% of STOPs</th></tr>{cr}</table></div><div class='c'><h2>VCP / Entry Anatomy: STOP vs NON-STOP</h2><table><tr><th>Feature</th><th>STOP median</th><th>NON-STOP median</th><th>Delta</th></tr>{fr}</table></div><div class='c'><b>Decision rule:</b> 先看 True Failure、Recovered +20%、Giveback、Extended Entry 各占多少，再决定 V8.28 修 VCP Qualification / Trigger / Re-entry / Stop。禁止在看到结果前发明新阈值。</div><script>async function poll(){{try{{let s=await (await fetch('/api/v827',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v827/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
 
 
 # ================= V8.28 STRICT VCP QUALIFICATION FORENSIC AUDIT =================
@@ -66616,12 +66616,12 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 # One source-supported intervention only: promote the engine's existing DRY soft edge to a hard qualification gate.
 # No threshold search. Exact engine supply() is recomputed at each frozen Top25 entry date.
 # Formal pivot/breakout, Top25 ordering, entry, -7% stop, 60-session exit, 10-slot portfolio policy remain frozen.
-V830_DIR = DATA_DIR / "v830b_exact_dryup_runtime_contract_ab"
+V830_DIR = DATA_DIR / "v830c_exact_engine_dry_edge_ab"
 V830_PREFLIGHT = V830_DIR / "preflight.json"
 V830_STATUS = V830_DIR / "status.json"
 V830_RESULT = V830_DIR / "result.json"
 V830_EXACT = V830_DIR / "exact_dry_trace.csv.gz"
-V830_BUILD_ID = "v830b-runtime-dry-contract-isolated-20260902"
+V830_BUILD_ID = "v830c-exact-engine-dry-edge-085-20260902"
 v830_thread = None
 
 def _v830_status():
@@ -66645,29 +66645,29 @@ def _v830_engine():
     return ep,eng
 
 def _v830_dry_rule():
-    """Runtime/source contract for the engine's existing DRY edge.
-    Do not require a literal threshold in source and do not invent one.
-    V8.29 already proved _v6_edges references `dry`; this function only records that provenance.
-    Exact DRY representation is validated by a real supply() sample in Preflight.
+    """Read the EXISTING DRY edge comparator directly from deployed _v6_edges().
+    The deployed engine defines dry as a continuous recent10/prior40 volume ratio.
+    We do not invent or tune a threshold; we require the exact source comparator.
     """
     ep,eng=_v830_engine(); txt=ep.read_text(encoding='utf-8',errors='replace')
     tree=ast.parse(txt); fs=_v829_func_source(txt,tree,'_v6_edges')
-    if not re.search(r'\bdry\b',fs,re.I):
-        raise RuntimeError('Exact _v6_edges does not reference dry; refuse to promote an unproven edge.')
-    return {"op":"RUNTIME_SUPPLY_DRY","value":None,"expression":"use exact eng.supply(...)[7] with runtime type contract","source":fs}
+    # Exact supported form in production: ... np.isfinite(dry) and dry < .85
+    m=re.search(r'\bdry\s*(<=|<|>=|>)\s*(0?(?:\.\d+)|\d+(?:\.\d+)?)',fs,re.I)
+    if not m:
+        raise RuntimeError('Could not find an exact numeric DRY comparator inside deployed _v6_edges(); refuse to guess.')
+    op=m.group(1); val=float(m.group(2))
+    return {"op":op,"value":val,"expression":f"exact _v6_edges: dry {op} {val:g}","source":fs}
 
 def _v830_gate(v,rule):
-    # Exact engine semantics only. `dry` is already computed inside supply(); no new threshold.
     if v is None:return False
-    if isinstance(v,(bool,np.bool_)):return bool(v)
-    try:
-        x=float(v)
-        if not np.isfinite(x):return False
-        # Some historical engine builds encode booleans as 0/1 numerics.
-        if x in (0.0,1.0):return bool(int(x))
-    except Exception:
-        pass
-    # If exact supply() emits any other numeric/string representation, fail closed rather than tune.
+    try:x=float(v)
+    except Exception:return False
+    if not np.isfinite(x):return False
+    op=rule.get('op'); z=float(rule.get('value'))
+    if op=='<': return x<z
+    if op=='<=': return x<=z
+    if op=='>': return x>z
+    if op=='>=': return x>=z
     return False
 
 def _v830_preflight():
@@ -66677,47 +66677,15 @@ def _v830_preflight():
     missing=[c for c in req if c not in T.columns]
     M,lidcol=_v826a_manifest(); lids=set(T['listing_id'].astype(str)); mlids=set(M[lidcol].astype(str)); cov=len(lids&mlids)/max(1,len(lids))
     ep,eng=_v830_engine(); funcs={k:hasattr(eng,k) for k in ['ind','supply']}
-    rule=None;err=None; probe={}
-    try:
-        rule=_v830_dry_rule()
-        # Runtime contract probe: use one real mapped Top25 listing/date and inspect exact supply() return.
-        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
-        ok=False
-        for _,rr in T.head(500).iterrows():
-            lid=str(rr['listing_id']); mr=mmap.get(lid)
-            if mr is None: continue
-            q,hi,amb=_v826a_prepare_price(mr)
-            if q is None or len(q)<260: continue
-            try:d=eng.ind(q.copy())
-            except Exception:d=q.copy()
-            d['date']=pd.to_datetime(d['date']).dt.normalize(); ed=pd.Timestamp(rr['entry_date']).normalize()
-            hit=np.flatnonzero((d['date']==ed).to_numpy())
-            if len(hit)==0 or int(hit[-1])<260: continue
-            out=eng.supply(d.iloc[:int(hit[-1])+1])
-            if not isinstance(out,(tuple,list)) or len(out)<8:
-                raise RuntimeError(f'supply() return contract unexpected: type={type(out).__name__}, len={len(out) if hasattr(out,"__len__") else "NA"}')
-            dry=out[7]
-            probe={'listing_id':lid,'entry_date':str(ed.date()),'supply_len':len(out),'dry_type':type(dry).__name__,'dry_repr':repr(dry)[:120]}
-            # Hard-gate is allowed only when the engine already emits boolean/0-1 DRY state.
-            if isinstance(dry,(bool,np.bool_)):
-                probe['dry_contract']='BOOLEAN'; ok=True
-            else:
-                try:
-                    x=float(dry)
-                    if np.isfinite(x) and x in (0.0,1.0): probe['dry_contract']='NUMERIC_BOOLEAN_0_1'; ok=True
-                    else: probe['dry_contract']='NON_BOOLEAN_NUMERIC__DO_NOT_INVENT_THRESHOLD'
-                except Exception:
-                    probe['dry_contract']='UNSUPPORTED__DO_NOT_INVENT_THRESHOLD'
-            break
-        if not probe: raise RuntimeError('Could not obtain one real exact supply() runtime probe from mapped Top25 entries')
-        if not ok: raise RuntimeError('Exact supply() DRY is not an existing boolean edge state; refuse to invent a new threshold. Probe='+json.dumps(probe,default=str))
-    except Exception as ex:err=f'{type(ex).__name__}: {ex}'
-    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values()) and rule is not None and err is None) else 'FAIL__SCHEMA_ENGINE_OR_DRY_RUNTIME_CONTRACT'
-    out={"version":"V8.30B Exact Supply-DRY Runtime-Contract A/B Replay","build_id":V830_BUILD_ID,"verdict":verdict,
+    rule=None;err=None
+    try: rule=_v830_dry_rule()
+    except Exception as ex: err=f'{type(ex).__name__}: {ex}'
+    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values()) and rule is not None and err is None) else 'FAIL__SCHEMA_ENGINE_OR_EXACT_DRY_EDGE'
+    out={"version":"V8.30C Exact Engine DRY-Edge A/B Replay","build_id":V830_BUILD_ID,"verdict":verdict,
          "top25_rows":int(len(T)),"unique_listings":int(len(lids)),"manifest_mapping":float(cov),"missing_columns":missing,
-         "engine_path":str(ep),"functions":funcs,"source_supported_dry_rule":({k:v for k,v in rule.items() if k!='source'} if rule else None),"runtime_dry_probe":probe,"dry_rule_error":err,
-         "frozen_contract":"reference_rank>=.75; exact engine supply(); exact existing supply() DRY boolean edge only; frozen formal breakout/entry/-7% stop/60-session exit; causal 10-slot replay; 0 Tiingo; 0 universe rescan; 0 threshold search",
-         "next":"RUN_EXACT_DRY_AB" if verdict=='PASS' else 'STOP__REPORT_RUNTIME_DRY_CONTRACT_ONLY'}
+         "engine_path":str(ep),"functions":funcs,"source_supported_dry_rule":({k:v for k,v in rule.items() if k!='source'} if rule else None),"dry_rule_error":err,
+         "frozen_contract":"reference_rank>=.75; exact engine supply(); existing _v6_edges DRY comparator only; frozen formal breakout/entry/-7% stop/60-session exit; causal 10-slot replay; 0 Tiingo; 0 universe rescan; 0 threshold search",
+         "next":"RUN_EXACT_DRY_AB" if verdict=='PASS' else 'STOP__REPORT_EXACT_DRY_EDGE_PARSE_ERROR'}
     V830_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return out
 
 def _v830_exact_trace(T,eng,rule):
@@ -66786,7 +66754,7 @@ def _v830_run():
     }
     passed=all(gate.values())
     verdict='DRY_HARD_GATE_ECONOMICALLY_SUPPORTED__PROMOTE_TO_SHADOW_CHALLENGER' if passed else 'DRY_HARD_GATE_NOT_PROVEN__DO_NOT_CHANGE_PRODUCTION'
-    result={"version":"V8.30B Exact Supply-DRY Runtime-Contract A/B Replay","build_id":V830_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"verdict":verdict,
+    result={"version":"V8.30C Exact Engine DRY-Edge A/B Replay","build_id":V830_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"verdict":verdict,
             "source_supported_dry_rule":{k:v for k,v in rule.items() if k!='source'},"exact_trace_rows":int(len(X)),"trace_coverage":float(cov),"formal_breakout_recompute_rate":float(X['formal_breakout_recomputed'].mean()),
             "base":vb,"dry_hard":vh,"candidate_big_winner20":{"base":bw_base,"dry_hard":bw_hard,"retention":float(bwret)},"economic_gate":gate,
             "decision_rule":"Single pre-existing DRY edge only. Pass requires admitted PF↑, AvgTrade↑, STOP rate↓, CAGR not worse, |MaxDD| not worse, and +20 candidate retention >=80% (existing winner-retention guardrail). No dry threshold search.",
@@ -66847,8 +66815,8 @@ def v830_page():
     rule=P.get('source_supported_dry_rule') or R.get('source_supported_dry_rule') or {}
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#eef2ff;border:2px solid #4f46e5;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'>
-<a href='/'>← 首页</a><div class='c'><h1>🧪 V8.30B Exact Supply-DRY Runtime-Contract A/B Replay</h1><div class='warn'><b>只动第一层一个东西：</b>把正式引擎已经存在的 DRY soft edge（{e(rule.get('expression','待 Preflight'))}）提升成 Hard Gate。不是发明新阈值。正式 supply() pivot / breakout / Top25 / Entry / -7% Stop / Exit 全冻结。</div></div>
-<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest {pc(P.get('manifest_mapping'))}</p><p>Source DRY rule: <b>{e(rule.get('expression','—'))}</b></p><form method='post' action='/v830/preflight'><button>A. Run Exact Preflight</button></form><br><button onclick='go()'>B. Run Single Dry-Up Hard-Gate A/B</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<a href='/'>← 首页</a><div class='c'><h1>🧪 V8.30C Exact Engine DRY-Edge A/B Replay</h1><div class='warn'><b>只动第一层一个东西：</b>把正式引擎已经存在的 DRY soft edge（{e(rule.get('expression','待 Preflight'))}）提升成 Hard Gate。DRY 是 recent-10d / prior-40d volume ratio；阈值直接读取 deployed _v6_edges，不发明、不调参。正式 supply() pivot / breakout / Top25 / Entry / -7% Stop / Exit 全冻结。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V830_BUILD_ID))}</p><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest {pc(P.get('manifest_mapping'))}</p><p>Source DRY rule: <b>{e(rule.get('expression','—'))}</b></p><p><b>Preflight error:</b> {e(P.get('dry_rule_error') or '—')}</p><form method='post' action='/v830/preflight'><button>A. Run Exact Preflight</button></form><br><button onclick='go()'>B. Run Single Dry-Up Hard-Gate A/B</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div>
 <div class='c'><h2>Verdict</h2><div class='ok'><b>{e(R.get('verdict','—'))}</b></div><p>Exact supply trace coverage: {pc(R.get('trace_coverage'))} · Formal-breakout recompute parity rate: {pc(R.get('formal_breakout_recompute_rate'))}</p></div>
 <div class='c'><h2>BASE vs DRY Hard Gate</h2><div style='overflow:auto'><table><tr><th>Metric</th><th>BASE Top25</th><th>DRY Hard</th></tr>
 <tr><td>Candidate rows</td><td>{e(b.get('candidate_rows','—'))}</td><td>{e(h.get('candidate_rows','—'))}</td></tr>
