@@ -46783,7 +46783,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v829-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v830-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧪 V8.30 Exact Dry-Up Hard-Gate A/B Replay</h2>
+        <p>只测试一个 source-supported 改动：把正式引擎现有的 Volume Dry-Up soft edge 提升为 Hard Gate。正式 supply() pivot / breakout / Entry / -7% Stop / Exit / Top25 排序全部冻结；10-slot causal replay。</p>
+        <a href='/v830'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.30</button></a>
+        </div>
+        <div id='v829-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧾 V8.29 VCP Qualification / Pivot / Trigger Code Audit</h2>
         <p>不回测、不调参。直接审正式引擎代码：VCP Qualification → Pivot → Breakout Trigger 到底哪些是 Hard Gate、哪些只是 Soft Edge/Score，并核对 Top25 ledger provenance。</p>
         <a href='/v829'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.29</button></a>
@@ -66605,3 +66610,223 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class='c'><div class='info'><b>重要限制：</b> {e(R.get('important_limit',''))}</div></div>
 <details class='c'><summary><b>Exact source snippets</b></summary>{sn or 'Run audit first.'}</details>
 </div></body></html>"""
+
+
+# ================= V8.30 EXACT DRY-UP HARD-GATE A/B REPLAY =================
+# One source-supported intervention only: promote the engine's existing DRY soft edge to a hard qualification gate.
+# No threshold search. Exact engine supply() is recomputed at each frozen Top25 entry date.
+# Formal pivot/breakout, Top25 ordering, entry, -7% stop, 60-session exit, 10-slot portfolio policy remain frozen.
+V830_DIR = DATA_DIR / "v830_exact_dryup_hardgate_ab"
+V830_PREFLIGHT = V830_DIR / "preflight.json"
+V830_STATUS = V830_DIR / "status.json"
+V830_RESULT = V830_DIR / "result.json"
+V830_EXACT = V830_DIR / "exact_dry_trace.csv.gz"
+V830_BUILD_ID = "v830-exact-dry-hardgate-ab-20260902a"
+v830_thread = None
+
+def _v830_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"current_listing":None,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V830_STATUS.exists():
+        try:x.update(json.loads(V830_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v830_write_status(**kw):
+    V830_DIR.mkdir(parents=True,exist_ok=True); x=_v830_status(); x.update(kw); x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V830_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return x
+
+def _v830_alive():return v830_thread is not None and v830_thread.is_alive()
+
+def _v830_engine():
+    import importlib.util
+    ep=Path(__file__).with_name('jlaw_v6_1_DECISION_FAST.py')
+    if not ep.exists():raise RuntimeError('Missing deployed jlaw_v6_1_DECISION_FAST.py')
+    spec=importlib.util.spec_from_file_location('v830_exact_engine',str(ep)); eng=importlib.util.module_from_spec(spec); spec.loader.exec_module(eng)
+    return ep,eng
+
+def _v830_dry_rule():
+    """Extract the already-existing DRY soft-edge comparator from exact engine source. No new threshold invented."""
+    ep,eng=_v830_engine(); txt=ep.read_text(encoding='utf-8',errors='replace')
+    tree=ast.parse(txt); fs=_v829_func_source(txt,tree,'_v6_edges')
+    # Prefer literal comparator involving variable dry. Covers dry<=.8, dry < 0.8, 0.8>=dry etc.
+    pats=[
+        (r'\bdry\s*(<=|<|>=|>)\s*(0?\.\d+|\d+(?:\.\d+)?)','direct'),
+        (r'(0?\.\d+|\d+(?:\.\d+)?)\s*(>=|>|<=|<)\s*\bdry\b','reverse'),
+    ]
+    for pat,mode in pats:
+        m=re.search(pat,fs,re.I)
+        if not m:continue
+        if mode=='direct':op,val=m.group(1),float(m.group(2))
+        else:
+            val=float(m.group(1)); rop=m.group(2); op={'>=':'<=','>':'<','<=':'>=','<':'>'}[rop]
+        return {"op":op,"value":val,"expression":f"dry {op} {val:g}","source":fs}
+    raise RuntimeError('Could not extract a literal DRY comparator from _v6_edges; refuse to invent a threshold.')
+
+def _v830_gate(v,rule):
+    try:x=float(v)
+    except Exception:return False
+    if not np.isfinite(x):return False
+    y=float(rule['value']); op=rule['op']
+    return {'<=':x<=y,'<':x<y,'>=':x>=y,'>':x>y}[op]
+
+def _v830_preflight():
+    V830_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos(); T=D[D['reference_rank']>=.75].copy()
+    req=['listing_id','entry_date','entry_px','reference_rank','exit60_date','realized_ret','winner20','is_stop','frozen_score']
+    missing=[c for c in req if c not in T.columns]
+    M,lidcol=_v826a_manifest(); lids=set(T['listing_id'].astype(str)); mlids=set(M[lidcol].astype(str)); cov=len(lids&mlids)/max(1,len(lids))
+    ep,eng=_v830_engine(); funcs={k:hasattr(eng,k) for k in ['ind','supply']}
+    rule=None;err=None
+    try:rule=_v830_dry_rule()
+    except Exception as ex:err=f'{type(ex).__name__}: {ex}'
+    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values()) and rule is not None) else 'FAIL__SCHEMA_ENGINE_OR_DRY_RULE'
+    out={"version":"V8.30 Exact Dry-Up Hard-Gate A/B Replay","build_id":V830_BUILD_ID,"verdict":verdict,
+         "top25_rows":int(len(T)),"unique_listings":int(len(lids)),"manifest_mapping":float(cov),"missing_columns":missing,
+         "engine_path":str(ep),"functions":funcs,"source_supported_dry_rule":({k:v for k,v in rule.items() if k!='source'} if rule else None),"dry_rule_error":err,
+         "frozen_contract":"reference_rank>=.75; exact engine supply(); existing dry soft-edge comparator only; frozen formal breakout/entry/-7% stop/60-session exit; causal 10-slot replay; 0 Tiingo; 0 universe rescan; 0 threshold search",
+         "next":"RUN_EXACT_DRY_AB" if verdict=='PASS' else 'STOP__FIX_REPORTED_PREFLIGHT_ONLY'}
+    V830_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return out
+
+def _v830_exact_trace(T,eng,rule):
+    M,lidcol=_v826a_manifest(); mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    T=T.copy().reset_index(drop=True); T['_v830_row']=np.arange(len(T)); T['entry_date']=pd.to_datetime(T['entry_date']).dt.normalize()
+    bylid={str(k):g.copy() for k,g in T.groupby(T['listing_id'].astype(str),sort=True)}
+    rows=[];errors=[];t0=time.time();lids=sorted(bylid)
+    for n,lid in enumerate(lids,1):
+        try:
+            mr=mmap.get(lid)
+            if mr is None:raise RuntimeError('manifest missing')
+            q,hi,amb=_v826a_prepare_price(mr)
+            if q is None:raise RuntimeError('historical price unavailable')
+            try:d=eng.ind(q.copy())
+            except Exception:d=q.copy()
+            d['date']=pd.to_datetime(d['date']).dt.normalize()
+            pos={pd.Timestamp(dt).normalize():i for i,dt in enumerate(d['date'])}
+            for _,r in bylid[lid].iterrows():
+                ed=pd.Timestamp(r['entry_date']).normalize(); i=pos.get(ed)
+                if i is None or i<260:continue
+                x=d.iloc[:i+1]
+                ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+                prev=float(x.close.iloc[-2]); close=float(x.close.iloc[-1]); ext=close/float(piv)-1 if np.isfinite(piv) and float(piv)!=0 else np.nan
+                formal=bool(np.isfinite(piv) and prev<=piv and close>piv and np.isfinite(ext) and ext<=.03 and np.isfinite(vr) and vr>=1.20)
+                rows.append({'_v830_row':int(r['_v830_row']),'listing_id':lid,'entry_date':ed,'dry':float(dry) if np.isfinite(dry) else np.nan,
+                             'dry_hard_pass':bool(_v830_gate(dry,rule)),'supply_score':float(ss) if np.isfinite(ss) else np.nan,
+                             'pivot':float(piv) if np.isfinite(piv) else np.nan,'tight':float(tight) if np.isfinite(tight) else np.nan,
+                             'volratio':float(vr) if np.isfinite(vr) else np.nan,'c1':float(c1) if np.isfinite(c1) else np.nan,'c2':float(c2) if np.isfinite(c2) else np.nan,'c3':float(c3) if np.isfinite(c3) else np.nan,
+                             'formal_breakout_recomputed':formal,'extension':float(ext) if np.isfinite(ext) else np.nan})
+        except Exception as ex:errors.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
+        if n==1 or n%10==0 or n==len(lids):_v830_write_status(status='running',phase='exact_supply_trace',message=f'Exact supply() {n}/{len(lids)} · {lid}',processed=n,total=len(lids),errors=len(errors),current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
+    X=pd.DataFrame(rows); return T,X,errors
+
+def _v830_variant(name,Q):
+    cm=_v826b_candidate_metrics(Q); adm,ast=_v826b_admit(Q)
+    return {'name':name,'candidate_rows':int(len(Q)),'candidate_metrics':cm,'admission_df':adm,'admission':ast,'portfolio_trade_metrics':_v826b_trade_portfolio_metrics(adm)}
+
+def _v830_run():
+    t0=time.time(); P=json.loads(V830_PREFLIGHT.read_text(encoding='utf-8')) if V830_PREFLIGHT.exists() else {}
+    if P.get('verdict')!='PASS':raise RuntimeError('V8.30 Preflight must PASS first')
+    ep,eng=_v830_engine(); rule=_v830_dry_rule(); D=_v826b_load_oos(); T=D[D['reference_rank']>=.75].copy()
+    T,X,errors=_v830_exact_trace(T,eng,rule)
+    if X.empty:raise RuntimeError('Exact supply trace produced zero rows')
+    A=T.merge(X,on=['_v830_row','listing_id','entry_date'],how='left',validate='one_to_one')
+    covered=A[A['dry'].notna()].copy(); cov=len(covered)/max(1,len(A))
+    if cov<.95:raise RuntimeError(f'Exact dry trace coverage too low: {cov:.1%}')
+    # Fair A/B denominator: rows with exact source dry available only.
+    base=covered.copy(); hard=covered[covered['dry_hard_pass']==True].copy()
+    vb=_v830_variant('BASE_TOP25_EXACT_COVERAGE',base); vh=_v830_variant('DRY_SOFT_EDGE_PROMOTED_TO_HARD_GATE',hard)
+    all_lids=set(vb['admission_df']['listing_id'].astype(str) if not vb['admission_df'].empty else []) | set(vh['admission_df']['listing_id'].astype(str) if not vh['admission_df'].empty else [])
+    _v830_write_status(status='running',phase='portfolio_prices',message='Loading cached prices for causal 10-slot MTM',processed=0,total=len(all_lids),errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+    pmaps=_v826b_price_maps(all_lids)
+    for v in (vb,vh):v['portfolio_mtm']=_v826b_daily_mtm(v['admission_df'],pmaps)
+    # Strip dataframes from JSON result.
+    b_adm=vb.pop('admission_df'); h_adm=vh.pop('admission_df')
+    bw_base=int(pd.Series(base['winner20']).fillna(False).astype(bool).sum()); bw_hard=int(pd.Series(hard['winner20']).fillna(False).astype(bool).sum())
+    bwret=bw_hard/max(1,bw_base)
+    bt=vb['portfolio_trade_metrics']; ht=vh['portfolio_trade_metrics']; bm=vb['portfolio_mtm']; hm=vh['portfolio_mtm']
+    gate={
+      'pf_improves':float(ht.get('pf',0))>float(bt.get('pf',0)),
+      'avgtrade_improves':float(ht.get('avg_trade',0))>float(bt.get('avg_trade',0)),
+      'stop_rate_drops':float(ht.get('stop_rate',1))<float(bt.get('stop_rate',1)),
+      'cagr_not_worse':float(hm.get('cagr',-9))>=float(bm.get('cagr',-9)),
+      'maxdd_not_worse':abs(float(hm.get('max_drawdown',9)))<=abs(float(bm.get('max_drawdown',9))),
+      'winner20_retention_ge_80pct':bwret>=.80,
+    }
+    passed=all(gate.values())
+    verdict='DRY_HARD_GATE_ECONOMICALLY_SUPPORTED__PROMOTE_TO_SHADOW_CHALLENGER' if passed else 'DRY_HARD_GATE_NOT_PROVEN__DO_NOT_CHANGE_PRODUCTION'
+    result={"version":"V8.30 Exact Dry-Up Hard-Gate A/B Replay","build_id":V830_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"verdict":verdict,
+            "source_supported_dry_rule":{k:v for k,v in rule.items() if k!='source'},"exact_trace_rows":int(len(X)),"trace_coverage":float(cov),"formal_breakout_recompute_rate":float(X['formal_breakout_recomputed'].mean()),
+            "base":vb,"dry_hard":vh,"candidate_big_winner20":{"base":bw_base,"dry_hard":bw_hard,"retention":float(bwret)},"economic_gate":gate,
+            "decision_rule":"Single pre-existing DRY edge only. Pass requires admitted PF↑, AvgTrade↑, STOP rate↓, CAGR not worse, |MaxDD| not worse, and +20 candidate retention >=80% (existing winner-retention guardrail). No dry threshold search.",
+            "important_correction":"V8.29 rs_score function-name check is not evidence that RS is absent. Existing formal replay code calls eng.rs() with RS>=72 plus sector/breadth/leader gates; V8.30 therefore does NOT invent a new RS gate.",
+            "boundaries":"Exact engine supply() at frozen entry dates; formal breakout recomputed for parity diagnostic only and NOT changed. Top25 ordering/Entry/-7% Stop/Exit/10-slot policy frozen; Historical Cache only; 0 Tiingo; 0 universe rescan.","errors":errors[:100]}
+    V830_DIR.mkdir(parents=True,exist_ok=True); V830_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); X.to_csv(V830_EXACT,index=False,compression='gzip')
+    return result
+
+def _v830_worker():
+    global v830_thread
+    t0=time.time()
+    try:
+        _v830_write_status(status='running',phase='start',message='Starting exact DRY hard-gate A/B',processed=0,total=0,errors=0,error=None)
+        R=_v830_run(); _v830_write_status(status='done',phase='complete',message=f"Done · {R.get('verdict')}",processed=R.get('exact_trace_rows',0),total=R.get('exact_trace_rows',0),errors=len(R.get('errors',[])),elapsed_sec=R.get('elapsed_sec',round(time.time()-t0,1)),error=None)
+    except Exception as ex:_v830_write_status(status='error',phase='failed',message='V8.30 failed',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v830_thread=None
+
+@APP.route('/v830/preflight',methods=['GET','POST'])
+def v830_preflight_route():
+    try:_v830_preflight()
+    except Exception as ex:
+        V830_DIR.mkdir(parents=True,exist_ok=True);V830_PREFLIGHT.write_text(json.dumps({'verdict':'AUDIT_ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v830')
+
+@APP.post('/v830/start')
+def v830_start():
+    global v830_thread
+    if _v830_alive():return jsonify({'started':False,**_v830_status()})
+    P=json.loads(V830_PREFLIGHT.read_text(encoding='utf-8')) if V830_PREFLIGHT.exists() else {}
+    if P.get('verdict')!='PASS':return jsonify({'started':False,'error':'Run Preflight and require PASS first'}),400
+    v830_thread=threading.Thread(target=_v830_worker,daemon=True);v830_thread.start();return jsonify({'started':True,**_v830_status()})
+
+@APP.get('/api/v830')
+def v830_api():return jsonify(_v830_status())
+
+@APP.get('/v830/export')
+def v830_export():
+    if not V830_EXACT.exists():return ('Run V8.30 first',404)
+    return send_file(V830_EXACT,as_attachment=True,download_name='v830_exact_supply_dry_trace.csv.gz')
+
+@APP.get('/v830')
+def v830_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P={};R={};S=_v830_status()
+    try:
+        if V830_PREFLIGHT.exists():P=json.loads(V830_PREFLIGHT.read_text(encoding='utf-8'))
+        if V830_RESULT.exists():R=json.loads(V830_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    b=R.get('base',{});h=R.get('dry_hard',{});bt=b.get('portfolio_trade_metrics',{});ht=h.get('portfolio_trade_metrics',{});bm=b.get('portfolio_mtm',{});hm=h.get('portfolio_mtm',{})
+    def pc(v):
+        try:return f'{100*float(v):.2f}%'
+        except Exception:return '—'
+    def num(v):
+        try:return f'{float(v):.3f}'
+        except Exception:return '—'
+    gate=''.join(f"<tr><td>{e(k)}</td><td>{'✅' if v else '❌'}</td></tr>" for k,v in R.get('economic_gate',{}).items()) or '<tr><td colspan=2>Run replay first.</td></tr>'
+    rule=P.get('source_supported_dry_rule') or R.get('source_supported_dry_rule') or {}
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#eef2ff;border:2px solid #4f46e5;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'>
+<a href='/'>← 首页</a><div class='c'><h1>🧪 V8.30 Exact Dry-Up Hard-Gate A/B Replay</h1><div class='warn'><b>只动第一层一个东西：</b>把正式引擎已经存在的 DRY soft edge（{e(rule.get('expression','待 Preflight'))}）提升成 Hard Gate。不是发明新阈值。正式 supply() pivot / breakout / Top25 / Entry / -7% Stop / Exit 全冻结。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest {pc(P.get('manifest_mapping'))}</p><p>Source DRY rule: <b>{e(rule.get('expression','—'))}</b></p><form method='post' action='/v830/preflight'><button>A. Run Exact Preflight</button></form><br><button onclick='go()'>B. Run Single Dry-Up Hard-Gate A/B</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class='c'><h2>Verdict</h2><div class='ok'><b>{e(R.get('verdict','—'))}</b></div><p>Exact supply trace coverage: {pc(R.get('trace_coverage'))} · Formal-breakout recompute parity rate: {pc(R.get('formal_breakout_recompute_rate'))}</p></div>
+<div class='c'><h2>BASE vs DRY Hard Gate</h2><div style='overflow:auto'><table><tr><th>Metric</th><th>BASE Top25</th><th>DRY Hard</th></tr>
+<tr><td>Candidate rows</td><td>{e(b.get('candidate_rows','—'))}</td><td>{e(h.get('candidate_rows','—'))}</td></tr>
+<tr><td>Admitted trades</td><td>{e(bt.get('trades','—'))}</td><td>{e(ht.get('trades','—'))}</td></tr>
+<tr><td>PF</td><td>{num(bt.get('pf'))}</td><td>{num(ht.get('pf'))}</td></tr>
+<tr><td>AvgTrade</td><td>{pc(bt.get('avg_trade'))}</td><td>{pc(ht.get('avg_trade'))}</td></tr>
+<tr><td>Win Rate</td><td>{pc(bt.get('win_rate'))}</td><td>{pc(ht.get('win_rate'))}</td></tr>
+<tr><td>STOP Rate</td><td>{pc(bt.get('stop_rate'))}</td><td>{pc(ht.get('stop_rate'))}</td></tr>
+<tr><td>CAGR</td><td>{pc(bm.get('cagr'))}</td><td>{pc(hm.get('cagr'))}</td></tr>
+<tr><td>MaxDD</td><td>{pc(bm.get('max_drawdown'))}</td><td>{pc(hm.get('max_drawdown'))}</td></tr></table></div></div>
+<div class='c'><h2>Big Winner Retention</h2><p>BASE +20 candidates: <b>{e((R.get('candidate_big_winner20') or {}).get('base','—'))}</b> · DRY Hard: <b>{e((R.get('candidate_big_winner20') or {}).get('dry_hard','—'))}</b> · Retention <b>{pc((R.get('candidate_big_winner20') or {}).get('retention'))}</b></p></div>
+<div class='c'><h2>Frozen Economic Gate</h2><table><tr><th>Check</th><th>Pass</th></tr>{gate}</table></div>
+<div class='c'><div class='info'><b>重要纠正：</b>{e(R.get('important_correction','V8.29 的 rs_score ❌ 只是函数名检查，不代表正式引擎没有 RS；正式链已有 eng.rs() / RS>=72。'))}</div><p>{e(R.get('boundaries',''))}</p>{"<a href='/v830/export'><button>Export Exact Supply Trace</button></a>" if V830_EXACT.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v830',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1800);}}catch(e){{}}}}async function go(){{let r=await fetch('/v830/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
