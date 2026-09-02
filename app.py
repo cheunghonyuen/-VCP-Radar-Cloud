@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826d1-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v826e-home-card-real' style='background:#fef3c7;border:7px solid #d97706;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🛡️ V8.26E Fixed Winner-Protection Portfolio Audit</h2>
+        <p>Top25 不改；复用既有 V6.31 五个固定 winner-protection variants，因果 10-slot replay。目标：减少 winner giveback，同时保住 +20/+30 tail。0参数搜索。</p>
+        <a href='/v826e'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26E</button></a>
+        </div>
+        <div id='v826d1-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🫀 V8.26D1 Runtime Heartbeat / Cache Read Diagnostic</h2>
         <p>只修 D 的黑盒加载：逐批读 cache，实时显示 current listing / processed / errors / elapsed / heartbeat。研究逻辑不变。</p>
         <a href='/v826d1'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26D1</button></a>
@@ -65432,6 +65437,539 @@ $('go').onclick=async()=>{{
  let s=await (await fetch('/v826d1/start',{{method:'POST'}})).json();
  $('msg').textContent=s.message||s.status||'';
  poll();
+}};
+poll();
+</script>
+</div></body></html>"""
+
+# ================= V8.26E FIXED WINNER-PROTECTION PORTFOLIO AUDIT =================
+# Exact Top25 candidate selection is frozen (reference_rank >= .75).
+# Test ONLY the already-existing V6.31 predeclared winner-protection rules:
+#   BASE_30Y, PROTECT_1R_BE, PROTECT_2R_1R, LADDER_GENTLE, LADDER_STRONG.
+# Initial stop stays -1R = -7%.
+# Newly earned ratchet becomes effective NEXT session to avoid same-day OHLC ordering bias.
+# 10-slot portfolio replay is causal: earlier exits can free slots for later candidates.
+# No threshold/grid search, no new rule invention, no entry/filter/model changes.
+# Reuses V8.26A OOS + Historical Cache only. 0 Tiingo / 0 universe rescan.
+V826E_DIR = DATA_DIR / "v826e_fixed_winner_protection_portfolio_audit"
+V826E_PREFLIGHT = V826E_DIR / "preflight.json"
+V826E_STATUS = V826E_DIR / "status.json"
+V826E_RESULT = V826E_DIR / "result.json"
+V826E_BUILD_ID = "V826E_FIXED_WINNER_PROTECTION_20260902A"
+V826E_VARIANTS = ["BASE_30Y","PROTECT_1R_BE","PROTECT_2R_1R","LADDER_GENTLE","LADDER_STRONG"]
+v826e_thread = None
+
+def _v826e_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,
+       "errors":0,"current_listing":None,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V826E_STATUS.exists():
+        try:x.update(json.loads(V826E_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v826e_write_status(**kw):
+    V826E_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v826e_status();x.update(kw)
+    x["last_heartbeat"]=datetime.now(timezone.utc).isoformat()
+    V826E_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return x
+
+def _v826e_alive():
+    return v826e_thread is not None and v826e_thread.is_alive()
+
+def _v826e_preflight():
+    V826E_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    T=D[D["reference_rank"]>=.75].copy()
+    M,lidcol=_v826a_manifest()
+    mlids=set(M[lidcol].astype(str))
+    lids=set(T["listing_id"].astype(str))
+    cov=len(lids & mlids)/max(1,len(lids))
+    out={
+        "version":"V8.26E Fixed Winner-Protection Portfolio Audit",
+        "build_id":V826E_BUILD_ID,
+        "verdict":"PASS" if len(T)>=15000 and cov>=.95 else "FAIL__TOP25_OOS_OR_HISTORICAL_CACHE_NOT_READY",
+        "top25_candidate_rows":int(len(T)),
+        "unique_listings":int(len(lids)),
+        "manifest_mapping_coverage":float(cov),
+        "variants":V826E_VARIANTS,
+        "rule_source":"Exact predeclared V6.31 winner-protection variants already present in repository.",
+        "parity":"Top25 cutoff fixed at reference_rank>=0.75; initial stop -7%; ratchet newly earned today activates next session; causal 10-slot replay.",
+        "next_action":"RUN_FIXED_WINNER_PROTECTION_REPLAY" if len(T)>=15000 and cov>=.95 else "STOP__FIX_ONLY_REPORTED_CACHE_GAP"
+    }
+    V826E_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return out
+
+def _v826e_load_paths_streaming(listing_ids, heartbeat_every=5):
+    M,lidcol=_v826a_manifest()
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    lids=sorted(set(map(str,listing_ids)))
+    out={};errors=[];t0=time.time()
+
+    for n,lid in enumerate(lids,1):
+        mr=mmap.get(lid)
+        if mr is None:
+            errors.append({"listing_id":lid,"error":"manifest_missing"})
+        else:
+            try:
+                q,hi,amb=_v826a_prepare_price(mr)
+                if q is None or q.empty:
+                    errors.append({"listing_id":lid,"error":"price_prepare_none"})
+                else:
+                    out[lid]=q[["date","open","high","low","close"]].copy()
+            except Exception as ex:
+                errors.append({"listing_id":lid,"error":f"{type(ex).__name__}: {ex}"})
+
+        if n==1 or n%heartbeat_every==0 or n==len(lids):
+            _v826e_write_status(
+                status="running",phase="cached_path_stream",
+                message=f"Reading cached OHLC paths {n}/{len(lids)} · current {lid}",
+                processed=n,total=len(lids),errors=len(errors),current_listing=lid,
+                elapsed_sec=round(time.time()-t0,1),error=None
+            )
+    return out,errors
+
+def _v826e_exit_for_row(r, q, variant):
+    ep=float(r["entry_px"])
+    ed=pd.Timestamp(r["entry_date"]).normalize()
+    # Exact frozen 60-session horizon after entry.
+    path=q[q["date"]>ed].head(60).copy().reset_index(drop=True)
+    if len(path)<60:
+        return None
+
+    ladder=V631_VARIANTS.get(variant,[])
+    active_stop_r=-1.0
+    next_stop_r=-1.0
+    peak_r=-np.inf
+    R=.07
+
+    for _,z in path.iterrows():
+        dt=pd.Timestamp(z["date"]).normalize()
+        active_stop_r=max(active_stop_r,next_stop_r)
+        stop_px=ep*(1.0+active_stop_r*R)
+
+        oo=float(z["open"]) if pd.notna(z["open"]) else np.nan
+        hh=float(z["high"]) if pd.notna(z["high"]) else np.nan
+        ll=float(z["low"]) if pd.notna(z["low"]) else np.nan
+
+        # Known stop is checked first. Gap below stop exits at open.
+        if np.isfinite(ll) and ll<=stop_px:
+            xp=float(oo) if np.isfinite(oo) and oo>0 and oo<stop_px else float(stop_px)
+            return {
+                "exit_date":dt,"exit_px":xp,
+                "reason":"BASE_STOP_-1R" if active_stop_r<=-1.0+1e-12 else f"RATCHET_STOP_{active_stop_r:+.1f}R",
+                "peak_r":float(peak_r) if np.isfinite(peak_r) else None,
+                "active_stop_r":float(active_stop_r),
+            }
+
+        # BASE has no protection milestones.
+        if variant!="BASE_30Y" and np.isfinite(hh) and hh>0:
+            today_r=(hh/ep-1.0)/R
+            peak_r=max(peak_r,float(today_r))
+            earned=next_stop_r
+            for trigger_r,protect_r in ladder:
+                if peak_r>=float(trigger_r):
+                    earned=max(earned,float(protect_r))
+            next_stop_r=max(next_stop_r,earned)
+
+    # No stop: time exit on 60th session close.
+    z=path.iloc[59]
+    return {
+        "exit_date":pd.Timestamp(z["date"]).normalize(),
+        "exit_px":float(z["close"]),
+        "reason":"TIME60",
+        "peak_r":float(peak_r) if np.isfinite(peak_r) else None,
+        "active_stop_r":float(active_stop_r),
+    }
+
+def _v826e_build_variant_trades(T, paths, variant):
+    rows=[]
+    for _,r in T.iterrows():
+        lid=str(r["listing_id"])
+        q=paths.get(lid)
+        if q is None or q.empty:continue
+        ex=_v826e_exit_for_row(r,q,variant)
+        if ex is None:continue
+        ret=float(ex["exit_px"])/float(r["entry_px"])-1.0
+        rows.append({
+            "listing_id":lid,
+            "entry_date":pd.Timestamp(r["entry_date"]).normalize(),
+            "entry_px":float(r["entry_px"]),
+            "exit_date":pd.Timestamp(ex["exit_date"]).normalize(),
+            "exit_px":float(ex["exit_px"]),
+            "ret":ret,
+            "reason":str(ex["reason"]),
+            "peak_r":ex.get("peak_r"),
+            "reference_rank":float(r["reference_rank"]),
+            "frozen_score":float(r["frozen_score"]),
+        })
+    return pd.DataFrame(rows)
+
+def _v826e_replay_variant(X, paths):
+    if X is None or X.empty:return {}
+    X=X.sort_values(["entry_date","reference_rank","frozen_score","listing_id"],
+                    ascending=[True,False,False,True]).reset_index(drop=True)
+
+    entries={d:g for d,g in X.groupby("entry_date",sort=True)}
+    exits={d:g for d,g in X.groupby("exit_date",sort=True)}
+    first=pd.Timestamp(X["entry_date"].min()).normalize()
+    last=pd.Timestamp(X["exit_date"].max()).normalize()
+    cal=pd.bdate_range(first,last)
+
+    cash=float(V826B_INITIAL_EQUITY)
+    active={}
+    last_px={}
+    ledger=[]
+    eqrows=[]
+    skipped_capacity=0
+    skipped_cash=0
+
+    for day in cal:
+        day=pd.Timestamp(day).normalize()
+
+        gx=exits.get(day)
+        if gx is not None:
+            for _,r in gx.iterrows():
+                key=(str(r["listing_id"]),pd.Timestamp(r["entry_date"]).normalize())
+                p=active.pop(key,None)
+                if p is None:continue
+                proceeds=float(p["capital"])*(float(r["exit_px"])/float(p["entry_px"]))
+                cash+=proceeds
+                rr=float(r["exit_px"])/float(p["entry_px"])-1.0
+                ledger.append({
+                    "listing_id":str(r["listing_id"]),
+                    "entry_date":p["entry_date"],"exit_date":day,
+                    "ret":rr,"pnl":proceeds-float(p["capital"]),
+                    "reason":str(r["reason"]),
+                    "reference_rank":float(r["reference_rank"]),
+                })
+                last_px.pop(key,None)
+
+        # Mark before admission for equity-based position sizing.
+        mtm=0.0
+        for key,p in active.items():
+            pm=paths.get(str(p["listing_id"]))
+            px=None
+            if pm is not None and not pm.empty:
+                z=pm[pm["date"]==day]
+                if len(z):px=float(z.iloc[-1]["close"])
+            if px is not None and np.isfinite(px):last_px[key]=px
+            else:px=last_px.get(key,float(p["entry_px"]))
+            mtm+=float(p["capital"])*(float(px)/float(p["entry_px"]))
+        eq_now=float(cash+mtm)
+
+        ge=entries.get(day)
+        if ge is not None:
+            for _,r in ge.iterrows():
+                if len(active)>=V826B_MAX_POSITIONS:
+                    skipped_capacity+=1;continue
+                cap=min(eq_now*V826B_RISK_PCT/.07,eq_now*.25,cash)
+                if not np.isfinite(cap) or cap<100:
+                    skipped_cash+=1;continue
+                cash-=cap
+                key=(str(r["listing_id"]),pd.Timestamp(r["entry_date"]).normalize())
+                active[key]={
+                    "listing_id":str(r["listing_id"]),
+                    "entry_date":pd.Timestamp(r["entry_date"]).normalize(),
+                    "entry_px":float(r["entry_px"]),
+                    "capital":float(cap)
+                }
+                last_px[key]=float(r["entry_px"])
+
+        mtm=0.0
+        for key,p in active.items():
+            pm=paths.get(str(p["listing_id"]))
+            px=None
+            if pm is not None and not pm.empty:
+                z=pm[pm["date"]==day]
+                if len(z):px=float(z.iloc[-1]["close"])
+            if px is not None and np.isfinite(px):last_px[key]=px
+            else:px=last_px.get(key,float(p["entry_px"]))
+            mtm+=float(p["capital"])*(float(px)/float(p["entry_px"]))
+        eq=float(cash+mtm)
+        eqrows.append({"date":day,"equity":eq,"open_positions":int(len(active))})
+
+    E=pd.DataFrame(eqrows)
+    L=pd.DataFrame(ledger)
+    if E.empty:return {}
+
+    E["peak"]=E["equity"].cummax()
+    E["dd"]=E["equity"]/E["peak"]-1.0
+    years=max((E["date"].iloc[-1]-E["date"].iloc[0]).days/365.25,1/365.25)
+    final=float(E["equity"].iloc[-1])
+    cagr=(final/V826B_INITIAL_EQUITY)**(1/years)-1 if final>0 else -1.0
+
+    if len(L):
+        gp=float(L.loc[L["pnl"]>0,"pnl"].sum())
+        gl=float(-L.loc[L["pnl"]<=0,"pnl"].sum())
+        pf=gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0)
+        avg=float(L["ret"].mean())
+        win=float((L["ret"]>0).mean())
+        winner20=int((L["ret"]>=.20).sum())
+        winner30=int((L["ret"]>=.30).sum())
+        ratchet_share=float(L["reason"].astype(str).str.startswith("RATCHET_STOP").mean())
+    else:
+        pf=avg=win=ratchet_share=0.0;winner20=winner30=0
+
+    yr=[]
+    for y,g in E.groupby(E["date"].dt.year,sort=True):
+        a=float(g["equity"].iloc[0]);b=float(g["equity"].iloc[-1])
+        yr.append({"year":int(y),"return":float(b/a-1) if a else 0.0})
+    return {
+        "trades":int(len(L)),
+        "pf":float(pf),"avg_trade":float(avg),"win_rate":float(win),
+        "cagr":float(cagr),"maxdd":float(E["dd"].min()),
+        "positive_year_share":float(np.mean([x["return"]>0 for x in yr])) if yr else 0.0,
+        "winner20_realized_count":int(winner20),
+        "winner30_realized_count":int(winner30),
+        "ratchet_exit_share":float(ratchet_share),
+        "avg_open_positions":float(E["open_positions"].mean()),
+        "skipped_capacity":int(skipped_capacity),
+        "skipped_cash":int(skipped_cash),
+        "final_equity":float(final),
+        "yearly":yr
+    }
+
+def _v826e_run():
+    V826E_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    T=D[D["reference_rank"]>=.75].copy()
+    lids=sorted(set(T["listing_id"].astype(str)))
+
+    _v826e_write_status(
+        status="running",phase="cached_path_stream",
+        message=f"Preparing to stream {len(lids)} historical OHLC paths…",
+        processed=0,total=len(lids),errors=0,current_listing=None,elapsed_sec=0,error=None
+    )
+    paths,errors=_v826e_load_paths_streaming(lids,heartbeat_every=5)
+    coverage=len(paths)/max(1,len(lids))
+    if coverage<.95:
+        result={
+            "version":"V8.26E Fixed Winner-Protection Portfolio Audit",
+            "build_id":V826E_BUILD_ID,
+            "verdict":"CACHE_PATH_COVERAGE_INCOMPLETE__DO_NOT_REPLAY",
+            "requested_listings":len(lids),"loaded_listings":len(paths),"coverage":coverage,
+            "errors":errors[:100],"next_action":"FIX_ONLY_REPORTED_CACHE_PATH_FAILURES"
+        }
+        V826E_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        return result
+
+    results={}
+    trade_frames={}
+    for i,v in enumerate(V826E_VARIANTS,1):
+        _v826e_write_status(
+            status="running",phase="fixed_exit_replay",
+            message=f"Fixed winner-protection replay {v} ({i}/{len(V826E_VARIANTS)})",
+            processed=i-1,total=len(V826E_VARIANTS),errors=len(errors),
+            current_listing=None,error=None
+        )
+        X=_v826e_build_variant_trades(T,paths,v)
+        trade_frames[v]=X
+        results[v]=_v826e_replay_variant(X,paths)
+
+    base=results["BASE_30Y"]
+    bpf=float(base.get("pf",0));bavg=float(base.get("avg_trade",0))
+    bcagr=float(base.get("cagr",0));bdd=abs(float(base.get("maxdd",0)))
+    bw20=max(1,int(base.get("winner20_realized_count",0)))
+    bw30=max(1,int(base.get("winner30_realized_count",0)))
+
+    qualifying=[]
+    for v in V826E_VARIANTS[1:]:
+        z=results[v]
+        z["winner20_retention_vs_base"]=float(z.get("winner20_realized_count",0)/bw20)
+        z["winner30_retention_vs_base"]=float(z.get("winner30_realized_count",0)/bw30)
+        gate={
+            "pf_ge_95pct_base":float(z.get("pf",0))>=bpf*.95,
+            "avgtrade_ge_90pct_base":float(z.get("avg_trade",0))>=bavg*.90,
+            "cagr_ge_base":float(z.get("cagr",0))>=bcagr,
+            "maxdd_improves_by_5pp":abs(float(z.get("maxdd",0)))<=max(0.0,bdd-.05),
+            "winner20_retention_ge_80pct":float(z["winner20_retention_vs_base"])>=.80,
+            "winner30_retention_ge_80pct":float(z["winner30_retention_vs_base"])>=.80,
+        }
+        z["frozen_gate"]=gate
+        if all(gate.values()):qualifying.append(v)
+
+    if qualifying:
+        verdict="FIXED_WINNER_PROTECTION_PASS__PORTFOLIO_GIVEBACK_REDUCED_WITH_TAIL_PRESERVED"
+        next_action="PROMOTE_BEST_FIXED_VARIANT_TO_SHADOW_CHALLENGER_ONLY__NO_PRODUCTION_CHANGE"
+    else:
+        verdict="NO_FIXED_WINNER_PROTECTION_VARIANT_PASSES_FULL_ECONOMIC_GATE"
+        next_action="DO_NOT_TUNE_RATCHETS__AUDIT_MARKET_EXPOSURE_SYNCHRONIZATION_NEXT"
+
+    result={
+        "version":"V8.26E Fixed Winner-Protection Portfolio Audit",
+        "build_id":V826E_BUILD_ID,
+        "verdict":verdict,
+        "requested_listings":int(len(lids)),
+        "loaded_listings":int(len(paths)),
+        "cache_coverage":float(coverage),
+        "cache_errors":errors[:100],
+        "variants":results,
+        "qualifying_variants":qualifying,
+        "rule_source":"Exact V6.31 predeclared winner-protection variants; no new ratchet levels invented in V8.26E.",
+        "decision_rule":"Pass requires PF>=95% of Top25 BASE, AvgTrade>=90% of BASE, CAGR>=BASE, absolute MaxDD improved by at least 5 percentage points, and realized +20/+30 winner counts each retained >=80% of BASE. No variant/threshold search beyond the five frozen V6.31 rules.",
+        "boundaries":"Top25 selection frozen at reference_rank>=0.75. Initial stop fixed at -7%. Newly earned ratchet activates next session. Causal 10-slot replay. No entry/model/admission changes, no downloads, no universe rescan, no tuning.",
+        "next_action":next_action
+    }
+    V826E_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    for v,X in trade_frames.items():
+        if X is not None and not X.empty:
+            X.to_csv(V826E_DIR/f"{v.lower()}_trades.csv.gz",index=False,compression="gzip")
+    return result
+
+def _v826e_worker():
+    global v826e_thread
+    t0=time.time()
+    try:
+        P=json.loads(V826E_PREFLIGHT.read_text(encoding="utf-8")) if V826E_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":raise RuntimeError("V8.26E Preflight must PASS first")
+        R=_v826e_run()
+        _v826e_write_status(
+            status="done",phase="done",message=f"完成：{R.get('verdict')}",
+            processed=len(V826E_VARIANTS),total=len(V826E_VARIANTS),
+            errors=len(R.get("cache_errors",[])),current_listing=None,
+            elapsed_sec=round(time.time()-t0,1),error=None
+        )
+    except Exception as ex:
+        _v826e_write_status(
+            status="error",phase="error",message=f"{type(ex).__name__}: {ex}",
+            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}"
+        )
+    finally:
+        v826e_thread=None
+
+@APP.route("/v826e/preflight",methods=["GET","POST"])
+def v826e_preflight_route():
+    try:_v826e_preflight()
+    except Exception as ex:
+        V826E_DIR.mkdir(parents=True,exist_ok=True)
+        V826E_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v826e")
+
+@APP.post("/v826e/start")
+def v826e_start_route():
+    global v826e_thread
+    if _v826e_alive():return jsonify({"started":False,**_v826e_status()})
+    P=json.loads(V826E_PREFLIGHT.read_text(encoding="utf-8")) if V826E_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":return jsonify({"started":False,"status":"blocked","message":"Run PASS Preflight first"})
+    v826e_thread=threading.Thread(target=_v826e_worker,daemon=True)
+    v826e_thread.start()
+    return jsonify({"started":True,**_v826e_status()})
+
+@APP.get("/api/v826e")
+def v826e_api():
+    return jsonify(_v826e_status())
+
+@APP.get("/v826e")
+def v826e_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P={}
+    if V826E_PREFLIGHT.exists():
+        try:P=json.loads(V826E_PREFLIGHT.read_text(encoding="utf-8"))
+        except Exception:P={}
+    R={}
+    if V826E_RESULT.exists():
+        try:R=json.loads(V826E_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    S=_v826e_status()
+
+    rows=""
+    variants=R.get("variants") or {}
+    base=variants.get("BASE_30Y") or {}
+    for v in V826E_VARIANTS:
+        z=variants.get(v,{})
+        rows += (
+            f"<tr><td><b>{e(v)}</b></td>"
+            f"<td>{e(z.get('trades','—'))}</td>"
+            f"<td>{e(round(float(z.get('pf',0)),3))}</td>"
+            f"<td>{e(round(float(z.get('avg_trade',0))*100,3))}%</td>"
+            f"<td>{e(round(float(z.get('win_rate',0))*100,1))}%</td>"
+            f"<td>{e(round(float(z.get('cagr',0))*100,2))}%</td>"
+            f"<td>{e(round(float(z.get('maxdd',0))*100,2))}%</td>"
+            f"<td>{e(round(float(z.get('positive_year_share',0))*100,1))}%</td>"
+            f"<td>{e(z.get('winner20_realized_count','—'))}</td>"
+            f"<td>{e(z.get('winner30_realized_count','—'))}</td>"
+            f"<td>{e(round(float(z.get('winner20_retention_vs_base',1 if v=='BASE_30Y' else 0))*100,1))}%</td>"
+            f"<td>{e(round(float(z.get('ratchet_exit_share',0))*100,1))}%</td></tr>"
+        )
+
+    gates=""
+    for v in V826E_VARIANTS[1:]:
+        z=variants.get(v,{})
+        g=z.get("frozen_gate") or {}
+        gates += (
+            f"<tr><td><b>{e(v)}</b></td>"
+            f"<td>{e(g.get('pf_ge_95pct_base','—'))}</td>"
+            f"<td>{e(g.get('avgtrade_ge_90pct_base','—'))}</td>"
+            f"<td>{e(g.get('cagr_ge_base','—'))}</td>"
+            f"<td>{e(g.get('maxdd_improves_by_5pp','—'))}</td>"
+            f"<td>{e(g.get('winner20_retention_ge_80pct','—'))}</td>"
+            f"<td>{e(g.get('winner30_retention_ge_80pct','—'))}</td></tr>"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🛡️ V8.26E Fixed Winner-Protection Portfolio Audit</h1>
+<div class='o'><b>Top25 不改，Exit 也不做参数搜索。</b> 直接复用项目里早已存在的 V6.31 五个固定 winner-protection variants，做因果 10-slot replay。目标：压 winner giveback，同时保住 +20/+30 tail。</div></div>
+
+<div class='c'><form method='post' action='/v826e/preflight'><button>A. Run Winner-Protection Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Top25 candidates <b>{e(P.get('top25_candidate_rows','—'))}</b> · Unique listings <b>{e(P.get('unique_listings','—'))}</b> ·
+Manifest map <b>{e(round(float(P.get('manifest_mapping_coverage',0))*100,1) if P else '—')}%</b><br>
+Rule source: <b>{e(P.get('rule_source','—'))}</b><br>Next: <b>{e(P.get('next_action','—'))}</b></div></div>
+
+<div class='c'><button id='go'>B. Run Fixed Winner-Protection 10-Slot Replay</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
+<div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span> · errors <span id='err'>{e(S.get('errors',0))}</span></p>
+<p>Current listing: <b id='cur'>{e(S.get('current_listing','—'))}</b></p>
+<p>Elapsed: <b id='elapsed'>{e(S.get('elapsed_sec',0))}</b>s · Last heartbeat: <b id='hb'>{e(S.get('last_heartbeat','—'))}</b></p></div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Qualifying variants: <b>{e(', '.join(R.get('qualifying_variants') or []) or 'NONE')}</b><br>
+BASE: PF <b>{e(round(float(base.get('pf',0)),3))}</b> · AvgTrade <b>{e(round(float(base.get('avg_trade',0))*100,3))}%</b> ·
+CAGR <b>{e(round(float(base.get('cagr',0))*100,2))}%</b> · MaxDD <b>{e(round(float(base.get('maxdd',0))*100,2))}%</b><br>
+Next: <b>{e(R.get('next_action','—'))}</b></div></div>
+
+<div class='c'><h2>Fixed Winner-Protection Comparison</h2><div style='overflow:auto'><table>
+<tr><th>Variant</th><th>Trades</th><th>PF</th><th>AvgTrade</th><th>Win%</th><th>CAGR</th><th>MaxDD</th><th>Positive years</th><th>Realized +20</th><th>Realized +30</th><th>+20 retention</th><th>Ratchet exits</th></tr>
+{rows or "<tr><td colspan=12>Run replay first.</td></tr>"}</table></div></div>
+
+<div class='c'><h2>Frozen Economic Gate</h2><div style='overflow:auto'><table>
+<tr><th>Variant</th><th>PF ≥95% BASE</th><th>AvgTrade ≥90%</th><th>CAGR ≥ BASE</th><th>MaxDD improves ≥5pp</th><th>+20 retain ≥80%</th><th>+30 retain ≥80%</th></tr>
+{gates or "<tr><td colspan=7>Run replay first.</td></tr>"}</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen rule:</b> {e(R.get('decision_rule',''))}<br><br>
+<b>Source:</b> {e(R.get('rule_source',''))}</div><p>{e(R.get('boundaries',''))}</p></div>
+
+<script>
+const $=x=>document.getElementById(x);
+async function poll(){{
+ try{{
+  let s=await (await fetch('/api/v826e',{{cache:'no-store'}})).json();
+  let pct=s.total?Math.round(100*s.processed/s.total):0;
+  $('msg').textContent=s.message||s.status||'';
+  $('pct').textContent=pct+'%';$('bar').style.width=pct+'%';
+  $('cnt').textContent=(s.processed||0)+'/'+(s.total||0);
+  $('err').textContent=s.errors||0;$('cur').textContent=s.current_listing||'—';
+  $('elapsed').textContent=s.elapsed_sec||0;$('hb').textContent=s.last_heartbeat||'—';
+  if(s.status==='running'||s.status==='starting')setTimeout(poll,1500);
+ }}catch(e){{$('msg').textContent='status error: '+e;}}
+}}
+$('go').onclick=async()=>{{
+ let s=await (await fetch('/v826e/start',{{method:'POST'}})).json();
+ $('msg').textContent=s.message||s.status||'';poll();
 }};
 poll();
 </script>
