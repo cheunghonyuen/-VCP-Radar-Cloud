@@ -46783,7 +46783,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v827-home-card-real' style='background:#fdf2f8;border:7px solid #be185d;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v828-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🔬 V8.28 Strict VCP Qualification Forensic Audit</h2>
+        <p>先审第一层：Trend Template / T1→T2→T3 contraction / pivot / volume dry-up / breakout demand / entry location。对比 Big Winner、True Failure STOP、Recovered +20 STOP；只诊断，不调参。</p>
+        <a href='/v828'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.28</button></a>
+        </div>
+        <div id='v827-home-card-real' style='background:#fdf2f8;border:7px solid #be185d;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h2>
         <p>最高优先级：查清为什么 VCP STOP 太多。区分 True Failure / False Breakout / Premature Stop / Giveback / Extended Entry；只诊断，不调参，不重扫。</p>
         <a href='/v827'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.27</button></a>
@@ -66132,3 +66137,290 @@ def v827_page():
     cr="".join(f"<tr><td>{e(k)}</td><td>{float(v):.1%}</td></tr>" for k,v in cls.items()) or "<tr><td colspan=2>Run audit first.</td></tr>"
     fr="".join(f"<tr><td>{e(x.get('feature'))}</td><td>{x.get('STOP_median',float('nan')):.4f}</td><td>{x.get('NON_STOP_median',float('nan')):.4f}</td><td>{x.get('delta',float('nan')):+.4f}</td></tr>" for x in R.get("feature_median_STOP_vs_NON_STOP",[])) or "<tr><td colspan=4>—</td></tr>"
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🧬 V8.27 VCP Integrity + STOP Root-Cause Audit</h1><div class='warn'><b>只诊断，不调参。</b> Top25 / Entry / -7% Stop / Exit 全冻结；0 Tiingo、0 universe rescan。直接查 STOP 为什么这么多。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows: {e(P.get('top25_candidate_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><form method='post' action='/v827/preflight'><button>A. Run Preflight</button></form><br><button onclick='startRun()'>B. Start STOP Root-Cause Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Headline</h2><p><b>Rows:</b> {e(R.get('rows_audited','—'))} · <b>STOPs:</b> {e(R.get('stops','—'))} · <b>STOP Rate:</b> {float(R.get('stop_rate',0)):.1%}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>STOP Root-Cause Classes</h2><table><tr><th>Class</th><th>% of STOPs</th></tr>{cr}</table></div><div class='c'><h2>VCP / Entry Anatomy: STOP vs NON-STOP</h2><table><tr><th>Feature</th><th>STOP median</th><th>NON-STOP median</th><th>Delta</th></tr>{fr}</table></div><div class='c'><b>Decision rule:</b> 先看 True Failure、Recovered +20%、Giveback、Extended Entry 各占多少，再决定 V8.28 修 VCP Qualification / Trigger / Re-entry / Stop。禁止在看到结果前发明新阈值。</div><script>async function poll(){{try{{let s=await (await fetch('/api/v827',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v827/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
+
+
+# ================= V8.28 STRICT VCP QUALIFICATION FORENSIC AUDIT =================
+# First-layer forensic audit only. No trading rule is changed.
+# Reuses exact V8.27 trade population + Historical Cache. No Tiingo, no universe rescan.
+# Purpose: prove whether the machine-labelled VCPs actually exhibit canonical VCP anatomy
+# before touching Stop / Exit / Market Exposure again.
+V828_DIR = DATA_DIR / "v828_strict_vcp_qualification_forensic"
+V828_PREFLIGHT = V828_DIR / "preflight.json"
+V828_STATUS = V828_DIR / "status.json"
+V828_RESULT = V828_DIR / "result.json"
+V828_TRADE_CSV = V828_DIR / "trade_level_vcp_forensic.csv.gz"
+V828_BUILD_ID = "V828_STRICT_VCP_QUALIFICATION_FORENSIC_20260902A"
+v828_thread = None
+
+def _v828_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"current_listing":None,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V828_STATUS.exists():
+        try:x.update(json.loads(V828_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v828_write_status(**kw):
+    V828_DIR.mkdir(parents=True,exist_ok=True); x=_v828_status(); x.update(kw)
+    x["last_heartbeat"]=datetime.now(timezone.utc).isoformat()
+    V828_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); return x
+
+def _v828_alive(): return v828_thread is not None and v828_thread.is_alive()
+
+def _v828_v827_trade_path():
+    return V827_DIR / "trade_level_stop_autopsy.csv.gz"
+
+def _v828_preflight():
+    V828_DIR.mkdir(parents=True,exist_ok=True)
+    trade_path=_v828_v827_trade_path()
+    issues=[]; rows=0; classes={}
+    if not trade_path.exists():
+        issues.append("MISSING_V827_TRADE_LEVEL_AUTOPSY__RUN_V827_FIRST")
+    else:
+        try:
+            A=pd.read_csv(trade_path,nrows=20000)
+            rows=int(len(A))
+            req=["listing_id","entry_date","entry_px","outcome","stop_class","peak_ret_before_exit"]
+            miss=[c for c in req if c not in A.columns]
+            if miss: issues.append("MISSING_COLUMNS:"+",".join(miss))
+            if not miss:
+                classes={str(k):int(v) for k,v in A["stop_class"].value_counts(dropna=False).to_dict().items()}
+        except Exception as ex: issues.append(f"V827_READ_ERROR:{type(ex).__name__}:{ex}")
+    try:
+        M,lidcol=_v826a_manifest(); mlids=set(M[lidcol].astype(str))
+        if trade_path.exists() and not issues:
+            lids=set(A["listing_id"].astype(str)); cov=len(lids & mlids)/max(1,len(lids))
+        else: cov=0.0
+    except Exception as ex:
+        cov=0.0; issues.append(f"MANIFEST_ERROR:{type(ex).__name__}:{ex}")
+    verdict="PASS" if (not issues and rows>=15000 and cov>=.95) else "FAIL__FIRST_LAYER_FORENSIC_INPUT_NOT_PROVEN"
+    out={"version":"V8.28 Strict VCP Qualification Forensic Audit","build_id":V828_BUILD_ID,"verdict":verdict,
+         "v827_trade_rows":rows,"manifest_mapping_coverage":float(cov),"v827_stop_classes":classes,"issues":issues,
+         "frozen_contract":"Exact V8.27 trade population; no Top25/Entry/Stop/Exit/model change; 0 Tiingo; 0 universe rescan",
+         "measurement_contract":"Price-only Trend Template subset (RS omitted unless present); measurement-only 3% zigzag for contraction legs; no threshold tuning",
+         "audit_question":"Do Big Winners, True Failures, and Recovered +20 STOPs differ at the first VCP layer: trend, contraction sequence, pivot, supply dry-up, breakout demand, entry location?",
+         "next_action":"RUN_STRICT_VCP_FORENSIC" if verdict=="PASS" else "STOP__FIX_ONLY_REPORTED_INPUT_GAP"}
+    V828_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); return out
+
+def _v828_num(x):
+    try:
+        y=float(x)
+        return y if np.isfinite(y) else np.nan
+    except Exception:return np.nan
+
+def _v828_zigzag_contractions(pre, reversal=.03):
+    """Measurement-only zigzag. Returns chronological pullback depths, not a trading rule."""
+    if pre is None or len(pre)<20:return []
+    c=pd.to_numeric(pre["close"],errors="coerce").dropna().values
+    if len(c)<20:return []
+    mode="peak"; peak=c[0]; trough=c[0]; depths=[]
+    for px in c[1:]:
+        if mode=="peak":
+            if px>peak: peak=px
+            elif peak>0 and px<=peak*(1-reversal):
+                trough=px; mode="trough"
+        else:
+            if px<trough: trough=px
+            elif trough>0 and px>=trough*(1+reversal):
+                if peak>0 and trough<peak: depths.append((peak-trough)/peak)
+                peak=px; mode="peak"
+    if mode=="trough" and peak>0 and trough<peak:
+        depths.append((peak-trough)/peak)
+    return [float(x) for x in depths if np.isfinite(x) and x>0]
+
+def _v828_anatomy(q, ed, ep):
+    out={}
+    if q is None or q.empty:return out
+    q=q.copy(); q["date"]=pd.to_datetime(q["date"]).dt.normalize(); ed=pd.Timestamp(ed).normalize()
+    pre=q[q["date"]<ed].tail(280).copy(); day=q[q["date"]==ed].tail(1).copy()
+    if len(pre)<60:return out
+    close=pd.to_numeric(pre["close"],errors="coerce")
+    high=pd.to_numeric(pre["high"],errors="coerce")
+    low=pd.to_numeric(pre["low"],errors="coerce")
+    # Price-only Minervini-style Trend Template subset. RS component deliberately not fabricated.
+    sma50=close.rolling(50).mean(); sma150=close.rolling(150).mean(); sma200=close.rolling(200).mean()
+    lastc=_v828_num(close.iloc[-1])
+    tt=[]
+    if len(pre)>=220 and np.isfinite(lastc):
+        vals=[_v828_num(sma50.iloc[-1]),_v828_num(sma150.iloc[-1]),_v828_num(sma200.iloc[-1]),_v828_num(sma200.iloc[-21])]
+        s50,s150,s200,s200old=vals
+        hi52=_v828_num(high.tail(252).max()); lo52=_v828_num(low.tail(252).min())
+        tt=[lastc>s50 if np.isfinite(s50) else False,
+            s50>s150 if np.isfinite(s50) and np.isfinite(s150) else False,
+            s150>s200 if np.isfinite(s150) and np.isfinite(s200) else False,
+            s200>s200old if np.isfinite(s200) and np.isfinite(s200old) else False,
+            lastc>=.75*hi52 if np.isfinite(hi52) else False,
+            lastc>=1.30*lo52 if np.isfinite(lo52) and lo52>0 else False]
+        out["trend_price_subset_pass_count"]=int(sum(tt)); out["trend_price_subset_all6"]=bool(all(tt))
+        out["dist_52w_high"]=(lastc/hi52-1) if np.isfinite(hi52) and hi52>0 else np.nan
+    # Contraction anatomy measured on last 120 sessions.
+    zz=_v828_zigzag_contractions(pre.tail(120),.03)
+    out["contraction_count_120d"]=int(len(zz))
+    last3=zz[-3:]
+    for i,d in enumerate(last3,1): out[f"contraction_T{i}_depth"]=d
+    out["last3_contractions_available"]=len(last3)>=3
+    out["last3_strictly_shrinking"]=bool(len(last3)>=3 and last3[0]>last3[1]>last3[2])
+    if len(last3)>=2: out["last_contraction_vs_prior"]=last3[-1]/last3[-2] if last3[-2]>0 else np.nan
+    # Tightness and base depth, pre-breakout only.
+    for n in (5,10,20,40,60):
+        z=pre.tail(n); hh=_v828_num(pd.to_numeric(z["high"],errors="coerce").max()); ll=_v828_num(pd.to_numeric(z["low"],errors="coerce").min())
+        out[f"pre_range_{n}d"]=(hh/ll-1) if np.isfinite(hh) and np.isfinite(ll) and ll>0 else np.nan
+    hi60=_v828_num(high.tail(60).max()); lo60=_v828_num(low.tail(60).min())
+    out["base_depth_60d"]=(lo60/hi60-1) if np.isfinite(hi60) and np.isfinite(lo60) and hi60>0 else np.nan
+    # Pivot = highest pre-entry high over the immediate 20-session pivot window. Raw measurement only.
+    pivot=_v828_num(high.tail(20).max()); out["pivot_20d"] = pivot
+    out["entry_vs_pivot20"]=(ep/pivot-1) if np.isfinite(pivot) and pivot>0 else np.nan
+    out["entry_within_5pct_of_pivot"]=bool(np.isfinite(out["entry_vs_pivot20"]) and -.05<=out["entry_vs_pivot20"]<=.05)
+    # Supply dry-up compares final 5 sessions with the preceding 20, rather than overlapping windows.
+    if "volume" in pre.columns:
+        v=pd.to_numeric(pre["volume"],errors="coerce")
+        v5=_v828_num(v.tail(5).mean()); vprev20=_v828_num(v.iloc[-25:-5].mean()) if len(v)>=25 else np.nan
+        out["volume_dryup_last5_vs_prev20"]=(v5/vprev20) if np.isfinite(v5) and np.isfinite(vprev20) and vprev20>0 else np.nan
+        out["volume_dryup_below_1"] = bool(np.isfinite(out["volume_dryup_last5_vs_prev20"]) and out["volume_dryup_last5_vs_prev20"]<1.0)
+    # Entry-day breakout demand.
+    if len(day):
+        d=day.iloc[-1]; dh=_v828_num(d.get("high")); dl=_v828_num(d.get("low")); dc=_v828_num(d.get("close")); dv=_v828_num(d.get("volume"))
+        out["entry_close_vs_pivot"]=(dc/pivot-1) if np.isfinite(dc) and np.isfinite(pivot) and pivot>0 else np.nan
+        out["entry_close_location"]=(dc-dl)/(dh-dl) if np.isfinite(dc) and np.isfinite(dh) and np.isfinite(dl) and dh>dl else np.nan
+        if "volume" in pre.columns:
+            p20=_v828_num(pd.to_numeric(pre["volume"],errors="coerce").tail(20).mean())
+            out["breakout_volume_ratio_20d"]=(dv/p20) if np.isfinite(dv) and np.isfinite(p20) and p20>0 else np.nan
+            out["breakout_volume_ge_1_5x"] = bool(np.isfinite(out["breakout_volume_ratio_20d"]) and out["breakout_volume_ratio_20d"]>=1.5)
+        out["entry_closed_above_pivot"] = bool(np.isfinite(dc) and np.isfinite(pivot) and dc>pivot)
+    return out
+
+def _v828_group(r):
+    if str(r.get("outcome"))=="NON_STOP" and _v828_num(r.get("peak_ret_before_exit"))>=.20:return "BIG_WINNER_20P"
+    sc=str(r.get("stop_class"))
+    if sc=="TRUE_FAILURE__NO_MEANINGFUL_RECOVERY":return "TRUE_FAILURE_STOP"
+    if sc=="PREMATURE_STOP__RECOVERED_20P":return "RECOVERED_20P_STOP"
+    return "OTHER"
+
+def _v828_run():
+    t0=time.time(); A=pd.read_csv(_v828_v827_trade_path())
+    A["entry_date"]=pd.to_datetime(A["entry_date"]).dt.normalize(); A["v828_group"]=A.apply(_v828_group,axis=1)
+    T=A[A["v828_group"].isin(["BIG_WINNER_20P","TRUE_FAILURE_STOP","RECOVERED_20P_STOP"])].copy().reset_index(drop=True)
+    lids=sorted(set(T["listing_id"].astype(str))); M,lidcol=_v826a_manifest(); mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    paths={}; errors=[]
+    for n,lid in enumerate(lids,1):
+        try:
+            if lid not in mmap: raise KeyError("listing missing from manifest")
+            q,hi,amb=_v826a_prepare_price(mmap[lid]); paths[lid]=q.copy() if q is not None else None
+        except Exception as ex: errors.append({"listing_id":lid,"error":f"{type(ex).__name__}: {ex}"})
+        if n==1 or n%5==0 or n==len(lids):_v828_write_status(status="running",phase="cached_path_stream",message=f"Reading Historical Cache {n}/{len(lids)} · {lid}",processed=n,total=len(lids),errors=len(errors),current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
+    rows=[]
+    for n,r in T.iterrows():
+        lid=str(r["listing_id"]); q=paths.get(lid)
+        if q is None or q.empty:continue
+        try:
+            rec={"listing_id":lid,"entry_date":r["entry_date"],"entry_px":_v828_num(r["entry_px"]),"group":r["v828_group"],"stop_class":r.get("stop_class"),"peak_ret_before_exit":_v828_num(r.get("peak_ret_before_exit")),**_v828_anatomy(q,r["entry_date"],_v828_num(r["entry_px"]))}
+            rows.append(rec)
+        except Exception as ex:errors.append({"listing_id":lid,"entry_date":str(r["entry_date"]),"error":f"{type(ex).__name__}: {ex}"})
+        if (n+1)%500==0:_v828_write_status(status="running",phase="vcp_anatomy",message=f"Strict VCP anatomy {n+1}/{len(T)}",processed=n+1,total=len(T),errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+    F=pd.DataFrame(rows)
+    groups=["BIG_WINNER_20P","TRUE_FAILURE_STOP","RECOVERED_20P_STOP"]
+    numeric=[c for c in ["trend_price_subset_pass_count","contraction_count_120d","contraction_T1_depth","contraction_T2_depth","contraction_T3_depth","last_contraction_vs_prior","pre_range_5d","pre_range_10d","pre_range_20d","pre_range_40d","pre_range_60d","base_depth_60d","entry_vs_pivot20","volume_dryup_last5_vs_prev20","breakout_volume_ratio_20d","entry_close_location"] if c in F.columns]
+    booleans=[c for c in ["trend_price_subset_all6","last3_contractions_available","last3_strictly_shrinking","entry_within_5pct_of_pivot","volume_dryup_below_1","breakout_volume_ge_1_5x","entry_closed_above_pivot"] if c in F.columns]
+    med=[]
+    for c in numeric:
+        rr={"feature":c}
+        for g in groups:
+            z=pd.to_numeric(F.loc[F["group"]==g,c],errors="coerce"); rr[g]=float(z.median()) if z.notna().any() else None
+        med.append(rr)
+    passrates=[]
+    for c in booleans:
+        rr={"check":c}
+        for g in groups:
+            z=F.loc[F["group"]==g,c]
+            if len(z): rr[g]=float(pd.Series(z).fillna(False).astype(bool).mean())
+            else: rr[g]=None
+        passrates.append(rr)
+    counts={g:int((F["group"]==g).sum()) for g in groups}
+    # Root-cause separation: rank checks by TRUE_FAILURE vs BIG_WINNER gap and RECOVERED vs BIG_WINNER gap.
+    gaps=[]
+    for rr in passrates:
+        bw=rr.get("BIG_WINNER_20P"); tf=rr.get("TRUE_FAILURE_STOP"); rc=rr.get("RECOVERED_20P_STOP")
+        gaps.append({"check":rr["check"],"big_winner_rate":bw,"true_failure_rate":tf,"recovered20_rate":rc,
+                     "true_failure_gap_vs_winner":(tf-bw) if bw is not None and tf is not None else None,
+                     "recovered_gap_vs_winner":(rc-bw) if bw is not None and rc is not None else None})
+    # Simple evidence-based diagnosis; no new trading threshold is created.
+    def rate(check,g):
+        for rr in passrates:
+            if rr["check"]==check:return rr.get(g)
+        return None
+    tf_tt=rate("trend_price_subset_all6","TRUE_FAILURE_STOP"); bw_tt=rate("trend_price_subset_all6","BIG_WINNER_20P")
+    tf_sh=rate("last3_strictly_shrinking","TRUE_FAILURE_STOP"); bw_sh=rate("last3_strictly_shrinking","BIG_WINNER_20P")
+    rc_tt=rate("trend_price_subset_all6","RECOVERED_20P_STOP")
+    diagnosis="MIXED__FIRST_LAYER_AND_ENTRY_STOP_BOTH_REQUIRE_SEPARATION"
+    if None not in (tf_tt,bw_tt,tf_sh,bw_sh) and ((bw_tt-tf_tt)>=.15 or (bw_sh-tf_sh)>=.15):
+        diagnosis="MATERIAL_FIRST_LAYER_VCP_QUALIFICATION_SEPARATION_FOUND"
+    if rc_tt is not None and bw_tt is not None and abs(rc_tt-bw_tt)<.08:
+        diagnosis += "__RECOVERED20_LOOKS_CLOSER_TO_WINNER__CHECK_TRIGGER_STOP_REENTRY"
+    # Representative deterministic samples for later human chart audit.
+    sample=[]
+    for g in groups:
+        z=F[F["group"]==g].sort_values(["entry_date","listing_id"]).head(25)
+        cols=[c for c in ["listing_id","entry_date","entry_px","group","trend_price_subset_pass_count","contraction_count_120d","contraction_T1_depth","contraction_T2_depth","contraction_T3_depth","pre_range_10d","base_depth_60d","entry_vs_pivot20","volume_dryup_last5_vs_prev20","breakout_volume_ratio_20d"] if c in z.columns]
+        sample.extend(z[cols].to_dict("records"))
+    result={"version":"V8.28 Strict VCP Qualification Forensic Audit","build_id":V828_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"rows_forensic":int(len(F)),"group_counts":counts,
+            "numeric_medians":med,"structural_pass_rates":passrates,"separation_gaps":gaps,"diagnosis":diagnosis,"representative_samples":sample,"errors":errors[:100],
+            "important_limit":"Trend Template is price-only subset because historical RS is not fabricated. Contraction zigzag 3% is measurement-only. Pivot uses raw 20-session pre-entry high for forensic comparison, not a newly adopted trading rule.",
+            "guardrail":"DIAGNOSTIC ONLY. No qualification/trigger/entry/stop/exit threshold changed; no parameter search; no Tiingo; no universe rescan."}
+    V828_DIR.mkdir(parents=True,exist_ok=True); V828_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8"); F.to_csv(V828_TRADE_CSV,index=False,compression="gzip")
+    return result
+
+def _v828_worker():
+    global v828_thread
+    try:
+        P=json.loads(V828_PREFLIGHT.read_text(encoding="utf-8")) if V828_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":raise RuntimeError("V8.28 Preflight must PASS first")
+        _v828_write_status(status="running",phase="start",message="Starting first-layer strict VCP forensic audit",processed=0,total=0,errors=0,error=None)
+        R=_v828_run(); _v828_write_status(status="done",phase="complete",message=f"Done · {R.get('diagnosis')}",processed=R.get("rows_forensic",0),total=R.get("rows_forensic",0),errors=len(R.get("errors",[])),elapsed_sec=R.get("elapsed_sec",0),error=None)
+    except Exception as ex:_v828_write_status(status="error",phase="failed",message="Audit failed",error=f"{type(ex).__name__}: {ex}")
+    finally:v828_thread=None
+
+@APP.route("/v828/preflight",methods=["GET","POST"])
+def v828_preflight_route():
+    try:_v828_preflight()
+    except Exception as ex:
+        V828_DIR.mkdir(parents=True,exist_ok=True); V828_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v828")
+
+@APP.post("/v828/start")
+def v828_start_route():
+    global v828_thread
+    if _v828_alive():return jsonify({"started":False,**_v828_status()})
+    P=json.loads(V828_PREFLIGHT.read_text(encoding="utf-8")) if V828_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":return jsonify({"started":False,"error":"Run Preflight and require PASS first"}),400
+    v828_thread=threading.Thread(target=_v828_worker,daemon=True); v828_thread.start(); return jsonify({"started":True,**_v828_status()})
+
+@APP.get("/api/v828")
+def v828_api():return jsonify(_v828_status())
+
+@APP.get("/v828/export")
+def v828_export():
+    if not V828_TRADE_CSV.exists():return ("Run V8.28 first",404)
+    return send_file(V828_TRADE_CSV,as_attachment=True,download_name="v828_trade_level_vcp_forensic.csv.gz")
+
+@APP.get("/v828")
+def v828_page():
+    def e(x):return html.escape(str(x))
+    def f4(x):
+        try:
+            if x is None:return "—"
+            y=float(x); return f"{y:.4f}" if np.isfinite(y) else "—"
+        except Exception:return "—"
+    def pct(x):
+        try:
+            if x is None:return "—"
+            y=float(x); return f"{y:.1%}" if np.isfinite(y) else "—"
+        except Exception:return "—"
+    P={};R={};S=_v828_status()
+    try:
+        if V828_PREFLIGHT.exists():P=json.loads(V828_PREFLIGHT.read_text(encoding="utf-8"))
+        if V828_RESULT.exists():R=json.loads(V828_RESULT.read_text(encoding="utf-8"))
+    except Exception:pass
+    groups=["BIG_WINNER_20P","TRUE_FAILURE_STOP","RECOVERED_20P_STOP"]
+    mr="".join("<tr><td>"+e(x.get("feature"))+"</td>"+"".join(f"<td>{f4(x.get(g))}</td>" for g in groups)+"</tr>" for x in R.get("numeric_medians",[])) or "<tr><td colspan=4>Run audit first.</td></tr>"
+    pr="".join("<tr><td>"+e(x.get("check"))+"</td>"+"".join(f"<td>{pct(x.get(g))}</td>" for g in groups)+"</tr>" for x in R.get("structural_pass_rates",[])) or "<tr><td colspan=4>—</td></tr>"
+    cnt=R.get("group_counts",{})
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1250px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#ecfeff;border:2px solid #0891b2;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🔬 V8.28 Strict VCP Qualification Forensic Audit</h1><div class='warn'><b>第一层优先。</b> 先证明机器找到的是不是严格 VCP，再谈 Stop / Exit / MaxDD。完全冻结 Top25、Entry、-7% Stop、Exit；0 Tiingo、0 universe rescan。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>V8.27 trade rows: {e(P.get('v827_trade_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><p>{e(P.get('measurement_contract',''))}</p><form method='post' action='/v828/preflight'><button>A. Run First-Layer Preflight</button></form><br><button onclick='startRun()'>B. Start Strict VCP Forensic Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Three Cohorts</h2><p><b>Big Winner +20:</b> {e(cnt.get('BIG_WINNER_20P','—'))} · <b>True Failure STOP:</b> {e(cnt.get('TRUE_FAILURE_STOP','—'))} · <b>Recovered +20 STOP:</b> {e(cnt.get('RECOVERED_20P_STOP','—'))}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>Structural Pass Rates</h2><div style='overflow:auto'><table><tr><th>Check</th><th>BIG WINNER +20</th><th>TRUE FAILURE STOP</th><th>RECOVERED +20 STOP</th></tr>{pr}</table></div></div><div class='c'><h2>Raw VCP Anatomy Medians</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>BIG WINNER +20</th><th>TRUE FAILURE STOP</th><th>RECOVERED +20 STOP</th></tr>{mr}</table></div></div><div class='c'><div class='info'><b>How to read:</b> 如果 True Failure 在 Trend Template / contraction shrink / pivot / dry-up / breakout demand 明显弱于 Big Winner，第一层 VCP Qualification 确认有漏网；如果 Recovered +20 与 Big Winner 很接近，则那一批主要转去查 Trigger / Stop / Re-entry，而不是把它们误杀成“坏 VCP”。</div><p><b>限制：</b> {e(R.get('important_limit',''))}</p>{"<a href='/v828/export'><button>Export Trade-Level Forensic CSV</button></a>" if V828_TRADE_CSV.exists() else ""}</div><script>async function poll(){{try{{let s=await (await fetch('/api/v828',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v828/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
