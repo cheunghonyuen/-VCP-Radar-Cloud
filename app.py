@@ -69148,3 +69148,179 @@ if _v840_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v840_home_base:APP.view_functions[ep]=_v840_home_wrap
+
+
+# ================= V8.41 PIVOT-CROSS / SIGNAL-DATE TIME-SEMANTICS AUDIT =================
+V841_DIR=DATA_DIR/'v841_pivot_cross_signal_date_semantics'
+V841_PREFLIGHT=V841_DIR/'preflight.json';V841_RESULT=V841_DIR/'result.json';V841_DETAIL=V841_DIR/'detail.csv.gz'
+V841_BUILD_ID='v841-pivot-cross-time-semantics-20260903'
+V841_S2=V834_V617;V841_V644=V644_TRADE_CACHE;V841_V669=V669_TRADES;V841_V835=V835_DETAIL
+
+def _v841_bool(s):
+    if getattr(s,'dtype',None)==bool:return s.fillna(False)
+    return s.map(lambda v:str(v).strip().lower() in ('1','true','t','yes','y')).fillna(False)
+
+def _v841_pf(df,m):
+    r=pd.to_numeric(df.loc[m,'control_ret'],errors='coerce').dropna()
+    if not len(r):return None
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    return gp/gl if gl>1e-12 else None
+
+def _v841_stats(D,c):
+    m=D[c].fillna(False).astype(bool);r=pd.to_numeric(D.control_ret,errors='coerce')
+    w20=r>=.20;w30=r>=.30;st=D.control_reason.astype(str).str.contains('STOP7',regex=False)
+    return {'semantic':c,'pass_n':int(m.sum()),'pass_pct':100*float(m.mean()),
+      'winner20_retention_pct':100*int((m&w20).sum())/max(1,int(w20.sum())),
+      'winner30_retention_pct':100*int((m&w30).sum())/max(1,int(w30.sum())),
+      'stop_rejection_pct':100*int((~m&st).sum())/max(1,int(st.sum())),
+      'pass_stop_rate_pct':100*float(st[m].mean()) if m.any() else None,'pass_pf':_v841_pf(D,m)}
+
+def _v841_preflight():
+    V841_DIR.mkdir(parents=True,exist_ok=True);err=None
+    try:
+        for p in [V841_S2,V841_V644,V841_V669,V841_V835]:
+            if not p.exists():raise RuntimeError('Missing '+str(p))
+        S=pd.read_csv(V841_S2,compression='gzip',nrows=5);T=pd.read_csv(V841_V644,compression='gzip',nrows=5)
+        P=pd.read_csv(V841_V669,compression='gzip',nrows=5);F=pd.read_csv(V841_V835,compression='gzip',nrows=5)
+        req=[(S,['listing_id','entry_date','entry_px']),(T,['variant','listing_id','entry_date','stage2_row_id','parent_entry_date']),
+             (P,['listing_id','entry_date','control_ret','control_reason']),(F,['listing_id','entry_date','audit_ok','pivot','pivot_cross','signal_date'])]
+        for d,cols in req:
+            miss=[c for c in cols if c not in d.columns]
+            if miss:raise RuntimeError('Schema missing '+str(miss))
+        verdict='PASS'
+    except Exception as ex:
+        verdict='ERROR';err=f'{type(ex).__name__}: {ex}'
+    o={'version':'V8.41','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,
+       'contract':'Recovered V6.44 TIGHT = Stage2 entry_px pivot; signal HIGH > pivot + volume > rolling50; next-session OPEN. Compare against V8.35 current supply pivot + close cross. Diagnostic only.'}
+    V841_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2),encoding='utf-8');return o
+
+def _v841_run():
+    pf=_v841_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError(pf.get('error'))
+    S=pd.read_csv(V841_S2,compression='gzip',low_memory=False).reset_index(drop=True)
+    S['stage2_row_id']=np.arange(len(S));S['listing_id']=S.listing_id.astype(str);S['stage2_entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
+    S['legacy_pivot']=pd.to_numeric(S.entry_px,errors='coerce')
+    S=S[['stage2_row_id','listing_id','stage2_entry_date','legacy_pivot']]
+
+    T=pd.read_csv(V841_V644,compression='gzip',low_memory=False)
+    T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+    T['listing_id']=T.listing_id.astype(str);T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+    T['parent_entry_date']=pd.to_datetime(T.parent_entry_date,errors='coerce').dt.normalize()
+    T=T.merge(S,on='stage2_row_id',how='left',suffixes=('','_s2'),validate='many_to_one')
+    parent_parity=100*float((T.parent_entry_date==T.stage2_entry_date).mean())
+    if 'listing_id_s2' in T.columns:
+        listing_parity=100*float((T.listing_id==T.listing_id_s2).mean())
+    else: listing_parity=100.0
+    T=T.dropna(subset=['legacy_pivot']).sort_values(['listing_id','entry_date','stage2_row_id']).drop_duplicates(['listing_id','entry_date'])
+
+    P=pd.read_csv(V841_V669,compression='gzip',low_memory=False)
+    P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+    P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+    D=P.merge(T[['listing_id','entry_date','legacy_pivot']],on=['listing_id','entry_date'],how='inner',validate='many_to_one')
+
+    F=pd.read_csv(V841_V835,compression='gzip',low_memory=False)
+    F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+    F=F[_v841_bool(F.audit_ok)].copy();F['current_pivot']=pd.to_numeric(F.pivot,errors='coerce')
+    F['v835_pivot_cross']=_v841_bool(F.pivot_cross);F['v835_signal_date']=pd.to_datetime(F.signal_date,errors='coerce').dt.normalize()
+    F=F[['listing_id','entry_date','current_pivot','v835_pivot_cross','v835_signal_date']].drop_duplicates(['listing_id','entry_date'])
+    D=D.merge(F,on=['listing_id','entry_date'],how='left',validate='many_to_one')
+
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()};rows=[];errs=[]
+    for lid,g in D.groupby('listing_id',sort=True):
+        mr=mmap.get(str(lid));q=None
+        if mr is not None:
+            try:q,_,_=_v826a_prepare_price(mr)
+            except Exception as ex:errs.append(f'{lid}: {type(ex).__name__}: {ex}')
+        if q is None or q.empty:continue
+        q=q.copy();q['date']=pd.to_datetime(q.date,errors='coerce').dt.normalize();q=q.sort_values('date').drop_duplicates('date').reset_index(drop=True)
+        for c in ['high','close','volume']:q[c]=pd.to_numeric(q[c],errors='coerce')
+        q['vavg50']=q.volume.rolling(50,min_periods=20).mean()
+        for _,r in g.iterrows():
+            ix=q.index[q.date.eq(r.entry_date)].tolist()
+            if not ix or ix[-1]<2:continue
+            i=int(ix[-1]);sig=q.iloc[i-1];prev=q.iloc[i-2]
+            lp=float(r.legacy_pivot);cp=float(r.current_pivot) if pd.notna(r.current_pivot) else np.nan
+            pc=float(prev.close);cl=float(sig.close);hi=float(sig.high);vo=float(sig.volume);va=float(sig.vavg50) if pd.notna(sig.vavg50) else np.nan
+            volok=bool((not np.isfinite(va)) or (np.isfinite(vo) and vo>va))
+            lhigh=bool(np.isfinite(lp) and hi>lp);lclose=bool(np.isfinite(lp) and pc<=lp and cl>lp)
+            chigh=bool(np.isfinite(cp) and hi>cp);cclose=bool(np.isfinite(cp) and pc<=cp and cl>cp)
+            sd=pd.Timestamp(sig.date).normalize()
+            rows.append({'listing_id':lid,'entry_date':r.entry_date,'signal_date_recovered':sd,'v835_signal_date':r.v835_signal_date,
+              'control_ret':r.control_ret,'control_reason':r.control_reason,'legacy_pivot':lp,'current_pivot':cp,
+              'pivot_anchor_rel_diff':abs(cp/lp-1) if np.isfinite(cp) and lp>0 else np.nan,
+              'recovered_v644_exact_trigger':bool(lhigh and volok),'recovered_v644_high_cross':lhigh,
+              'legacy_pivot_close_cross':lclose,'current_pivot_high_cross':chigh,'current_pivot_close_cross':cclose,
+              'v835_pivot_cross':bool(r.v835_pivot_cross) if pd.notna(r.v835_pivot_cross) else False,
+              'signal_date_matches_v835':bool(pd.notna(r.v835_signal_date) and sd==r.v835_signal_date)})
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('No signal rows reconstructed')
+    X.to_csv(V841_DETAIL,index=False,compression='gzip')
+
+    exact=float(X.recovered_v644_exact_trigger.mean());sigpar=float(X.signal_date_matches_v835.mean())
+    v835=float(X.v835_pivot_cross.mean());legclose=float(X.legacy_pivot_close_cross.mean());chigh=float(X.current_pivot_high_cross.mean());cclose=float(X.current_pivot_close_cross.mean())
+    anchor_med=float(pd.to_numeric(X.pivot_anchor_rel_diff,errors='coerce').median())
+    field_pen=max(0.0,exact-legclose);anchor_pen=max(0.0,legclose-cclose)
+    if exact>=.98 and sigpar>=.98 and v835<=.35:
+        if field_pen>anchor_pen+.05:diag='ROOT_CAUSE_FOUND__WRONG_PRICE_FIELD_CLOSE_CROSS_VS_RECOVERED_HIGH_BREAKOUT'
+        elif anchor_pen>field_pen+.05:diag='ROOT_CAUSE_FOUND__WRONG_PIVOT_ANCHOR_CURRENT_SUPPLY_VS_RECOVERED_STAGE2_PIVOT'
+        else:diag='ROOT_CAUSE_FOUND__BOTH_PIVOT_ANCHOR_AND_CLOSE_CROSS_SEMANTICS_MISMATCH'
+    elif exact>=.95 and v835<exact-.25:diag='STRONG_EVIDENCE__PIVOT_CROSS_SEMANTICS_MISMATCH__DO_NOT_TUNE_THRESHOLD'
+    else:diag='PIVOT_CROSS_SEMANTICS_NOT_YET_EXPLAINED__DO_NOT_CHANGE_TRIGGER'
+    sem=['recovered_v644_exact_trigger','recovered_v644_high_cross','legacy_pivot_close_cross','current_pivot_high_cross','current_pivot_close_cross','v835_pivot_cross']
+    R={'version':'V8.41','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
+       'source_parity':{'v644_stage2_parent_date_pct':parent_parity,'v644_stage2_listing_pct':listing_parity,'recovered_signal_date_vs_v835_pct':100*sigpar,'recovered_exact_trigger_reconstruction_pct':100*exact},
+       'semantic_decomposition':{'v835_pivot_cross_pass_pct':100*v835,'legacy_pivot_close_cross_pct':100*legclose,'current_pivot_high_cross_pct':100*chigh,'current_pivot_close_cross_pct':100*cclose,
+        'median_current_vs_legacy_pivot_abs_rel_diff_pct':100*anchor_med,'estimated_high_to_close_penalty_pp':100*field_pen,'estimated_pivot_anchor_penalty_pp':100*anchor_pen},
+       'winner_stop_table':[_v841_stats(X,c) for c in sem],
+       'critical_interpretation':'Recovered V6.44 TIGHT trigger was HIGH > frozen Stage-2 entry-price pivot + volume context, then next-open entry. V8.35 pivot_cross instead used current supply() pivot and prev-close<=pivot<close. Those are different semantics; low V8.35 pivot_cross cannot prove recovered winners lacked breakout.',
+       'next':'If exact recovered trigger reconstructs near 100%, freeze it as lineage truth. Rebuild TRUE VCP qualification BEFORE this trigger; do not impose a second pivot-cross hard gate and do not tune pivot thresholds.',
+       'errors':errs[:100],'boundaries':'Diagnostic only; 0 Tiingo, 0 rescan, no threshold sweep, no Entry/Stop/Exit changes.'}
+    V841_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return R
+
+@APP.route('/v841/preflight',methods=['GET','POST'])
+def v841_preflight_route():
+    _v841_preflight();return redirect('/v841')
+
+@APP.route('/v841/run',methods=['GET','POST'])
+def v841_run_route():
+    try:_v841_run()
+    except Exception as ex:
+        V841_DIR.mkdir(parents=True,exist_ok=True)
+        V841_RESULT.write_text(json.dumps({'version':'V8.41','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v841')
+
+@APP.get('/v841')
+def v841_page():
+    def e(x):return html.escape(str(x))
+    P={};R={}
+    if V841_PREFLIGHT.exists():
+        try:P=json.loads(V841_PREFLIGHT.read_text(encoding='utf-8'))
+        except Exception:pass
+    if V841_RESULT.exists():
+        try:R=json.loads(V841_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    S=R.get('source_parity',{});D=R.get('semantic_decomposition',{});T=R.get('winner_stop_table',[])
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    rows=''.join(f"<tr><td>{e(z.get('semantic'))}</td><td>{e(z.get('pass_n'))}</td><td>{n(z.get('pass_pct'))}%</td><td>{n(z.get('winner20_retention_pct'))}%</td><td>{n(z.get('winner30_retention_pct'))}%</td><td>{n(z.get('stop_rejection_pct'))}%</td><td>{n(z.get('pass_pf'),3)}</td></tr>" for z in T)
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>V8.41 Pivot-Cross / Signal-Date Time-Semantics Audit</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V841_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v841/preflight'><button>A. Run Signal-Semantics Preflight</button></form><br><form method='post' action='/v841/run'><button>B. Run Exact Pivot-Cross Audit</button></form></div>
+<div class='c'><h2>Diagnosis</h2><div class='ok'>{e(R.get('diagnosis','—'))}</div></div>
+<div class='c'><h2>Source Parity</h2><table><tr><td>V6.44 ↔ Stage2 parent date</td><td>{n(S.get('v644_stage2_parent_date_pct'))}%</td></tr><tr><td>V6.44 ↔ Stage2 listing</td><td>{n(S.get('v644_stage2_listing_pct'))}%</td></tr><tr><td>Recovered signal date ↔ V8.35</td><td>{n(S.get('recovered_signal_date_vs_v835_pct'))}%</td></tr><tr><td>Recovered exact trigger reconstructed</td><td>{n(S.get('recovered_exact_trigger_reconstruction_pct'))}%</td></tr></table></div>
+<div class='c'><h2>Semantic Decomposition</h2><table><tr><td>V8.35 current-pivot CLOSE cross</td><td>{n(D.get('v835_pivot_cross_pass_pct'))}%</td></tr><tr><td>Legacy pivot + CLOSE cross</td><td>{n(D.get('legacy_pivot_close_cross_pct'))}%</td></tr><tr><td>Current pivot + HIGH cross</td><td>{n(D.get('current_pivot_high_cross_pct'))}%</td></tr><tr><td>Current pivot + CLOSE cross recompute</td><td>{n(D.get('current_pivot_close_cross_pct'))}%</td></tr><tr><td>Median current-vs-legacy pivot diff</td><td>{n(D.get('median_current_vs_legacy_pivot_abs_rel_diff_pct'))}%</td></tr><tr><td>HIGH→CLOSE penalty</td><td>{n(D.get('estimated_high_to_close_penalty_pp'))} pp</td></tr><tr><td>Pivot-anchor penalty</td><td>{n(D.get('estimated_pivot_anchor_penalty_pp'))} pp</td></tr></table></div>
+<div class='c'><h2>Winner Survival / STOP Rejection</h2><table><tr><th>Semantic</th><th>N</th><th>Pass</th><th>+20 retain</th><th>+30 retain</th><th>STOP reject</th><th>PF</th></tr>{rows}</table></div>
+<div class='c'><div class='warn'><b>Interpretation:</b> {e(R.get('critical_interpretation',''))}</div><p><b>Next:</b> {e(R.get('next','Run audit first.'))}</p></div></div></body></html>"""
+
+_v841_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v841_home_base is not None:
+    def _v841_home_wrap(*args,**kwargs):
+        resp=_v841_home_base(*args,**kwargs)
+        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41 Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v841_home_base:APP.view_functions[ep]=_v841_home_wrap
