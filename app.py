@@ -46783,7 +46783,13 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v831-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""
+        <div id='v832-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧬 V8.32 Frozen Ledger Provenance Reconciliation</h2>
+        <p>先恢复历史交易到底由哪一份 signal/cache/engine 生成：扫描 /data 的 signals/trades/meta/checkpoints 与 /app 引擎指纹，核对 frozen entry 的 next-open 语义和 signal provenance。只诊断，不改 VCP/Entry/Stop/Exit。</p>
+        <a href='/v832'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.32</button></a>
+        </div>
+<div id='v831-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧭 V8.31 Entry / Breakout Parity Root-Cause Audit</h2>
         <p>专查 V8.30 formal-breakout recompute parity 只有 6.87% 的根因：entry_date/signal_date 对齐、entry_px 对应 close/open、engine/cache revision provenance。只诊断，不调参。</p>
         <a href='/v831'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.31</button></a>
@@ -67014,3 +67020,200 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <div class='c'><h2>Frozen Economic Gate</h2><table><tr><th>Check</th><th>Pass</th></tr>{gate}</table></div>
 <div class='c'><div class='info'><b>重要纠正：</b>{e(R.get('important_correction','V8.29 的 rs_score ❌ 只是函数名检查，不代表正式引擎没有 RS；正式链已有 eng.rs() / RS>=72。'))}</div><p>{e(R.get('boundaries',''))}</p>{"<a href='/v830/export'><button>Export Exact Supply Trace</button></a>" if V830_EXACT.exists() else ''}</div>
 <script>async function poll(){{try{{let s=await (await fetch('/api/v830',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1800);}}catch(e){{}}}}async function go(){{let r=await fetch('/v830/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
+
+
+# ================= V8.32 FROZEN LEDGER PROVENANCE RECONCILIATION =================
+V832_DIR = DATA_DIR / "v832_frozen_ledger_provenance_reconciliation"
+V832_PREFLIGHT = V832_DIR / "preflight.json"
+V832_STATUS = V832_DIR / "status.json"
+V832_RESULT = V832_DIR / "result.json"
+V832_CANDIDATES = V832_DIR / "provenance_candidates.csv"
+V832_BUILD_ID = "v832-ledger-provenance-reconciliation-20260902"
+v832_thread = None
+
+def _v832_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V832_STATUS.exists():
+        try:x.update(json.loads(V832_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v832_write_status(**kw):
+    V832_DIR.mkdir(parents=True,exist_ok=True);x=_v832_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V832_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v832_alive(): return v832_thread is not None and v832_thread.is_alive()
+
+def _v832_sha(path):
+    import hashlib
+    try:return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except Exception:return None
+
+def _v832_file_inventory():
+    roots=[Path('/data'),Path('/app')]
+    pats=('signal','trade','meta','manifest','checkpoint','cache','decision','engine','jlaw')
+    rows=[]
+    for root in roots:
+        if not root.exists():continue
+        try: it=root.rglob('*')
+        except Exception:continue
+        for p in it:
+            try:
+                if not p.is_file():continue
+                nm=p.name.lower(); suf=p.suffix.lower()
+                if not any(k in nm for k in pats) and suf not in ('.py','.pkl','.csv','.gz','.json','.parquet'):continue
+                st=p.stat()
+                rows.append({'path':str(p),'name':p.name,'suffix':suf,'size':int(st.st_size),'mtime':float(st.st_mtime)})
+            except Exception:continue
+            if len(rows)>=12000:break
+    return rows
+
+def _v832_preflight():
+    V832_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos();T=D[D['reference_rank']>=.75].copy()
+    req=['listing_id','entry_date','entry_px','reference_rank'];missing=[c for c in req if c not in T.columns]
+    inv=_v832_file_inventory(); app_eng=Path(__file__).with_name('jlaw_v6_1_DECISION_FAST.py')
+    verdict='PASS' if (not missing and len(T)>=15000 and app_eng.exists() and len(inv)>0) else 'FAIL__LEDGER_ENGINE_OR_FILE_INVENTORY'
+    out={'version':'V8.32 Frozen Ledger Provenance Reconciliation','build_id':V832_BUILD_ID,'verdict':verdict,'top25_rows':int(len(T)),'unique_listings':int(T['listing_id'].astype(str).nunique()),'missing_columns':missing,'inventory_files':int(len(inv)),'current_engine':str(app_eng),'current_engine_sha256':_v832_sha(app_eng),'boundary':'Diagnostic only. No VCP/Entry/Stop/Exit changes; 0 Tiingo; 0 universe rescan.'}
+    V832_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v832_read_candidate(path, frozen):
+    import pandas as pd, numpy as np
+    p=Path(path); rec={'path':str(p),'size':p.stat().st_size if p.exists() else 0,'kind':'unknown','rows':None,'cols':'','listing_match_pct':None,'entry_date_match_pct':None,'next_open_semantics_pct':None,'score':0.0,'note':''}
+    try:
+        suf=''.join(p.suffixes).lower()
+        if suf.endswith('.json'):
+            rec['kind']='json/meta'; rec['score']+=2; return rec
+        if p.suffix.lower()=='.py':
+            rec['kind']='engine/source'; rec['sha256']=_v832_sha(p); rec['score']+=4 if 'jlaw' in p.name.lower() or 'decision' in p.name.lower() else 1; return rec
+        if suf.endswith('.csv') or suf.endswith('.csv.gz'):
+            df=pd.read_csv(p,nrows=250000,low_memory=False)
+        elif p.suffix.lower()=='.pkl':
+            obj=pd.read_pickle(p)
+            if not isinstance(obj,pd.DataFrame): rec['kind']='pkl/nonframe'; return rec
+            df=obj.head(250000).copy()
+        elif p.suffix.lower()=='.parquet':
+            df=pd.read_parquet(p).head(250000)
+        else:return rec
+        rec['kind']='table';rec['rows']=int(len(df)); cols=[str(c) for c in df.columns];rec['cols']='|'.join(cols[:80])
+        lmap={c.lower():c for c in cols}
+        lidc=next((lmap[k] for k in ('listing_id','listing','permno','ticker','symbol') if k in lmap),None)
+        datec=next((lmap[k] for k in ('entry_date','signal_date','date','breakout_date','trade_date') if k in lmap),None)
+        pxcol=next((lmap[k] for k in ('entry_px','entry_price','price','open','entry') if k in lmap),None)
+        if lidc:
+            A=set(df[lidc].dropna().astype(str)); B=set(frozen['listing_id'].dropna().astype(str)); rec['listing_match_pct']=100*len(A&B)/max(1,len(B));rec['score']+=min(25,rec['listing_match_pct']/4)
+        if lidc and datec:
+            a=df[[lidc,datec]].dropna().copy();a[lidc]=a[lidc].astype(str);a[datec]=pd.to_datetime(a[datec],errors='coerce').dt.normalize();a=a.dropna()
+            f=frozen[['listing_id','entry_date']].copy();f['listing_id']=f['listing_id'].astype(str);f['entry_date']=pd.to_datetime(f['entry_date'],errors='coerce').dt.normalize();f=f.dropna()
+            keys0=set(zip(f['listing_id'],f['entry_date']))
+            keys=set(zip(a[lidc],a[datec])); exact=100*len(keys&keys0)/max(1,len(keys0));rec['entry_date_match_pct']=exact
+            # signal on prior trading/calendar day proxy: compare +/- 1..3 calendar days, only for provenance ranking
+            best=exact;bestsh=0
+            for sh in (-3,-2,-1,1,2,3):
+                ks=set((x,d+pd.Timedelta(days=sh)) for x,d in keys)
+                q=100*len(ks&keys0)/max(1,len(keys0))
+                if q>best:best=q;bestsh=sh
+            rec['best_date_match_pct']=best;rec['best_calendar_shift']=bestsh;rec['score']+=min(35,best/3)
+        if pxcol and 'entry_px' in frozen.columns: rec['score']+=2
+        nm=p.name.lower()
+        if 'signal' in nm:rec['score']+=8
+        if 'trade' in nm:rec['score']+=6
+        if 'v61' in str(p).lower() or 'v6_1' in str(p).lower():rec['score']+=5
+        if rec['rows'] and rec['rows']>=1000:rec['score']+=2
+        return rec
+    except Exception as ex:
+        rec['note']=f'{type(ex).__name__}: {ex}'[:300];return rec
+
+def _v832_run():
+    import time,pandas as pd,numpy as np
+    t0=time.time(); P=_v832_preflight()
+    if P.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    D=_v826b_load_oos();F=D[D['reference_rank']>=.75].copy();F['entry_date']=pd.to_datetime(F['entry_date'],errors='coerce').dt.normalize()
+    inv=_v832_file_inventory()
+    # prioritize likely provenance artifacts; cap heavyweight reads
+    cand=[]
+    for r in inv:
+        p=r['path'];nm=r['name'].lower();suf=''.join(Path(p).suffixes).lower()
+        likely=any(k in nm for k in ('signal','trade','meta','manifest','checkpoint','jlaw_v6','decision_fast'))
+        if likely and (suf.endswith('.csv') or suf.endswith('.csv.gz') or suf.endswith('.pkl') or suf.endswith('.parquet') or suf.endswith('.json') or suf.endswith('.py')):cand.append(p)
+    cand=sorted(set(cand), key=lambda p:(0 if ('signal' in p.lower() or 'trade' in p.lower()) else 1, len(p)))[:500]
+    rows=[];errors=[]
+    _v832_write_status(status='running',phase='inventory',message=f'Found {len(cand)} provenance candidates',processed=0,total=len(cand),errors=0,elapsed_sec=round(time.time()-t0,1))
+    for i,p in enumerate(cand,1):
+        try:rows.append(_v832_read_candidate(p,F))
+        except Exception as ex:errors.append(f'{p}: {type(ex).__name__}: {ex}')
+        if i==1 or i%5==0 or i==len(cand):_v832_write_status(status='running',phase='candidate_scan',message=f'Checking {i}/{len(cand)} · {Path(p).name}',processed=i,total=len(cand),errors=len(errors),elapsed_sec=round(time.time()-t0,1))
+    C=pd.DataFrame(rows)
+    if not C.empty:
+        C=C.sort_values(['score','best_date_match_pct' if 'best_date_match_pct' in C.columns else 'score'],ascending=False,na_position='last')
+        C.to_csv(V832_CANDIDATES,index=False)
+    top=C.head(20).replace({np.nan:None}).to_dict('records') if not C.empty else []
+    current_sha=P.get('current_engine_sha256')
+    source_rows=C[C['kind'].eq('engine/source')] if (not C.empty and 'kind' in C.columns) else pd.DataFrame()
+    exact_engine_copies=[]
+    if not source_rows.empty:
+        for _,r in source_rows.iterrows():
+            if r.get('sha256')==current_sha:exact_engine_copies.append(r.get('path'))
+    best_table=next((r for r in top if r.get('kind')=='table'),None)
+    best_match=float(best_table.get('best_date_match_pct') or 0) if best_table else 0
+    if best_match>=90:diag='PROVENANCE_SOURCE_RECOVERED__READY_FOR_EXACT_PARITY_REPLAY'
+    elif best_match>=50:diag='PARTIAL_PROVENANCE_RECOVERED__RECONCILE_SIGNAL_DATE_AND_ENGINE_REVISION'
+    else:diag='NO_HIGH_PARITY_SOURCE_FOUND__FROZEN_LEDGER_PROVENANCE_WAS_NOT_PRESERVED_IN_DISCOVERED_ARTIFACTS'
+    result={'version':'V8.32','build_id':V832_BUILD_ID,'diagnosis':diag,'inventory_files':len(inv),'candidate_files_scanned':len(cand),'errors':errors[:100],'current_engine_sha256':current_sha,'exact_current_engine_copies':exact_engine_copies[:20],'best_candidate':best_table,'top_candidates':top,'interpretation':'Ranked provenance artifacts by listing/date overlap with the frozen Top25 ledger. A high match identifies the historical signal/trade source that should be used for exact parity; a low match means the ledger lacks preserved source provenance and must not be treated as reproducible by the current engine.','boundary':'No trading rule changed.' ,'elapsed_sec':round(time.time()-t0,1)}
+    V832_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return result
+
+def _v832_worker():
+    global v832_thread
+    import time
+    t0=time.time()
+    try:
+        _v832_write_status(status='running',phase='start',message='Starting frozen-ledger provenance reconciliation',processed=0,total=0,errors=0,error=None)
+        R=_v832_run();_v832_write_status(status='done',phase='complete',message=f"Done · {R.get('diagnosis')}",processed=R.get('candidate_files_scanned',0),total=R.get('candidate_files_scanned',0),errors=len(R.get('errors',[])),elapsed_sec=R.get('elapsed_sec'),error=None)
+    except Exception as ex:_v832_write_status(status='error',phase='failed',message='V8.32 failed',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v832_thread=None
+
+@APP.route('/v832/preflight',methods=['GET','POST'])
+def v832_preflight_route():
+    try:_v832_preflight()
+    except Exception as ex:
+        V832_DIR.mkdir(parents=True,exist_ok=True);V832_PREFLIGHT.write_text(json.dumps({'verdict':'ERROR','build_id':V832_BUILD_ID,'error':f'{type(ex).__name__}: {ex}'},indent=2),encoding='utf-8')
+    return redirect('/v832')
+
+@APP.post('/v832/start')
+def v832_start():
+    global v832_thread
+    if _v832_alive():return jsonify({'started':False,**_v832_status()})
+    try:
+        p=_v832_preflight()
+        if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    except Exception as ex:return jsonify({'started':False,'error':f'{type(ex).__name__}: {ex}'}),500
+    v832_thread=threading.Thread(target=_v832_worker,daemon=True);v832_thread.start();return jsonify({'started':True,**_v832_status()})
+
+@APP.get('/api/v832')
+def v832_api():return jsonify(_v832_status())
+
+@APP.get('/v832/export')
+def v832_export():
+    if not V832_CANDIDATES.exists():return ('not ready',404)
+    return send_file(V832_CANDIDATES,as_attachment=True,download_name='v832_provenance_candidates.csv')
+
+@APP.get('/v832')
+def v832_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v832_status()
+    try:
+        if V832_PREFLIGHT.exists():P=json.loads(V832_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V832_RESULT.exists():R=json.loads(V832_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    top=R.get('top_candidates',[]) or []
+    trs=''.join(f"<tr><td>{e(Path(str(x.get('path',''))).name)}</td><td>{e(x.get('kind'))}</td><td>{e(round(float(x.get('score') or 0),2))}</td><td>{e('—' if x.get('listing_match_pct') is None else round(float(x.get('listing_match_pct')),2))}%</td><td>{e('—' if x.get('best_date_match_pct') is None else round(float(x.get('best_date_match_pct')),2))}%</td><td>{e(x.get('best_calendar_shift','—'))}</td></tr>" for x in top[:15])
+    best=R.get('best_candidate') or {}
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#111827;margin:0}}.w{{max-width:980px;margin:auto;padding:22px}}.c{{background:white;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:8px;border-bottom:1px solid #dbe2ea;text-align:left;vertical-align:top}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}code{{overflow-wrap:anywhere}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.32 Frozen Ledger Provenance Reconciliation</h1><div class='warn'><b>只做来源对账：</b>找回 frozen ledger 到底由哪份 signals/trades/cache/engine 生成。VCP / Entry / Stop / Exit 全冻结；0 Tiingo，0 universe rescan。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V832_BUILD_ID))}</p><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Inventory files {e(P.get('inventory_files','—'))}</p><p>Current engine SHA256: <code>{e(P.get('current_engine_sha256','—'))}</code></p><p><b>Preflight error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v832/preflight'><button>A. Run Provenance Preflight</button></form><br><button onclick='go()'>B. Run Provenance Reconciliation</button><p id='st'>{e(S0.get('status'))} · {e(S0.get('message'))}</p></div>
+<div class='c'><h2>Diagnosis</h2><div class='ok'><b>{e(R.get('diagnosis','—'))}</b></div><p>Files scanned: {e(R.get('candidate_files_scanned','—'))} · elapsed {e(R.get('elapsed_sec','—'))}s</p><p><b>Best candidate:</b> {e(best.get('path','—'))}</p><p>Best date match: {e(best.get('best_date_match_pct','—'))}% · shift {e(best.get('best_calendar_shift','—'))} · listing match {e(best.get('listing_match_pct','—'))}%</p></div>
+<div class='c'><h2>Top Provenance Candidates</h2><table><tr><th>File</th><th>Kind</th><th>Score</th><th>Listing overlap</th><th>Best date match</th><th>Calendar shift</th></tr>{trs}</table></div>
+<div class='c'><p>{e(R.get('interpretation',''))}</p>{"<a href='/v832/export'><button>Export Provenance Candidates</button></a>" if V832_CANDIDATES.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v832',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1800);}}catch(e){{}}}}async function go(){{let r=await fetch('/v832/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
