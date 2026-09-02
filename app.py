@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825c-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825d-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🕒 V8.25D Recent-Period Free PIT Pilot</h2>
+        <p>把免费 fundamentals 与近年 V6.44 frozen trades 对齐。先 Preflight 样本量，再决定是否跑 OOS。0下载 / 0重扫 / 0调参。</p>
+        <a href='/v825d'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25D</button></a>
+        </div>
+        <div id='v825c-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>📚 V8.25C Fundamentals Historical Depth Audit</h2>
         <p>查 requested startDate vs actual earliest release date，并统计各年代 PIT coverage。只读，不下载、不调模型。</p>
         <a href='/v825c'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25C</button></a>
@@ -59799,4 +59804,242 @@ Valid cache tickers: <b>{e(C.get('valid_cache_tickers','—'))}/{e(C.get('ticker
 <div class='c'><h2>Ticker Historical Depth</h2><div style='overflow:auto'><table>
 <tr><th>Ticker</th><th>Schema</th><th>Rows</th><th>Earliest release</th><th>Latest release</th><th>Span years</th></tr>{dep or "<tr><td colspan=6>Run audit first.</td></tr>"}</table></div></div>
 <div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div><p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
+
+
+# ================= V8.25D RECENT-PERIOD FREE PIT PILOT =================
+# Reuses existing V6.44 trigger cache + V6.94 feature store + V8.25 free PIT cache.
+# No downloads, no universe rescan, no strategy tuning.
+V825D_DIR = DATA_DIR / "v825d_recent_period_free_pit_pilot"
+V825D_PREFLIGHT = V825D_DIR / "preflight.json"
+V825D_RESULT = V825D_DIR / "result.json"
+V825D_BUILD_ID = "V825D_RECENT_FREE_PIT_20260902A"
+
+def _v825d_load_recent():
+    if not V644_TRADE_CACHE.exists():
+        raise RuntimeError("V6.44 trigger cache missing")
+    T=pd.read_csv(V644_TRADE_CACHE,compression="gzip")
+    need=["variant","listing_id","ticker","entry_date","entry_px","exit_date","exit_px","exit_reason"]
+    miss=[c for c in need if c not in T.columns]
+    if miss: raise RuntimeError("V6.44 cache missing: "+",".join(miss))
+    T=T[T["variant"].astype(str).eq("TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT")].copy()
+    T["ticker"]=T["ticker"].astype(str).str.upper().str.strip()
+    T["entry_date"]=pd.to_datetime(T["entry_date"],errors="coerce").dt.normalize()
+    T["exit_date"]=pd.to_datetime(T["exit_date"],errors="coerce").dt.normalize()
+    T["entry_px"]=pd.to_numeric(T["entry_px"],errors="coerce")
+    T["exit_px"]=pd.to_numeric(T["exit_px"],errors="coerce")
+    T=T.dropna(subset=["entry_date","exit_date","entry_px","exit_px"])
+    T["ret"]=T["exit_px"]/T["entry_px"]-1
+    T["is_stop"]=T["exit_reason"].astype(str).str.upper().str.contains("STOP")
+    T["winner50"]=T["ret"].ge(.50)
+    T=T[T["ticker"].isin(V825_DOW30)].copy()
+    return T
+
+def _v825d_join_controls(T):
+    fp=V694_DIR/"clean_candidate_path_features.csv.gz"
+    if not fp.exists():
+        raise RuntimeError("V6.94 clean candidate feature store missing")
+    F=pd.read_csv(fp,compression="gzip")
+    for c in ["entry_date","exit_date"]:
+        if c in F.columns:F[c]=pd.to_datetime(F[c],errors="coerce").dt.normalize()
+
+    keys=[]
+    if "parent_opportunity_id" in T.columns and "parent_opportunity_id" in F.columns:
+        keys=["parent_opportunity_id"]
+    elif "stage2_row_id" in T.columns and "stage2_row_id" in F.columns:
+        keys=["stage2_row_id"]
+    else:
+        keys=["listing_id"]
+        # entry dates may differ because V6.44 delays trigger; use parent_entry_date when available.
+        if "parent_entry_date" in T.columns:
+            T=T.copy()
+            T["join_entry_date"]=pd.to_datetime(T["parent_entry_date"],errors="coerce").dt.normalize()
+            if "entry_date" in F.columns:
+                F=F.copy();F["join_entry_date"]=F["entry_date"];keys+=["join_entry_date"]
+
+    meta=set(["listing_id","entry_date","exit_date","ret","exit_reason","is_stop","winner50","winner100",
+              "parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id"])
+    feat=[c for c in F.columns if c not in meta and pd.to_numeric(F[c],errors="coerce").notna().sum()>=20]
+    keep=list(dict.fromkeys(keys+feat))
+    J=T.merge(F[keep].drop_duplicates(keys),on=keys,how="left",suffixes=("","_v694"))
+    return J,feat
+
+def _v825d_preflight():
+    V825D_DIR.mkdir(parents=True,exist_ok=True)
+    T=_v825d_load_recent()
+    J,control_features=_v825d_join_controls(T)
+    _,defs=_v825_defs();codes=_v820_pick_codes(defs)
+
+    # Determine actual usable date from cache depth, not guessed.
+    depth=[_v825c_cache_depth(t) for t in sorted(set(J.ticker))]
+    valid=[x for x in depth if x.get("schema_ok") and x.get("earliest_release")]
+    if not valid: raise RuntimeError("No valid free PIT cache")
+    earliest=max(pd.Timestamp(x["earliest_release"]) for x in valid)  # conservative common start
+    recent_start=max(pd.Timestamp("2023-10-01"),earliest)
+
+    R=J[J.entry_date>=recent_start].copy()
+    R=R[R.is_stop|R.winner50].copy()
+    R=R[~(R.is_stop&R.winner50)].copy()
+    R["y"]=R.winner50.astype(int)
+    X=_v825_attach(R,codes)
+
+    fund=["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]
+    cov={}
+    for f in fund:
+        z=pd.to_numeric(X[f],errors="coerce")
+        cov[f]={"non_null":int(z.notna().sum()),"coverage":float(z.notna().mean()) if len(X) else 0.0}
+
+    X["core_pit_ok"]=X[["rev_yoy","eps_yoy"]].notna().all(axis=1)
+    core=X[X.core_pit_ok].copy()
+    winners=int(core.y.sum()) if len(core) else 0
+    stops=int((core.y==0).sum()) if len(core) else 0
+
+    joined_controls=sum(pd.to_numeric(X[c],errors="coerce").notna().any() for c in control_features if c in X.columns)
+
+    if len(R)<30:
+        verdict="INSUFFICIENT_RECENT_FROZEN_TRADES"
+        next_action="DO_NOT_PAY__WAIT_FOR_MORE_RECENT_FROZEN_TRADES_OR_USE_ANOTHER_FREE_TEST_BASKET"
+    elif len(core)<30 or winners<5 or stops<15:
+        verdict="INSUFFICIENT_RECENT_PIT_ELIGIBLE_LABELS"
+        next_action="DO_NOT_PAY__CURRENT_FREE_WINDOW_TOO_SMALL_FOR_DECISIVE_OOS"
+    elif joined_controls<3:
+        verdict="CONTROL_FEATURE_JOIN_INSUFFICIENT"
+        next_action="AUDIT_LINEAGE_JOIN_ONLY"
+    else:
+        verdict="PASS_RECENT_FREE_PILOT_READY"
+        next_action="RUN_FROZEN_RECENT_CONTROL_VS_PIT_OVERLAY"
+
+    result={
+        "version":"V8.25D Recent-Period Free PIT Pilot",
+        "build_id":V825D_BUILD_ID,
+        "verdict":verdict,
+        "recent_start":str(recent_start.date()),
+        "raw_recent_v644_trades":int(len(T[T.entry_date>=recent_start])),
+        "labeled_recent_rows":int(len(R)),
+        "core_pit_eligible_rows":int(len(core)),
+        "core_pit_winners50":winners,
+        "core_pit_stops":stops,
+        "fundamental_coverage":cov,
+        "control_feature_candidates":len(control_features),
+        "control_features_with_any_joined_data":int(joined_controls),
+        "cache_depth_valid_tickers":len(valid),
+        "next_action":next_action,
+        "boundaries":"Cache-only preflight. No downloads, no universe rescan, no strategy/model tuning."
+    }
+    _v825_jwrite(V825D_PREFLIGHT,result)
+    return result
+
+def _v825d_run():
+    P=_v825_jread(V825D_PREFLIGHT,{})
+    if P.get("verdict")!="PASS_RECENT_FREE_PILOT_READY":
+        raise RuntimeError("V8.25D Preflight must PASS before pilot")
+
+    T=_v825d_load_recent()
+    J,control_features=_v825d_join_controls(T)
+    _,defs=_v825_defs();codes=_v820_pick_codes(defs)
+    start=pd.Timestamp(P["recent_start"])
+
+    D=J[J.entry_date>=start].copy()
+    D=D[D.is_stop|D.winner50].copy()
+    D=D[~(D.is_stop&D.winner50)].copy()
+    D["y"]=D.winner50.astype(int)
+    X=_v825_attach(D,codes)
+
+    # Same sample for Control and Overlay: only rows where core PIT information exists.
+    X=X[X[["rev_yoy","eps_yoy"]].notna().all(axis=1)].copy()
+
+    deny=set(["ret","is_stop","winner50","winner100","listing_id","ticker","entry_date","exit_date","exit_reason",
+              "entry_px","exit_px","y","core_pit_ok","parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id"])
+    controls=[]
+    for c in control_features:
+        if c in deny or c not in X.columns:continue
+        z=pd.to_numeric(X[c],errors="coerce")
+        if z.notna().mean()>=.60 and z.nunique(dropna=True)>=5:
+            X[c]=z;controls.append(c)
+
+    fund=["rev_yoy","eps_yoy","ni_yoy"]
+    for f in ["rev_yoy_accel","eps_yoy_accel"]:
+        if pd.to_numeric(X[f],errors="coerce").notna().mean()>=.45:
+            fund.append(f)
+
+    C=_v825_oos(X,controls,"RECENT_CONTROL_PRICE_VOLUME")
+    O=_v825_oos(X,controls+fund,"RECENT_OVERLAY_PLUS_PIT_FUNDAMENTALS")
+
+    if not C.get("available") or not O.get("available"):
+        verdict="RECENT_FREE_PILOT_INCONCLUSIVE_SAMPLE"
+    else:
+        cm=C["top20_metrics"];om=O["top20_metrics"]
+        auc_gain=(O.get("pooled_auc") or 0)-(C.get("pooled_auc") or 0)
+        med_gain=(O.get("median_fold_auc") or 0)-(C.get("median_fold_auc") or 0)
+        pf_gain=om.get("pf",0)-cm.get("pf",0)
+        avg_gain=om.get("avg_trade",0)-cm.get("avg_trade",0)
+        dd_ok=om.get("max_dd",0)>=cm.get("max_dd",0)-0.25
+        passed=bool(auc_gain>=.03 and med_gain>=.02 and pf_gain>0 and avg_gain>0 and dd_ok)
+        verdict="RECENT_FREE_PIT_PASS__PAID_SECOND_STAGE_JUSTIFIED" if passed else "RECENT_FREE_PIT_FAIL__DO_NOT_PAY"
+
+    result={
+        "version":"V8.25D Recent-Period Free PIT Pilot",
+        "verdict":verdict,
+        "recent_start":P["recent_start"],
+        "sample_rows":int(len(X)),
+        "winners50":int(X.y.sum()),
+        "stops":int((X.y==0).sum()),
+        "control_features":controls,
+        "fundamental_features":fund,
+        "control":C,
+        "overlay":O,
+        "decision_rule":"Frozen: overlay must improve pooled AUC >=0.03, median-fold AUC >=0.02, top20 PF and AvgTrade, with no material MaxDD deterioration.",
+        "next_action":("CONSIDER_PAID_BROAD_UNIVERSE_SECOND_STAGE" if "PASS__PAID" in verdict else
+                       "STOP_PAID_FUNDAMENTALS_EXPANSION" if "FAIL__DO_NOT_PAY" in verdict else
+                       "DO_NOT_PAY__WAIT_FOR_MORE_FREE_RECENT_SAMPLE"),
+        "boundaries":"Cache-only recent-period test. No downloads, no universe rescan, no parameter rescue."
+    }
+    _v825_jwrite(V825D_RESULT,result)
+    return result
+
+@APP.route("/v825d/preflight",methods=["GET","POST"])
+def v825d_preflight_route():
+    try:_v825d_preflight()
+    except Exception as ex:_v825_jwrite(V825D_PREFLIGHT,{"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"})
+    return redirect("/v825d")
+
+@APP.route("/v825d/run",methods=["POST"])
+def v825d_run_route():
+    try:_v825d_run()
+    except Exception as ex:_v825_jwrite(V825D_RESULT,{"verdict":"PILOT_ERROR","error":f"{type(ex).__name__}: {ex}"})
+    return redirect("/v825d")
+
+@APP.get("/v825d")
+def v825d_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P=_v825_jread(V825D_PREFLIGHT,{})
+    R=_v825_jread(V825D_RESULT,{})
+    cov=P.get("fundamental_coverage") or {}
+    covtxt=" · ".join(f"{k}:{float(v.get('coverage',0))*100:.1f}% ({v.get('non_null',0)})" for k,v in cov.items())
+    def mb(x):
+        if not x or not x.get("available"):return e((x or {}).get("reason","—"))
+        m=x.get("top20_metrics") or {}
+        return f"OOS {e(x.get('oos_rows'))} · AUC <b>{e(round(float(x.get('pooled_auc') or 0),4))}</b> · median-fold <b>{e(round(float(x.get('median_fold_auc') or 0),4))}</b><br>Top20 PF <b>{e(round(float(m.get('pf',0)),3))}</b> · AvgTrade <b>{e(round(float(m.get('avg_trade',0))*100,2))}%</b> · Win {e(round(float(m.get('win_rate',0))*100,1))}% · MaxDD {e(round(float(m.get('max_dd',0))*100,1))}%"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🕒 V8.25D Recent-Period Free PIT Pilot</h1><div class='o'><b>只用 fundamentals 真正覆盖的近年窗口。</b> 复用 V6.44 frozen trigger cache + V6.94 controls + V8.25 free cache。0下载、0全市场重扫、0调参。</div></div>
+<div class='c'><form method='post' action='/v825d/preflight'><button>A. Run Recent-Window Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Recent start: <b>{e(P.get('recent_start','—'))}</b><br>
+Recent V6.44 trades: <b>{e(P.get('raw_recent_v644_trades','—'))}</b> · labeled STOP/+50: <b>{e(P.get('labeled_recent_rows','—'))}</b><br>
+Core PIT eligible: <b>{e(P.get('core_pit_eligible_rows','—'))}</b> · +50 <b>{e(P.get('core_pit_winners50','—'))}</b> · STOP <b>{e(P.get('core_pit_stops','—'))}</b><br>
+Control features joined: <b>{e(P.get('control_features_with_any_joined_data','—'))}</b><br>{e(covtxt)}</div>
+<p><b>Next:</b> {e(P.get('next_action','—'))}</p></div>
+<div class='c'><form method='post' action='/v825d/run'><button>B. Run Frozen Recent Control vs PIT Overlay</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<h3>Control</h3><div class='g'>{mb(R.get('control')) if R else '—'}</div>
+<h3>Overlay</h3><div class='g'>{mb(R.get('overlay')) if R else '—'}</div>
+<p><b>Sample:</b> {e(R.get('sample_rows','—'))} · +50 {e(R.get('winners50','—'))} · STOP {e(R.get('stops','—'))}</p>
+<p><b>Next:</b> {e(R.get('next_action','—'))}</p></div>
 </div></body></html>"""
