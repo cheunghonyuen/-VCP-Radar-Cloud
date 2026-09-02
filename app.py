@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825i-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825j-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>💰 V8.25J Tradable Tail / Economic Value Audit</h2>
+        <p>检查 H 的40笔候选真正可交易的 MFE（止损后上涨不算），以及固定7% stop / 60d规则下的 PF、AvgRet、tail asymmetry。只读审计。</p>
+        <a href='/v825j'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25J</button></a>
+        </div>
+        <div id='v825i-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🔎 V8.25I MFE / Right-Censor Audit</h2>
         <p>查清 H 的 +50=0：看 MFE +10/+20/+30/+40/+50 分布，以及 2026 尾端 right-censor。只读，0调参。</p>
         <a href='/v825i'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25I</button></a>
@@ -61251,4 +61256,213 @@ Median MFE <b>{e(round(float(R.get("mfe_median",0))*100,1) if R.get("mfe_median"
 {years or "<tr><td colspan=8>Run audit first.</td></tr>"}
 </table></div></div>
 <div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
+<p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
+
+# ================= V8.25J TRADABLE TAIL / ECONOMIC VALUE AUDIT =================
+V825J_DIR = DATA_DIR / "v825j_tradable_tail_economic_value_audit"
+V825J_RESULT = V825J_DIR / "result.json"
+V825J_BUILD_ID = "V825J_TRADABLE_TAIL_ECONOMIC_20260902A"
+
+def _v825j_pf(vals):
+    s = pd.to_numeric(pd.Series(vals), errors="coerce").dropna()
+    if s.empty:
+        return 0.0
+    gp = float(s[s > 0].sum())
+    gl = float(-s[s < 0].sum())
+    return gp / gl if gl > 1e-12 else (999.0 if gp > 0 else 0.0)
+
+def _v825j_maxdd(vals):
+    s = pd.to_numeric(pd.Series(vals), errors="coerce").dropna()
+    if s.empty:
+        return 0.0
+    eq = s.cumsum()
+    dd = eq - eq.cummax()
+    return float(dd.min()) if len(dd) else 0.0
+
+def _v825j_run():
+    V825J_DIR.mkdir(parents=True, exist_ok=True)
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    need = ["ticker","entry_date","exit_date","entry_px","ret","mfe","is_stop","winner50"]
+    miss = [c for c in need if c not in C.columns]
+    if miss:
+        raise RuntimeError("V8.25H candidate schema missing: " + ",".join(miss))
+
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["entry_px"] = pd.to_numeric(C["entry_px"], errors="coerce")
+    C["ret"] = pd.to_numeric(C["ret"], errors="coerce")
+    C["mfe"] = pd.to_numeric(C["mfe"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+    if C["winner50"].dtype != bool:
+        C["winner50"] = C["winner50"].astype(str).str.lower().isin(["true","1","yes"])
+    C = C.dropna(subset=["ticker","entry_date","entry_px","ret","mfe"]).copy()
+
+    audit_rows = []
+    for i, r in C.iterrows():
+        ticker = str(r["ticker"]).upper().strip()
+        D = _v825h_load_prices(ticker)
+        if D is None or D.empty:
+            audit_rows.append({"idx":i,"available_forward_days":0,"right_censored":True,
+                               "tradable_mfe":None,"tradable_days":0,"last_price_date":None})
+            continue
+
+        future_all = D[D["Date"] > r["entry_date"]].copy()
+        avail = int(len(future_all))
+        last_price_date = str(future_all["Date"].max().date()) if len(future_all) else None
+        right_censored = avail < 60
+
+        if pd.notna(r["exit_date"]):
+            tradable = D[(D["Date"] > r["entry_date"]) & (D["Date"] <= r["exit_date"])].copy()
+        else:
+            tradable = future_all.head(60).copy()
+
+        tradable_mfe = float(tradable["high"].max()/float(r["entry_px"]) - 1.0) if len(tradable) else None
+        audit_rows.append({"idx":i,"available_forward_days":avail,"right_censored":bool(right_censored),
+                           "tradable_mfe":tradable_mfe,"tradable_days":int(len(tradable)),
+                           "last_price_date":last_price_date})
+
+    A = pd.DataFrame(audit_rows).set_index("idx")
+    C = C.join(A, how="left")
+    C["post_exit_mfe_gap"] = C["mfe"] - C["tradable_mfe"]
+
+    unc = C[~C["right_censored"].fillna(True)].copy()
+    cen = C[C["right_censored"].fillna(True)].copy()
+
+    tail = []
+    for th in [0.10,0.20,0.30,0.40,0.50]:
+        g = unc[unc["tradable_mfe"] >= th].copy()
+        tail.append({
+            "threshold":th,
+            "full_horizon_count":int((unc["mfe"] >= th).sum()),
+            "tradable_count":int(len(g)),
+            "tradable_pct":float(len(g)/max(1,len(unc))),
+            "avg_realized_ret":float(g["ret"].mean()) if len(g) else None,
+            "median_realized_ret":float(g["ret"].median()) if len(g) else None,
+            "stops_after_reaching_threshold":int(g["is_stop"].sum()) if len(g) else 0,
+            "reward_to_7pct_stop_R":float(th/0.07),
+        })
+
+    pf = _v825j_pf(unc["ret"])
+    avg = float(unc["ret"].mean()) if len(unc) else None
+    med = float(unc["ret"].median()) if len(unc) else None
+    win = float((unc["ret"] > 0).mean()) if len(unc) else None
+    stop = float(unc["is_stop"].mean()) if len(unc) else None
+    maxdd = _v825j_maxdd(unc["ret"])
+
+    pre20 = int((unc["tradable_mfe"] >= .20).sum())
+    pre30 = int((unc["tradable_mfe"] >= .30).sum())
+    pre40 = int((unc["tradable_mfe"] >= .40).sum())
+
+    if len(unc) < 30:
+        verdict = "INCONCLUSIVE__TOO_FEW_UNCENSORED_CANDIDATES"
+        next_action = "DO_NOT_PAY__WAIT_OR_EXPAND_ONLY_WITH_FREE_DATA"
+    elif pf > 1.0 and (avg or 0) > 0 and pre20 >= max(4, int(.10*len(unc))) and pre30 >= 1:
+        verdict = "ECONOMIC_TAIL_PRESENT__FREE_FUNDAMENTALS_OVERLAY_TEST_JUSTIFIED"
+        next_action = "RUN_PIT_FUNDAMENTALS_OVERLAY_ON_EXACT_FROZEN_SAMPLE__NO_RETUNE"
+    else:
+        verdict = "ECONOMIC_STRUCTURE_INSUFFICIENT__DO_NOT_PAY_FOR_FUNDAMENTALS"
+        next_action = "STOP_PAID_FUNDAMENTALS_EXPANSION__KEEP_RESULT_AS_RESEARCH_ONLY"
+
+    result = {
+        "version":"V8.25J Tradable Tail / Economic Value Audit",
+        "build_id":V825J_BUILD_ID,
+        "verdict":verdict,
+        "candidate_rows":int(len(C)),
+        "uncensored_rows":int(len(unc)),
+        "right_censored_rows":int(len(cen)),
+        "realized":{
+            "pf":pf,"avg_ret":avg,"median_ret":med,"win_rate":win,"stop_rate":stop,
+            "maxdd_sum_returns":maxdd,"net_ret_sum":float(unc["ret"].sum()) if len(unc) else 0.0
+        },
+        "tradable_mfe":{
+            "median":float(unc["tradable_mfe"].median()) if len(unc) else None,
+            "p75":float(unc["tradable_mfe"].quantile(.75)) if len(unc) else None,
+            "p90":float(unc["tradable_mfe"].quantile(.90)) if len(unc) else None,
+            "ge20":pre20,"ge30":pre30,"ge40":pre40,
+            "ge50":int((unc["tradable_mfe"] >= .50).sum())
+        },
+        "full_vs_tradable_inflation":{
+            "full_ge20_but_tradable_below20":int(((unc["mfe"] >= .20) & (unc["tradable_mfe"] < .20)).sum()),
+            "full_ge30_but_tradable_below30":int(((unc["mfe"] >= .30) & (unc["tradable_mfe"] < .30)).sum()),
+            "full_ge40_but_tradable_below40":int(((unc["mfe"] >= .40) & (unc["tradable_mfe"] < .40)).sum()),
+            "median_post_exit_mfe_gap":float(unc["post_exit_mfe_gap"].median()) if len(unc) else None
+        },
+        "threshold_tail":tail,
+        "decision_rule":"Continuation only if uncensored>=30, realized PF>1, AvgRet>0, tradable MFE>=20 on at least max(4,10% of sample), and at least one tradable MFE>=30. No rescue tuning.",
+        "next_action":next_action,
+        "boundaries":"READ-ONLY. Exact V8.25H candidates; 7% stop and 60-day horizon unchanged. No downloads, no rule changes, no threshold changes after seeing results, no replay, no tuning."
+    }
+    _v825g_write(V825J_RESULT, result)
+    return result
+
+@APP.route("/v825j/run", methods=["GET","POST"])
+def v825j_run_route():
+    try:
+        _v825j_run()
+    except Exception as ex:
+        _v825g_write(V825J_RESULT, {
+            "version":"V8.25J Tradable Tail / Economic Value Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825j")
+
+@APP.get("/v825j")
+def v825j_page():
+    import html
+    e=lambda x: html.escape(str(x))
+    R=_v825g_read(V825J_RESULT,{})
+    rr=R.get("realized") or {}
+    tm=R.get("tradable_mfe") or {}
+    inf=R.get("full_vs_tradable_inflation") or {}
+    rows=""
+    for x in R.get("threshold_tail") or []:
+        rows += (
+            f"<tr><td><b>+{int(float(x.get('threshold',0))*100)}%</b></td>"
+            f"<td>{e(x.get('full_horizon_count'))}</td>"
+            f"<td>{e(x.get('tradable_count'))}</td>"
+            f"<td>{e(round(float(x.get('tradable_pct',0))*100,1))}%</td>"
+            f"<td>{e(round(float(x.get('avg_realized_ret') or 0)*100,2) if x.get('avg_realized_ret') is not None else '—')}%</td>"
+            f"<td>{e(x.get('stops_after_reaching_threshold'))}</td>"
+            f"<td>{e(round(float(x.get('reward_to_7pct_stop_R',0)),2))}R</td></tr>"
+        )
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.r{{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>💰 V8.25J Tradable Tail / Economic Value Audit</h1>
+<div class="o"><b>关键修正：</b> I 的 full-horizon MFE 可能包含已经止损之后的上涨。J 只计算“入场 → 实际退出/止损”之间真正可交易的 MFE，并检查这40笔候选本身有没有正的经济结构。</div></div>
+<div class="c"><form method="post" action="/v825j/run"><button>▶ Run Tradable Tail / Economic Audit</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">
+Candidates <b>{e(R.get("candidate_rows","—"))}</b> · Uncensored <b>{e(R.get("uncensored_rows","—"))}</b> · Right-censored <b>{e(R.get("right_censored_rows","—"))}</b><br>
+Realized PF <b>{e(round(float(rr.get("pf",0)),3))}</b> · AvgRet <b>{e(round(float(rr.get("avg_ret",0))*100,2) if rr.get("avg_ret") is not None else "—")}%</b> ·
+Win <b>{e(round(float(rr.get("win_rate",0))*100,1) if rr.get("win_rate") is not None else "—")}%</b> · Stop <b>{e(round(float(rr.get("stop_rate",0))*100,1) if rr.get("stop_rate") is not None else "—")}%</b><br>
+Tradable MFE median <b>{e(round(float(tm.get("median",0))*100,1) if tm.get("median") is not None else "—")}%</b> ·
+P75 <b>{e(round(float(tm.get("p75",0))*100,1) if tm.get("p75") is not None else "—")}%</b> ·
+P90 <b>{e(round(float(tm.get("p90",0))*100,1) if tm.get("p90") is not None else "—")}%</b>
+</div></div>
+<div class="c"><h2>Full-Horizon vs Actually Tradable Tail</h2>
+<div class="r">
+Full MFE ≥20 but tradable &lt;20: <b>{e(inf.get("full_ge20_but_tradable_below20","—"))}</b><br>
+Full MFE ≥30 but tradable &lt;30: <b>{e(inf.get("full_ge30_but_tradable_below30","—"))}</b><br>
+Full MFE ≥40 but tradable &lt;40: <b>{e(inf.get("full_ge40_but_tradable_below40","—"))}</b><br>
+Median post-exit MFE gap: <b>{e(round(float(inf.get("median_post_exit_mfe_gap",0))*100,2) if inf.get("median_post_exit_mfe_gap") is not None else "—")}%</b>
+</div></div>
+<div class="c"><h2>Economic Tail</h2><div style="overflow:auto"><table>
+<tr><th>MFE level</th><th>Full horizon count</th><th>Tradable count</th><th>Tradable %</th><th>Avg realized return</th><th>Later stopped</th><th>Reward / 7% stop</th></tr>
+{rows or "<tr><td colspan=7>Run audit first.</td></tr>"}
+</table></div></div>
+<div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
+<p><b>Frozen decision rule:</b> {e(R.get("decision_rule",""))}</p>
 <p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
