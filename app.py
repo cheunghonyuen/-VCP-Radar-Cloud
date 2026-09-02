@@ -46782,9 +46782,9 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826d-home-card-real' style='background:#fdf2f8;border:7px solid #db2777;border-radius:26px;padding:26px;margin:20px 0'>
-        <h2>🧬 V8.26D Portfolio Drawdown Attribution / Winner Giveback Audit</h2>
-        <p>只读拆解 Top25 最大回撤：逐持仓归因 STOP / Winner / MTM 同步回撤，并检查 +20 Winner 是否大幅浮盈后回吐。0 Exit 改动 / 0 调参。</p>
+        card="""<div id='v826d-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧾 V8.26D Drawdown Attribution / Winner Giveback Audit</h2>
+        <p>只解释 Top25 -54.76% 最大回撤：逐仓归因、winner giveback、STOP 贡献，并对照 BASE。0 exit change / 0 tuning / 0 rescan。</p>
         <a href='/v826d'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26D</button></a>
         </div>
         <div id='v826c-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
@@ -64700,21 +64700,20 @@ poll();
 </div></body></html>"""
 
 # ================= V8.26D PORTFOLIO DRAWDOWN ATTRIBUTION / WINNER GIVEBACK AUDIT =================
-# Read-only diagnosis of Top25 portfolio MaxDD.
-# Reuses V8.26A/B/C OOS + historical cached prices only.
+# Read-only audit. No model/filter/admission/exit changes.
+# Reuses exact V8.26C TOP25_CURRENT admission + V8.26A/B cached prices.
 #
-# Answers:
-# 1) Which admitted positions contributed most to the 2017-style peak->trough drawdown?
-# 2) How much of drawdown came from eventual STOPs vs eventual winners?
-# 3) Which winners had meaningful open profit before the trough and then gave it back?
-# 4) Is the dominant failure mode entry selection, synchronized MTM drawdown, or winner giveback?
-#
-# No exit rule changes, no trailing stop tests, no threshold search, no tuning.
-V826D_DIR = DATA_DIR / "v826d_drawdown_attribution_winner_giveback"
+# Questions:
+# 1) Which positions contributed most to the 2017-style peak->trough MTM drawdown?
+# 2) Were they eventual STOPs, eventual +20 winners, or neutral?
+# 3) How much open-profit giveback occurred between portfolio peak and trough?
+# 4) Did eventual winners themselves cause substantial interim drawdown?
+# 5) Does BASE show the same phenomenon in its own max-DD window?
+V826D_DIR = DATA_DIR / "v826d_portfolio_drawdown_attribution_winner_giveback"
 V826D_PREFLIGHT = V826D_DIR / "preflight.json"
 V826D_STATUS = V826D_DIR / "status.json"
 V826D_RESULT = V826D_DIR / "result.json"
-V826D_BUILD_ID = "V826D_DD_ATTRIBUTION_WINNER_GIVEBACK_20260902A"
+V826D_BUILD_ID = "V826D_DRAWDOWN_ATTRIBUTION_20260902A"
 v826d_thread = None
 
 def _v826d_status():
@@ -64739,163 +64738,192 @@ def _v826d_preflight():
     D=_v826b_load_oos()
     T=D[D["reference_rank"]>=.75].copy()
     meta,_=_v826c_listing_meta()
-    adm,_=_v826c_admit(T,"TOP25_CURRENT",meta)
-    lids=sorted(set(adm["listing_id"].astype(str))) if not adm.empty else []
+
+    top_adm,_=_v826c_admit(T,"TOP25_CURRENT",meta)
+    base_adm,_=_v826b_admit(D)
+
+    lids=set(top_adm["listing_id"].astype(str)) | set(base_adm["listing_id"].astype(str))
     M,lidcol=_v826a_manifest()
     mlids=set(M[lidcol].astype(str))
-    map_cov=len(set(lids)&mlids)/max(1,len(lids))
-
-    cresult={}
-    if V826C_RESULT.exists():
-        try:cresult=json.loads(V826C_RESULT.read_text(encoding="utf-8"))
-        except Exception:cresult={}
-    top25=(cresult.get("top25_variants") or {}).get("TOP25_CURRENT",{})
-    anatomy=top25.get("maxdd_anatomy") or {}
-
-    verdict="PASS" if (
-        len(T)>=10000 and len(adm)>=2000 and map_cov>=.95 and
-        anatomy.get("peak_date") and anatomy.get("trough_date")
-    ) else "FAIL__TOP25_OR_V826C_MAXDD_CONTEXT_NOT_READY"
+    cov=len(lids & mlids)/max(1,len(lids))
 
     out={
         "version":"V8.26D Portfolio Drawdown Attribution / Winner Giveback Audit",
         "build_id":V826D_BUILD_ID,
-        "verdict":verdict,
-        "top25_candidate_rows":int(len(T)),
-        "admitted_trades":int(len(adm)),
-        "unique_listings":int(len(lids)),
-        "manifest_mapping_coverage":float(map_cov),
-        "v826c_peak_date":anatomy.get("peak_date"),
-        "v826c_trough_date":anatomy.get("trough_date"),
-        "v826c_drawdown":anatomy.get("drawdown"),
-        "boundaries":"Read-only. Reuses fixed Top25/current admission and cached historical prices. No exit simulations, no new thresholds, no tuning.",
-        "next_action":"RUN_POSITION_LEVEL_DRAWDOWN_ATTRIBUTION"
+        "verdict":"PASS" if len(top_adm)>2000 and len(base_adm)>2000 and cov>=.95 else "FAIL__ADMISSION_OR_CACHE_NOT_READY",
+        "top25_admitted_trades":int(len(top_adm)),
+        "base_admitted_trades":int(len(base_adm)),
+        "unique_price_listings":int(len(lids)),
+        "manifest_mapping_coverage":float(cov),
+        "scope":"Exact TOP25_CURRENT vs BASE admissions from V8.26C/V8.26B. Daily cached-close MTM attribution only.",
+        "next_action":"RUN_READ_ONLY_DRAWDOWN_ATTRIBUTION"
     }
     V826D_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     return out
 
-def _v826d_value_on(pm, day, fallback):
-    if pm is None:return float(fallback)
+def _v826d_price_on_or_before(pm, day, fallback):
+    if not pm:return float(fallback)
     day=pd.Timestamp(day).normalize()
-    if day in pm and np.isfinite(pm[day]):return float(pm[day])
-    # use latest cached close <= day
-    keys=[d for d in pm.keys() if d<=day]
-    if keys:
-        d=max(keys);v=pm.get(d)
-        if v is not None and np.isfinite(v):return float(v)
-    return float(fallback)
+    if day in pm:
+        return float(pm[day])
+    prev=[d for d in pm.keys() if d<=day]
+    if not prev:return float(fallback)
+    return float(pm[max(prev)])
 
-def _v826d_path_slice(pm, start, end, entry_px):
-    if pm is None:return pd.DataFrame(columns=["date","close","ret"])
-    rows=[(pd.Timestamp(d).normalize(),float(v)) for d,v in pm.items()
-          if pd.Timestamp(start).normalize()<=pd.Timestamp(d).normalize()<=pd.Timestamp(end).normalize()
-          and np.isfinite(v)]
-    if not rows:return pd.DataFrame(columns=["date","close","ret"])
-    q=pd.DataFrame(rows,columns=["date","close"]).sort_values("date").drop_duplicates("date",keep="last")
-    q["ret"]=q["close"]/float(entry_px)-1.0
-    return q
+def _v826d_position_mtm_value(p, day, price_maps):
+    lid=str(p["listing_id"])
+    px=_v826d_price_on_or_before(price_maps.get(lid,{}),day,p["entry_px"])
+    return float(p["capital"])*(float(px)/float(p["entry_px"])), float(px)
 
-def _v826d_position_attribution(adm, price_maps, peak, trough):
-    out=[]
-    peak=pd.Timestamp(peak).normalize();trough=pd.Timestamp(trough).normalize()
+def _v826d_active_on(adm, day):
+    day=pd.Timestamp(day).normalize()
+    return adm[(adm["entry_date"]<=day)&(adm["exit_date"]>day)].copy()
 
-    # Include positions that were active at any point during peak->trough window.
-    X=adm[(adm["entry_date"]<=trough)&(adm["exit_date"]>peak)].copy()
-    for _,r in X.iterrows():
-        lid=str(r["listing_id"]);pm=price_maps.get(lid,{})
-        ep=float(r["entry_px"]);cap=float(r["capital"])
-        entry=pd.Timestamp(r["entry_date"]).normalize()
-        exitd=pd.Timestamp(r["exit_date"]).normalize()
+def _v826d_position_path_stats(p, peak_date, trough_date, price_maps):
+    lid=str(p["listing_id"])
+    pm=price_maps.get(lid,{})
+    ep=float(p["entry_px"])
+    cap=float(p["capital"])
 
-        start=max(entry,peak)
-        end=min(exitd,trough)
-        start_px=_v826d_value_on(pm,start,ep)
-        end_px=_v826d_value_on(pm,end,start_px)
+    pval, ppx = _v826d_position_mtm_value(p, peak_date, price_maps)
+    tval, tpx = _v826d_position_mtm_value(p, trough_date, price_maps)
 
-        # If position exits within window, use modeled realized proceeds at exit.
-        if exitd<=trough:
-            end_value=cap*(1.0+float(r["realized_ret"]))
-            end_ret=float(r["realized_ret"])
-        else:
-            end_value=cap*(end_px/ep)
-            end_ret=float(end_px/ep-1.0)
-
-        start_value=cap*(start_px/ep)
-        contribution=end_value-start_value
-
-        # Full path until trough/exit, and from entry to trough/exit for MFE/giveback.
-        pwin=_v826d_path_slice(pm,start,end,ep)
-        pfull=_v826d_path_slice(pm,entry,end,ep)
-
-        peak_open_ret=float(pwin["ret"].max()) if len(pwin) else float(start_px/ep-1.0)
-        trough_open_ret=float(end_ret)
-        entry_to_end_mfe=float(pfull["ret"].max()) if len(pfull) else max(0.0,float(end_ret))
-        giveback_from_best=float(entry_to_end_mfe-end_ret)
-        drawdown_window_mfe=float(pwin["ret"].max()) if len(pwin) else float(start_px/ep-1.0)
-        window_giveback=float(drawdown_window_mfe-end_ret)
-
-        out.append({
-            "listing_id":lid,
-            "ticker":r.get("ticker"),
-            "sector":r.get("sector"),
-            "entry_date":str(entry.date()),
-            "exit_date":str(exitd.date()),
-            "reference_rank":float(r["reference_rank"]),
-            "capital":cap,
-            "winner20":bool(r["winner20"]),
-            "is_stop":bool(r["is_stop"]),
-            "realized_ret":float(r["realized_ret"]),
-            "active_start":str(start.date()),
-            "active_end":str(end.date()),
-            "start_ret":float(start_px/ep-1.0),
-            "end_ret":float(end_ret),
-            "dollar_contribution":float(contribution),
-            "pct_of_capital_change":float(contribution/cap) if cap else None,
-            "entry_to_window_end_mfe":entry_to_end_mfe,
-            "giveback_from_best_to_window_end":giveback_from_best,
-            "window_mfe":drawdown_window_mfe,
-            "window_giveback":window_giveback,
-            "had_10pct_open_profit_before_end":bool(entry_to_end_mfe>=.10),
-            "had_20pct_open_profit_before_end":bool(entry_to_end_mfe>=.20),
-            "gave_back_10pct_or_more":bool(giveback_from_best>=.10),
-        })
-    return pd.DataFrame(out)
-
-def _v826d_classify_failure(A):
-    if A is None or A.empty:return {}
-    total_loss=float(-A.loc[A["dollar_contribution"]<0,"dollar_contribution"].sum())
-    stop_loss=float(-A.loc[(A["dollar_contribution"]<0)&(A["is_stop"]),"dollar_contribution"].sum())
-    nonstop_loss=float(-A.loc[(A["dollar_contribution"]<0)&(~A["is_stop"]),"dollar_contribution"].sum())
-    winner_loss=float(-A.loc[(A["dollar_contribution"]<0)&(A["winner20"]),"dollar_contribution"].sum())
-
-    gave=A[A["giveback_from_best_to_window_end"]>=.10].copy()
-    winner_gave=gave[gave["winner20"]].copy()
-
-    stop_share=stop_loss/max(1e-12,total_loss)
-    winner_loss_share=winner_loss/max(1e-12,total_loss)
-    big_giveback_share=float(len(winner_gave)/max(1,int(A["winner20"].sum())))
-
-    if stop_share>=.60:
-        mode="STOP_CLUSTER_DOMINANT"
-    elif winner_loss_share>=.35 or big_giveback_share>=.50:
-        mode="WINNER_GIVEBACK_OR_SYNCHRONIZED_WINNER_DRAWDOWN_DOMINANT"
+    # Position-local max mark from max(entry, portfolio peak) through portfolio trough.
+    start=max(pd.Timestamp(p["entry_date"]).normalize(),pd.Timestamp(peak_date).normalize())
+    end=pd.Timestamp(trough_date).normalize()
+    vals=[]
+    if pm:
+        for d,px in pm.items():
+            dd=pd.Timestamp(d).normalize()
+            if start<=dd<=end and np.isfinite(px):
+                vals.append((dd,float(px)))
+    if vals:
+        best_day,best_px=max(vals,key=lambda z:z[1])
     else:
-        mode="MIXED_SYNCHRONIZED_MTM_DRAWDOWN"
+        best_day=start;best_px=ppx
+
+    best_val=cap*(best_px/ep)
+    peak_unreal=pval-cap
+    trough_unreal=tval-cap
+    local_best_unreal=best_val-cap
+
+    giveback_dollars=max(0.0,best_val-tval)
+    peak_to_trough_dollars=tval-pval
+    peak_to_trough_pct_of_cap=(tval/pval-1.0) if pval else None
+    local_best_to_trough_pct=(tval/best_val-1.0) if best_val else None
+
+    # Final modeled PnL.
+    final_pnl=cap*float(p["realized_ret"])
+
+    # Was there substantial open profit before trough?
+    had_10pct_open_profit = (best_px/ep-1.0) >= .10
+    had_20pct_open_profit = (best_px/ep-1.0) >= .20
 
     return {
-        "mode":mode,
-        "gross_negative_contribution":total_loss,
-        "stop_negative_contribution":stop_loss,
-        "nonstop_negative_contribution":nonstop_loss,
-        "winner20_negative_contribution":winner_loss,
-        "stop_loss_share":float(stop_share),
-        "winner20_loss_share":float(winner_loss_share),
-        "winner20_count":int(A["winner20"].sum()),
-        "winner20_with_10pct_plus_giveback":int(len(winner_gave)),
-        "winner20_big_giveback_share":float(big_giveback_share),
-        "positions_with_10pct_open_profit":int(A["had_10pct_open_profit_before_end"].sum()),
-        "positions_with_20pct_open_profit":int(A["had_20pct_open_profit_before_end"].sum()),
-        "positions_giveback_10pct_plus":int(A["gave_back_10pct_or_more"].sum()),
+        "listing_id":lid,
+        "ticker":p.get("ticker"),
+        "sector":p.get("sector"),
+        "entry_date":str(pd.Timestamp(p["entry_date"]).date()),
+        "exit_date":str(pd.Timestamp(p["exit_date"]).date()),
+        "reference_rank":float(p["reference_rank"]),
+        "capital":cap,
+        "entry_px":ep,
+        "peak_px":ppx,
+        "trough_px":tpx,
+        "portfolio_peak_unrealized_dollars":float(peak_unreal),
+        "portfolio_trough_unrealized_dollars":float(trough_unreal),
+        "peak_to_trough_dollars":float(peak_to_trough_dollars),
+        "peak_to_trough_pct_of_cap":float(peak_to_trough_pct_of_cap) if peak_to_trough_pct_of_cap is not None else None,
+        "local_best_date":str(pd.Timestamp(best_day).date()),
+        "local_best_px":float(best_px),
+        "local_best_unrealized_dollars":float(local_best_unreal),
+        "giveback_dollars_local_best_to_trough":float(giveback_dollars),
+        "local_best_to_trough_pct":float(local_best_to_trough_pct) if local_best_to_trough_pct is not None else None,
+        "eventual_realized_ret":float(p["realized_ret"]),
+        "eventual_pnl_dollars":float(final_pnl),
+        "winner20":bool(p["winner20"]),
+        "is_stop":bool(p["is_stop"]),
+        "had_10pct_open_profit_before_trough":bool(had_10pct_open_profit),
+        "had_20pct_open_profit_before_trough":bool(had_20pct_open_profit),
+    }
+
+def _v826d_analyze_variant(name, adm, E, price_maps):
+    if adm is None or adm.empty or E is None or E.empty:
+        return {}
+
+    trough_i=int(E["dd"].idxmin())
+    trough_date=pd.Timestamp(E.loc[trough_i,"date"]).normalize()
+    peak_equity=float(E.loc[trough_i,"peak"])
+    pre=E.loc[:trough_i]
+    peak_candidates=pre.index[np.isclose(pre["equity"],peak_equity,rtol=1e-10,atol=1e-8)]
+    peak_i=int(peak_candidates[-1]) if len(peak_candidates) else int(pre["equity"].idxmax())
+    peak_date=pd.Timestamp(E.loc[peak_i,"date"]).normalize()
+
+    # Positions active at either end plus positions opened during DD window.
+    scope=adm[
+        ((adm["entry_date"]<=peak_date)&(adm["exit_date"]>peak_date)) |
+        ((adm["entry_date"]<=trough_date)&(adm["exit_date"]>trough_date)) |
+        ((adm["entry_date"]>peak_date)&(adm["entry_date"]<=trough_date))
+    ].copy()
+
+    rows=[]
+    for _,p in scope.iterrows():
+        rows.append(_v826d_position_path_stats(p,peak_date,trough_date,price_maps))
+
+    R=pd.DataFrame(rows)
+    if R.empty:return {}
+
+    # Attribution based on peak->trough MTM dollar change.
+    neg=R[R["peak_to_trough_dollars"]<0].copy()
+    pos=R[R["peak_to_trough_dollars"]>=0].copy()
+
+    dd_dollars=float(E.loc[trough_i,"equity"]-E.loc[peak_i,"equity"])
+    giveback_total=float(R["giveback_dollars_local_best_to_trough"].sum())
+
+    def grp(mask):
+        X=R[mask].copy()
+        return {
+            "positions":int(len(X)),
+            "peak_to_trough_dollars":float(X["peak_to_trough_dollars"].sum()) if len(X) else 0.0,
+            "giveback_dollars":float(X["giveback_dollars_local_best_to_trough"].sum()) if len(X) else 0.0,
+            "eventual_pnl_dollars":float(X["eventual_pnl_dollars"].sum()) if len(X) else 0.0,
+            "had_10pct_open_profit":int(X["had_10pct_open_profit_before_trough"].sum()) if len(X) else 0,
+            "had_20pct_open_profit":int(X["had_20pct_open_profit_before_trough"].sum()) if len(X) else 0,
+        }
+
+    groups={
+        "eventual_winner20":grp(R["winner20"]),
+        "eventual_stop":grp(R["is_stop"]),
+        "winner20_not_stop":grp(R["winner20"] & ~R["is_stop"]),
+        "stop_not_winner20":grp(R["is_stop"] & ~R["winner20"]),
+        "neither":grp(~R["winner20"] & ~R["is_stop"]),
+    }
+
+    # Largest negative contributors and largest givebacks.
+    contrib=R.sort_values("peak_to_trough_dollars").head(15).to_dict("records")
+    givebacks=R.sort_values("giveback_dollars_local_best_to_trough",ascending=False).head(15).to_dict("records")
+
+    # Count winners that gave back materially despite positive final outcome.
+    eventual_positive=R[R["eventual_realized_ret"]>0].copy()
+    winner_giveback_count=int(((eventual_positive["giveback_dollars_local_best_to_trough"]>0) &
+                               (eventual_positive["local_best_to_trough_pct"]<=-.10)).sum()) if len(eventual_positive) else 0
+
+    return {
+        "variant":name,
+        "peak_date":str(peak_date.date()),
+        "trough_date":str(trough_date.date()),
+        "peak_equity":float(E.loc[peak_i,"equity"]),
+        "trough_equity":float(E.loc[trough_i,"equity"]),
+        "drawdown_pct":float(E.loc[trough_i,"dd"]),
+        "drawdown_dollars":dd_dollars,
+        "positions_in_scope":int(len(R)),
+        "negative_contributors":int(len(neg)),
+        "positive_contributors":int(len(pos)),
+        "gross_giveback_dollars_local_best_to_trough":giveback_total,
+        "winner_giveback_count_ge10pct_from_local_best":winner_giveback_count,
+        "groups":groups,
+        "largest_negative_contributors":contrib,
+        "largest_givebacks":givebacks,
     }
 
 def _v826d_run():
@@ -64903,96 +64931,60 @@ def _v826d_run():
     D=_v826b_load_oos()
     T=D[D["reference_rank"]>=.75].copy()
     meta,_=_v826c_listing_meta()
-    adm,_=_v826c_admit(T,"TOP25_CURRENT",meta)
-    if adm.empty:raise RuntimeError("No Top25 admitted trades")
 
-    # Recompute equity curve to avoid trusting stale page state.
-    lids=sorted(set(adm["listing_id"].astype(str)))
-    _v826d_write_status(status="running",phase="cached_prices",
-        message=f"Loading cached prices for {len(lids)} Top25 admitted listings…",
-        processed=0,total=len(lids),error=None)
-    price_maps=_v826b_price_maps(lids)
-    E=_v826c_equity_curve(adm,price_maps)
-    md=_v826c_drawdown_anatomy(adm,E,meta)
-    if not md.get("peak_date") or not md.get("trough_date"):
-        raise RuntimeError("Could not resolve Top25 peak/trough")
-
-    peak=pd.Timestamp(md["peak_date"]).normalize()
-    trough=pd.Timestamp(md["trough_date"]).normalize()
-
-    A=_v826d_position_attribution(adm,price_maps,peak,trough)
-    if A.empty:raise RuntimeError("No positions overlap Top25 drawdown window")
-    A=A.sort_values("dollar_contribution",ascending=True).reset_index(drop=True)
-
-    failure=_v826d_classify_failure(A)
-
-    # Group summaries.
-    by_class=[]
-    for label,mask in [
-        ("STOP",A["is_stop"]),
-        ("WINNER20",A["winner20"]),
-        ("NONSTOP_NONWINNER",(~A["is_stop"]) & (~A["winner20"])),
-    ]:
-        g=A[mask].copy()
-        by_class.append({
-            "class":label,
-            "positions":int(len(g)),
-            "net_dollar_contribution":float(g["dollar_contribution"].sum()) if len(g) else 0.0,
-            "negative_dollar_contribution":float(-g.loc[g["dollar_contribution"]<0,"dollar_contribution"].sum()) if len(g) else 0.0,
-            "median_window_giveback":float(g["window_giveback"].median()) if len(g) else None,
-            "median_entry_to_end_giveback":float(g["giveback_from_best_to_window_end"].median()) if len(g) else None,
-        })
-
-    # Top contributors to drawdown and top givebacks.
-    worst=A.head(15).to_dict("records")
-    givebacks=A.sort_values("giveback_from_best_to_window_end",ascending=False).head(15).to_dict("records")
-    winners=A[A["winner20"]].sort_values("giveback_from_best_to_window_end",ascending=False).to_dict("records")
-
-    # Compare BASE same peak/trough window for context.
+    top_adm,_=_v826c_admit(T,"TOP25_CURRENT",meta)
     base_adm,_=_v826b_admit(D)
-    base_lids=sorted(set(base_adm["listing_id"].astype(str)))
-    missing=[x for x in base_lids if x not in price_maps]
-    if missing:
-        extra=_v826b_price_maps(missing);price_maps.update(extra)
-    base_E=_v826c_equity_curve(base_adm,price_maps)
-    base_window=base_E[(base_E["date"]>=peak)&(base_E["date"]<=trough)].copy()
-    if len(base_window):
-        base_peak=float(base_window["equity"].iloc[0])
-        base_min=float(base_window["equity"].min())
-        base_window_dd=float(base_min/base_peak-1.0) if base_peak else None
-    else:
-        base_window_dd=None
 
-    verdict="DRAWDOWN_ATTRIBUTION_COMPLETE__"+failure.get("mode","UNKNOWN")
-    if failure.get("mode")=="STOP_CLUSTER_DOMINANT":
-        next_action="RESEARCH_EARLY_FAILURE_EXIT_ONLY__NO_ENTRY_RETUNE"
-    elif failure.get("mode")=="WINNER_GIVEBACK_OR_SYNCHRONIZED_WINNER_DRAWDOWN_DOMINANT":
-        next_action="RESEARCH_WINNER_PROFIT_PROTECTION_OR_EXPOSURE_LAYER__READ_ONLY_FIRST"
+    all_lids=set(top_adm["listing_id"].astype(str)) | set(base_adm["listing_id"].astype(str))
+    _v826d_write_status(status="running",phase="cached_prices",
+                        message=f"Loading cached prices for {len(all_lids)} listings…",
+                        processed=0,total=len(all_lids),error=None)
+    price_maps=_v826b_price_maps(all_lids)
+
+    _v826d_write_status(status="running",phase="top25_attribution",
+                        message="Attributing TOP25 max drawdown…",processed=1,total=3,error=None)
+    top_E=_v826c_equity_curve(top_adm,price_maps)
+    top=_v826d_analyze_variant("TOP25_CURRENT",top_adm,top_E,price_maps)
+
+    _v826d_write_status(status="running",phase="base_attribution",
+                        message="Attributing BASE max drawdown…",processed=2,total=3,error=None)
+    base_E=_v826c_equity_curve(base_adm,price_maps)
+    base=_v826d_analyze_variant("BASE",base_adm,base_E,price_maps)
+
+    # Read-only diagnosis classification.
+    tw=top.get("groups",{}).get("eventual_winner20",{})
+    ts=top.get("groups",{}).get("eventual_stop",{})
+    dd=abs(float(top.get("drawdown_dollars",0)))
+    winner_dd_share=abs(min(0.0,float(tw.get("peak_to_trough_dollars",0))))/dd if dd>0 else 0.0
+    stop_dd_share=abs(min(0.0,float(ts.get("peak_to_trough_dollars",0))))/dd if dd>0 else 0.0
+    giveback_ratio=float(top.get("gross_giveback_dollars_local_best_to_trough",0))/dd if dd>0 else 0.0
+
+    if winner_dd_share>=.35 and giveback_ratio>=.75:
+        verdict="TOP25_DRAWDOWN_DOMINATED_BY_WINNER_GIVEBACK_AND_SYNCHRONIZED_MTM"
+        next_action="AUDIT_FIXED_WINNER_PROTECTION_IDEAS_ONLY__NO_EXIT_TUNING_YET"
+    elif stop_dd_share>=.50:
+        verdict="TOP25_DRAWDOWN_DOMINATED_BY_STOP_CLUSTER"
+        next_action="AUDIT_EARLY_FAILURE_PATHS_ONLY__NO_ENTRY_THRESHOLD_TUNING"
     else:
-        next_action="RESEARCH_MARKET_EXPOSURE_SYNCHRONIZATION__READ_ONLY_FIRST"
+        verdict="TOP25_DRAWDOWN_IS_MIXED__NO_SINGLE_DOMINANT_CAUSE"
+        next_action="KEEP_TOP25_RESEARCH_ONLY__SEPARATE_MARKET_EXPOSURE_AND_EXIT_PATH_AUDITS"
 
     result={
         "version":"V8.26D Portfolio Drawdown Attribution / Winner Giveback Audit",
         "build_id":V826D_BUILD_ID,
         "verdict":verdict,
-        "top25_maxdd":{
-            "peak_date":md.get("peak_date"),
-            "trough_date":md.get("trough_date"),
-            "drawdown":md.get("drawdown"),
-            "base_same_window_drawdown":base_window_dd,
-            "positions_overlapping_window":int(len(A))
+        "top25":top,
+        "base":base,
+        "diagnosis":{
+            "top25_winner20_negative_dd_share":float(winner_dd_share),
+            "top25_stop_negative_dd_share":float(stop_dd_share),
+            "top25_gross_giveback_to_drawdown_ratio":float(giveback_ratio),
         },
-        "failure_mode":failure,
-        "class_attribution":by_class,
-        "worst_position_contributors":worst,
-        "largest_givebacks":givebacks,
-        "winner20_giveback_rows":winners,
-        "decision_rule":"Read-only diagnosis only. No strategy rule is changed in V8.26D. Failure mode is classified from actual cached MTM contribution during the fixed Top25 maximum-drawdown window.",
-        "next_action":next_action,
-        "boundaries":"Reuses V8.26A/B/C OOS and cached daily prices only. No new downloads, no Top25 cutoff changes, no exit simulation, no trailing-stop optimization, no threshold search, no tuning."
+        "decision_rule":"Read-only diagnosis only. No trading rule is promoted from this page. Winner-giveback diagnosis requires >=35% of Top25 peak->trough negative dollar drawdown attributable to eventual +20 winners and gross local-best giveback >=75% of portfolio drawdown dollars. STOP-cluster diagnosis requires >=50% attributable to eventual STOPs.",
+        "boundaries":"Exact V8.26C TOP25_CURRENT and V8.26B BASE admissions. Actual cached daily close MTM. No entry/exit/admission changes, no threshold search, no tuning, no downloads, no rescan.",
+        "next_action":next_action
     }
     V826D_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
-    A.to_csv(V826D_DIR/"top25_maxdd_position_attribution.csv.gz",index=False,compression="gzip")
     return result
 
 def _v826d_worker():
@@ -65001,15 +64993,14 @@ def _v826d_worker():
     try:
         P=json.loads(V826D_PREFLIGHT.read_text(encoding="utf-8")) if V826D_PREFLIGHT.exists() else {}
         if P.get("verdict")!="PASS":raise RuntimeError("V8.26D Preflight must PASS first")
-        _v826d_write_status(status="running",phase="drawdown_attribution",
-            message="Attributing Top25 maximum drawdown position-by-position…",
-            processed=0,total=1,elapsed_sec=0,error=None)
+        _v826d_write_status(status="running",phase="start",message="Starting read-only drawdown attribution…",
+                            processed=0,total=3,elapsed_sec=0,error=None)
         R=_v826d_run()
         _v826d_write_status(status="done",phase="done",message=f"完成：{R.get('verdict')}",
-            processed=1,total=1,elapsed_sec=round(time.time()-t0,1),error=None)
+                            processed=3,total=3,elapsed_sec=round(time.time()-t0,1),error=None)
     except Exception as ex:
         _v826d_write_status(status="error",phase="error",message=f"{type(ex).__name__}: {ex}",
-            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}")
+                            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}")
     finally:
         v826d_thread=None
 
@@ -65048,41 +65039,49 @@ def v826d_page():
         try:R=json.loads(V826D_RESULT.read_text(encoding="utf-8"))
         except Exception:R={}
     S=_v826d_status()
-    fm=R.get("failure_mode") or {}
-    md=R.get("top25_maxdd") or {}
 
-    cls=""
-    for x in R.get("class_attribution") or []:
-        cls += (
-            f"<tr><td><b>{e(x.get('class'))}</b></td><td>{e(x.get('positions'))}</td>"
-            f"<td>{e(round(float(x.get('net_dollar_contribution',0)),2))}</td>"
-            f"<td>{e(round(float(x.get('negative_dollar_contribution',0)),2))}</td>"
-            f"<td>{e(round(float(x.get('median_window_giveback',0))*100,2) if x.get('median_window_giveback') is not None else '—')}%</td>"
-            f"<td>{e(round(float(x.get('median_entry_to_end_giveback',0))*100,2) if x.get('median_entry_to_end_giveback') is not None else '—')}%</td></tr>"
-        )
+    top=R.get("top25") or {}
+    base=R.get("base") or {}
+    diag=R.get("diagnosis") or {}
 
-    worst=""
-    for x in R.get("worst_position_contributors") or []:
-        worst += (
-            f"<tr><td><b>{e(x.get('ticker'))}</b></td><td>{e(x.get('entry_date'))}</td><td>{e(x.get('exit_date'))}</td>"
+    contrib=""
+    for x in top.get("largest_negative_contributors") or []:
+        contrib += (
+            f"<tr><td><b>{e(x.get('ticker','—'))}</b></td>"
+            f"<td>{e(x.get('entry_date'))}</td><td>{e(x.get('exit_date'))}</td>"
             f"<td>{e(round(float(x.get('reference_rank',0))*100,1))}%</td>"
-            f"<td>{e(x.get('winner20'))}</td><td>{e(x.get('is_stop'))}</td>"
-            f"<td>{e(round(float(x.get('dollar_contribution',0)),2))}</td>"
-            f"<td>{e(round(float(x.get('start_ret',0))*100,2))}%</td>"
-            f"<td>{e(round(float(x.get('end_ret',0))*100,2))}%</td>"
-            f"<td>{e(round(float(x.get('giveback_from_best_to_window_end',0))*100,2))}%</td></tr>"
+            f"<td>{e(round(float(x.get('peak_to_trough_dollars',0)),0))}</td>"
+            f"<td>{e(round(float(x.get('giveback_dollars_local_best_to_trough',0)),0))}</td>"
+            f"<td>{e(round(float(x.get('eventual_realized_ret',0))*100,1))}%</td>"
+            f"<td>{e(x.get('winner20'))}</td><td>{e(x.get('is_stop'))}</td></tr>"
         )
 
-    win=""
-    for x in R.get("winner20_giveback_rows") or []:
-        win += (
-            f"<tr><td><b>{e(x.get('ticker'))}</b></td><td>{e(x.get('entry_date'))}</td>"
-            f"<td>{e(round(float(x.get('reference_rank',0))*100,1))}%</td>"
-            f"<td>{e(round(float(x.get('entry_to_window_end_mfe',0))*100,2))}%</td>"
-            f"<td>{e(round(float(x.get('end_ret',0))*100,2))}%</td>"
-            f"<td>{e(round(float(x.get('giveback_from_best_to_window_end',0))*100,2))}%</td>"
-            f"<td>{e(x.get('is_stop'))}</td></tr>"
+    gb=""
+    for x in top.get("largest_givebacks") or []:
+        gb += (
+            f"<tr><td><b>{e(x.get('ticker','—'))}</b></td>"
+            f"<td>{e(x.get('entry_date'))}</td>"
+            f"<td>{e(x.get('local_best_date'))}</td>"
+            f"<td>{e(round(float(x.get('giveback_dollars_local_best_to_trough',0)),0))}</td>"
+            f"<td>{e(round(float(x.get('local_best_to_trough_pct',0))*100,1))}%</td>"
+            f"<td>{e(round(float(x.get('eventual_realized_ret',0))*100,1))}%</td>"
+            f"<td>{e(x.get('winner20'))}</td><td>{e(x.get('is_stop'))}</td></tr>"
         )
+
+    def group_table(side):
+        out=""
+        g=side.get("groups") or {}
+        for k in ["eventual_winner20","eventual_stop","winner20_not_stop","stop_not_winner20","neither"]:
+            x=g.get(k,{})
+            out += (
+                f"<tr><td><b>{e(k)}</b></td><td>{e(x.get('positions','—'))}</td>"
+                f"<td>{e(round(float(x.get('peak_to_trough_dollars',0)),0))}</td>"
+                f"<td>{e(round(float(x.get('giveback_dollars',0)),0))}</td>"
+                f"<td>{e(round(float(x.get('eventual_pnl_dollars',0)),0))}</td>"
+                f"<td>{e(x.get('had_10pct_open_profit','—'))}</td>"
+                f"<td>{e(x.get('had_20pct_open_profit','—'))}</td></tr>"
+            )
+        return out
 
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
 <style>
@@ -65091,45 +65090,49 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 .o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
 .g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
 .b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
-.r{{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}}
 button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
 .track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
-table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left}}
 </style></head><body><div class='w'><a href='/'>← 首页</a>
 
-<div class='c'><h1>🧬 V8.26D Portfolio Drawdown Attribution / Winner Giveback Audit</h1>
-<div class='o'><b>不改 Exit，不调参数。</b> 直接拆 Top25 最大回撤：每只持仓从 portfolio peak 到 trough 贡献了多少亏损？STOP 占多少？真正 +20 Winner 是否曾有大幅浮盈后又回吐？</div></div>
+<div class='c'><h1>🧾 V8.26D Portfolio Drawdown Attribution / Winner Giveback Audit</h1>
+<div class='o'><b>只解释，不改规则。</b> 精确拆 Top25 当前最大回撤：哪些仓位贡献了亏损、哪些最终其实是 +20 winner、多少是 winner giveback、多少是真 STOP；同时与 BASE 自己的最大回撤作对照。</div></div>
 
-<div class='c'><form method='post' action='/v826d/preflight'><button>A. Run Drawdown Attribution Preflight</button></form>
+<div class='c'><form method='post' action='/v826d/preflight'><button>A. Run Attribution Preflight</button></form>
 <h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
-<div class='g'>Top25 candidates <b>{e(P.get('top25_candidate_rows','—'))}</b> · Admitted <b>{e(P.get('admitted_trades','—'))}</b> · Manifest map <b>{e(round(float(P.get('manifest_mapping_coverage',0))*100,1) if P else '—')}%</b><br>
-V8.26C MaxDD window <b>{e(P.get('v826c_peak_date','—'))}</b> → <b>{e(P.get('v826c_trough_date','—'))}</b> · DD <b>{e(round(float(P.get('v826c_drawdown',0))*100,2) if P.get('v826c_drawdown') is not None else '—')}%</b></div></div>
+<div class='g'>Top25 admitted <b>{e(P.get('top25_admitted_trades','—'))}</b> · BASE admitted <b>{e(P.get('base_admitted_trades','—'))}</b> ·
+Price listings <b>{e(P.get('unique_price_listings','—'))}</b> · Manifest map <b>{e(round(float(P.get('manifest_mapping_coverage',0))*100,1) if P else '—')}%</b><br>
+Next: <b>{e(P.get('next_action','—'))}</b></div></div>
 
-<div class='c'><button id='go'>B. Run Position-Level Drawdown Attribution</button>
+<div class='c'><button id='go'>B. Run Read-Only Drawdown Attribution</button>
 <h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
 <div class='track'><div id='bar' class='bar'></div></div>
 <p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span></p></div>
 
 <div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
-<div class='g'>Failure mode: <b>{e(fm.get('mode','—'))}</b><br>
-Top25 DD: <b>{e(round(float(md.get('drawdown',0))*100,2) if md.get('drawdown') is not None else '—')}%</b> · BASE same window: <b>{e(round(float(md.get('base_same_window_drawdown',0))*100,2) if md.get('base_same_window_drawdown') is not None else '—')}%</b><br>
-STOP loss share <b>{e(round(float(fm.get('stop_loss_share',0))*100,1))}%</b> · Winner20 loss share <b>{e(round(float(fm.get('winner20_loss_share',0))*100,1))}%</b><br>
-Winner20 with ≥10% giveback <b>{e(fm.get('winner20_with_10pct_plus_giveback','—'))}/{e(fm.get('winner20_count','—'))}</b><br>
+<div class='g'>Top25 DD: <b>{e(top.get('peak_date','—'))}</b> → <b>{e(top.get('trough_date','—'))}</b> · <b>{e(round(float(top.get('drawdown_pct',0))*100,2) if top else '—')}%</b><br>
+Winner20 negative-DD share <b>{e(round(float(diag.get('top25_winner20_negative_dd_share',0))*100,1) if diag else '—')}%</b> ·
+STOP negative-DD share <b>{e(round(float(diag.get('top25_stop_negative_dd_share',0))*100,1) if diag else '—')}%</b> ·
+Gross giveback / DD dollars <b>{e(round(float(diag.get('top25_gross_giveback_to_drawdown_ratio',0))*100,1) if diag else '—')}%</b><br>
 Next: <b>{e(R.get('next_action','—'))}</b></div></div>
 
-<div class='c'><h2>Class Attribution</h2><div style='overflow:auto'><table>
-<tr><th>Class</th><th>Positions</th><th>Net $ contribution</th><th>Negative $ contribution</th><th>Median window giveback</th><th>Median entry→end giveback</th></tr>
-{cls or "<tr><td colspan=6>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>Top25 Group Attribution</h2><div style='overflow:auto'><table>
+<tr><th>Group</th><th>Positions</th><th>Peak→Trough $</th><th>Giveback $</th><th>Eventual PnL $</th><th>Had +10%</th><th>Had +20%</th></tr>
+{group_table(top) if top else "<tr><td colspan=7>Run audit first.</td></tr>"}</table></div></div>
 
-<div class='c'><h2>Worst Position Contributors</h2><div style='overflow:auto'><table>
-<tr><th>Ticker</th><th>Entry</th><th>Exit</th><th>Rank</th><th>+20?</th><th>STOP?</th><th>$ contribution</th><th>Start ret</th><th>End ret</th><th>Giveback</th></tr>
-{worst or "<tr><td colspan=10>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>BASE Group Attribution</h2><div style='overflow:auto'><table>
+<tr><th>Group</th><th>Positions</th><th>Peak→Trough $</th><th>Giveback $</th><th>Eventual PnL $</th><th>Had +10%</th><th>Had +20%</th></tr>
+{group_table(base) if base else "<tr><td colspan=7>Run audit first.</td></tr>"}</table></div></div>
 
-<div class='c'><h2>Tradable +20 Winners — Giveback Check</h2><div style='overflow:auto'><table>
-<tr><th>Ticker</th><th>Entry</th><th>Rank</th><th>MFE by DD end</th><th>End ret</th><th>Giveback</th><th>Eventually STOP?</th></tr>
-{win or "<tr><td colspan=7>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>Top25 Largest Negative Contributors</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Entry</th><th>Exit</th><th>Rank</th><th>Peak→Trough $</th><th>Giveback $</th><th>Final Ret</th><th>+20?</th><th>STOP?</th></tr>
+{contrib or "<tr><td colspan=9>Run audit first.</td></tr>"}</table></div></div>
 
-<div class='c'><div class='b'><b>Read-only rule:</b> {e(R.get('decision_rule',''))}</div>
+<div class='c'><h2>Top25 Largest Winner / Open-Profit Givebacks</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Entry</th><th>Local best</th><th>Giveback $</th><th>Best→Trough</th><th>Final Ret</th><th>+20?</th><th>STOP?</th></tr>
+{gb or "<tr><td colspan=8>Run audit first.</td></tr>"}</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen diagnosis rule:</b> {e(R.get('decision_rule',''))}</div>
 <p>{e(R.get('boundaries',''))}</p></div>
 
 <script>
