@@ -67568,3 +67568,231 @@ if _v834_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v834_home_base:APP.view_functions[ep]=_v834_home_wrap
+
+# ================= V8.35 TRUE POINT-IN-TIME VCP STRUCTURE RECONSTRUCTION A/B =================
+# Reconstruct a strict, source-anchored VCP structure gate at the actual V6.44 signal day
+# (one completed session before next-open entry). No threshold search: every numeric threshold
+# below is inherited from the already-deployed V6.1 engine's formal stage2/supply/breakout logic.
+# We filter the recovered V6.69 CONTROL entry stream only; entry / -7% stop / exit outcomes stay frozen.
+V835_DIR = DATA_DIR / "v835_true_pit_vcp_structure_reconstruction"
+V835_PREFLIGHT = V835_DIR / "preflight.json"
+V835_STATUS = V835_DIR / "status.json"
+V835_RESULT = V835_DIR / "result.json"
+V835_DETAIL = V835_DIR / "strict_vcp_entry_audit.csv.gz"
+V835_SOURCE = DATA_DIR / 'v669_low10_structural_stop_ab' / 'paired_exit_trades.csv.gz'
+V835_ENGINE = Path(__file__).with_name('jlaw_v6_1_DECISION_FAST.py')
+V835_BUILD_ID = 'v835-true-pit-vcp-structure-source-anchored-20260902'
+v835_thread = None
+
+def _v835_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'current_listing':None,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V835_STATUS.exists():
+        try:x.update(json.loads(V835_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v835_write(**kw):
+    V835_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v835_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V835_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v835_alive():return v835_thread is not None and v835_thread.is_alive()
+
+def _v835_engine():
+    import importlib.util
+    if not V835_ENGINE.exists():raise RuntimeError('Missing deployed jlaw_v6_1_DECISION_FAST.py')
+    spec=importlib.util.spec_from_file_location('v835_exact_engine',str(V835_ENGINE))
+    eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+    for n in ['ind','stage2','supply']:
+        if not hasattr(eng,n):raise RuntimeError('Exact engine missing '+n)
+    return eng
+
+def _v835_pf():
+    import pandas as pd,time
+    t0=time.time();V835_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V835_SOURCE.exists():raise RuntimeError('Recovered V6.69 source missing')
+        if not V835_ENGINE.exists():raise RuntimeError('Exact V6.1 engine missing')
+        S=pd.read_csv(V835_SOURCE,nrows=100,compression='gzip',low_memory=False)
+        need=['listing_id','entry_date','entry_px','control_reason','control_ret']
+        miss=[c for c in need if c not in S.columns]
+        M,lidcol=_v826a_manifest()
+        if M is None or M.empty:raise RuntimeError('Historical listing manifest missing')
+        allrows=pd.read_csv(V835_SOURCE,usecols=['listing_id','entry_date'],compression='gzip',low_memory=False)
+        lids=set(allrows.listing_id.astype(str));mlids=set(M[lidcol].astype(str));cov=100*len(lids&mlids)/max(1,len(lids))
+        eng=_v835_engine()
+        verdict='PASS' if not miss and cov>=95 and all(hasattr(eng,n) for n in ['ind','stage2','supply']) else 'FAIL__SOURCE_CACHE_OR_ENGINE'
+        out={'version':'V8.35','build_id':V835_BUILD_ID,'verdict':verdict,'source_rows':int(len(allrows)),'unique_listings':int(len(lids)),'manifest_mapping_pct':cov,'missing_columns':miss,
+             'gate_contract':['stage2 exact engine','3 finite contractions with c1>c2>c3','pivot tight <= 0.10','dry < 0.85','prev close <= pivot and signal close > pivot','extension <= 0.03','breakout volume ratio >= 1.20'],
+             'threshold_provenance':'All thresholds/conditions are pre-existing in deployed V6.1 engine; no threshold search in V8.35. RS/sector/group are NOT re-invented here because recovered 30Y benchmark provenance is not yet parity-certified.',
+             'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.35','build_id':V835_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V835_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v835_metrics(df):
+    import pandas as pd,numpy as np
+    if df is None or df.empty:return {'n':0,'stop_rate_pct':None,'win_rate_pct':None,'pf':None,'avg_ret_pct':None,'winner20':0,'winner30':0}
+    r=pd.to_numeric(df['control_ret'],errors='coerce');valid=r.notna();r=r[valid]
+    stop=df.loc[valid,'control_reason'].astype(str).str.upper().str.contains('STOP7',regex=False)
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    return {'n':int(len(r)),'stop_rate_pct':100*float(stop.mean()) if len(stop) else None,'win_rate_pct':100*float((r>0).mean()) if len(r) else None,
+            'pf':gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0),'avg_ret_pct':100*float(r.mean()) if len(r) else None,
+            'winner20':int((r>=.20).sum()),'winner30':int((r>=.30).sum())}
+
+def _v835_eval_entry(eng,q,entry_date,entry_px):
+    import pandas as pd,numpy as np
+    # q already adjusted/reconciled by _v826a_prepare_price. V6.44 enters NEXT session open,
+    # so qualification/trigger must use only completed bars strictly before entry_date.
+    ed=pd.Timestamp(entry_date).normalize()
+    q=q[q['date']<=ed].copy().reset_index(drop=True)
+    if len(q)<262:return {'audit_ok':False,'audit_error':'insufficient_history'}
+    idxs=q.index[q['date'].eq(ed)].tolist()
+    if not idxs:return {'audit_ok':False,'audit_error':'entry_date_not_in_cache'}
+    ei=int(idxs[-1])
+    if ei<261:return {'audit_ok':False,'audit_error':'insufficient_pre_entry_history'}
+    actual_open=float(q.loc[ei,'open'])
+    signal_q=q.iloc[:ei].copy().reset_index(drop=True)
+    try:
+        d=eng.ind(signal_q[['date','open','high','low','close','volume']].copy())
+        if d is None or len(d)<260:return {'audit_ok':False,'audit_error':'engine_ind_short'}
+        s2=bool(eng.stage2(d))
+        ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(d)
+        vals=[c1,c2,c3]
+        three=all(np.isfinite(float(x)) for x in vals)
+        contraction=bool(three and float(c2)<float(c1) and float(c3)<float(c2))
+        tight_ok=bool(np.isfinite(tight) and float(tight)<=.10)
+        dry_ok=bool(np.isfinite(dry) and float(dry)<.85)
+        prev=float(d.close.iloc[-2]);close=float(d.close.iloc[-1])
+        cross=bool(np.isfinite(piv) and prev<=float(piv) and close>float(piv))
+        ext=float(close/float(piv)-1) if np.isfinite(piv) and float(piv)>0 else np.nan
+        ext_ok=bool(np.isfinite(ext) and ext<=.03)
+        demand=bool(np.isfinite(vr) and float(vr)>=1.20)
+        strict=bool(s2 and contraction and tight_ok and dry_ok and cross and ext_ok and demand)
+        return {'audit_ok':True,'audit_error':None,'entry_open_cache':actual_open,'entry_px_rel_diff':abs(actual_open/float(entry_px)-1) if float(entry_px)>0 else np.nan,
+                'signal_date':str(pd.Timestamp(d.date.iloc[-1]).date()) if 'date' in d.columns else str(signal_q.date.iloc[-1].date()),
+                'trend_template':s2,'contraction_sequence':contraction,'tight_pivot':tight_ok,'volume_dry':dry_ok,'pivot_cross':cross,'extension_ok':ext_ok,'demand_confirm':demand,'strict_vcp_pass':strict,
+                'supply_score':float(ss) if np.isfinite(ss) else np.nan,'pivot':float(piv) if np.isfinite(piv) else np.nan,'pivot_tight':float(tight) if np.isfinite(tight) else np.nan,'volratio':float(vr) if np.isfinite(vr) else np.nan,
+                'c1':float(c1) if np.isfinite(c1) else np.nan,'c2':float(c2) if np.isfinite(c2) else np.nan,'c3':float(c3) if np.isfinite(c3) else np.nan,'dry':float(dry) if np.isfinite(dry) else np.nan,'extension':ext}
+    except Exception as ex:
+        return {'audit_ok':False,'audit_error':f'{type(ex).__name__}: {str(ex)[:120]}'}
+
+def _v835_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v835_pf()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    _v835_write(status='running',phase='load',message='Loading recovered V6.69 CONTROL stream + historical listing manifest',processed=0,total=0,errors=0)
+    S=pd.read_csv(V835_SOURCE,compression='gzip',low_memory=False)
+    S['listing_id']=S.listing_id.astype(str);S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize();S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce');S['control_ret']=pd.to_numeric(S.control_ret,errors='coerce')
+    S=S.dropna(subset=['listing_id','entry_date','entry_px','control_ret']).copy()
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    eng=_v835_engine();groups=list(S.groupby('listing_id',sort=True));total=len(groups);rows=[];errs=0
+    _v835_write(status='running',phase='reconstruct',message=f'Reconstructing exact point-in-time VCP structure on {total} listings',processed=0,total=total,errors=0)
+    for n,(lid,g) in enumerate(groups,1):
+        mr=mmap.get(str(lid));q=None
+        if mr is not None:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception:q=None
+        if q is None:
+            errs+=len(g)
+            for _,r in g.iterrows():rows.append({'listing_id':lid,'entry_date':r.entry_date,'entry_px':r.entry_px,'control_reason':r.control_reason,'control_ret':r.control_ret,'audit_ok':False,'audit_error':'price_cache_unavailable'})
+        else:
+            for _,r in g.iterrows():
+                a=_v835_eval_entry(eng,q,r.entry_date,r.entry_px);a.update({'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),'control_reason':r.control_reason,'control_ret':float(r.control_ret)})
+                if not a.get('audit_ok'):errs+=1
+                rows.append(a)
+        if n==1 or n%25==0 or n==total:
+            _v835_write(status='running',phase='reconstruct',message=f'Point-in-time strict VCP reconstruction {n}/{total} listings',processed=n,total=total,errors=errs,current_listing=str(lid),elapsed_sec=round(time.time()-t0,1))
+    D=pd.DataFrame(rows);V835_DIR.mkdir(parents=True,exist_ok=True);D.to_csv(V835_DETAIL,index=False,compression='gzip')
+    A=D[D.audit_ok.astype(bool)].copy();Q=A[A.strict_vcp_pass.astype(bool)].copy()
+    base=_v835_metrics(A);strict=_v835_metrics(Q)
+    gate_order=['trend_template','contraction_sequence','tight_pivot','volume_dry','pivot_cross','extension_ok','demand_confirm']
+    gates=[]
+    alive=pd.Series(True,index=A.index)
+    for c in gate_order:
+        col=A[c].fillna(False).astype(bool);standalone=100*float(col.mean()) if len(A) else None;alive=alive&col
+        gates.append({'gate':c,'standalone_pass_pct':standalone,'cumulative_pass_pct':100*float(alive.mean()) if len(A) else None,'cumulative_n':int(alive.sum())})
+    b20=int(base.get('winner20') or 0);b30=int(base.get('winner30') or 0)
+    retention20=100*int(strict.get('winner20') or 0)/max(1,b20);retention30=100*int(strict.get('winner30') or 0)/max(1,b30)
+    stopdrop=(base.get('stop_rate_pct')-strict.get('stop_rate_pct')) if base.get('stop_rate_pct') is not None and strict.get('stop_rate_pct') is not None else None
+    pfup=(strict.get('pf')-base.get('pf')) if strict.get('pf') is not None and base.get('pf') is not None else None
+    entry_parity=100*float((pd.to_numeric(A.entry_px_rel_diff,errors='coerce')<=1e-4).mean()) if len(A) else 0
+    coverage=100*len(A)/max(1,len(D))
+    if len(Q)>=500 and stopdrop is not None and stopdrop>=10 and pfup is not None and pfup>0 and retention20>=25:
+        verdict='STRICT_VCP_FIRST_LAYER_STRONGLY_IMPROVES_TRADE_QUALITY__PROCEED_TO_PORTFOLIO_REPLAY'
+    elif len(Q)>=200 and stopdrop is not None and stopdrop>0 and pfup is not None and pfup>0:
+        verdict='STRICT_VCP_FIRST_LAYER_SHOWS_POSITIVE_EDGE__NEEDS_PORTFOLIO_REPLAY_AND_RS_LINEAGE'
+    elif len(Q)<100:
+        verdict='STRICT_VCP_GATE_TOO_SPARSE_ON_RECOVERED_STREAM__CHECK_SIGNAL_SEMANTICS_BEFORE_TUNING'
+    else:
+        verdict='STRICT_VCP_FIRST_LAYER_NOT_YET_PROVEN__DO_NOT_TUNE_THRESHOLDS'
+    result={'version':'V8.35','build_id':V835_BUILD_ID,'verdict':verdict,'source':'Recovered V6.69 CONTROL entry stream; exact pre-entry historical cache; current V6.1 engine conditions used only as source-anchored reconstruction, not as historical provenance.',
+            'audit_coverage_pct':coverage,'entry_open_parity_pct':entry_parity,'base':base,'strict_vcp':strict,'strict_pass_pct':100*len(Q)/max(1,len(A)),'stop_rate_drop_pp':stopdrop,'pf_delta':pfup,'winner20_retention_pct':retention20,'winner30_retention_pct':retention30,'gate_funnel':gates,
+            'important_limit':'This V8.35 reconstructs the PRICE-STRUCTURE VCP layer point-in-time. It deliberately does not fabricate historical RS/sector/group benchmark lineage. If structure edge is proven, next replay adds parity-certified leadership/RS and causal 10-slot portfolio economics.',
+            'next':'If strict structure materially lowers STOP and lifts PF while retaining winners: V8.36 = parity-certified RS/Leadership + 10-slot causal portfolio replay. If not, inspect which strict gate destroys winners before any threshold change.',
+            'elapsed_sec':round(time.time()-t0,1),'errors':int(errs)}
+    V835_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    _v835_write(status='done',phase='complete',message=f'Done · {verdict}',processed=total,total=total,errors=errs,elapsed_sec=result['elapsed_sec']);return result
+
+def _v835_worker():
+    global v835_thread
+    import time
+    t0=time.time()
+    try:_v835_run()
+    except Exception as ex:_v835_write(status='error',phase='failed',message='V8.35 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v835_thread=None
+
+@APP.route('/v835/preflight',methods=['GET','POST'])
+def v835_preflight_route():_v835_pf();return redirect('/v835')
+@APP.post('/v835/start')
+def v835_start():
+    global v835_thread
+    if _v835_alive():return jsonify({'started':False,**_v835_status()})
+    p=_v835_pf()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v835_thread=threading.Thread(target=_v835_worker,daemon=True);v835_thread.start();return jsonify({'started':True,**_v835_status()})
+@APP.get('/api/v835')
+def v835_api():return jsonify(_v835_status())
+@APP.get('/v835/export')
+def v835_export():
+    if not V835_DETAIL.exists():return ('not ready',404)
+    return send_file(V835_DETAIL,as_attachment=True,download_name='v835_true_pit_vcp_entry_audit.csv.gz')
+@APP.get('/v835')
+def v835_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v835_status()
+    try:
+        if V835_PREFLIGHT.exists():P=json.loads(V835_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V835_RESULT.exists():R=json.loads(V835_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    b=R.get('base',{}) or {};q=R.get('strict_vcp',{}) or {}
+    def f(x,n=2):
+        try:return round(float(x),n)
+        except:return '—'
+    grows=''.join(f"<tr><td><b>{e(x.get('gate'))}</b></td><td>{e(f(x.get('standalone_pass_pct')))}%</td><td>{e(f(x.get('cumulative_pass_pct')))}%</td><td>{e(x.get('cumulative_n','—'))}</td></tr>" for x in R.get('gate_funnel',[]))
+    def mr(name,x):return f"<tr><td><b>{e(name)}</b></td><td>{e(x.get('n','—'))}</td><td>{e(f(x.get('stop_rate_pct')))}%</td><td>{e(f(x.get('win_rate_pct')))}%</td><td>{e(f(x.get('pf'),3))}</td><td>{e(f(x.get('avg_ret_pct'),3))}%</td><td>{e(x.get('winner20','—'))}</td><td>{e(x.get('winner30','—'))}</td></tr>"
+    mrows=mr('Recovered CONTROL',b)+mr('STRICT PIT VCP',q)
+    diagnosis=R.get('verdict','—');cls='ok' if ('IMPROVES' in str(diagnosis) or 'POSITIVE_EDGE' in str(diagnosis)) else 'warn'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#0f172a;margin:0}}.w{{max-width:1100px;margin:auto;padding:22px}}.c{{background:#fff;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe2ea;text-align:left;vertical-align:top}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V8.35 True Point-in-Time VCP Structure Reconstruction</h1><div class="warn"><b>第一层重建，不调阈值。</b> 在 V6.44 实际 next-open entry 的前一个已完成交易日，用历史 cache 重建严格 VCP price structure。Entry / -7% STOP / Exit outcome 全冻结。0 Tiingo，0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V835_BUILD_ID))}</p><p>Source rows {e(P.get('source_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest mapping {e(f(P.get('manifest_mapping_pct')))}%</p><p><b>Gate contract:</b> {e(' → '.join(P.get('gate_contract',[])))}</p><p><b>Preflight error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v835/preflight"><button>A. Run VCP Reconstruction Preflight</button></form><br><button onclick="go()">B. Run True PIT VCP A/B</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class="c"><h2>Verdict</h2><div class="{cls}"><b>{e(diagnosis)}</b></div><p>Audit coverage: <b>{e(f(R.get('audit_coverage_pct')))}%</b> · Entry-open parity: <b>{e(f(R.get('entry_open_parity_pct')))}%</b> · Strict pass: <b>{e(f(R.get('strict_pass_pct')))}%</b></p><p>STOP drop: <b>{e(f(R.get('stop_rate_drop_pp')))} pp</b> · PF Δ: <b>{e(f(R.get('pf_delta'),3))}</b> · +20 retention: <b>{e(f(R.get('winner20_retention_pct')))}%</b> · +30 retention: <b>{e(f(R.get('winner30_retention_pct')))}%</b></p></div>
+<div class="c"><h2>CONTROL vs Strict PIT VCP</h2><table><tr><th>Cohort</th><th>N</th><th>STOP Rate</th><th>Win Rate</th><th>PF</th><th>AvgTrade</th><th>+20</th><th>+30</th></tr>{mrows}</table></div>
+<div class="c"><h2>VCP Gate Funnel</h2><table><tr><th>Gate</th><th>Standalone pass</th><th>Cumulative pass</th><th>Cumulative N</th></tr>{grows or '<tr><td colspan=4>—</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>限制：</b> {e(R.get('important_limit','V8.35 不伪造历史 RS/sector/group benchmark lineage。'))}</div><p><b>Next:</b> {e(R.get('next',''))}</p>{"<a href='/v835/export'><button>Export trade-level VCP audit</button></a>" if V835_DETAIL.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v835',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1200)}}catch(e){{}}}}async function go(){{let r=await fetch('/v835/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll()}}poll()</script></div></body></html>'''
+
+_v835_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v835_home_base is not None:
+    def _v835_home_wrap(*args,**kwargs):
+        resp=_v835_home_base(*args,**kwargs)
+        card="""<div id='v835-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🧬 V8.35 True Point-in-Time VCP Reconstruction</h2><p>终于重建真正第一层：Trend Template → contraction sequence → tight pivot → dry-up → exact breakout。Entry/-7% Stop/Exit 冻结，直接看 STOP/PF/Big Winner retention。</p><a href='/v835'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.35</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v835_home_base:APP.view_functions[ep]=_v835_home_wrap
