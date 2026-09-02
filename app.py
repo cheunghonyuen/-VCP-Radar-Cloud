@@ -46784,7 +46784,7 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""<div id='v830-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
-        <h2>🧪 V8.30A Exact Supply-DRY Hard-Gate A/B Replay</h2>
+        <h2>🧪 V8.30B Exact Supply-DRY Runtime-Contract A/B Replay</h2>
         <p>只测试一个 source-supported 改动：把正式引擎现有的 Volume Dry-Up soft edge 提升为 Hard Gate。正式 supply() pivot / breakout / Entry / -7% Stop / Exit / Top25 排序全部冻结；10-slot causal replay。</p>
         <a href='/v830'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.30</button></a>
         </div>
@@ -66616,12 +66616,12 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 # One source-supported intervention only: promote the engine's existing DRY soft edge to a hard qualification gate.
 # No threshold search. Exact engine supply() is recomputed at each frozen Top25 entry date.
 # Formal pivot/breakout, Top25 ordering, entry, -7% stop, 60-session exit, 10-slot portfolio policy remain frozen.
-V830_DIR = DATA_DIR / "v830_exact_dryup_hardgate_ab"
+V830_DIR = DATA_DIR / "v830b_exact_dryup_runtime_contract_ab"
 V830_PREFLIGHT = V830_DIR / "preflight.json"
 V830_STATUS = V830_DIR / "status.json"
 V830_RESULT = V830_DIR / "result.json"
 V830_EXACT = V830_DIR / "exact_dry_trace.csv.gz"
-V830_BUILD_ID = "v830a-exact-supply-dry-bool-hardgate-20260902"
+V830_BUILD_ID = "v830b-runtime-dry-contract-isolated-20260902"
 v830_thread = None
 
 def _v830_status():
@@ -66645,17 +66645,16 @@ def _v830_engine():
     return ep,eng
 
 def _v830_dry_rule():
-    """Use the exact engine supply() DRY output itself as the pre-existing soft edge.
-    V8.29 proved _v6_edges references `dry`; therefore no literal comparator is required here.
-    We refuse to invent any numeric threshold: hard gate == bool(exact supply() dry).
+    """Runtime/source contract for the engine's existing DRY edge.
+    Do not require a literal threshold in source and do not invent one.
+    V8.29 already proved _v6_edges references `dry`; this function only records that provenance.
+    Exact DRY representation is validated by a real supply() sample in Preflight.
     """
     ep,eng=_v830_engine(); txt=ep.read_text(encoding='utf-8',errors='replace')
-    tree=ast.parse(txt); fs=_v829_func_source(txt,tree,'_v6_edges'); sup=_v829_func_source(txt,tree,'supply')
+    tree=ast.parse(txt); fs=_v829_func_source(txt,tree,'_v6_edges')
     if not re.search(r'\bdry\b',fs,re.I):
         raise RuntimeError('Exact _v6_edges does not reference dry; refuse to promote an unproven edge.')
-    if not re.search(r'\bdry\b',sup,re.I):
-        raise RuntimeError('Exact supply() source does not expose dry; refuse to invent a replacement.')
-    return {"op":"BOOL","value":None,"expression":"exact supply() dry == True","source":fs}
+    return {"op":"RUNTIME_SUPPLY_DRY","value":None,"expression":"use exact eng.supply(...)[7] with runtime type contract","source":fs}
 
 def _v830_gate(v,rule):
     # Exact engine semantics only. `dry` is already computed inside supply(); no new threshold.
@@ -66678,15 +66677,47 @@ def _v830_preflight():
     missing=[c for c in req if c not in T.columns]
     M,lidcol=_v826a_manifest(); lids=set(T['listing_id'].astype(str)); mlids=set(M[lidcol].astype(str)); cov=len(lids&mlids)/max(1,len(lids))
     ep,eng=_v830_engine(); funcs={k:hasattr(eng,k) for k in ['ind','supply']}
-    rule=None;err=None
-    try:rule=_v830_dry_rule()
+    rule=None;err=None; probe={}
+    try:
+        rule=_v830_dry_rule()
+        # Runtime contract probe: use one real mapped Top25 listing/date and inspect exact supply() return.
+        mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+        ok=False
+        for _,rr in T.head(500).iterrows():
+            lid=str(rr['listing_id']); mr=mmap.get(lid)
+            if mr is None: continue
+            q,hi,amb=_v826a_prepare_price(mr)
+            if q is None or len(q)<260: continue
+            try:d=eng.ind(q.copy())
+            except Exception:d=q.copy()
+            d['date']=pd.to_datetime(d['date']).dt.normalize(); ed=pd.Timestamp(rr['entry_date']).normalize()
+            hit=np.flatnonzero((d['date']==ed).to_numpy())
+            if len(hit)==0 or int(hit[-1])<260: continue
+            out=eng.supply(d.iloc[:int(hit[-1])+1])
+            if not isinstance(out,(tuple,list)) or len(out)<8:
+                raise RuntimeError(f'supply() return contract unexpected: type={type(out).__name__}, len={len(out) if hasattr(out,"__len__") else "NA"}')
+            dry=out[7]
+            probe={'listing_id':lid,'entry_date':str(ed.date()),'supply_len':len(out),'dry_type':type(dry).__name__,'dry_repr':repr(dry)[:120]}
+            # Hard-gate is allowed only when the engine already emits boolean/0-1 DRY state.
+            if isinstance(dry,(bool,np.bool_)):
+                probe['dry_contract']='BOOLEAN'; ok=True
+            else:
+                try:
+                    x=float(dry)
+                    if np.isfinite(x) and x in (0.0,1.0): probe['dry_contract']='NUMERIC_BOOLEAN_0_1'; ok=True
+                    else: probe['dry_contract']='NON_BOOLEAN_NUMERIC__DO_NOT_INVENT_THRESHOLD'
+                except Exception:
+                    probe['dry_contract']='UNSUPPORTED__DO_NOT_INVENT_THRESHOLD'
+            break
+        if not probe: raise RuntimeError('Could not obtain one real exact supply() runtime probe from mapped Top25 entries')
+        if not ok: raise RuntimeError('Exact supply() DRY is not an existing boolean edge state; refuse to invent a new threshold. Probe='+json.dumps(probe,default=str))
     except Exception as ex:err=f'{type(ex).__name__}: {ex}'
-    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values()) and rule is not None) else 'FAIL__SCHEMA_ENGINE_OR_DRY_RULE'
-    out={"version":"V8.30A Exact Supply-DRY Hard-Gate A/B Replay","build_id":V830_BUILD_ID,"verdict":verdict,
+    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values()) and rule is not None and err is None) else 'FAIL__SCHEMA_ENGINE_OR_DRY_RUNTIME_CONTRACT'
+    out={"version":"V8.30B Exact Supply-DRY Runtime-Contract A/B Replay","build_id":V830_BUILD_ID,"verdict":verdict,
          "top25_rows":int(len(T)),"unique_listings":int(len(lids)),"manifest_mapping":float(cov),"missing_columns":missing,
-         "engine_path":str(ep),"functions":funcs,"source_supported_dry_rule":({k:v for k,v in rule.items() if k!='source'} if rule else None),"dry_rule_error":err,
-         "frozen_contract":"reference_rank>=.75; exact engine supply(); exact supply() dry boolean soft edge only; frozen formal breakout/entry/-7% stop/60-session exit; causal 10-slot replay; 0 Tiingo; 0 universe rescan; 0 threshold search",
-         "next":"RUN_EXACT_DRY_AB" if verdict=='PASS' else 'STOP__FIX_REPORTED_PREFLIGHT_ONLY'}
+         "engine_path":str(ep),"functions":funcs,"source_supported_dry_rule":({k:v for k,v in rule.items() if k!='source'} if rule else None),"runtime_dry_probe":probe,"dry_rule_error":err,
+         "frozen_contract":"reference_rank>=.75; exact engine supply(); exact existing supply() DRY boolean edge only; frozen formal breakout/entry/-7% stop/60-session exit; causal 10-slot replay; 0 Tiingo; 0 universe rescan; 0 threshold search",
+         "next":"RUN_EXACT_DRY_AB" if verdict=='PASS' else 'STOP__REPORT_RUNTIME_DRY_CONTRACT_ONLY'}
     V830_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8'); return out
 
 def _v830_exact_trace(T,eng,rule):
@@ -66755,7 +66786,7 @@ def _v830_run():
     }
     passed=all(gate.values())
     verdict='DRY_HARD_GATE_ECONOMICALLY_SUPPORTED__PROMOTE_TO_SHADOW_CHALLENGER' if passed else 'DRY_HARD_GATE_NOT_PROVEN__DO_NOT_CHANGE_PRODUCTION'
-    result={"version":"V8.30A Exact Supply-DRY Hard-Gate A/B Replay","build_id":V830_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"verdict":verdict,
+    result={"version":"V8.30B Exact Supply-DRY Runtime-Contract A/B Replay","build_id":V830_BUILD_ID,"elapsed_sec":round(time.time()-t0,1),"verdict":verdict,
             "source_supported_dry_rule":{k:v for k,v in rule.items() if k!='source'},"exact_trace_rows":int(len(X)),"trace_coverage":float(cov),"formal_breakout_recompute_rate":float(X['formal_breakout_recomputed'].mean()),
             "base":vb,"dry_hard":vh,"candidate_big_winner20":{"base":bw_base,"dry_hard":bw_hard,"retention":float(bwret)},"economic_gate":gate,
             "decision_rule":"Single pre-existing DRY edge only. Pass requires admitted PF↑, AvgTrade↑, STOP rate↓, CAGR not worse, |MaxDD| not worse, and +20 candidate retention >=80% (existing winner-retention guardrail). No dry threshold search.",
@@ -66816,7 +66847,7 @@ def v830_page():
     rule=P.get('source_supported_dry_rule') or R.get('source_supported_dry_rule') or {}
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#eef2ff;border:2px solid #4f46e5;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'>
-<a href='/'>← 首页</a><div class='c'><h1>🧪 V8.30A Exact Supply-DRY Hard-Gate A/B Replay</h1><div class='warn'><b>只动第一层一个东西：</b>把正式引擎已经存在的 DRY soft edge（{e(rule.get('expression','待 Preflight'))}）提升成 Hard Gate。不是发明新阈值。正式 supply() pivot / breakout / Top25 / Entry / -7% Stop / Exit 全冻结。</div></div>
+<a href='/'>← 首页</a><div class='c'><h1>🧪 V8.30B Exact Supply-DRY Runtime-Contract A/B Replay</h1><div class='warn'><b>只动第一层一个东西：</b>把正式引擎已经存在的 DRY soft edge（{e(rule.get('expression','待 Preflight'))}）提升成 Hard Gate。不是发明新阈值。正式 supply() pivot / breakout / Top25 / Entry / -7% Stop / Exit 全冻结。</div></div>
 <div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest {pc(P.get('manifest_mapping'))}</p><p>Source DRY rule: <b>{e(rule.get('expression','—'))}</b></p><form method='post' action='/v830/preflight'><button>A. Run Exact Preflight</button></form><br><button onclick='go()'>B. Run Single Dry-Up Hard-Gate A/B</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div>
 <div class='c'><h2>Verdict</h2><div class='ok'><b>{e(R.get('verdict','—'))}</b></div><p>Exact supply trace coverage: {pc(R.get('trace_coverage'))} · Formal-breakout recompute parity rate: {pc(R.get('formal_breakout_recompute_rate'))}</p></div>
 <div class='c'><h2>BASE vs DRY Hard Gate</h2><div style='overflow:auto'><table><tr><th>Metric</th><th>BASE Top25</th><th>DRY Hard</th></tr>
