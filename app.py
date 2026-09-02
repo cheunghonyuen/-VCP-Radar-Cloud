@@ -68172,12 +68172,12 @@ if _v837_home_base is not None:
 # Freeze the V8.37 winner-preserving candidate exactly: tight_pivot only.
 # Recovered V6.69 CONTROL entry/exit lineage, exact first-come 10-slot account policy,
 # equal 1/10-equity sizing, cached daily-close MTM. No threshold tuning / no Tiingo / no rescan.
-V838_DIR = DATA_DIR / "v838a_tight_only_causal_10slot_keyfix"
+V838_DIR = DATA_DIR / "v838b_tight_only_causal_10slot_startfix"
 V838_PREFLIGHT = V838_DIR / "preflight.json"
 V838_STATUS = V838_DIR / "status.json"
 V838_RESULT = V838_DIR / "result.json"
 V838_ADMITTED = V838_DIR / "admitted_trades.csv.gz"
-V838_BUILD_ID = "v838a-key-cardinality-fixed-20260903"
+V838_BUILD_ID = "v838b-start-loop-fixed-20260903"
 V838_SOURCE = V835_DETAIL
 V838_LINEAGE = V669_TRADES
 V838_LINEAGE_RESULT = V669_RESULT
@@ -68404,13 +68404,40 @@ def _v838_worker():
 @APP.route('/v838/preflight',methods=['GET','POST'])
 def v838_preflight_route():_v838_preflight();return redirect('/v838')
 
+def _v838_cached_preflight():
+    try:
+        p=json.loads(V838_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:
+        p={}
+    if p.get('build_id')==V838_BUILD_ID and p.get('verdict')=='PASS':
+        return p
+    return _v838_preflight()
+
 @APP.post('/v838/start')
 def v838_start():
     global v838_thread
-    if _v838_alive():return jsonify({'started':False,**_v838_status()})
-    p=_v838_preflight()
-    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
-    v838_thread=threading.Thread(target=_v838_worker,daemon=True);v838_thread.start();return jsonify({'started':True,**_v838_status()})
+    if _v838_alive():
+        return jsonify({'started':False,**_v838_status()})
+    p=_v838_cached_preflight()
+    if p.get('verdict')!='PASS':
+        return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    _v838_write(status='starting',phase='queued',message='Run accepted; starting causal 10-slot replay',processed=0,total=2,errors=0,error=None)
+    v838_thread=threading.Thread(target=_v838_worker,daemon=True)
+    v838_thread.start()
+    return jsonify({'started':True,**_v838_status()})
+
+@APP.post('/v838/start-page')
+def v838_start_page():
+    global v838_thread
+    if not _v838_alive():
+        p=_v838_cached_preflight()
+        if p.get('verdict')!='PASS':
+            _v838_write(status='error',phase='preflight',message='Preflight must PASS first',error=p.get('error') or p.get('verdict'),errors=1)
+            return redirect('/v838')
+        _v838_write(status='starting',phase='queued',message='Run accepted; starting causal 10-slot replay',processed=0,total=2,errors=0,error=None)
+        v838_thread=threading.Thread(target=_v838_worker,daemon=True)
+        v838_thread.start()
+    return redirect('/v838')
 
 @APP.get('/api/v838')
 def v838_api():return jsonify(_v838_status())
@@ -68437,9 +68464,25 @@ def v838_page():
     d=R.get('delta',{});par=R.get('baseline_parity',{})
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:28px;border-radius:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;padding:16px;border-radius:15px}}.g{{border:2px solid #10b981;background:#ecfdf5;padding:16px;border-radius:15px;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:9px;border-bottom:1px solid #dbe3ee;text-align:left}}@media(max-width:800px){{.c{{padding:18px}}table{{font-size:11px}}}}
-</style><script>async function go(){{let r=await fetch('/v838/start',{{method:'POST'}});if(!r.ok)alert(await r.text());poll();}}async function poll(){{let r=await fetch('/api/v838');let j=await r.json();document.getElementById('st').innerText=(j.status||'')+' · '+(j.phase||'')+' · '+(j.message||'')+' · '+(j.processed||0)+'/'+(j.total||0)+' · errors '+(j.errors||0);if(['starting','running'].includes(j.status))setTimeout(poll,3000);else location.reload();}}</script></head><body onload="poll()"><div class="w">
-<a href="/">← 首页</a><div class="c"><h1>🏦 V8.38A Frozen TIGHT_ONLY Causal 10-Slot Portfolio</h1><div class="o"><b>不调阈值。</b> 只把 V8.37 已胜出的 TIGHT_ONLY 原样冻结，做 recovered V6.69 lineage 的真实 10-slot account replay。BASE vs TIGHT_ONLY；Entry / -7% STOP / Exit 全冻结；0 Tiingo / 0 universe rescan。</div></div>
-<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V838_BUILD_ID))}</p><p>BASE rows {e(P.get('base_rows','—'))} · TIGHT rows {e(P.get('tight_rows','—'))} · lineage join {e(round(float(P.get('lineage_join_coverage_pct',0)),2) if P else '—')}% · entry parity {e(round(float(P.get('entry_price_exact_parity_pct',0)),2) if P else '—')}%</p><p><b>Frozen V8.37 winner:</b> {e(P.get('v837_frozen_best','—'))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v838/preflight"><button>A. Run Portfolio Preflight</button></form><br><button onclick="go()">B. Run Frozen TIGHT_ONLY 10-Slot</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+</style><script>
+async function poll(){{
+  try{{
+    let r=await fetch('/api/v838',{{cache:'no-store'}});
+    let j=await r.json();
+    document.getElementById('st').innerText=(j.status||'')+' · '+(j.phase||'')+' · '+(j.message||'')+' · '+(j.processed||0)+'/'+(j.total||0)+' · errors '+(j.errors||0);
+    if(['starting','running'].includes(j.status)){{
+      setTimeout(poll,2500);
+    }} else if(j.status==='done'){{
+      setTimeout(()=>location.reload(),600);
+    }}
+    // idle/error: do NOT reload. This was the Safari infinite-spinner bug.
+  }}catch(e){{
+    document.getElementById('st').innerText='status check error: '+e;
+  }}
+}}
+</script></head><body onload="poll()"><div class="w">
+<a href="/">← 首页</a><div class="c"><h1>🏦 V8.38B Frozen TIGHT_ONLY Causal 10-Slot Portfolio</h1><div class="o"><b>不调阈值。</b> 只把 V8.37 已胜出的 TIGHT_ONLY 原样冻结，做 recovered V6.69 lineage 的真实 10-slot account replay。BASE vs TIGHT_ONLY；Entry / -7% STOP / Exit 全冻结；0 Tiingo / 0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V838_BUILD_ID))}</p><p>BASE rows {e(P.get('base_rows','—'))} · TIGHT rows {e(P.get('tight_rows','—'))} · lineage join {e(round(float(P.get('lineage_join_coverage_pct',0)),2) if P else '—')}% · entry parity {e(round(float(P.get('entry_price_exact_parity_pct',0)),2) if P else '—')}%</p><p><b>Frozen V8.37 winner:</b> {e(P.get('v837_frozen_best','—'))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v838/preflight"><button>A. Run Portfolio Preflight</button></form><br><form method="post" action="/v838/start-page"><button type="submit">B. Run Frozen TIGHT_ONLY 10-Slot</button></form><p><small>Mobile-safe start: normal POST; no JavaScript required.</small></p><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
 <div class="c"><h2>Verdict</h2><div class="g"><b>{e(R.get('verdict','—'))}</b></div><p>BASE parity: <b>{e(R.get('base_parity_ok','—'))}</b> · price coverage {e(round(float(R.get('price_listing_coverage_pct',0)),2) if R else '—')}%</p><p>Δ CAGR {e(round(float(d.get('cagr_pp',0)),2) if d else '—')}pp · Δ MaxDD {e(round(float(d.get('maxdd_pp',0)),2) if d else '—')}pp · Δ PF {e(round(float(d.get('pf',0)),3) if d else '—')} · Δ STOP {e(round(float(d.get('stop_rate_pp',0)),2) if d else '—')}pp</p><p>Historical BASE parity details: {e(par)}</p></div>
 <div class="c"><h2>BASE vs TIGHT_ONLY — Causal 10-Slot</h2><div style="overflow-x:auto"><table><tr><th>Variant</th><th>Admitted</th><th>PF</th><th>AvgTrade</th><th>Win%</th><th>STOP%</th><th>CAGR</th><th>MaxDD</th><th>Positive years</th><th>Avg open</th><th>+20</th><th>+30</th></tr>{rows or '<tr><td colspan="12">Run B first.</td></tr>'}</table></div></div>
 <div class="c"><h2>Frozen Economic Gate</h2><table><tr><th>Check</th><th>Pass</th></tr>{grows or '<tr><td colspan="2">—</td></tr>'}</table><div class="o"><b>规则：</b> TIGHT_ONLY 必须 PF、AvgTrade、CAGR 不低于 BASE，绝对 MaxDD 不恶化，positive-year share 最多只允许差 5pp；同时 BASE 必须先通过 recovered V6.69 portfolio parity。<br><br><b>Next:</b> {e(R.get('next',''))}</div>{"<p><a href='/v838/export'><button>Export admitted trades</button></a></p>" if V838_ADMITTED.exists() else ''}</div>
@@ -68450,7 +68493,7 @@ _v838_home_base = APP.view_functions.get('home') or APP.view_functions.get('inde
 if _v838_home_base is not None:
     def _v838_home_wrap(*args,**kwargs):
         resp=_v838_home_base(*args,**kwargs)
-        card="""<div id='v838-home-card' style='background:#ecfdf5;border:6px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🏦 V8.38 Frozen TIGHT_ONLY Causal 10-Slot</h2><p>V8.37 winner 原样冻结 · BASE vs TIGHT_ONLY · recovered V6.69 lineage · CAGR / MaxDD / PF · 0调参</p><a href='/v838'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.38A</button></a></div>"""
+        card="""<div id='v838-home-card' style='background:#ecfdf5;border:6px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🏦 V8.38 Frozen TIGHT_ONLY Causal 10-Slot</h2><p>V8.37 winner 原样冻结 · BASE vs TIGHT_ONLY · recovered V6.69 lineage · CAGR / MaxDD / PF · 0调参</p><a href='/v838'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.38B</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
             body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
