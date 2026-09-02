@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825a-home-card-real' style='background:#fef2f2;border:7px solid #dc2626;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825b-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧬 V8.25B Source-to-Feature Trace Audit</h2>
+        <p>逐层追踪 raw statement → dataCode/value → release date → prior-year quarter → YoY。只读，不重新下载。</p>
+        <a href='/v825b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25B</button></a>
+        </div>
+        <div id='v825a-home-card-real' style='background:#fef2f2;border:7px solid #dc2626;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🔬 V8.25A Fundamental Feature Injection Audit</h2>
         <p>查清 V8.25 的 PIT fundamentals 是否被45% coverage filter删掉。只读审计，0 tuning / 0 replay。</p>
         <a href='/v825a'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25A</button></a>
@@ -59205,3 +59210,328 @@ Overlay feature list equals Control: <b>{e(R.get('overlay_equals_control_feature
 <tr><th>Fold</th><th>Test Period</th><th>Train/Test rows</th><th>Train PIT coverage</th><th>Test PIT coverage</th></tr>{folds or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
 <div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div>
 <p>{e(R.get('boundaries',''))}</p></div></div></body></html>"""
+
+
+# ================= V8.25B SOURCE-TO-FEATURE TRACE AUDIT =================
+# Goal: trace a few REAL cached tickers end-to-end:
+# raw Tiingo statement -> statement group -> dataCode/value -> release_date ->
+# entry_date PIT eligibility -> prior-year same-quarter -> YoY -> acceleration.
+# READ-ONLY. No downloads. No threshold/model changes. No replay.
+V825B_TRACE_DIR = DATA_DIR / "v825b_source_to_feature_trace_audit"
+V825B_TRACE_RESULT = V825B_TRACE_DIR / "result.json"
+
+def _v825b_trace_num(x):
+    try:
+        v=float(x)
+        return v if np.isfinite(v) else None
+    except Exception:
+        return None
+
+def _v825b_trace_growth(a,b):
+    a=_v825b_trace_num(a); b=_v825b_trace_num(b)
+    if a is None or b is None or abs(b)<1e-12:
+        return None
+    return a/abs(b)-1 if b<0 else a/b-1
+
+def _v825b_trace_cache_tickers():
+    out=[]
+    P=_v825_jread(V825_PREFLIGHT,{})
+    for t in (P.get("universe") or {}).get("present_in_feature_store",[]) or []:
+        fp=V825_FUND_DIR/f"{t}.json"
+        if not fp.exists():
+            continue
+        try:
+            arr=json.loads(fp.read_text(encoding="utf-8"))
+            aud=_v825_cache_audit(arr)
+            if aud.get("ok"):
+                out.append((t,fp,arr))
+        except Exception:
+            pass
+    return out
+
+def _v825b_trace_pick_trades():
+    D=_v825_feature_store()
+    P=_v825_jread(V825_PREFLIGHT,{})
+    tickers=(P.get("universe") or {}).get("present_in_feature_store",[]) or []
+    D=D[D.ticker.isin(tickers)].copy()
+    D["label_stop"]=D.is_stop.astype(bool)
+    D["label_50"]=D.ret.ge(.50)
+    D=D[D.label_stop|D.label_50].copy()
+    D=D[~(D.label_stop&D.label_50)].copy()
+    return D.sort_values(["ticker","entry_date","listing_id"])
+
+def _v825b_trace_find_values(statement,codes):
+    sd=(statement.get("statementData") or {}) if isinstance(statement,dict) else {}
+    groups={}
+    for gname,grows in sd.items():
+        if not isinstance(grows,list):
+            continue
+        got={}
+        for x in grows:
+            if not isinstance(x,dict):
+                continue
+            code=str(x.get("dataCode"))
+            if any(code in cc for cc in codes.values()):
+                got[code]=x.get("value")
+        if got:
+            groups[gname]=got
+    return groups
+
+def _v825b_trace_normalized_rows(arr,codes):
+    rows=[]
+    for r in arr if isinstance(arr,list) else []:
+        if not isinstance(r,dict):
+            continue
+        dt=pd.to_datetime(r.get("date"),errors="coerce")
+        if pd.isna(dt):
+            continue
+        try:
+            q=int(r.get("quarter") or 0)
+        except Exception:
+            q=0
+        try:
+            y=int(r.get("year") or 0)
+        except Exception:
+            y=0
+        sd=r.get("statementData") or {}
+        inc=sd.get("incomeStatement") or []
+        vals={}
+        raw_matches={}
+        for fam,cc in codes.items():
+            vals[fam]=None
+            raw_matches[fam]=[]
+            for x in inc if isinstance(inc,list) else []:
+                if not isinstance(x,dict):
+                    continue
+                code=str(x.get("dataCode"))
+                if code in cc:
+                    raw_matches[fam].append({"dataCode":code,"value":x.get("value")})
+                    v=_v825b_trace_num(x.get("value"))
+                    if vals[fam] is None and v is not None:
+                        vals[fam]=v
+        rows.append({
+            "release_date":str(pd.Timestamp(dt).normalize().date()),
+            "year":y,"quarter":q,
+            "statement_groups":sorted(sd.keys()) if isinstance(sd,dict) else [],
+            "incomeStatement_rows":len(inc) if isinstance(inc,list) else 0,
+            "values":vals,
+            "matches":raw_matches,
+            "all_selected_codes_any_group":_v825b_trace_find_values(r,codes),
+        })
+    return sorted(rows,key=lambda x:(x["release_date"],x["year"],x["quarter"]))
+
+def _v825b_trace_one(ticker,fp,arr,trades,codes):
+    norm=_v825b_trace_normalized_rows(arr,codes)
+    tt=trades[trades.ticker.eq(ticker)].copy()
+    if tt.empty:
+        return {"ticker":ticker,"cache_file":str(fp),"cache_rows":len(norm),"error":"NO_TRADES"}
+
+    # Prefer a trade near the middle of available dates and with a clear label.
+    tt=tt.sort_values("entry_date")
+    samples=[]
+    idxs=list(range(len(tt)))
+    if len(idxs)>5:
+        idxs=[0,len(tt)//4,len(tt)//2,(3*len(tt))//4,len(tt)-1]
+    for pos in idxs[:5]:
+        tr=tt.iloc[pos]
+        ed=pd.Timestamp(tr.entry_date).normalize()
+        eligible=[x for x in norm if pd.Timestamp(x["release_date"])<=ed]
+        chosen=eligible[-1] if eligible else None
+
+        trace={
+            "listing_id":str(tr.listing_id),
+            "entry_date":str(ed.date()),
+            "ret":float(tr.ret),
+            "label":"PLUS50" if bool(tr.label_50) else "STOP",
+            "eligible_statement_count":len(eligible),
+            "chosen_statement":chosen,
+            "prior_same_quarter":None,
+            "prior2_same_quarter":None,
+            "computed":{
+                "rev_yoy":None,"eps_yoy":None,"ni_yoy":None,
+                "rev_yoy_accel":None,"eps_yoy_accel":None
+            }
+        }
+
+        if chosen:
+            y=int(chosen["year"]);q=int(chosen["quarter"])
+            prior=next((x for x in norm if int(x["year"])==y-1 and int(x["quarter"])==q),None)
+            prior2=next((x for x in norm if int(x["year"])==y-2 and int(x["quarter"])==q),None)
+            trace["prior_same_quarter"]=prior
+            trace["prior2_same_quarter"]=prior2
+            if prior:
+                ry=_v825b_trace_growth(chosen["values"].get("revenue"),prior["values"].get("revenue"))
+                ey=_v825b_trace_growth(chosen["values"].get("eps"),prior["values"].get("eps"))
+                ny=_v825b_trace_growth(chosen["values"].get("net_income"),prior["values"].get("net_income"))
+                trace["computed"]["rev_yoy"]=ry
+                trace["computed"]["eps_yoy"]=ey
+                trace["computed"]["ni_yoy"]=ny
+                if prior2:
+                    pry=_v825b_trace_growth(prior["values"].get("revenue"),prior2["values"].get("revenue"))
+                    pey=_v825b_trace_growth(prior["values"].get("eps"),prior2["values"].get("eps"))
+                    if ry is not None and pry is not None:
+                        trace["computed"]["rev_yoy_accel"]=ry-pry
+                    if ey is not None and pey is not None:
+                        trace["computed"]["eps_yoy_accel"]=ey-pey
+
+        samples.append(trace)
+
+    return {
+        "ticker":ticker,
+        "cache_file":str(fp),
+        "cache_rows":len(norm),
+        "trade_rows":int(len(tt)),
+        "normalized_sample":norm[-5:],
+        "traces":samples
+    }
+
+def _v825b_trace_run():
+    V825B_TRACE_DIR.mkdir(parents=True,exist_ok=True)
+
+    _,defs=_v825_defs()
+    codes=_v820_pick_codes(defs)
+    caches=_v825b_trace_cache_tickers()
+    if not caches:
+        raise RuntimeError("No valid V8.25 free PIT cache files found")
+    trades=_v825b_trace_pick_trades()
+
+    # Pick up to 5 cached tickers that actually have labeled trades.
+    chosen=[]
+    for t,fp,arr in caches:
+        if not trades[trades.ticker.eq(t)].empty:
+            chosen.append((t,fp,arr))
+        if len(chosen)>=5:
+            break
+    if not chosen:
+        raise RuntimeError("No cached ticker overlaps V8.25 labeled trade sample")
+
+    ticker_results=[_v825b_trace_one(t,fp,arr,trades,codes) for t,fp,arr in chosen]
+
+    # Diagnose where the chain breaks.
+    total_traces=0
+    eligible=0
+    chosen_rows=0
+    chosen_with_any_value=0
+    prior_found=0
+    computed_any=0
+    income_group_missing=0
+    selected_codes_found_other_group=0
+
+    for trr in ticker_results:
+        for x in trr.get("traces") or []:
+            total_traces+=1
+            if x.get("eligible_statement_count",0)>0:
+                eligible+=1
+            ch=x.get("chosen_statement")
+            if ch:
+                chosen_rows+=1
+                vals=(ch.get("values") or {})
+                if any(v is not None for v in vals.values()):
+                    chosen_with_any_value+=1
+                groups=ch.get("statement_groups") or []
+                if "incomeStatement" not in groups:
+                    income_group_missing+=1
+                if not any(v is not None for v in vals.values()):
+                    other=ch.get("all_selected_codes_any_group") or {}
+                    if other:
+                        selected_codes_found_other_group+=1
+            if x.get("prior_same_quarter"):
+                prior_found+=1
+            comp=x.get("computed") or {}
+            if any(v is not None for v in comp.values()):
+                computed_any+=1
+
+    if eligible==0:
+        verdict="BREAK_AT_PIT_DATE_MATCH__NO_STATEMENT_RELEASED_BEFORE_ENTRY"
+        next_action="AUDIT_RELEASE_DATE_SEMANTICS_AND_CACHE_DATE_RANGE_ONLY"
+    elif chosen_rows>0 and chosen_with_any_value==0 and selected_codes_found_other_group>0:
+        verdict="BREAK_AT_STATEMENT_GROUP__SELECTED_CODES_NOT_IN_INCOME_STATEMENT"
+        next_action="FIX_STATEMENT_GROUP_MAPPING_ONLY__NO_MODEL_CHANGE"
+    elif chosen_rows>0 and chosen_with_any_value==0:
+        verdict="BREAK_AT_DATACODE_VALUE_EXTRACTION__SELECTED_CODES_NOT_PRESENT"
+        next_action="FIX_DATACODE_MAPPING_ONLY__NO_MODEL_CHANGE"
+    elif chosen_with_any_value>0 and prior_found==0:
+        verdict="BREAK_AT_PRIOR_YEAR_SAME_QUARTER_MATCH"
+        next_action="FIX_FISCAL_YEAR_QUARTER_PAIRING_ONLY__NO_MODEL_CHANGE"
+    elif prior_found>0 and computed_any==0:
+        verdict="BREAK_AT_YOY_CALCULATION_INPUTS"
+        next_action="AUDIT_RAW_VALUE_TYPES_AND_SIGN_HANDLING_ONLY"
+    else:
+        verdict="SOURCE_TO_FEATURE_CHAIN_WORKS_ON_TRACE_SAMPLE"
+        next_action="AUDIT_WHY_V825_ATTACH_OUTPUT_ZERO_DESPITE_VALID_TRACE"
+
+    result={
+        "version":"V8.25B Source-to-Feature Trace Audit",
+        "build_id":"V825B_TRACE_20260902A",
+        "verdict":verdict,
+        "selected_codes":codes,
+        "tickers_traced":[x[0] for x in chosen],
+        "summary":{
+            "trace_count":total_traces,
+            "with_eligible_statement":eligible,
+            "with_chosen_statement":chosen_rows,
+            "chosen_with_any_selected_value":chosen_with_any_value,
+            "prior_same_quarter_found":prior_found,
+            "computed_any_feature":computed_any,
+            "income_group_missing":income_group_missing,
+            "selected_codes_found_other_group":selected_codes_found_other_group
+        },
+        "ticker_results":ticker_results,
+        "next_action":next_action,
+        "boundaries":"READ-ONLY trace audit. 0 downloads, 0 threshold changes, 0 model changes, 0 replay, 0 tuning."
+    }
+    _v825_jwrite(V825B_TRACE_RESULT,result)
+    return result
+
+@APP.route("/v825b/run",methods=["GET","POST"])
+def v825b_trace_run_route():
+    try:
+        _v825b_trace_run()
+    except Exception as ex:
+        _v825_jwrite(V825B_TRACE_RESULT,{
+            "version":"V8.25B Source-to-Feature Trace Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}",
+            "boundaries":"READ-ONLY trace audit."
+        })
+    return redirect("/v825b")
+
+@APP.get("/api/v825b")
+def v825b_trace_api():
+    return jsonify(_v825_jread(V825B_TRACE_RESULT,{"verdict":"NOT_RUN"}))
+
+@APP.get("/v825b")
+def v825b_trace_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825_jread(V825B_TRACE_RESULT,{})
+    summ=R.get("summary") or {}
+    rows=""
+    for trr in R.get("ticker_results") or []:
+        for x in trr.get("traces") or []:
+            ch=x.get("chosen_statement") or {}
+            pr=x.get("prior_same_quarter") or {}
+            comp=x.get("computed") or {}
+            vals=ch.get("values") or {}
+            rows+=f"<tr><td><b>{e(trr.get('ticker'))}</b></td><td>{e(x.get('entry_date'))}</td><td>{e(x.get('label'))}</td><td>{e(x.get('eligible_statement_count'))}</td><td>{e(ch.get('release_date','—'))}</td><td>{e(ch.get('year','—'))}Q{e(ch.get('quarter','—'))}</td><td>{e(vals.get('revenue'))}</td><td>{e(vals.get('eps'))}</td><td>{e(vals.get('net_income'))}</td><td>{e(pr.get('year','—'))}Q{e(pr.get('quarter','—'))}</td><td>{e(comp.get('rev_yoy'))}</td><td>{e(comp.get('eps_yoy'))}</td><td>{e(comp.get('ni_yoy'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+pre{{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:10px;border-radius:10px;font-size:10px}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧬 V8.25B Source-to-Feature Trace Audit</h1>
+<div class='o'><b>逐层追踪：</b> raw statement → group/dataCode/value → release_date ≤ entry_date → prior-year same-quarter → YoY。只读，不重新下载、不改45%门槛、不改模型。</div></div>
+<div class='c'><form method='post' action='/v825b/run'><button>▶ Run Source-to-Feature Trace</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Trace count <b>{e(summ.get('trace_count','—'))}</b> · eligible statement <b>{e(summ.get('with_eligible_statement','—'))}</b> · chosen with selected value <b>{e(summ.get('chosen_with_any_selected_value','—'))}</b> · prior same quarter <b>{e(summ.get('prior_same_quarter_found','—'))}</b> · computed feature <b>{e(summ.get('computed_any_feature','—'))}</b></div>
+<p><b>Selected codes:</b> {e(json.dumps(R.get('selected_codes') or {},ensure_ascii=False))}</p></div>
+<div class='c'><h2>Trade-by-Trade Trace</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Entry</th><th>Label</th><th>Eligible stmts</th><th>Chosen release</th><th>Fiscal</th><th>Revenue</th><th>EPS</th><th>Net Inc</th><th>Prior fiscal</th><th>Rev YoY</th><th>EPS YoY</th><th>NI YoY</th></tr>
+{rows or "<tr><td colspan=13>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div><p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
