@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825j-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825k-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧬 V8.25K Free PIT Fundamentals Separation Audit</h2>
+        <p>Exact H frozen sample：只看 PIT Revenue/EPS/NI growth & acceleration 是否天然分离 Tradable +20/+30/+40 与 STOP。0下载 / 0阈值搜索 / 0调参。</p>
+        <a href='/v825k'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25K</button></a>
+        </div>
+        <div id='v825j-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>💰 V8.25J Tradable Tail / Economic Value Audit</h2>
         <p>检查 H 的40笔候选真正可交易的 MFE（止损后上涨不算），以及固定7% stop / 60d规则下的 PF、AvgRet、tail asymmetry。只读审计。</p>
         <a href='/v825j'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25J</button></a>
@@ -61466,3 +61471,216 @@ Median post-exit MFE gap: <b>{e(round(float(inf.get("median_post_exit_mfe_gap",0
 <div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
 <p><b>Frozen decision rule:</b> {e(R.get("decision_rule",""))}</p>
 <p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
+
+# ================= V8.25K FREE PIT FUNDAMENTALS SEPARATION AUDIT =================
+V825K_DIR = DATA_DIR / "v825k_free_pit_fundamentals_separation_audit"
+V825K_RESULT = V825K_DIR / "result.json"
+V825K_BUILD_ID = "V825K_FREE_PIT_SEPARATION_20260902A"
+
+def _v825k_auc(y, x):
+    y = pd.Series(y).astype(int).reset_index(drop=True)
+    x = pd.to_numeric(pd.Series(x), errors="coerce").reset_index(drop=True)
+    m = x.notna() & y.notna()
+    y = y[m]; x = x[m]
+    if len(y) < 6 or y.nunique() < 2:
+        return None
+    pos = x[y == 1].to_numpy()
+    neg = x[y == 0].to_numpy()
+    if len(pos) == 0 or len(neg) == 0:
+        return None
+    wins = 0.0
+    total = len(pos) * len(neg)
+    for a in pos:
+        wins += float((a > neg).sum()) + 0.5 * float((a == neg).sum())
+    return float(wins / total)
+
+def _v825k_std_effect(pos, neg):
+    p = pd.to_numeric(pd.Series(pos), errors="coerce").dropna()
+    n = pd.to_numeric(pd.Series(neg), errors="coerce").dropna()
+    if len(p) < 2 or len(n) < 2:
+        return None
+    v = ((len(p)-1)*p.var(ddof=1) + (len(n)-1)*n.var(ddof=1)) / max(1, len(p)+len(n)-2)
+    if not np.isfinite(v) or v <= 1e-12:
+        return None
+    return float((p.mean()-n.mean()) / np.sqrt(v))
+
+def _v825k_run():
+    V825K_DIR.mkdir(parents=True, exist_ok=True)
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["entry_px"] = pd.to_numeric(C["entry_px"], errors="coerce")
+    C["ret"] = pd.to_numeric(C["ret"], errors="coerce")
+    C["mfe"] = pd.to_numeric(C["mfe"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+
+    aud = []
+    for i, r in C.iterrows():
+        D = _v825h_load_prices(str(r["ticker"]).upper().strip())
+        if D is None or D.empty:
+            aud.append({"idx":i,"right_censored":True,"tradable_mfe":None})
+            continue
+        future = D[D["Date"] > r["entry_date"]].copy()
+        right_censored = len(future) < 60
+        tradable = D[(D["Date"] > r["entry_date"]) & (D["Date"] <= r["exit_date"])].copy()
+        tmfe = float(tradable["high"].max()/float(r["entry_px"])-1.0) if len(tradable) else None
+        aud.append({"idx":i,"right_censored":bool(right_censored),"tradable_mfe":tmfe})
+
+    A = pd.DataFrame(aud).set_index("idx")
+    C = C.join(A, how="left")
+    U = C[~C["right_censored"].fillna(True)].copy()
+
+    _, defs = _v825_defs()
+    codes = _v820_pick_codes(defs)
+    X = _v825_attach(U.copy(), codes)
+
+    features = ["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]
+    X["tail20"] = pd.to_numeric(X["tradable_mfe"], errors="coerce").ge(.20)
+    X["tail30"] = pd.to_numeric(X["tradable_mfe"], errors="coerce").ge(.30)
+    X["tail40"] = pd.to_numeric(X["tradable_mfe"], errors="coerce").ge(.40)
+    X["stop_label"] = X["is_stop"].astype(bool)
+
+    feature_rows = []
+    for f in features:
+        z = pd.to_numeric(X[f], errors="coerce")
+        coverage = float(z.notna().mean()) if len(X) else 0.0
+        t20 = z[X["tail20"]]
+        nt20 = z[~X["tail20"]]
+        st = z[X["stop_label"]]
+        ns = z[~X["stop_label"]]
+        feature_rows.append({
+            "feature":f,
+            "coverage":coverage,
+            "non_null":int(z.notna().sum()),
+            "tail20_n":int(t20.notna().sum()),
+            "nontail20_n":int(nt20.notna().sum()),
+            "tail20_median":float(t20.median()) if t20.notna().any() else None,
+            "nontail20_median":float(nt20.median()) if nt20.notna().any() else None,
+            "tail20_auc":_v825k_auc(X["tail20"].astype(int), z),
+            "tail20_effect_d":_v825k_std_effect(t20, nt20),
+            "nonstop_auc":_v825k_auc((~X["stop_label"]).astype(int), z),
+            "nonstop_effect_d":_v825k_std_effect(ns, st),
+            "stop_median":float(st.median()) if st.notna().any() else None,
+            "nonstop_median":float(ns.median()) if ns.notna().any() else None,
+        })
+
+    usable = [r for r in feature_rows if r["coverage"] >= .45 and r["tail20_auc"] is not None]
+    strong = [
+        r for r in usable
+        if max(r["tail20_auc"], 1-r["tail20_auc"]) >= .65
+        and r["tail20_effect_d"] is not None
+        and abs(r["tail20_effect_d"]) >= .50
+    ]
+
+    rare = []
+    for _, r in X[X["tail30"]].sort_values(["tradable_mfe"], ascending=False).iterrows():
+        rare.append({
+            "ticker":str(r["ticker"]),
+            "entry_date":str(pd.Timestamp(r["entry_date"]).date()),
+            "tradable_mfe":float(r["tradable_mfe"]),
+            "is_stop":bool(r["is_stop"]),
+            "features":{f:(None if pd.isna(r.get(f)) else float(r.get(f))) for f in features}
+        })
+
+    if len(X) < 30:
+        verdict = "INCONCLUSIVE__TOO_FEW_UNCENSORED_ROWS"
+        next_action = "DO_NOT_PAY__NO_THRESHOLDING"
+    elif len(usable) == 0:
+        verdict = "NO_USABLE_PIT_FUNDAMENTAL_COVERAGE_ON_FROZEN_SAMPLE"
+        next_action = "STOP_FUNDAMENTALS_ROUTE__DO_NOT_PAY"
+    elif len(strong) >= 1:
+        verdict = "PIT_FUNDAMENTAL_SEPARATION_SIGNAL_PRESENT__VALIDATE_WITH_FROZEN_LOO_OOS"
+        next_action = "RUN_FIXED_LOO_OOS_USING_ONLY_PREDECLARED_FEATURE_SET__NO_RETUNE"
+    else:
+        verdict = "NO_CLEAR_UNIVARIATE_FUNDAMENTAL_SEPARATION__DO_NOT_PAY"
+        next_action = "STOP_PAID_FUNDAMENTALS_EXPANSION__KEEP_AS_RESEARCH_ONLY"
+
+    result = {
+        "version":"V8.25K Free PIT Fundamentals Separation Audit",
+        "build_id":V825K_BUILD_ID,
+        "verdict":verdict,
+        "sample":{
+            "candidates_total":int(len(C)),
+            "uncensored":int(len(X)),
+            "stops":int(X["stop_label"].sum()),
+            "tail20":int(X["tail20"].sum()),
+            "tail30":int(X["tail30"].sum()),
+            "tail40":int(X["tail40"].sum())
+        },
+        "selected_codes":codes,
+        "feature_rows":feature_rows,
+        "usable_features":[r["feature"] for r in usable],
+        "strong_features":[r["feature"] for r in strong],
+        "rare_tail30_plus":rare,
+        "decision_rule":"Read-only separation screen. Strong feature requires >=45% coverage, |AUC-0.5|>=0.15 and |standardized effect|>=0.50 for tradable MFE>=20 vs rest. No threshold optimization.",
+        "next_action":next_action,
+        "boundaries":"Exact frozen V8.25H candidates. PIT-at-entry fundamentals only. No downloads, no candidate changes, no stop/exit changes, no filters, no threshold search, no tuning."
+    }
+    _v825g_write(V825K_RESULT, result)
+    return result
+
+@APP.route("/v825k/run", methods=["GET","POST"])
+def v825k_run_route():
+    try:
+        _v825k_run()
+    except Exception as ex:
+        _v825g_write(V825K_RESULT, {
+            "version":"V8.25K Free PIT Fundamentals Separation Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825k")
+
+@APP.get("/v825k")
+def v825k_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825g_read(V825K_RESULT,{})
+    S=R.get("sample") or {}
+    rows=""
+    for x in R.get("feature_rows") or []:
+        rows += (
+            f"<tr><td><b>{e(x.get('feature'))}</b></td>"
+            f"<td>{e(round(float(x.get('coverage',0))*100,1))}%</td>"
+            f"<td>{e(x.get('non_null'))}</td>"
+            f"<td>{e(round(float(x.get('tail20_auc') or 0),3) if x.get('tail20_auc') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('tail20_effect_d') or 0),2) if x.get('tail20_effect_d') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('tail20_median') or 0),3) if x.get('tail20_median') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('nontail20_median') or 0),3) if x.get('nontail20_median') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('nonstop_auc') or 0),3) if x.get('nonstop_auc') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('stop_median') or 0),3) if x.get('stop_median') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('nonstop_median') or 0),3) if x.get('nonstop_median') is not None else '—')}</td></tr>"
+        )
+    rare=""
+    for x in R.get("rare_tail30_plus") or []:
+        rare += f"<tr><td><b>{e(x.get('ticker'))}</b></td><td>{e(x.get('entry_date'))}</td><td>{e(round(float(x.get('tradable_mfe',0))*100,1))}%</td><td>{e(x.get('is_stop'))}</td><td>{e(json.dumps(x.get('features') or {},ensure_ascii=False))}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V8.25K Free PIT Fundamentals Separation Audit</h1>
+<div class="o"><b>不调参数，先看基本面有没有天然分离力。</b> 同一批 H frozen candidates，用入场当时可见的 Revenue/EPS/Net Income growth & acceleration，对比 Tradable MFE≥20 的右尾与其他候选，同时单独观察 STOP。</div></div>
+<div class="c"><form method="post" action="/v825k/run"><button>▶ Run Free PIT Separation Audit</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">Uncensored <b>{e(S.get("uncensored","—"))}</b> · STOP <b>{e(S.get("stops","—"))}</b> ·
+Tradable +20 <b>{e(S.get("tail20","—"))}</b> · +30 <b>{e(S.get("tail30","—"))}</b> · +40 <b>{e(S.get("tail40","—"))}</b><br>
+Usable features: <b>{e(", ".join(R.get("usable_features") or []) or "NONE")}</b><br>
+Strong separation: <b>{e(", ".join(R.get("strong_features") or []) or "NONE")}</b></div></div>
+<div class="c"><h2>Feature Separation</h2><div style="overflow:auto"><table>
+<tr><th>Feature</th><th>Coverage</th><th>N</th><th>Tail20 AUC</th><th>Effect d</th><th>Tail20 median</th><th>Other median</th><th>NonSTOP AUC</th><th>STOP median</th><th>NonSTOP median</th></tr>
+{rows or "<tr><td colspan=10>Run audit first.</td></tr>"}</table></div></div>
+<div class="c"><h2>Rare Tradable +30/+40 Tail — Protect These</h2><div style="overflow:auto"><table>
+<tr><th>Ticker</th><th>Entry</th><th>Tradable MFE</th><th>Stopped?</th><th>PIT feature vector</th></tr>
+{rare or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
+<div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
+<p><b>Frozen screen:</b> {e(R.get("decision_rule",""))}</p><p>{e(R.get("boundaries",""))}</p></div>
+</div></body></html>'''
