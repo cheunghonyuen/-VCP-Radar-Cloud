@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825h-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825i-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🔎 V8.25I MFE / Right-Censor Audit</h2>
+        <p>查清 H 的 +50=0：看 MFE +10/+20/+30/+40/+50 分布，以及 2026 尾端 right-censor。只读，0调参。</p>
+        <a href='/v825i'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25I</button></a>
+        </div>
+        <div id='v825h-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧱 V8.25H Recent VCP Candidate Builder</h2>
         <p>从 V8.25G 30只 recent price cache 生成 research-only VCP candidates。先 Preflight，再 Build。0下载 / 0 Champion 改动 / 0调参。</p>
         <a href='/v825h'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25H</button></a>
@@ -61091,4 +61096,159 @@ Rules: trend + near-high + tightening + breakout + RVOL20≥1.2 · 7% stop · 60
 STOP <b>{e(R.get("stops","—"))}</b> · +50 <b>{e(R.get("winner50","—"))}</b> · Tickers <b>{e(R.get("tickers_with_candidates","—"))}</b><br>
 Date {e(R.get("date_min","—"))} → {e(R.get("date_max","—"))}<br>
 Next: <b>{e(R.get("next_action","—"))}</b></div>
+<p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
+
+# ================= V8.25I MFE / RIGHT-CENSOR AUDIT =================
+# Read-only audit of V8.25H recent candidates.
+# Questions:
+# 1) Is +50=0 because winners are truly absent, or because many candidates peak at +20/+30/+40?
+# 2) Are late-2026 candidates right-censored because a full 60 trading-day horizon is unavailable?
+# No downloads, no candidate-rule changes, no threshold rescue, no replay.
+V825I_DIR = DATA_DIR / "v825i_mfe_right_censor_audit"
+V825I_RESULT = V825I_DIR / "result.json"
+V825I_BUILD_ID = "V825I_MFE_CENSOR_20260902A"
+
+def _v825i_run():
+    V825I_DIR.mkdir(parents=True, exist_ok=True)
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    need = ["ticker","entry_date","mfe","is_stop","winner50","exit_date"]
+    miss = [c for c in need if c not in C.columns]
+    if miss:
+        raise RuntimeError("V8.25H candidate schema missing: " + ",".join(miss))
+
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["mfe"] = pd.to_numeric(C["mfe"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+    if C["winner50"].dtype != bool:
+        C["winner50"] = C["winner50"].astype(str).str.lower().isin(["true","1","yes"])
+    C = C.dropna(subset=["entry_date","mfe"]).copy()
+
+    # Audit actual available forward horizon per candidate from V8.25G price cache.
+    horizon_rows = []
+    for i, r in C.iterrows():
+        t = str(r["ticker"]).upper()
+        D = _v825h_load_prices(t)
+        if D is None or D.empty:
+            horizon_rows.append((i, 0, None, True))
+            continue
+        future = D[D["Date"] > r["entry_date"]].copy()
+        avail = int(len(future))
+        last = str(future["Date"].max().date()) if len(future) else None
+        censored = avail < 60
+        horizon_rows.append((i, avail, last, censored))
+
+    H = pd.DataFrame(horizon_rows, columns=["idx","available_forward_days","last_price_date","right_censored"]).set_index("idx")
+    C = C.join(H, how="left")
+
+    # MFE distribution buckets fixed BEFORE looking at outcome.
+    thresholds = [0.10,0.20,0.30,0.40,0.50]
+    mfe_counts = {}
+    for th in thresholds:
+        mfe_counts[f"mfe_ge_{int(th*100)}"] = int((C["mfe"] >= th).sum())
+
+    unc = C[~C["right_censored"].fillna(True)].copy()
+    cen = C[C["right_censored"].fillna(True)].copy()
+
+    # Eligible labeled sample used by H.
+    labeled = C[C["is_stop"] | C["winner50"]].copy()
+
+    by_year = []
+    for y, g in C.groupby(C["entry_date"].dt.year):
+        by_year.append({
+            "year": int(y),
+            "candidates": int(len(g)),
+            "right_censored": int(g["right_censored"].sum()),
+            "uncensored": int((~g["right_censored"]).sum()),
+            "mfe_ge_20": int((g["mfe"] >= .20).sum()),
+            "mfe_ge_30": int((g["mfe"] >= .30).sum()),
+            "mfe_ge_40": int((g["mfe"] >= .40).sum()),
+            "mfe_ge_50": int((g["mfe"] >= .50).sum()),
+        })
+
+    if len(C) == 0:
+        verdict = "AUDIT_NO_CANDIDATES"
+        next_action = "STOP"
+    elif int((C["mfe"] >= .20).sum()) == 0:
+        verdict = "CONFIRMED_NO_MEANINGFUL_BIG_WINNER_TAIL_IN_FREE_SAMPLE"
+        next_action = "STOP_FREE_FUNDAMENTALS_FEASIBILITY_ON_DOW30__DO_NOT_PAY"
+    elif int((unc["mfe"] >= .50).sum()) == 0 and int((C["mfe"] >= .30).sum()) > 0:
+        verdict = "NO_PLUS50_BUT_NONTRIVIAL_PLUS30_PLUS40_TAIL_EXISTS"
+        next_action = "DO_NOT_RETUNE__REPORT_SAMPLE_AS_INCONCLUSIVE_FOR_PLUS50_GATE"
+    elif len(cen) > 0 and int((cen["mfe"] >= .30).sum()) > 0:
+        verdict = "RIGHT_CENSORING_MATERIALLY_AFFECTS_LATE_CANDIDATES"
+        next_action = "EXCLUDE_RIGHT_CENSORED_ROWS_AND_REASSESS_SAMPLE_SIZE_ONLY"
+    else:
+        verdict = "PLUS50_ABSENCE_CONFIRMED_ON_FULL_HORIZON_SAMPLE"
+        next_action = "STOP_FREE_DOW30_FEASIBILITY__DO_NOT_PAY"
+
+    result = {
+        "version":"V8.25I MFE / Right-Censor Audit",
+        "build_id":V825I_BUILD_ID,
+        "verdict":verdict,
+        "candidate_rows":int(len(C)),
+        "labeled_stop_plus50_rows":int(len(labeled)),
+        "right_censored_rows":int(C["right_censored"].sum()),
+        "uncensored_rows":int((~C["right_censored"]).sum()),
+        "mfe_counts":mfe_counts,
+        "mfe_median":float(C["mfe"].median()) if len(C) else None,
+        "mfe_p75":float(C["mfe"].quantile(.75)) if len(C) else None,
+        "mfe_p90":float(C["mfe"].quantile(.90)) if len(C) else None,
+        "uncensored_mfe_ge_50":int((unc["mfe"] >= .50).sum()),
+        "uncensored_mfe_ge_30":int((unc["mfe"] >= .30).sum()),
+        "by_year":by_year,
+        "next_action":next_action,
+        "boundaries":"READ-ONLY audit. No downloads, no rule changes, no threshold changes, no replay, no tuning."
+    }
+    _v825g_write(V825I_RESULT, result)
+    return result
+
+@APP.route("/v825i/run", methods=["GET","POST"])
+def v825i_run_route():
+    try:
+        _v825i_run()
+    except Exception as ex:
+        _v825g_write(V825I_RESULT, {
+            "version":"V8.25I MFE / Right-Censor Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825i")
+
+@APP.get("/v825i")
+def v825i_page():
+    import html
+    e=lambda x: html.escape(str(x))
+    R=_v825g_read(V825I_RESULT,{})
+    m=R.get("mfe_counts") or {}
+    years=""
+    for x in R.get("by_year") or []:
+        years += f"<tr><td>{e(x.get('year'))}</td><td>{e(x.get('candidates'))}</td><td>{e(x.get('uncensored'))}</td><td>{e(x.get('right_censored'))}</td><td>{e(x.get('mfe_ge_20'))}</td><td>{e(x.get('mfe_ge_30'))}</td><td>{e(x.get('mfe_ge_40'))}</td><td>{e(x.get('mfe_ge_50'))}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1100px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🔎 V8.25I MFE / Right-Censor Audit</h1>
+<div class="o"><b>只查为什么 H 是 +50 = 0。</b> 看 MFE +10/+20/+30/+40/+50 分布，并检查靠近 2026-09-01 的候选是否没有完整60交易日未来窗口。</div></div>
+<div class="c"><form method="post" action="/v825i/run"><button>▶ Run MFE / Right-Censor Audit</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">
+Candidates <b>{e(R.get("candidate_rows","—"))}</b> · Uncensored <b>{e(R.get("uncensored_rows","—"))}</b> · Right-censored <b>{e(R.get("right_censored_rows","—"))}</b><br>
+MFE ≥10% <b>{e(m.get("mfe_ge_10","—"))}</b> · ≥20% <b>{e(m.get("mfe_ge_20","—"))}</b> · ≥30% <b>{e(m.get("mfe_ge_30","—"))}</b> · ≥40% <b>{e(m.get("mfe_ge_40","—"))}</b> · ≥50% <b>{e(m.get("mfe_ge_50","—"))}</b><br>
+Median MFE <b>{e(round(float(R.get("mfe_median",0))*100,1) if R.get("mfe_median") is not None else "—")}%</b> · P75 <b>{e(round(float(R.get("mfe_p75",0))*100,1) if R.get("mfe_p75") is not None else "—")}%</b> · P90 <b>{e(round(float(R.get("mfe_p90",0))*100,1) if R.get("mfe_p90") is not None else "—")}%</b>
+</div></div>
+<div class="c"><h2>By Year</h2><div style="overflow:auto"><table>
+<tr><th>Year</th><th>Candidates</th><th>Uncensored</th><th>Right-censored</th><th>MFE≥20</th><th>≥30</th><th>≥40</th><th>≥50</th></tr>
+{years or "<tr><td colspan=8>Run audit first.</td></tr>"}
+</table></div></div>
+<div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
 <p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
