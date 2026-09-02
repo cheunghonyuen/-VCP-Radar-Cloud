@@ -68167,3 +68167,272 @@ if _v837_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v837_home_base:APP.view_functions[ep]=_v837_home_wrap
+
+# ================= V8.38 FROZEN TIGHT_ONLY CAUSAL 10-SLOT PORTFOLIO =================
+# Freeze the V8.37 winner-preserving candidate exactly: tight_pivot only.
+# Recovered V6.69 CONTROL entry/exit lineage, exact first-come 10-slot account policy,
+# equal 1/10-equity sizing, cached daily-close MTM. No threshold tuning / no Tiingo / no rescan.
+V838_DIR = DATA_DIR / "v838_tight_only_causal_10slot"
+V838_PREFLIGHT = V838_DIR / "preflight.json"
+V838_STATUS = V838_DIR / "status.json"
+V838_RESULT = V838_DIR / "result.json"
+V838_ADMITTED = V838_DIR / "admitted_trades.csv.gz"
+V838_BUILD_ID = "v838-frozen-tight-only-causal-10slot-20260903"
+V838_SOURCE = V835_DETAIL
+V838_LINEAGE = V669_TRADES
+V838_LINEAGE_RESULT = V669_RESULT
+v838_thread = None
+
+
+def _v838_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V838_STATUS.exists():
+        try:x.update(json.loads(V838_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v838_write(**kw):
+    V838_DIR.mkdir(parents=True,exist_ok=True);x=_v838_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V838_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v838_alive():return v838_thread is not None and v838_thread.is_alive()
+
+
+def _v838_bool(s):
+    if getattr(s,'dtype',None)==bool:return s.fillna(False)
+    return s.map(lambda v:str(v).strip().lower() in ('1','true','t','yes','y')).fillna(False)
+
+
+def _v838_load_streams():
+    import pandas as pd,numpy as np
+    if not V838_SOURCE.exists():raise RuntimeError('V8.35 PIT detail missing')
+    if not V838_LINEAGE.exists():raise RuntimeError('Recovered V6.69 lineage missing')
+    A=pd.read_csv(V838_SOURCE,compression='gzip',low_memory=False)
+    need_a=['listing_id','entry_date','entry_px','audit_ok','tight_pivot']
+    miss=[c for c in need_a if c not in A.columns]
+    if miss:raise RuntimeError('V8.35 schema missing: '+','.join(miss))
+    A['listing_id']=A.listing_id.astype(str);A['entry_date']=pd.to_datetime(A.entry_date,errors='coerce').dt.normalize();A['entry_px']=pd.to_numeric(A.entry_px,errors='coerce')
+    A=A[_v838_bool(A.audit_ok)].copy();A['tight_pivot']=_v838_bool(A.tight_pivot)
+    P=pd.read_csv(V838_LINEAGE,compression='gzip',low_memory=False).reset_index(drop=False).rename(columns={'index':'candidate_order'})
+    need_p=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret','candidate_order']
+    miss=[c for c in need_p if c not in P.columns]
+    if miss:raise RuntimeError('V6.69 lineage schema missing: '+','.join(miss))
+    P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize();P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+    P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize();P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce');P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+    P=P.dropna(subset=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_ret']).copy()
+    J=P.merge(A[['listing_id','entry_date','entry_px','tight_pivot']],on=['listing_id','entry_date'],how='inner',suffixes=('_lin','_pit'),validate='one_to_one')
+    J['entry_px_rel_diff']=(J.entry_px_lin/J.entry_px_pit-1).abs()
+    # Recovered lineage entry price is source-of-truth; PIT join only supplies frozen membership.
+    base=pd.DataFrame({
+        'variant':'BASE','candidate_order':J.candidate_order.astype(int),'listing_id':J.listing_id.astype(str),'entry_date':J.entry_date,
+        'entry_px':J.entry_px_lin.astype(float),'exit_date':J.control_exit_date,'exit_px':J.control_exit_px.astype(float),
+        'exit_reason':J.control_reason.astype(str),'realized_ret':J.control_ret.astype(float),'tight_pivot':J.tight_pivot.astype(bool)
+    })
+    tight=base[base.tight_pivot].copy();tight['variant']='TIGHT_ONLY'
+    X=pd.concat([base,tight],ignore_index=True)
+    return J,base,tight,X
+
+
+def _v838_preflight():
+    import time,numpy as np
+    t0=time.time();V838_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        J,B,T,X=_v838_load_streams()
+        join_cov=100*len(J)/max(1,len(pd.read_csv(V838_LINEAGE,usecols=['listing_id'],compression='gzip')))
+        px_par=100*float((J.entry_px_rel_diff<=1e-8).mean()) if len(J) else 0.0
+        v837_best=None
+        if V837_RESULT.exists():
+            try:v837_best=(json.loads(V837_RESULT.read_text(encoding='utf-8')).get('best_candidate') or {}).get('name')
+            except Exception:pass
+        verdict='PASS' if len(B)>=50000 and len(T)>=20000 and join_cov>=99 and px_par>=98 and v837_best=='TIGHT_ONLY' else 'FAIL__LINEAGE_OR_V837_FREEZE_PARITY'
+        out={'version':'V8.38','build_id':V838_BUILD_ID,'verdict':verdict,'base_rows':int(len(B)),'tight_rows':int(len(T)),
+             'lineage_join_coverage_pct':join_cov,'entry_price_exact_parity_pct':px_par,'v837_frozen_best':v837_best,
+             'frozen_contract':'Exactly BASE vs V8.37 TIGHT_ONLY (tight_pivot as already defined in V8.35). V6.69 CONTROL entry/exit lineage; first-come 10-slot; target=equity/10; daily cached-close MTM; no pivot_cross/trend/contraction/dry hard gate; no threshold change.',
+             'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.38','build_id':V838_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V838_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v838_price_maps(listing_ids):
+    import pandas as pd,numpy as np,time
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()};out={};date_set=set();errs=[]
+    lids=sorted(set(map(str,listing_ids)));t0=time.time()
+    for n,lid in enumerate(lids,1):
+        mr=mmap.get(lid)
+        if mr is None:errs.append(lid);continue
+        try:q,hi,amb=_v826a_prepare_price(mr)
+        except Exception:q=None
+        if q is None or q.empty:errs.append(lid);continue
+        z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+        if z.empty:errs.append(lid);continue
+        out[lid]={pd.Timestamp(d).normalize():float(c) for d,c in zip(z.date,z.close) if pd.notna(d) and pd.notna(c) and np.isfinite(c)}
+        date_set.update(out[lid].keys())
+        if n==1 or n%100==0 or n==len(lids):
+            _v838_write(status='running',phase='prices',message=f'Loading cached daily MTM prices {n}/{len(lids)}',processed=n,total=len(lids),errors=len(errs),elapsed_sec=round(time.time()-t0,1),error=None)
+    return out,sorted(date_set),errs
+
+
+def _v838_replay(Z,price,cal,label,t0,vi,vn):
+    import pandas as pd,numpy as np
+    # Exact recovered V6.69 economic policy: first-come order by entry_date/listing_id,
+    # max 10; each new position targets current equity/10; exits happen before same-day entries.
+    Q=Z[Z.variant.eq(label)].sort_values(['entry_date','listing_id'],kind='stable').reset_index(drop=True)
+    rec=Q.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};ledger=[];eqrows=[];skipped=0;admitted=0;step=max(1,len(cal)//24)
+    for di,dt in enumerate(cal,1):
+        dt=pd.Timestamp(dt).normalize()
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);proceeds=p['shares']*xp;cash+=proceeds
+            rr=xp/p['entry_px']-1.0
+            ledger.append({'variant':label,'listing_id':p['listing_id'],'entry_date':p['entry_date'],'exit_date':dt,'entry_px':p['entry_px'],'exit_px':xp,
+                           'ret':rr,'pnl':proceeds-p['cost'],'reason':str(rec[i]['exit_reason']),'capital':p['cost']})
+            last.pop(i,None)
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']));cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+        for i in entries.get(dt,[]):
+            if len(pos)>=10:skipped+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.0
+            if ep<=0 or cash+1e-12<target:skipped+=1;continue
+            cash-=target;shares=target/ep;pos[i]={'listing_id':str(r['listing_id']),'shares':shares,'entry_px':ep,'cost':target,'entry_date':dt};last[i]=ep;admitted+=1
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']));cp=cp if np.isfinite(cp) and cp>0 else last.get(i,p['entry_px']);last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos)))
+        if di%step==0 or di==len(cal):
+            _v838_write(status='running',phase='account_replay',message=f'Causal 10-slot replay {label} {int(round(di/len(cal)*100))}%',processed=vi,total=vn,errors=0,elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure','open_n']);L=pd.DataFrame(ledger)
+    if C.empty:return {},L,C
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0;dd=C.equity/C.equity.cummax()-1;maxdd=float(dd.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=gp/gl if gl>0 else np.inf;wr=float((L.ret>0).mean());stop=float(L.reason.astype(str).str.contains('STOP7',regex=False).mean())
+        w20=int((L.ret>=.20).sum());w30=int((L.ret>=.30).sum());avg=float(L.ret.mean())
+    else:pf=wr=stop=avg=np.nan;w20=w30=0
+    # Calendar-year equity returns from actual MTM path.
+    Y=C.copy();Y['year']=pd.to_datetime(Y.date).dt.year;yr=[]
+    for y,g in Y.groupby('year',sort=True):
+        if len(g):yr.append({'year':int(y),'return':float(g.equity.iloc[-1]/g.equity.iloc[0]-1) if float(g.equity.iloc[0])>0 else None})
+    met={'strategy':label,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else None,'pf':float(pf),'win_rate':wr,'stop_rate':stop,
+         'avg_trade':avg,'winner20':w20,'winner30':w30,'admitted_positions':int(admitted),'skipped_capacity_or_cash':int(skipped),'avg_exposure':float(C.exposure.mean()),
+         'avg_open_positions':float(C.open_n.mean()),'final_multiple':float(end/start),'positive_year_share':float(np.mean([x['return']>0 for x in yr if x['return'] is not None])) if yr else None,'yearly_returns':yr}
+    return met,L,C
+
+
+def _v838_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v838_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    J,B,T,X=_v838_load_streams();_v838_write(status='running',phase='prices',message='Loading recovered-lineage cached prices',processed=0,total=int(B.listing_id.nunique()),errors=0)
+    price,cal,errs=_v838_price_maps(B.listing_id.unique())
+    cov=100*len(price)/max(1,B.listing_id.nunique())
+    if cov<95:raise RuntimeError(f'Price cache coverage too low: {cov:.2f}%')
+    mets=[];led=[]
+    for i,label in enumerate(['BASE','TIGHT_ONLY'],1):
+        m,L,C=_v838_replay(X,price,cal,label,t0,i,2);mets.append(m)
+        if len(L):led.append(L)
+    md={x['strategy']:x for x in mets};base=md['BASE'];tight=md['TIGHT_ONLY']
+    # Baseline parity against the historical V6.69 CONTROL result if present.
+    old=None
+    if V838_LINEAGE_RESULT.exists():
+        try:
+            rr=json.loads(V838_LINEAGE_RESULT.read_text(encoding='utf-8'))
+            old=next((x for x in rr.get('account',[]) if x.get('strategy')=='CONTROL_STOP7'),None)
+        except Exception:old=None
+    parity={}
+    if old:
+        parity={'cagr_abs_diff':abs(float(base['cagr'])-float(old.get('cagr',base['cagr']))),'maxdd_abs_diff':abs(float(base['maxdd'])-float(old.get('maxdd',base['maxdd']))),
+                'pf_abs_diff':abs(float(base['pf'])-float(old.get('profit_factor',base['pf']))),'admitted_diff':abs(int(base['admitted_positions'])-int(old.get('admitted_positions',base['admitted_positions'])))}
+    base_parity_ok=(not old) or (parity.get('cagr_abs_diff',0)<=0.005 and parity.get('maxdd_abs_diff',0)<=0.01 and parity.get('admitted_diff',0)<=5)
+    delta={'cagr_pp':100*(tight['cagr']-base['cagr']),'maxdd_pp':100*(tight['maxdd']-base['maxdd']),'pf':tight['pf']-base['pf'],'win_rate_pp':100*(tight['win_rate']-base['win_rate']),
+           'stop_rate_pp':100*(tight['stop_rate']-base['stop_rate']),'avg_trade_pp':100*(tight['avg_trade']-base['avg_trade']),'positive_year_share_pp':100*((tight['positive_year_share'] or 0)-(base['positive_year_share'] or 0))}
+    # Portfolio gate: demand real account improvement, not just candidate-level optics.
+    econ=bool(base_parity_ok and tight['pf']>=base['pf'] and tight['avg_trade']>=base['avg_trade'] and tight['cagr']>=base['cagr'] and abs(tight['maxdd'])<=abs(base['maxdd']) and tight['positive_year_share']>=base['positive_year_share']-.05)
+    verdict='TIGHT_ONLY_PASSES_CAUSAL_10_SLOT__PROMOTE_TO_SHADOW_FIRST_LAYER' if econ else 'TIGHT_ONLY_FAILS_CAUSAL_10_SLOT__DO_NOT_PROMOTE'
+    if not base_parity_ok:verdict='BASE_PORTFOLIO_PARITY_FAIL__DO_NOT_INTERPRET_CHALLENGER'
+    R={'version':'V8.38','build_id':V838_BUILD_ID,'verdict':verdict,'base_parity_ok':base_parity_ok,'baseline_parity':parity,'price_listing_coverage_pct':cov,'price_errors':errs[:100],
+       'portfolio':[base,tight],'delta':delta,
+       'economic_gate':{'pf_not_worse':tight['pf']>=base['pf'],'avgtrade_not_worse':tight['avg_trade']>=base['avg_trade'],'cagr_not_worse':tight['cagr']>=base['cagr'],
+                        'maxdd_not_worse':abs(tight['maxdd'])<=abs(base['maxdd']),'positive_year_share_not_worse_by_gt5pp':tight['positive_year_share']>=base['positive_year_share']-.05},
+       'frozen':'V8.37 TIGHT_ONLY exactly; recovered V6.69 CONTROL entry/exit; first-come 10-slot; equity/10 sizing; daily cache MTM; zero threshold search.',
+       'next':'If PASS, keep TIGHT_ONLY only as a first-layer shadow challenger and separately repair pivot_cross semantics. If FAIL, do not tune tight threshold; return to process reconstruction evidence.',
+       'elapsed_sec':round(time.time()-t0,1)}
+    V838_DIR.mkdir(parents=True,exist_ok=True);V838_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    if led:pd.concat(led,ignore_index=True).to_csv(V838_ADMITTED,index=False,compression='gzip')
+    _v838_write(status='done',phase='complete',message='Done · '+verdict,processed=2,total=2,errors=len(errs),elapsed_sec=R['elapsed_sec'])
+    return R
+
+
+def _v838_worker():
+    global v838_thread
+    import time
+    t0=time.time()
+    try:_v838_run()
+    except Exception as ex:_v838_write(status='error',phase='failed',message='V8.38 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v838_thread=None
+
+
+@APP.route('/v838/preflight',methods=['GET','POST'])
+def v838_preflight_route():_v838_preflight();return redirect('/v838')
+
+@APP.post('/v838/start')
+def v838_start():
+    global v838_thread
+    if _v838_alive():return jsonify({'started':False,**_v838_status()})
+    p=_v838_preflight()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v838_thread=threading.Thread(target=_v838_worker,daemon=True);v838_thread.start();return jsonify({'started':True,**_v838_status()})
+
+@APP.get('/api/v838')
+def v838_api():return jsonify(_v838_status())
+
+@APP.get('/v838/export')
+def v838_export():
+    if not V838_ADMITTED.exists():return ('not ready',404)
+    return send_file(V838_ADMITTED,as_attachment=True,download_name='v838_base_vs_tight_only_admitted.csv.gz')
+
+@APP.get('/v838')
+def v838_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v838_status()
+    try:
+        if V838_PREFLIGHT.exists():P=json.loads(V838_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V838_RESULT.exists():R=json.loads(V838_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    rows=''
+    for x in R.get('portfolio',[]):
+        rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{int(x.get('admitted_positions',0))}</td><td>{float(x.get('pf',0)):.3f}</td><td>{float(x.get('avg_trade',0))*100:.2f}%</td><td>{float(x.get('win_rate',0))*100:.2f}%</td><td>{float(x.get('stop_rate',0))*100:.2f}%</td><td>{float(x.get('cagr',0))*100:.2f}%</td><td>{float(x.get('maxdd',0))*100:.2f}%</td><td>{float(x.get('positive_year_share',0))*100:.1f}%</td><td>{float(x.get('avg_open_positions',0)):.2f}</td><td>{int(x.get('winner20',0))}</td><td>{int(x.get('winner30',0))}</td></tr>"
+    gates=R.get('economic_gate',{});grows=''.join(f"<tr><td>{e(k)}</td><td>{'✅' if v else '❌'}</td></tr>" for k,v in gates.items())
+    d=R.get('delta',{});par=R.get('baseline_parity',{})
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a;padding:16px}}.w{{max-width:1500px;margin:auto}}.c{{background:#fff;padding:28px;border-radius:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;padding:16px;border-radius:15px}}.g{{border:2px solid #10b981;background:#ecfdf5;padding:16px;border-radius:15px;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:14px}}th,td{{padding:9px;border-bottom:1px solid #dbe3ee;text-align:left}}@media(max-width:800px){{.c{{padding:18px}}table{{font-size:11px}}}}
+</style><script>async function go(){{let r=await fetch('/v838/start',{{method:'POST'}});if(!r.ok)alert(await r.text());poll();}}async function poll(){{let r=await fetch('/api/v838');let j=await r.json();document.getElementById('st').innerText=(j.status||'')+' · '+(j.phase||'')+' · '+(j.message||'')+' · '+(j.processed||0)+'/'+(j.total||0)+' · errors '+(j.errors||0);if(['starting','running'].includes(j.status))setTimeout(poll,3000);else location.reload();}}</script></head><body onload="poll()"><div class="w">
+<a href="/">← 首页</a><div class="c"><h1>🏦 V8.38 Frozen TIGHT_ONLY Causal 10-Slot Portfolio</h1><div class="o"><b>不调阈值。</b> 只把 V8.37 已胜出的 TIGHT_ONLY 原样冻结，做 recovered V6.69 lineage 的真实 10-slot account replay。BASE vs TIGHT_ONLY；Entry / -7% STOP / Exit 全冻结；0 Tiingo / 0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V838_BUILD_ID))}</p><p>BASE rows {e(P.get('base_rows','—'))} · TIGHT rows {e(P.get('tight_rows','—'))} · lineage join {e(round(float(P.get('lineage_join_coverage_pct',0)),2) if P else '—')}% · entry parity {e(round(float(P.get('entry_price_exact_parity_pct',0)),2) if P else '—')}%</p><p><b>Frozen V8.37 winner:</b> {e(P.get('v837_frozen_best','—'))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v838/preflight"><button>A. Run Portfolio Preflight</button></form><br><button onclick="go()">B. Run Frozen TIGHT_ONLY 10-Slot</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g"><b>{e(R.get('verdict','—'))}</b></div><p>BASE parity: <b>{e(R.get('base_parity_ok','—'))}</b> · price coverage {e(round(float(R.get('price_listing_coverage_pct',0)),2) if R else '—')}%</p><p>Δ CAGR {e(round(float(d.get('cagr_pp',0)),2) if d else '—')}pp · Δ MaxDD {e(round(float(d.get('maxdd_pp',0)),2) if d else '—')}pp · Δ PF {e(round(float(d.get('pf',0)),3) if d else '—')} · Δ STOP {e(round(float(d.get('stop_rate_pp',0)),2) if d else '—')}pp</p><p>Historical BASE parity details: {e(par)}</p></div>
+<div class="c"><h2>BASE vs TIGHT_ONLY — Causal 10-Slot</h2><div style="overflow-x:auto"><table><tr><th>Variant</th><th>Admitted</th><th>PF</th><th>AvgTrade</th><th>Win%</th><th>STOP%</th><th>CAGR</th><th>MaxDD</th><th>Positive years</th><th>Avg open</th><th>+20</th><th>+30</th></tr>{rows or '<tr><td colspan="12">Run B first.</td></tr>'}</table></div></div>
+<div class="c"><h2>Frozen Economic Gate</h2><table><tr><th>Check</th><th>Pass</th></tr>{grows or '<tr><td colspan="2">—</td></tr>'}</table><div class="o"><b>规则：</b> TIGHT_ONLY 必须 PF、AvgTrade、CAGR 不低于 BASE，绝对 MaxDD 不恶化，positive-year share 最多只允许差 5pp；同时 BASE 必须先通过 recovered V6.69 portfolio parity。<br><br><b>Next:</b> {e(R.get('next',''))}</div>{"<p><a href='/v838/export'><button>Export admitted trades</button></a></p>" if V838_ADMITTED.exists() else ''}</div>
+</div></body></html>'''
+
+
+_v838_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v838_home_base is not None:
+    def _v838_home_wrap(*args,**kwargs):
+        resp=_v838_home_base(*args,**kwargs)
+        card="""<div id='v838-home-card' style='background:#ecfdf5;border:6px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🏦 V8.38 Frozen TIGHT_ONLY Causal 10-Slot</h2><p>V8.37 winner 原样冻结 · BASE vs TIGHT_ONLY · recovered V6.69 lineage · CAGR / MaxDD / PF · 0调参</p><a href='/v838'><button style='background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.38</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v838_home_base:APP.view_functions[ep]=_v838_home_wrap
