@@ -67796,3 +67796,203 @@ if _v835_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v835_home_base:APP.view_functions[ep]=_v835_home_wrap
+
+# ================= V8.36 WINNER SURVIVAL + VCP GATE ATTRIBUTION AUDIT =================
+# Diagnostic only. Reuses V8.35 trade-level PIT reconstruction. No thresholds changed,
+# no prices reloaded, no Tiingo, no universe rescan, no portfolio replay.
+V836_DIR = DATA_DIR / "v836_winner_survival_vcp_gate_attribution"
+V836_PREFLIGHT = V836_DIR / "preflight.json"
+V836_STATUS = V836_DIR / "status.json"
+V836_RESULT = V836_DIR / "result.json"
+V836_DETAIL = V836_DIR / "gate_attribution_detail.csv.gz"
+V836_BUILD_ID = "v836-winner-survival-gate-attribution-20260903"
+V836_SOURCE = V835_DETAIL
+v836_thread = None
+
+V836_GATES = ['trend_template','contraction_sequence','tight_pivot','volume_dry','pivot_cross','extension_ok','demand_confirm']
+
+def _v836_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V836_STATUS.exists():
+        try:x.update(json.loads(V836_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v836_write(**kw):
+    V836_DIR.mkdir(parents=True,exist_ok=True);x=_v836_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V836_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v836_alive():return v836_thread is not None and v836_thread.is_alive()
+
+def _v836_bool(s):
+    import pandas as pd
+    if getattr(s,'dtype',None)==bool:return s.fillna(False)
+    return s.map(lambda v: str(v).strip().lower() in ('1','true','t','yes','y')).fillna(False)
+
+def _v836_pf():
+    import pandas as pd,time
+    t0=time.time();V836_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V836_SOURCE.exists():raise RuntimeError('V8.35 trade-level audit missing; run V8.35 B first')
+        D=pd.read_csv(V836_SOURCE,nrows=50,compression='gzip',low_memory=False)
+        req=['listing_id','entry_date','entry_px','control_reason','control_ret','audit_ok']+V836_GATES
+        miss=[c for c in req if c not in D.columns]
+        full=pd.read_csv(V836_SOURCE,usecols=['audit_ok','control_ret','control_reason']+V836_GATES,compression='gzip',low_memory=False)
+        ok=_v836_bool(full['audit_ok']);valid=int(ok.sum());total=int(len(full))
+        verdict='PASS' if not miss and valid>=1000 else 'FAIL__V835_DETAIL_OR_SCHEMA'
+        out={'version':'V8.36','build_id':V836_BUILD_ID,'verdict':verdict,'rows':total,'audit_ok_rows':valid,'coverage_pct':100*valid/max(1,total),'missing_columns':miss,
+             'contract':'Attribution only: each existing V8.35 gate is evaluated against +20/+30 winners and STOPs. No gate threshold or order is changed.',
+             'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.36','build_id':V836_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V836_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v836_metrics(df):
+    import pandas as pd,numpy as np
+    if df is None or df.empty:return {'n':0,'stop_rate_pct':None,'win_rate_pct':None,'pf':None,'avg_ret_pct':None,'winner20':0,'winner30':0}
+    r=pd.to_numeric(df.control_ret,errors='coerce');m=r.notna();r=r[m];z=df.loc[m]
+    stop=z.control_reason.astype(str).str.upper().str.contains('STOP7',regex=False)
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    return {'n':int(len(r)),'stop_rate_pct':100*float(stop.mean()) if len(stop) else None,'win_rate_pct':100*float((r>0).mean()) if len(r) else None,
+            'pf':gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0),'avg_ret_pct':100*float(r.mean()) if len(r) else None,
+            'winner20':int((r>=.20).sum()),'winner30':int((r>=.30).sum())}
+
+def _v836_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v836_pf()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    _v836_write(status='running',phase='load',message='Loading V8.35 PIT trade-level audit; no price-cache replay',processed=0,total=4,errors=0)
+    D=pd.read_csv(V836_SOURCE,compression='gzip',low_memory=False)
+    D=D[_v836_bool(D.audit_ok)].copy();D['control_ret']=pd.to_numeric(D.control_ret,errors='coerce');D=D[D.control_ret.notna()].copy()
+    D['is_stop']=D.control_reason.astype(str).str.upper().str.contains('STOP7',regex=False)
+    D['winner20']=D.control_ret>=.20;D['winner30']=D.control_ret>=.30
+    for g in V836_GATES:D[g]=_v836_bool(D[g])
+    _v836_write(status='running',phase='single_gate',message='Measuring winner survival vs STOP rejection for each gate',processed=1,total=4,errors=0,elapsed_sec=round(time.time()-t0,1))
+
+    n=len(D);w20=int(D.winner20.sum());w30=int(D.winner30.sum());st=int(D.is_stop.sum())
+    rows=[]
+    for g in V836_GATES:
+        p=D[g];passdf=D[p];faildf=D[~p]
+        w20pass=int((p&D.winner20).sum());w30pass=int((p&D.winner30).sum());stpass=int((p&D.is_stop).sum())
+        w20ret=100*w20pass/max(1,w20);w30ret=100*w30pass/max(1,w30);stop_rej=100*(st-stpass)/max(1,st)
+        overall_rej=100*float((~p).mean())
+        # >1 means the gate rejects STOPs faster than it rejects +20 winners.
+        winner_rej=100-w20ret
+        selective=(stop_rej/max(1e-9,winner_rej)) if winner_rej>1e-9 else (999.0 if stop_rej>0 else 1.0)
+        pm=_v836_metrics(passdf)
+        rows.append({'gate':g,'standalone_pass_pct':100*float(p.mean()),'overall_reject_pct':overall_rej,
+                     'winner20_retention_pct':w20ret,'winner30_retention_pct':w30ret,'stop_rejection_pct':stop_rej,
+                     'winner20_rejection_pct':winner_rej,'stop_reject_to_winner20_reject_ratio':selective,
+                     'pass_n':int(len(passdf)),'pass_stop_rate_pct':pm['stop_rate_pct'],'pass_pf':pm['pf'],'pass_avg_ret_pct':pm['avg_ret_pct'],
+                     'fail_n':int(len(faildf))})
+    _v836_write(status='running',phase='cumulative',message='Attributing cumulative winner loss and STOP removal in V8.35 gate order',processed=2,total=4,errors=0,elapsed_sec=round(time.time()-t0,1))
+
+    alive=pd.Series(True,index=D.index);cum=[];prev_w20=w20;prev_st=st
+    for i,g in enumerate(V836_GATES,1):
+        before=alive.copy();alive=alive&D[g]
+        sub=D[alive];curw=int((alive&D.winner20).sum());curst=int((alive&D.is_stop).sum())
+        killed_w=prev_w20-curw;killed_s=prev_st-curst
+        cum.append({'step':i,'gate':g,'n_after':int(alive.sum()),'cumulative_pass_pct':100*float(alive.mean()),
+                    'winner20_after':curw,'winner20_retention_pct':100*curw/max(1,w20),'stop_after':curst,'stop_rejection_pct':100*(st-curst)/max(1,st),
+                    'marginal_winner20_killed':int(killed_w),'marginal_stop_killed':int(killed_s),
+                    'marginal_stop_per_winner_killed':float(killed_s/max(1,killed_w))})
+        prev_w20,prev_st=curw,curst
+
+    _v836_write(status='running',phase='interactions',message='Checking pairwise gate combinations without tuning thresholds',processed=3,total=4,errors=0,elapsed_sec=round(time.time()-t0,1))
+    pairs=[]
+    from itertools import combinations
+    for a,b in combinations(V836_GATES,2):
+        p=D[a]&D[b];wp=int((p&D.winner20).sum());sp=int((p&D.is_stop).sum())
+        wret=100*wp/max(1,w20);srej=100*(st-sp)/max(1,st);wrej=100-wret
+        select=srej/max(1e-9,wrej) if wrej>1e-9 else (999.0 if srej>0 else 1.0)
+        met=_v836_metrics(D[p])
+        pairs.append({'gate_a':a,'gate_b':b,'n':int(p.sum()),'winner20_retention_pct':wret,'stop_rejection_pct':srej,'selectivity_ratio':select,'pf':met['pf'],'stop_rate_pct':met['stop_rate_pct']})
+    pairs=sorted(pairs,key=lambda x:(x['selectivity_ratio'],x['winner20_retention_pct']),reverse=True)
+
+    # Root-cause classification: identify gates that destroy winners more than STOPs.
+    harmful=[r for r in rows if r['winner20_rejection_pct']>r['stop_rejection_pct']+5]
+    useful=[r for r in rows if r['stop_rejection_pct']>r['winner20_rejection_pct']+5]
+    worst=sorted(rows,key=lambda r:(r['winner20_rejection_pct']-r['stop_rejection_pct']),reverse=True)
+    worst_names=[x['gate'] for x in worst[:3]]
+    # special signal-semantic alarm if pivot_cross is highly destructive to winners
+    pc=next((x for x in rows if x['gate']=='pivot_cross'),{})
+    if pc and pc.get('winner20_rejection_pct',0)>70 and pc.get('stop_rejection_pct',0)<=pc.get('winner20_rejection_pct',0)+5:
+        verdict='PIVOT_CROSS_SIGNAL_SEMANTICS_IS_MAJOR_SUSPECT__DO_NOT_TUNE_THRESHOLD'
+    elif harmful:
+        verdict='STRICT_GATE_MISCLASSIFICATION_FOUND__REBUILD_VCP_PROCESS_NOT_THRESHOLD_TUNING'
+    elif useful:
+        verdict='SOME_VCP_GATES_SHOW_SELECTIVE_EDGE__BUILD_PROCESS_AWARE_QUALIFICATION_NEXT'
+    else:
+        verdict='NO_SINGLE_GATE_SELECTIVE_EDGE__VCP_PROCESS_RECONSTRUCTION_REQUIRED'
+
+    R={'version':'V8.36','build_id':V836_BUILD_ID,'verdict':verdict,'source':'V8.35 PIT trade-level audit','base':_v836_metrics(D),
+       'winner20_total':w20,'winner30_total':w30,'stop_total':st,'single_gate':rows,'cumulative':cum,'top_pairwise':pairs[:10],
+       'harmful_gates':[x['gate'] for x in harmful],'useful_gates':[x['gate'] for x in useful],'largest_winner_destruction_vs_stop':worst_names,
+       'interpretation':'A useful qualification gate should reject STOPs faster than it rejects big winners. V8.36 measures that directly. It does not loosen or tighten any threshold.',
+       'next':'Reconstruct VCP as a process, not seven simultaneous static hard gates. Preserve gates with selective STOP rejection; re-check time semantics for destructive gates (especially pivot_cross) before any A/B rule change.',
+       'elapsed_sec':round(time.time()-t0,2)}
+    V836_DIR.mkdir(parents=True,exist_ok=True);pd.DataFrame(rows).to_csv(V836_DETAIL,index=False,compression='gzip');V836_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    _v836_write(status='done',phase='complete',message='Done · '+verdict,processed=4,total=4,errors=0,elapsed_sec=R['elapsed_sec']);return R
+
+def _v836_worker():
+    global v836_thread
+    import time
+    t0=time.time()
+    try:_v836_run()
+    except Exception as ex:_v836_write(status='error',phase='failed',message='V8.36 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v836_thread=None
+
+@APP.route('/v836/preflight',methods=['GET','POST'])
+def v836_preflight_route():_v836_pf();return redirect('/v836')
+@APP.post('/v836/start')
+def v836_start():
+    global v836_thread
+    if _v836_alive():return jsonify({'started':False,**_v836_status()})
+    p=_v836_pf()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v836_thread=threading.Thread(target=_v836_worker,daemon=True);v836_thread.start();return jsonify({'started':True,**_v836_status()})
+@APP.get('/api/v836')
+def v836_api():return jsonify(_v836_status())
+@APP.get('/v836/export')
+def v836_export():
+    if not V836_DETAIL.exists():return ('not ready',404)
+    return send_file(V836_DETAIL,as_attachment=True,download_name='v836_vcp_gate_attribution.csv.gz')
+@APP.get('/v836')
+def v836_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v836_status()
+    try:
+        if V836_PREFLIGHT.exists():P=json.loads(V836_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V836_RESULT.exists():R=json.loads(V836_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def f(x,n=2):
+        try:return round(float(x),n)
+        except:return '—'
+    srows=''.join(f"<tr><td><b>{e(x.get('gate'))}</b></td><td>{e(f(x.get('standalone_pass_pct')))}%</td><td>{e(f(x.get('winner20_retention_pct')))}%</td><td>{e(f(x.get('stop_rejection_pct')))}%</td><td>{e(f(x.get('stop_reject_to_winner20_reject_ratio')))}</td><td>{e(f(x.get('pass_stop_rate_pct')))}%</td><td>{e(f(x.get('pass_pf'),3))}</td></tr>" for x in R.get('single_gate',[]))
+    crows=''.join(f"<tr><td>{e(x.get('step'))}</td><td><b>{e(x.get('gate'))}</b></td><td>{e(x.get('n_after'))}</td><td>{e(f(x.get('winner20_retention_pct')))}%</td><td>{e(f(x.get('stop_rejection_pct')))}%</td><td>{e(x.get('marginal_winner20_killed'))}</td><td>{e(x.get('marginal_stop_killed'))}</td></tr>" for x in R.get('cumulative',[]))
+    prows=''.join(f"<tr><td>{e(x.get('gate_a'))} + {e(x.get('gate_b'))}</td><td>{e(x.get('n'))}</td><td>{e(f(x.get('winner20_retention_pct')))}%</td><td>{e(f(x.get('stop_rejection_pct')))}%</td><td>{e(f(x.get('selectivity_ratio')))}</td><td>{e(f(x.get('pf'),3))}</td></tr>" for x in R.get('top_pairwise',[]))
+    verdict=R.get('verdict','—');cls='ok' if 'SELECTIVE_EDGE' in str(verdict) else 'warn'
+    b=R.get('base',{}) or {}
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#0f172a;margin:0}}.w{{max-width:1200px;margin:auto;padding:22px}}.c{{background:#fff;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe2ea;text-align:left;vertical-align:top}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧪 V8.36 Winner Survival + VCP Gate Attribution Audit</h1><div class="warn"><b>只诊断，不调阈值。</b> 直接复用 V8.35 的 64k PIT trade-level audit，测每个 gate 到底是在杀 STOP，还是在杀 Big Winner。0 price reload / 0 Tiingo / 0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V836_BUILD_ID))}</p><p>Rows {e(P.get('rows','—'))} · audit_ok {e(P.get('audit_ok_rows','—'))} · coverage {e(f(P.get('coverage_pct')))}%</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v836/preflight"><button>A. Run Attribution Preflight</button></form><br><button onclick="go()">B. Run Winner-Survival Attribution</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class="c"><h2>Verdict</h2><div class="{cls}"><b>{e(verdict)}</b></div><p>BASE N <b>{e(b.get('n','—'))}</b> · STOP <b>{e(f(b.get('stop_rate_pct')))}%</b> · PF <b>{e(f(b.get('pf'),3))}</b> · +20 <b>{e(R.get('winner20_total','—'))}</b> · +30 <b>{e(R.get('winner30_total','—'))}</b></p><p><b>Most destructive vs STOP:</b> {e(', '.join(R.get('largest_winner_destruction_vs_stop',[])))}</p><p><b>Harmful gates:</b> {e(', '.join(R.get('harmful_gates',[])) or '—')}<br><b>Potentially useful gates:</b> {e(', '.join(R.get('useful_gates',[])) or '—')}</p></div>
+<div class="c"><h2>Single-Gate Winner Survival vs STOP Rejection</h2><table><tr><th>Gate</th><th>Pass</th><th>+20 retention</th><th>STOP rejected</th><th>STOP-reject / Winner-reject</th><th>Pass STOP rate</th><th>Pass PF</th></tr>{srows or '<tr><td colspan=7>—</td></tr>'}</table><p><b>How to read:</b> Ratio &gt; 1 means the gate rejects STOPs faster than it rejects +20 winners. Ratio &lt; 1 means it destroys winners faster than STOPs.</p></div>
+<div class="c"><h2>Cumulative Attribution in V8.35 Order</h2><table><tr><th>#</th><th>Gate</th><th>N after</th><th>+20 retention</th><th>STOP rejected</th><th>Winner killed at step</th><th>STOP killed at step</th></tr>{crows or '<tr><td colspan=7>—</td></tr>'}</table></div>
+<div class="c"><h2>Top Pairwise Gate Combinations (diagnostic only)</h2><table><tr><th>Pair</th><th>N</th><th>+20 retention</th><th>STOP rejected</th><th>Selectivity</th><th>PF</th></tr>{prows or '<tr><td colspan=6>—</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>Interpretation:</b> {e(R.get('interpretation',''))}</div><p><b>Next:</b> {e(R.get('next',''))}</p>{"<a href='/v836/export'><button>Export gate attribution</button></a>" if V836_DETAIL.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v836',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,800)}}catch(e){{}}}}async function go(){{let r=await fetch('/v836/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll()}}poll()</script></div></body></html>'''
+
+_v836_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v836_home_base is not None:
+    def _v836_home_wrap(*args,**kwargs):
+        resp=_v836_home_base(*args,**kwargs)
+        card="""<div id='v836-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'><h2>🧪 V8.36 Winner Survival + VCP Gate Attribution</h2><p>不调阈值，直接查 V8.35 七个 gate：哪个真正淘汰 STOP，哪个反而杀掉 Big Winner；重点核查 contraction / pivot-cross 时间语义。</p><a href='/v836'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.36</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v836_home_base:APP.view_functions[ep]=_v836_home_wrap
