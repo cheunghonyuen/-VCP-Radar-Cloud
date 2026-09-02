@@ -46782,7 +46782,18 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
+        card="""<div id='v825a-home-card-real' style='background:#fef2f2;border:7px solid #dc2626;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🔬 V8.25A Fundamental Feature Injection Audit</h2>
+        <p>查清 V8.25 的 PIT fundamentals 是否被45% coverage filter删掉。只读审计，0 tuning / 0 replay。</p>
+        <a href='/v825a'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25A</button></a>
+        </div>
+        <div id='v825-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🆓 V8.25 Free Dow-30 PIT Fundamentals Pilot</h2>
+        <p><b>第一关：先免费证明“值不值得付钱”。</b></p>
+        <p>Control = price/volume；Overlay = 同一 Control + 真实 PIT Revenue/EPS/Net Income growth & acceleration。A Preflight → B FREE cache → C frozen purged-forward OOS。</p>
+        <a href='/v825'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25</button></a>
+        </div>
+        <div id='v820-home-card-real' style='background:#ecfdf5;border:6px solid #059669;border-radius:24px;padding:24px;margin:20px 0'>
         <h2>🧭 V8.20B New-Information OOS Test</h2>
         <p>Sector/Industry Leadership + TRUE PIT Fundamentals · final research version before any replay.</p>
         <a href='/v820'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.20B</button></a>
@@ -58992,3 +59003,205 @@ if _v825_home_base is not None:
         except Exception:return resp
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v825_home_base:APP.view_functions[_ep]=_v825_home_wrap
+
+# V8.25B: canonical dashboard card hardcoded before V8.20B.
+
+
+# ================= V8.25A FUNDAMENTAL FEATURE INJECTION AUDIT =================
+# Read-only audit to prove whether PIT fundamental features actually entered the
+# frozen V8.25 OOS model. No threshold changes, no model changes, no rerun rescue.
+V825A_INJ_DIR = DATA_DIR / "v825a_fundamental_injection_audit"
+V825A_INJ_RESULT = V825A_INJ_DIR / "result.json"
+
+def _v825a_inj_run():
+    V825A_INJ_DIR.mkdir(parents=True, exist_ok=True)
+
+    P = _v825_jread(V825_PREFLIGHT, {})
+    if P.get("verdict") != "PASS":
+        raise RuntimeError("V8.25 Preflight result missing/not PASS")
+
+    D = _v825_feature_store()
+    tickers = P["universe"]["present_in_feature_store"]
+    D = D[D.ticker.isin(tickers)].copy()
+    D["label_stop"] = D.is_stop.astype(bool)
+    D["label_50"] = D.ret.ge(.50)
+    D = D[D.label_stop | D.label_50].copy()
+    D = D[~(D.label_stop & D.label_50)].copy()
+    D["y"] = D.label_50.astype(int)
+
+    deny=set(["ret","is_stop","winner50","winner100","listing_id","ticker","entry_date","exit_date","exit_reason",
+              "entry_px","entry_px_raw","exit_px","exit_px_raw","control_ret","low10_ret",
+              "parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id",
+              "label_stop","label_50","y"])
+    deny_tokens=["exit","future","forward","label","outcome","mfe","mae"]
+    control=[]
+    for c in D.columns:
+        if c in deny or any(tok in c.lower() for tok in deny_tokens):
+            continue
+        z=pd.to_numeric(D[c],errors="coerce")
+        if z.notna().sum()>=max(40,int(.60*len(D))) and z.nunique(dropna=True)>=5:
+            D[c]=z
+            control.append(c)
+
+    _, defs = _v825_defs()
+    codes = _v820_pick_codes(defs)
+    X = _v825_attach(D, codes)
+    fund = ["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]
+
+    coverage=[]
+    for f in fund:
+        z=pd.to_numeric(X[f],errors="coerce")
+        coverage.append({
+            "feature":f,
+            "non_null":int(z.notna().sum()),
+            "rows":int(len(X)),
+            "coverage":float(z.notna().mean()),
+            "unique":int(z.nunique(dropna=True)),
+            "passes_v825_45pct_filter":bool(z.notna().mean()>=.45),
+        })
+
+    control_after=[c for c in control if c in X.columns and pd.to_numeric(X[c],errors="coerce").notna().mean()>=.45]
+    overlay_requested=control+fund
+    overlay_after=[c for c in overlay_requested if c in X.columns and pd.to_numeric(X[c],errors="coerce").notna().mean()>=.45]
+    injected=[f for f in fund if f in overlay_after]
+
+    # Reconstruct the exact rolling split used by V8.25 and audit PIT coverage per fold.
+    Z=X.sort_values(["entry_date","listing_id"]).copy()
+    idx=Z.index.to_numpy()
+    n=len(Z)
+    warm=max(60,int(n*.40))
+    cuts=np.linspace(warm,n,5,dtype=int)
+    folds=[]
+    for fi in range(4):
+        a,b=int(cuts[fi]),int(cuts[fi+1])
+        if b<=a:
+            continue
+        te=Z.loc[idx[a:b]]
+        t0=pd.Timestamp(te.entry_date.min()).normalize()
+        tr=Z[(Z.entry_date<t0)&(Z.exit_date<t0-pd.Timedelta(days=30))]
+        row={
+            "fold":fi+1,
+            "test":f"{te.entry_date.min().date()} → {te.entry_date.max().date()}",
+            "train_rows":int(len(tr)),
+            "test_rows":int(len(te)),
+            "train_coverage":{},
+            "test_coverage":{},
+        }
+        for f in fund:
+            row["train_coverage"][f]=float(pd.to_numeric(tr[f],errors="coerce").notna().mean()) if len(tr) else 0.0
+            row["test_coverage"][f]=float(pd.to_numeric(te[f],errors="coerce").notna().mean()) if len(te) else 0.0
+        folds.append(row)
+
+    cache=[]
+    for t in tickers:
+        fp=V825_FUND_DIR/f"{t}.json"
+        if not fp.exists():
+            cache.append({"ticker":t,"exists":False,"rows":0,"schema_ok":False})
+            continue
+        try:
+            arr=json.loads(fp.read_text(encoding="utf-8"))
+            aud=_v825_cache_audit(arr)
+            cache.append({"ticker":t,"exists":True,"rows":int(aud.get("rows",0)),
+                          "schema_ok":bool(aud.get("ok"))})
+        except Exception as ex:
+            cache.append({"ticker":t,"exists":True,"rows":0,"schema_ok":False,
+                          "error":f"{type(ex).__name__}: {ex}"})
+
+    prior=_v825_jread(V825_RESULT,{})
+    exact_same=False
+    if prior:
+        c=prior.get("control") or {}
+        o=prior.get("overlay") or {}
+        keys=["oos_rows","pooled_auc","median_fold_auc","top20_metrics"]
+        exact_same=all(c.get(k)==o.get(k) for k in keys)
+
+    if len(injected)==0:
+        verdict="CONFIRMED__FUNDAMENTALS_FILTERED_OUT__OVERLAY_EQUALS_CONTROL"
+        next_action="FIX_FEATURE_INJECTION_COVERAGE_HANDLING_ONLY__KEEP_FROZEN_MODEL_AND_GATE"
+    elif exact_same:
+        verdict="FUNDAMENTALS_PRESENT_BUT_PRIOR_OUTPUT_IDENTICAL__AUDIT_MODEL_SELECTION_PATH"
+        next_action="TRACE_SELECTED_FEATURES_PER_FOLD_ONLY"
+    else:
+        verdict="FUNDAMENTALS_DID_ENTER_MODEL__PRIOR_FAIL_CAN_BE_INTERPRETED"
+        next_action="ACCEPT_V825_RESULT_WITHOUT_RETUNING"
+
+    result={
+        "version":"V8.25A Fundamental Feature Injection Audit",
+        "build_id":"V825A_INJECTION_AUDIT_20260902A",
+        "verdict":verdict,
+        "sample":{"rows":int(len(X)),"tickers":int(X.ticker.nunique()),
+                  "stops":int(X.label_stop.sum()),"plus50":int(X.label_50.sum())},
+        "fundamental_coverage":coverage,
+        "control_feature_count_before":len(control),
+        "control_feature_count_after_45pct":len(control_after),
+        "overlay_requested_feature_count":len(overlay_requested),
+        "overlay_feature_count_after_45pct":len(overlay_after),
+        "fundamental_features_requested":fund,
+        "fundamental_features_injected":injected,
+        "overlay_equals_control_feature_list":bool(overlay_after==control_after),
+        "control_features_after_filter":control_after,
+        "overlay_features_after_filter":overlay_after,
+        "fold_coverage":folds,
+        "cache_inventory":cache,
+        "prior_v825_verdict":prior.get("verdict","NOT_FOUND"),
+        "prior_control_overlay_exact_same":exact_same,
+        "next_action":next_action,
+        "boundaries":"READ-ONLY audit. No downloads, no threshold changes, no model changes, no replay, no strategy tuning."
+    }
+    _v825_jwrite(V825A_INJ_RESULT,result)
+    return result
+
+@APP.route("/v825a/run",methods=["GET","POST"])
+def v825a_inj_run_route():
+    try:
+        _v825a_inj_run()
+    except Exception as ex:
+        _v825_jwrite(V825A_INJ_RESULT,{
+            "version":"V8.25A Fundamental Feature Injection Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}",
+            "boundaries":"READ-ONLY audit."
+        })
+    return redirect("/v825a")
+
+@APP.get("/api/v825a")
+def v825a_inj_api():
+    return jsonify(_v825_jread(V825A_INJ_RESULT,{"verdict":"NOT_RUN"}))
+
+@APP.get("/v825a")
+def v825a_inj_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825_jread(V825A_INJ_RESULT,{})
+    cov=""
+    for x in R.get("fundamental_coverage") or []:
+        cov+=f"<tr><td><b>{e(x.get('feature'))}</b></td><td>{e(x.get('non_null'))}/{e(x.get('rows'))}</td><td>{e(round(float(x.get('coverage',0))*100,1))}%</td><td>{e(x.get('unique'))}</td><td>{'✅' if x.get('passes_v825_45pct_filter') else '❌'}</td></tr>"
+    folds=""
+    for x in R.get("fold_coverage") or []:
+        tr=x.get("train_coverage") or {};te=x.get("test_coverage") or {}
+        folds+=f"<tr><td>{e(x.get('fold'))}</td><td>{e(x.get('test'))}</td><td>{e(x.get('train_rows'))}/{e(x.get('test_rows'))}</td><td>{e(' · '.join(f'{k}:{float(v)*100:.1f}%' for k,v in tr.items()))}</td><td>{e(' · '.join(f'{k}:{float(v)*100:.1f}%' for k,v in te.items()))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.r{{background:#fef2f2;border:2px solid #dc2626;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🔬 V8.25A Fundamental Feature Injection Audit</h1>
+<div class='r'><b>只回答一个问题：</b> V8.25 的 PIT fundamentals 到底有没有真正进入 Overlay 模型？这版只读，不改45%门槛，不改模型，不重跑策略。</div></div>
+<div class='c'><form method='post' action='/v825a/run'><button>▶ Run Feature Injection Audit</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<p><b>Prior V8.25:</b> {e(R.get('prior_v825_verdict','—'))}</p>
+<p><b>Prior Control/Overlay exact same:</b> {e(R.get('prior_control_overlay_exact_same','—'))}</p>
+<p><b>Fundamental features actually injected:</b> {e(', '.join(R.get('fundamental_features_injected') or []) or 'NONE')}</p>
+<div class='g'>Control after 45% filter: <b>{e(R.get('control_feature_count_after_45pct','—'))}</b> features<br>
+Overlay after 45% filter: <b>{e(R.get('overlay_feature_count_after_45pct','—'))}</b> features<br>
+Overlay feature list equals Control: <b>{e(R.get('overlay_equals_control_feature_list','—'))}</b></div></div>
+<div class='c'><h2>Fundamental Coverage</h2><div style='overflow:auto'><table>
+<tr><th>Feature</th><th>Non-null</th><th>Coverage</th><th>Unique</th><th>Pass 45%</th></tr>{cov or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>Fold Coverage</h2><div style='overflow:auto'><table>
+<tr><th>Fold</th><th>Test Period</th><th>Train/Test rows</th><th>Train PIT coverage</th><th>Test PIT coverage</th></tr>{folds or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div>
+<p>{e(R.get('boundaries',''))}</p></div></div></body></html>"""
