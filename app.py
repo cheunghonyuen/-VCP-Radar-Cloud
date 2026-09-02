@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825b-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825c-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>📚 V8.25C Fundamentals Historical Depth Audit</h2>
+        <p>查 requested startDate vs actual earliest release date，并统计各年代 PIT coverage。只读，不下载、不调模型。</p>
+        <a href='/v825c'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25C</button></a>
+        </div>
+        <div id='v825b-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧬 V8.25B Source-to-Feature Trace Audit</h2>
         <p>逐层追踪 raw statement → dataCode/value → release date → prior-year quarter → YoY。只读，不重新下载。</p>
         <a href='/v825b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25B</button></a>
@@ -59533,5 +59538,265 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:10px;
 <div class='c'><h2>Trade-by-Trade Trace</h2><div style='overflow:auto'><table>
 <tr><th>Ticker</th><th>Entry</th><th>Label</th><th>Eligible stmts</th><th>Chosen release</th><th>Fiscal</th><th>Revenue</th><th>EPS</th><th>Net Inc</th><th>Prior fiscal</th><th>Rev YoY</th><th>EPS YoY</th><th>NI YoY</th></tr>
 {rows or "<tr><td colspan=13>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div><p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
+
+
+# ================= V8.25C FUNDAMENTALS HISTORICAL DEPTH AUDIT =================
+# Read-only audit of the already downloaded FREE Dow-30 PIT fundamentals cache.
+# Answers: requested startDate vs actual earliest release date; PIT eligible trade
+# coverage by era; whether the API cache is recent-only or the downloader is wrong.
+# No downloads, no tuning, no model rerun.
+V825C_DIR = DATA_DIR / "v825c_fundamentals_historical_depth_audit"
+V825C_RESULT = V825C_DIR / "result.json"
+
+def _v825c_cache_depth(ticker):
+    fp = V825_FUND_DIR / f"{ticker}.json"
+    if not fp.exists():
+        return {
+            "ticker": ticker, "exists": False, "rows": 0,
+            "earliest_release": None, "latest_release": None,
+            "span_years": 0.0, "schema_ok": False
+        }
+    try:
+        arr = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception as ex:
+        return {
+            "ticker": ticker, "exists": True, "rows": 0,
+            "earliest_release": None, "latest_release": None,
+            "span_years": 0.0, "schema_ok": False,
+            "error": f"{type(ex).__name__}: {ex}"
+        }
+    aud = _v825_cache_audit(arr)
+    dates = []
+    for r in arr if isinstance(arr, list) else []:
+        if not isinstance(r, dict):
+            continue
+        dt = pd.to_datetime(r.get("date"), errors="coerce")
+        if pd.notna(dt):
+            dates.append(pd.Timestamp(dt).normalize())
+    if not dates:
+        return {
+            "ticker": ticker, "exists": True, "rows": int(aud.get("rows", 0)),
+            "earliest_release": None, "latest_release": None,
+            "span_years": 0.0, "schema_ok": bool(aud.get("ok"))
+        }
+    mn, mx = min(dates), max(dates)
+    span = max(0.0, (mx - mn).days / 365.25)
+    return {
+        "ticker": ticker, "exists": True, "rows": int(aud.get("rows", 0)),
+        "earliest_release": str(mn.date()), "latest_release": str(mx.date()),
+        "span_years": round(span, 2), "schema_ok": bool(aud.get("ok"))
+    }
+
+def _v825c_trade_sample():
+    D = _v825_feature_store()
+    P = _v825_jread(V825_PREFLIGHT, {})
+    tickers = (P.get("universe") or {}).get("present_in_feature_store", []) or []
+    D = D[D.ticker.isin(tickers)].copy()
+    D["label_stop"] = D.is_stop.astype(bool)
+    D["label_50"] = D.ret.ge(.50)
+    D = D[D.label_stop | D.label_50].copy()
+    D = D[~(D.label_stop & D.label_50)].copy()
+    return D.sort_values(["entry_date","ticker","listing_id"])
+
+def _v825c_run():
+    V825C_DIR.mkdir(parents=True, exist_ok=True)
+
+    P = _v825_jread(V825_PREFLIGHT, {})
+    if P.get("verdict") != "PASS":
+        raise RuntimeError("V8.25 Preflight result missing/not PASS")
+
+    tickers = (P.get("universe") or {}).get("present_in_feature_store", []) or []
+    requested_start = ((P.get("cache_plan") or {}).get("start_date"))
+
+    depth = [_v825c_cache_depth(t) for t in tickers]
+    valid = [x for x in depth if x.get("schema_ok") and x.get("earliest_release")]
+    if not valid:
+        raise RuntimeError("No valid V8.25 fundamentals cache files found")
+
+    earliest_all = min(pd.Timestamp(x["earliest_release"]) for x in valid)
+    latest_all = max(pd.Timestamp(x["latest_release"]) for x in valid)
+    median_earliest = pd.Timestamp(pd.Series([pd.Timestamp(x["earliest_release"]) for x in valid]).median())
+    median_span = float(np.median([x["span_years"] for x in valid]))
+
+    D = _v825c_trade_sample()
+
+    # Build ticker-specific earliest/latest release map.
+    depth_map = {x["ticker"]: x for x in valid}
+
+    trade_rows = []
+    eligible_count = 0
+    in_range_count = 0
+    before_cache_count = 0
+    after_cache_count = 0
+
+    eras = [
+        ("1990-1999", "1990-01-01", "1999-12-31"),
+        ("2000-2009", "2000-01-01", "2009-12-31"),
+        ("2010-2019", "2010-01-01", "2019-12-31"),
+        ("2020-2025", "2020-01-01", "2025-12-31"),
+    ]
+    era_stats = []
+
+    # For each trade, PIT-eligible means at least one statement release_date <= entry_date.
+    for _, r in D.iterrows():
+        t = r["ticker"]
+        ed = pd.Timestamp(r["entry_date"]).normalize()
+        dep = depth_map.get(t)
+        earliest = pd.Timestamp(dep["earliest_release"]) if dep else None
+        latest = pd.Timestamp(dep["latest_release"]) if dep else None
+
+        in_range = bool(earliest is not None and latest is not None and earliest <= ed <= latest)
+        before_cache = bool(earliest is not None and ed < earliest)
+        after_cache = bool(latest is not None and ed > latest)
+
+        eligible = False
+        if dep:
+            fp = V825_FUND_DIR / f"{t}.json"
+            try:
+                arr = json.loads(fp.read_text(encoding="utf-8"))
+                for s in arr if isinstance(arr, list) else []:
+                    dt = pd.to_datetime(s.get("date"), errors="coerce") if isinstance(s, dict) else pd.NaT
+                    if pd.notna(dt) and pd.Timestamp(dt).normalize() <= ed:
+                        eligible = True
+                        break
+            except Exception:
+                pass
+
+        eligible_count += int(eligible)
+        in_range_count += int(in_range)
+        before_cache_count += int(before_cache)
+        after_cache_count += int(after_cache)
+
+        trade_rows.append({
+            "ticker": t,
+            "entry_date": str(ed.date()),
+            "label": "PLUS50" if bool(r["label_50"]) else "STOP",
+            "cache_earliest": str(earliest.date()) if earliest is not None else None,
+            "cache_latest": str(latest.date()) if latest is not None else None,
+            "within_cache_range": in_range,
+            "pit_eligible": eligible,
+        })
+
+    TD = pd.DataFrame(trade_rows)
+
+    for name, start, end in eras:
+        a = pd.Timestamp(start); b = pd.Timestamp(end)
+        g = TD[(pd.to_datetime(TD.entry_date) >= a) & (pd.to_datetime(TD.entry_date) <= b)].copy()
+        era_stats.append({
+            "era": name,
+            "trades": int(len(g)),
+            "within_cache_range": int(g.within_cache_range.sum()) if len(g) else 0,
+            "pit_eligible": int(g.pit_eligible.sum()) if len(g) else 0,
+            "pit_eligible_pct": float(g.pit_eligible.mean()) if len(g) else 0.0
+        })
+
+    req = pd.Timestamp(requested_start) if requested_start else None
+    requested_vs_actual_days = int((earliest_all - req).days) if req is not None else None
+
+    # Diagnose.
+    recent_only = bool(
+        requested_start and
+        earliest_all.year >= 2022 and
+        req.year <= 2005
+    )
+    if recent_only:
+        verdict = "FREE_API_CACHE_IS_RECENT_ONLY_RELATIVE_TO_REQUESTED_START"
+        next_action = "RUN_RECENT_PERIOD_ONLY_FEASIBILITY_PILOT_USING_ACTUAL_CACHE_COVERAGE__NO_PAID_DATA"
+    elif requested_start and requested_vs_actual_days is not None and requested_vs_actual_days > 365:
+        verdict = "REQUESTED_START_NOT_HONORED_OR_HISTORY_TRUNCATED"
+        next_action = "AUDIT_TIINGO_ENDPOINT_PAGINATION_OR_HISTORY_LIMIT_BEFORE_ANY_MODEL_RERUN"
+    elif eligible_count == 0:
+        verdict = "NO_PIT_ELIGIBLE_TRADES_DESPITE_CACHE_RANGE"
+        next_action = "AUDIT_RELEASE_DATE_SEMANTICS_ONLY"
+    else:
+        verdict = "HISTORICAL_DEPTH_SUFFICIENT_FOR_SUBSET_PILOT"
+        next_action = "RESTRICT_FROZEN_PILOT_TO_PIT_ELIGIBLE_TRADES_ONLY__KEEP_GATE_UNCHANGED"
+
+    result = {
+        "version": "V8.25C Fundamentals Historical Depth Audit",
+        "build_id": "V825C_DEPTH_AUDIT_20260902A",
+        "verdict": verdict,
+        "requested_start_date": requested_start,
+        "cache_summary": {
+            "tickers_total": len(tickers),
+            "valid_cache_tickers": len(valid),
+            "earliest_release_any": str(earliest_all.date()),
+            "median_earliest_release": str(median_earliest.date()),
+            "latest_release_any": str(latest_all.date()),
+            "median_span_years": round(median_span, 2),
+            "requested_vs_actual_earliest_days": requested_vs_actual_days
+        },
+        "trade_coverage": {
+            "trades_total": int(len(TD)),
+            "within_cache_range": int(in_range_count),
+            "pit_eligible": int(eligible_count),
+            "pit_eligible_pct": float(eligible_count / max(1, len(TD))),
+            "before_cache_start": int(before_cache_count),
+            "after_cache_end": int(after_cache_count)
+        },
+        "era_coverage": era_stats,
+        "ticker_depth": depth,
+        "sample_trades": trade_rows[:80],
+        "next_action": next_action,
+        "boundaries": "READ-ONLY historical-depth audit. 0 downloads, 0 model changes, 0 threshold changes, 0 replay, 0 tuning."
+    }
+
+    _v825_jwrite(V825C_RESULT, result)
+    return result
+
+@APP.route("/v825c/run", methods=["GET","POST"])
+def v825c_run_route():
+    try:
+        _v825c_run()
+    except Exception as ex:
+        _v825_jwrite(V825C_RESULT, {
+            "version": "V8.25C Fundamentals Historical Depth Audit",
+            "verdict": "AUDIT_ERROR",
+            "error": f"{type(ex).__name__}: {ex}",
+            "boundaries": "READ-ONLY historical-depth audit."
+        })
+    return redirect("/v825c")
+
+@APP.get("/api/v825c")
+def v825c_api():
+    return jsonify(_v825_jread(V825C_RESULT, {"verdict":"NOT_RUN"}))
+
+@APP.get("/v825c")
+def v825c_page():
+    import html
+    e=lambda x: html.escape(str(x))
+    R=_v825_jread(V825C_RESULT,{})
+    C=R.get("cache_summary") or {}
+    T=R.get("trade_coverage") or {}
+    era=""
+    for x in R.get("era_coverage") or []:
+        era+=f"<tr><td><b>{e(x.get('era'))}</b></td><td>{e(x.get('trades'))}</td><td>{e(x.get('within_cache_range'))}</td><td>{e(x.get('pit_eligible'))}</td><td>{e(round(float(x.get('pit_eligible_pct',0))*100,1))}%</td></tr>"
+    dep=""
+    for x in R.get("ticker_depth") or []:
+        dep+=f"<tr><td><b>{e(x.get('ticker'))}</b></td><td>{'✅' if x.get('schema_ok') else '❌'}</td><td>{e(x.get('rows'))}</td><td>{e(x.get('earliest_release'))}</td><td>{e(x.get('latest_release'))}</td><td>{e(x.get('span_years'))}</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>📚 V8.25C Fundamentals Historical Depth Audit</h1>
+<div class='o'><b>只查历史深度。</b> 比较请求的 startDate 与 API 实际返回的 earliest release date，并统计 1990s / 2000s / 2010s / 2020–2025 的 PIT eligible coverage。</div></div>
+<div class='c'><form method='post' action='/v825c/run'><button>▶ Run Historical Depth Audit</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Requested start: <b>{e(R.get('requested_start_date','—'))}</b><br>
+Actual earliest any: <b>{e(C.get('earliest_release_any','—'))}</b> · median earliest: <b>{e(C.get('median_earliest_release','—'))}</b><br>
+Latest any: <b>{e(C.get('latest_release_any','—'))}</b> · median span: <b>{e(C.get('median_span_years','—'))} years</b><br>
+Valid cache tickers: <b>{e(C.get('valid_cache_tickers','—'))}/{e(C.get('tickers_total','—'))}</b></div></div>
+<div class='c'><h2>Trade PIT Coverage</h2>
+<div class='g'>Total trades <b>{e(T.get('trades_total','—'))}</b> · PIT eligible <b>{e(T.get('pit_eligible','—'))}</b> ({e(round(float(T.get('pit_eligible_pct',0))*100,1))}%) · before cache start <b>{e(T.get('before_cache_start','—'))}</b></div>
+<div style='overflow:auto'><table><tr><th>Era</th><th>Trades</th><th>Within cache range</th><th>PIT eligible</th><th>PIT eligible %</th></tr>{era or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
+<div class='c'><h2>Ticker Historical Depth</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Schema</th><th>Rows</th><th>Earliest release</th><th>Latest release</th><th>Span years</th></tr>{dep or "<tr><td colspan=6>Run audit first.</td></tr>"}</table></div></div>
 <div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div><p>{e(R.get('boundaries',''))}</p></div>
 </div></body></html>"""
