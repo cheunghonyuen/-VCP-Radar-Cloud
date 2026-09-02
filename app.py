@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826a-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v826b-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>💵 V8.26B Economic / 10-Slot Portfolio Audit</h2>
+        <p>不再用 Winner Recall 判生死：直接审计 BASE vs 固定 Top25/33/50 的 PF、AvgTrade、10-slot CAGR、daily-MTM MaxDD、年度稳定性。复用 V8.26A OOS/cache。</p>
+        <a href='/v826b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26B</button></a>
+        </div>
+        <div id='v826a-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧱 V8.26A Historical STOP-Avoidance Walk-Forward</h2>
         <p>M 的8-feature frozen model → 更大历史 candidate/cache；先 Schema/Parity Preflight，再 resumable strict year-forward。0下载 / 0全市场重扫 / 0调参。</p>
         <a href='/v826a'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26A</button></a>
@@ -63670,6 +63675,515 @@ $('go').onclick=async()=>{{
   let s=await (await fetch('/v826a/start',{{method:'POST'}})).json();
   $('msg').textContent=s.message||s.status||'';
   poll();
+}};
+poll();
+</script>
+</div></body></html>"""
+
+# ================= V8.26B ECONOMIC / 10-SLOT PORTFOLIO AUDIT =================
+# Reuses V8.26A strict-year-forward OOS rows. No historical feature rebuild.
+# Fixed variants only: BASE, Top25, Top33, Top50 by the already-frozen reference rank.
+# 10-slot portfolio:
+#   - max 10 concurrent positions
+#   - risk budget 0.5% equity / 7% stop => ~7.14% equity per admitted position
+#   - same-day admission priority: higher frozen reference rank, then higher frozen score
+#   - realized-equity sizing; actual cached daily closes used for MTM MaxDD after admission
+# No threshold search / no tuning / no downloads / no universe rescan.
+V826B_DIR = DATA_DIR / "v826b_economic_portfolio_audit"
+V826B_PREFLIGHT = V826B_DIR / "preflight.json"
+V826B_STATUS = V826B_DIR / "status.json"
+V826B_RESULT = V826B_DIR / "result.json"
+V826B_BUILD_ID = "V826B_ECONOMIC_PORTFOLIO_20260902A"
+V826B_INITIAL_EQUITY = 100000.0
+V826B_MAX_POSITIONS = 10
+V826B_RISK_PCT = 0.005
+v826b_thread = None
+
+def _v826b_oos_path():
+    return V826A_DIR / "strict_year_forward_oos_rows.csv.gz"
+
+def _v826b_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,
+       "elapsed_sec":0,"error":None}
+    if V826B_STATUS.exists():
+        try:x.update(json.loads(V826B_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v826b_write_status(**kw):
+    V826B_DIR.mkdir(parents=True, exist_ok=True)
+    x=_v826b_status(); x.update(kw)
+    V826B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return x
+
+def _v826b_alive():
+    return v826b_thread is not None and v826b_thread.is_alive()
+
+def _v826b_load_oos():
+    fp=_v826b_oos_path()
+    if not fp.exists():raise RuntimeError("V8.26A strict year-forward OOS file missing")
+    D=pd.read_csv(fp,compression="gzip")
+    need=["listing_id","entry_date","entry_px","exit60_date","realized_ret","winner20","is_stop","frozen_score","reference_rank"]
+    miss=[c for c in need if c not in D.columns]
+    if miss:raise RuntimeError("V8.26A OOS schema missing: "+",".join(miss))
+    D["entry_date"]=pd.to_datetime(D["entry_date"],errors="coerce").dt.normalize()
+    D["exit60_date"]=pd.to_datetime(D["exit60_date"],errors="coerce").dt.normalize()
+    D["entry_px"]=pd.to_numeric(D["entry_px"],errors="coerce")
+    D["realized_ret"]=pd.to_numeric(D["realized_ret"],errors="coerce")
+    D["frozen_score"]=pd.to_numeric(D["frozen_score"],errors="coerce")
+    D["reference_rank"]=pd.to_numeric(D["reference_rank"],errors="coerce")
+    D["winner20"]=_v826a_bool(D["winner20"])
+    D["is_stop"]=_v826a_bool(D["is_stop"])
+    D=D.dropna(subset=["listing_id","entry_date","exit60_date","entry_px","realized_ret","reference_rank"]).copy()
+    return D.sort_values(["entry_date","reference_rank","frozen_score","listing_id"],
+                         ascending=[True,False,False,True]).reset_index(drop=True)
+
+def _v826b_preflight():
+    V826B_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    M,lidcol=_v826a_manifest()
+    lids=set(D["listing_id"].astype(str))
+    mlids=set(M[lidcol].astype(str))
+    map_cov=len(lids & mlids)/max(1,len(lids))
+    dup=int(D.duplicated(["listing_id","entry_date"],keep=False).sum())
+    years=sorted(D["entry_date"].dt.year.dropna().astype(int).unique().tolist())
+    out={
+        "version":"V8.26B Economic / 10-Slot Portfolio Audit",
+        "build_id":V826B_BUILD_ID,
+        "verdict":"PASS" if len(D)>=50000 and map_cov>=.95 and len(years)>=20 else "FAIL__OOS_OR_PRICE_CACHE_NOT_READY",
+        "oos_rows":int(len(D)),
+        "unique_listings":int(D["listing_id"].nunique()),
+        "manifest_mapping_coverage":float(map_cov),
+        "duplicate_listing_date_rows":dup,
+        "years":years,
+        "date_min":str(D["entry_date"].min().date()),
+        "date_max":str(D["entry_date"].max().date()),
+        "variants":["BASE","TOP25","TOP33","TOP50"],
+        "portfolio_policy":"10 slots; 0.5% equity risk / 7% stop; same-day priority by frozen reference rank then frozen score; realized-equity sizing; daily cached-close MTM for drawdown.",
+        "next_action":"RUN_ECONOMIC_AUDIT_FROM_EXISTING_OOS_ONLY"
+    }
+    V826B_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return out
+
+def _v826b_candidate_metrics(D):
+    m=_v826a_metrics(D)
+    if not D.empty:
+        yearly=[]
+        for y,g in D.groupby(D["entry_date"].dt.year,sort=True):
+            q=_v826a_metrics(g)
+            yearly.append({"year":int(y),**q})
+        m["positive_pf_year_share"]=float(np.mean([x.get("pf",0)>1 for x in yearly])) if yearly else 0.0
+        m["positive_avgtrade_year_share"]=float(np.mean([x.get("avg_trade",0)>0 for x in yearly])) if yearly else 0.0
+        m["yearly"]=yearly
+    return m
+
+def _v826b_admit(D):
+    """
+    Admission uses realized equity/cash for sizing and exact exit dates.
+    This determines positions once. Daily MTM is computed afterward from actual cached closes.
+    """
+    D=D.sort_values(["entry_date","reference_rank","frozen_score","listing_id"],
+                    ascending=[True,False,False,True]).copy()
+    cash=float(V826B_INITIAL_EQUITY)
+    realized_equity=float(V826B_INITIAL_EQUITY)
+    open_pos=[]
+    admitted=[]
+    skipped_capacity=0
+    skipped_cash=0
+
+    days=sorted(set(D["entry_date"].tolist()) | set(D["exit60_date"].tolist()))
+    by_entry={d:g for d,g in D.groupby("entry_date",sort=True)}
+
+    def close_due(day):
+        nonlocal cash, realized_equity, open_pos
+        due=[p for p in open_pos if p["exit_date"]<=day]
+        keep=[p for p in open_pos if p["exit_date"]>day]
+        for p in sorted(due,key=lambda z:(z["exit_date"],z["listing_id"])):
+            proceeds=float(p["capital"])*(1.0+float(p["realized_ret"]))
+            cash += proceeds
+        open_pos=keep
+        realized_equity=cash+sum(float(p["capital"]) for p in open_pos)
+
+    for day in days:
+        close_due(day)
+        g=by_entry.get(day)
+        if g is None:continue
+        for _,r in g.iterrows():
+            if len(open_pos)>=V826B_MAX_POSITIONS:
+                skipped_capacity+=1;continue
+            realized_equity=cash+sum(float(p["capital"]) for p in open_pos)
+            cap=min(
+                realized_equity*V826B_RISK_PCT/0.07,
+                realized_equity*0.25,
+                cash
+            )
+            if not np.isfinite(cap) or cap<100:
+                skipped_cash+=1;continue
+            cash-=cap
+            p={
+                "listing_id":str(r["listing_id"]),
+                "entry_date":pd.Timestamp(r["entry_date"]).normalize(),
+                "exit_date":pd.Timestamp(r["exit60_date"]).normalize(),
+                "entry_px":float(r["entry_px"]),
+                "realized_ret":float(r["realized_ret"]),
+                "capital":float(cap),
+                "reference_rank":float(r["reference_rank"]),
+                "frozen_score":float(r["frozen_score"]),
+                "winner20":bool(r["winner20"]),
+                "is_stop":bool(r["is_stop"]),
+            }
+            open_pos.append(p);admitted.append(p.copy())
+
+    if days:close_due(max(days)+pd.Timedelta(days=1))
+    final_equity=float(cash)
+    return pd.DataFrame(admitted), {
+        "final_realized_equity":final_equity,
+        "skipped_capacity":int(skipped_capacity),
+        "skipped_cash":int(skipped_cash)
+    }
+
+def _v826b_price_maps(listing_ids):
+    M,lidcol=_v826a_manifest()
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    out={}
+    lids=sorted(set(map(str,listing_ids)))
+    t0=time.time()
+    for n,lid in enumerate(lids,1):
+        mr=mmap.get(lid)
+        if mr is None:continue
+        try:
+            q,hi,amb=_v826a_prepare_price(mr)
+            if q is None:continue
+            out[lid]={
+                pd.Timestamp(d).normalize():float(c)
+                for d,c in zip(q["date"],q["close"])
+                if pd.notna(d) and pd.notna(c)
+            }
+        except Exception:
+            continue
+        if n==1 or n%100==0 or n==len(lids):
+            _v826b_write_status(status="running",phase="daily_mtm_prices",
+                message=f"Loading cached MTM prices {n}/{len(lids)} listings",
+                processed=n,total=len(lids),elapsed_sec=round(time.time()-t0,1),error=None)
+    return out
+
+def _v826b_daily_mtm(adm, price_maps):
+    if adm is None or adm.empty:
+        return {"equity_rows":[],"max_drawdown":0.0,"cagr":0.0,"total_return":0.0,
+                "positive_year_share":0.0,"yearly_returns":[]}
+
+    first=pd.Timestamp(adm["entry_date"].min()).normalize()
+    last=pd.Timestamp(adm["exit_date"].max()).normalize()
+    # Business-day calendar is sufficient for audit; missing market holidays carry last known value.
+    cal=pd.bdate_range(first,last)
+    entries={d:g for d,g in adm.groupby("entry_date",sort=True)}
+    exits={d:g for d,g in adm.groupby("exit_date",sort=True)}
+
+    cash=float(V826B_INITIAL_EQUITY)
+    active={}
+    rows=[]
+    last_px={}
+
+    for day in cal:
+        day=pd.Timestamp(day).normalize()
+
+        # Close at exact modeled realized proceeds before new entries.
+        gx=exits.get(day)
+        if gx is not None:
+            for _,r in gx.iterrows():
+                lid=str(r["listing_id"])
+                key=(lid,pd.Timestamp(r["entry_date"]).normalize())
+                if key in active:
+                    p=active.pop(key)
+                    cash += float(p["capital"])*(1.0+float(p["realized_ret"]))
+
+        ge=entries.get(day)
+        if ge is not None:
+            for _,r in ge.iterrows():
+                key=(str(r["listing_id"]),pd.Timestamp(r["entry_date"]).normalize())
+                cash -= float(r["capital"])
+                active[key]=r.to_dict()
+
+        mtm=0.0
+        for key,p in active.items():
+            lid=str(p["listing_id"])
+            pm=price_maps.get(lid,{})
+            px=pm.get(day)
+            if px is not None and np.isfinite(px):
+                last_px[key]=float(px)
+            else:
+                px=last_px.get(key,float(p["entry_px"]))
+            mtm += float(p["capital"])*(float(px)/float(p["entry_px"]))
+
+        eq=float(cash+mtm)
+        rows.append({"date":day,"equity":eq,"open_positions":len(active)})
+
+    E=pd.DataFrame(rows)
+    if E.empty:
+        return {"equity_rows":[],"max_drawdown":0.0,"cagr":0.0,"total_return":0.0,
+                "positive_year_share":0.0,"yearly_returns":[]}
+    E["peak"]=E["equity"].cummax()
+    E["dd"]=E["equity"]/E["peak"]-1.0
+    maxdd=float(E["dd"].min())
+    years=max((E["date"].iloc[-1]-E["date"].iloc[0]).days/365.25,1/365.25)
+    final=float(E["equity"].iloc[-1])
+    cagr=(final/V826B_INITIAL_EQUITY)**(1/years)-1 if final>0 else -1.0
+
+    yr=[]
+    for y,g in E.groupby(E["date"].dt.year,sort=True):
+        start=float(g["equity"].iloc[0]); end=float(g["equity"].iloc[-1])
+        yr.append({"year":int(y),"return":float(end/start-1) if start else 0.0,
+                   "end_equity":end,"max_drawdown":float((g["equity"]/g["equity"].cummax()-1).min())})
+    posshare=float(np.mean([x["return"]>0 for x in yr])) if yr else 0.0
+
+    return {
+        "max_drawdown":maxdd,
+        "cagr":float(cagr),
+        "total_return":float(final/V826B_INITIAL_EQUITY-1),
+        "final_equity":final,
+        "positive_year_share":posshare,
+        "yearly_returns":yr,
+        "avg_open_positions":float(E["open_positions"].mean()),
+        "max_open_positions":int(E["open_positions"].max()),
+        "equity_rows":int(len(E))
+    }
+
+def _v826b_trade_portfolio_metrics(adm):
+    if adm is None or adm.empty:return {"trades":0}
+    r=pd.to_numeric(adm["realized_ret"],errors="coerce").dropna()
+    gp=float(r[r>0].sum()); gl=float(-r[r<0].sum())
+    pf=gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0)
+    return {
+        "trades":int(len(r)),
+        "win_rate":float((r>0).mean()),
+        "avg_trade":float(r.mean()),
+        "pf":float(pf),
+        "winner20_rate":float(adm["winner20"].astype(bool).mean()),
+        "stop_rate":float(adm["is_stop"].astype(bool).mean()),
+    }
+
+def _v826b_run():
+    V826B_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    variants=[
+        ("BASE",0.0),
+        ("TOP25",0.75),
+        ("TOP33",0.67),
+        ("TOP50",0.50),
+    ]
+
+    admissions={}
+    base_results={}
+    all_lids=set()
+    for name,cut in variants:
+        Q=D if cut<=0 else D[D["reference_rank"]>=cut].copy()
+        cm=_v826b_candidate_metrics(Q)
+        adm,ast=_v826b_admit(Q)
+        admissions[name]=adm
+        all_lids.update(adm["listing_id"].astype(str).tolist() if not adm.empty else [])
+        base_results[name]={
+            "candidate_rows":int(len(Q)),
+            "candidate_metrics":cm,
+            "admission":ast,
+            "portfolio_trade_metrics":_v826b_trade_portfolio_metrics(adm),
+        }
+
+    price_maps=_v826b_price_maps(all_lids)
+
+    for n,(name,_) in enumerate(variants,1):
+        _v826b_write_status(status="running",phase="daily_mtm",
+            message=f"Daily MTM {name} ({n}/{len(variants)})",
+            processed=n-1,total=len(variants),error=None)
+        pm=_v826b_daily_mtm(admissions[name],price_maps)
+        base_results[name]["portfolio_mtm"]=pm
+
+    B=base_results["BASE"]
+    bpf=float(B["candidate_metrics"].get("pf",0))
+    bavg=float(B["candidate_metrics"].get("avg_trade",0))
+    bcagr=float(B["portfolio_mtm"].get("cagr",0))
+    bdd=abs(float(B["portfolio_mtm"].get("max_drawdown",0)))
+    byshare=float(B["portfolio_mtm"].get("positive_year_share",0))
+
+    qualifying=[]
+    for name in ["TOP25","TOP33","TOP50"]:
+        R=base_results[name]
+        cm=R["candidate_metrics"]; pm=R["portfolio_mtm"]
+        cond={
+            "candidate_pf_not_worse":float(cm.get("pf",0))>=bpf,
+            "candidate_avgtrade_not_worse":float(cm.get("avg_trade",0))>=bavg,
+            "portfolio_cagr_not_worse":float(pm.get("cagr",0))>=bcagr,
+            "portfolio_maxdd_not_worse":abs(float(pm.get("max_drawdown",0)))<=bdd,
+            "positive_year_share_not_materially_worse":float(pm.get("positive_year_share",0))>=byshare-.05,
+        }
+        R["relative_gate"]=cond
+        if all(cond.values()):qualifying.append(name)
+
+    if qualifying:
+        verdict="ECONOMIC_PORTFOLIO_PASS__FIXED_RANK_FILTER_ADDS_VALUE"
+        next_action="KEEP_BEST_FIXED_GATE_AS_SHADOW_CHALLENGER_ONLY__DO_NOT_REWRITE_PRODUCTION_YET"
+    else:
+        verdict="ECONOMIC_PORTFOLIO_FAIL__HIGH_CANDIDATE_PF_DID_NOT_IMPROVE_REAL_PORTFOLIO"
+        next_action="DO_NOT_PROMOTE_FILTER__KEEP_V825O_FORWARD_SHADOW_RUNNING"
+
+    result={
+        "version":"V8.26B Economic / 10-Slot Portfolio Audit",
+        "build_id":V826B_BUILD_ID,
+        "verdict":verdict,
+        "qualifying_fixed_gates":qualifying,
+        "results":base_results,
+        "portfolio_policy":{
+            "initial_equity":V826B_INITIAL_EQUITY,
+            "max_positions":V826B_MAX_POSITIONS,
+            "risk_pct_per_position":V826B_RISK_PCT,
+            "stop_pct":0.07,
+            "position_cap_formula":"min(realized_equity*0.5%/7%, equity*25%, cash)",
+            "same_day_priority":"frozen reference rank DESC, frozen score DESC, listing_id ASC",
+            "mtm":"actual split-adjusted cached daily close; modeled stop/time exit proceeds applied on exact exit date",
+            "sizing_note":"Admission sizing uses realized equity/book capital; daily MTM is used for portfolio drawdown/CAGR audit, not retroactively for position sizing."
+        },
+        "decision_rule":"A fixed gate economically passes only if vs BASE it has candidate PF>=BASE, AvgTrade>=BASE, 10-slot CAGR>=BASE, absolute daily-MTM MaxDD<=BASE, and positive-year share no more than 5 percentage points worse. No threshold search: only pre-existing Top25/33/50.",
+        "next_action":next_action,
+        "boundaries":"Reuses V8.26A OOS rows and historical price cache only. No feature rebuild, no Tiingo, no universe rescan, no new thresholds, no retuning."
+    }
+    V826B_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+def _v826b_worker():
+    global v826b_thread
+    t0=time.time()
+    try:
+        P=json.loads(V826B_PREFLIGHT.read_text(encoding="utf-8")) if V826B_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":raise RuntimeError("V8.26B Preflight must PASS first")
+        _v826b_write_status(status="running",phase="economic_audit",message="Reusing V8.26A OOS rows…",
+                            processed=0,total=4,elapsed_sec=0,error=None)
+        R=_v826b_run()
+        _v826b_write_status(status="done",phase="done",message=f"完成：{R.get('verdict')}",
+                            processed=4,total=4,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        _v826b_write_status(status="error",phase="error",message=f"{type(ex).__name__}: {ex}",
+                            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v826b_thread=None
+
+@APP.route("/v826b/preflight",methods=["GET","POST"])
+def v826b_preflight_route():
+    try:_v826b_preflight()
+    except Exception as ex:
+        V826B_DIR.mkdir(parents=True,exist_ok=True)
+        V826B_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v826b")
+
+@APP.post("/v826b/start")
+def v826b_start_route():
+    global v826b_thread
+    if _v826b_alive():return jsonify({"started":False,**_v826b_status()})
+    P=json.loads(V826B_PREFLIGHT.read_text(encoding="utf-8")) if V826B_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":return jsonify({"started":False,"status":"blocked","message":"Run PASS Preflight first"})
+    v826b_thread=threading.Thread(target=_v826b_worker,daemon=True)
+    v826b_thread.start()
+    return jsonify({"started":True,**_v826b_status()})
+
+@APP.get("/api/v826b")
+def v826b_api():
+    return jsonify(_v826b_status())
+
+@APP.get("/v826b")
+def v826b_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P={}
+    if V826B_PREFLIGHT.exists():
+        try:P=json.loads(V826B_PREFLIGHT.read_text(encoding="utf-8"))
+        except Exception:P={}
+    R={}
+    if V826B_RESULT.exists():
+        try:R=json.loads(V826B_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    S=_v826b_status()
+
+    rows=""
+    for name in ["BASE","TOP25","TOP33","TOP50"]:
+        z=(R.get("results") or {}).get(name,{})
+        cm=z.get("candidate_metrics") or {}
+        pt=z.get("portfolio_trade_metrics") or {}
+        pm=z.get("portfolio_mtm") or {}
+        rows += (
+            f"<tr><td><b>{name}</b></td>"
+            f"<td>{e(z.get('candidate_rows','—'))}</td>"
+            f"<td>{e(round(float(cm.get('pf',0)),3))}</td>"
+            f"<td>{e(round(float(cm.get('avg_trade',0))*100,3))}%</td>"
+            f"<td>{e(pt.get('trades','—'))}</td>"
+            f"<td>{e(round(float(pt.get('pf',0)),3))}</td>"
+            f"<td>{e(round(float(pt.get('avg_trade',0))*100,3))}%</td>"
+            f"<td>{e(round(float(pm.get('cagr',0))*100,2))}%</td>"
+            f"<td>{e(round(float(pm.get('max_drawdown',0))*100,2))}%</td>"
+            f"<td>{e(round(float(pm.get('positive_year_share',0))*100,1))}%</td>"
+            f"<td>{e(round(float(pm.get('avg_open_positions',0)),2))}</td></tr>"
+        )
+
+    rel=""
+    for name in ["TOP25","TOP33","TOP50"]:
+        z=(R.get("results") or {}).get(name,{})
+        rg=z.get("relative_gate") or {}
+        rel += f"<tr><td><b>{name}</b></td><td>{e(rg.get('candidate_pf_not_worse','—'))}</td><td>{e(rg.get('candidate_avgtrade_not_worse','—'))}</td><td>{e(rg.get('portfolio_cagr_not_worse','—'))}</td><td>{e(rg.get('portfolio_maxdd_not_worse','—'))}</td><td>{e(rg.get('positive_year_share_not_materially_worse','—'))}</td></tr>"
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1450px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>💵 V8.26B Economic / 10-Slot Portfolio Audit</h1>
+<div class='o'><b>这次不再用 Winner Recall 判生死。</b> 直接比较 BASE vs 固定 Top25 / Top33 / Top50 的候选经济性和真正 10-slot portfolio：PF、AvgTrade、CAGR、daily-MTM MaxDD、年度稳定性。只复用 V8.26A 已完成 OOS + 历史价格 cache。</div></div>
+
+<div class='c'><form method='post' action='/v826b/preflight'><button>A. Run OOS / Portfolio Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>OOS rows <b>{e(P.get('oos_rows','—'))}</b> · Listings <b>{e(P.get('unique_listings','—'))}</b> · Manifest map <b>{e(round(float(P.get('manifest_mapping_coverage',0))*100,1) if P else '—')}%</b><br>
+Range {e(P.get('date_min','—'))} → {e(P.get('date_max','—'))}<br>
+Policy: {e(P.get('portfolio_policy','—'))}</div></div>
+
+<div class='c'><button id='go'>B. Run Economic / Daily-MTM Portfolio Audit</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
+<div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span></p></div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Qualifying fixed gates: <b>{e(', '.join(R.get('qualifying_fixed_gates') or []) or 'NONE')}</b><br>
+Next: <b>{e(R.get('next_action','—'))}</b></div></div>
+
+<div class='c'><h2>Economic Comparison</h2><div style='overflow:auto'><table>
+<tr><th>Variant</th><th>Candidate N</th><th>Candidate PF</th><th>Candidate AvgTrade</th><th>10-slot trades</th><th>Portfolio trade PF</th><th>Portfolio AvgTrade</th><th>CAGR</th><th>Daily MTM MaxDD</th><th>Positive years</th><th>Avg open</th></tr>
+{rows or "<tr><td colspan=11>Run audit first.</td></tr>"}</table></div></div>
+
+<div class='c'><h2>Relative Gate vs BASE</h2><div style='overflow:auto'><table>
+<tr><th>Gate</th><th>PF ≥ BASE</th><th>AvgTrade ≥ BASE</th><th>CAGR ≥ BASE</th><th>MaxDD no worse</th><th>Positive-year share no material worse</th></tr>
+{rel or "<tr><td colspan=6>Run audit first.</td></tr>"}</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen economic rule:</b> {e(R.get('decision_rule',''))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
+
+<script>
+const $=x=>document.getElementById(x);
+async function poll(){{
+ try{{
+  let s=await (await fetch('/api/v826b',{{cache:'no-store'}})).json();
+  let pct=s.total?Math.round(100*s.processed/s.total):0;
+  $('msg').textContent=s.message||s.status||'';
+  $('pct').textContent=pct+'%';$('bar').style.width=pct+'%';
+  $('cnt').textContent=(s.processed||0)+'/'+(s.total||0);
+  if(s.status==='running'||s.status==='starting')setTimeout(poll,1800);
+ }}catch(e){{$('msg').textContent='status error: '+e;}}
+}}
+$('go').onclick=async()=>{{
+ let s=await (await fetch('/v826b/start',{{method:'POST'}})).json();
+ $('msg').textContent=s.message||s.status||'';
+ poll();
 }};
 poll();
 </script>
