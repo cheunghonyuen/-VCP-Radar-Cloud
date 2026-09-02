@@ -69151,9 +69151,9 @@ if _v840_home_base is not None:
 
 
 # ================= V8.41 PIVOT-CROSS / SIGNAL-DATE TIME-SEMANTICS AUDIT =================
-V841_DIR=DATA_DIR/'v841a_pivot_cross_schema_fallback_reconstruction'
+V841_DIR=DATA_DIR/'v841b_exact_v644_generator_provenance'
 V841_PREFLIGHT=V841_DIR/'preflight.json';V841_RESULT=V841_DIR/'result.json';V841_DETAIL=V841_DIR/'detail.csv.gz'
-V841_BUILD_ID='v841a-schema-fallback-reconstruct-20260903'
+V841_BUILD_ID='v841b-exact-v644-generator-provenance-20260903'
 V841_S2=V834_V617;V841_V644=V644_TRADE_CACHE;V841_V669=V669_TRADES;V841_V835=V835_DETAIL
 
 def _v841_bool(s):
@@ -69178,9 +69178,10 @@ def _v841_stats(D,c):
 def _v841_preflight():
     V841_DIR.mkdir(parents=True,exist_ok=True);err=None
     try:
-        for p in [V841_S2,V841_V644,V841_V669,V841_V835]:
+        for p in [V841_V644,V841_V669,V841_V835]:
             if not p.exists():raise RuntimeError('Missing '+str(p))
-        S=pd.read_csv(V841_S2,compression='gzip',nrows=5,low_memory=False)
+        if '_v622_load_trades' not in globals():raise RuntimeError('Exact V6.44 source loader _v622_load_trades missing')
+        S=_v622_load_trades().head(5).copy()
         T=pd.read_csv(V841_V644,compression='gzip',nrows=5,low_memory=False)
         P=pd.read_csv(V841_V669,compression='gzip',nrows=5,low_memory=False)
         F=pd.read_csv(V841_V835,compression='gzip',nrows=5,low_memory=False)
@@ -69197,11 +69198,11 @@ def _v841_preflight():
         verdict='PASS'
         schema_note={'v644_has_stage2_row_id':bool('stage2_row_id' in T.columns),
                      'v644_has_parent_entry_date':bool('parent_entry_date' in T.columns),
-                     'fallback':'RECONSTRUCT_FROM_FROZEN_V617_STAGE2'}
+                     'fallback':'RECONSTRUCT_FROM_EXACT_V644_GENERATOR_INPUT__V622_STAGE2_FROZEN'}
     except Exception as ex:
         verdict='ERROR';err=f'{type(ex).__name__}: {ex}';schema_note={}
-    o={'version':'V8.41A','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
-       'contract':'Old deployed V6.44 cache may lack stage2_row_id/parent_entry_date. V8.41A does not guess those fields; it reconstructs exact trigger provenance from frozen V6.17 Stage-2 + deployed _v644_tight_breakout_volume() + historical cache.'}
+    o={'version':'V8.41B','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
+       'contract':'Old deployed V6.44 cache may lack stage2_row_id/parent_entry_date. V8.41B reconstructs provenance from the exact source used inside the historical V6.44 builder itself: _v622_load_trades(), filtered by V624_START/V624_END, then the deployed _v644_tight_breakout_volume(). No proxy Stage-2 file.'}
     V841_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2),encoding='utf-8');return o
 
 V841_STATUS=V841_DIR/'status.json'
@@ -69226,12 +69227,15 @@ def _v841_run():
     if pf.get('verdict')!='PASS':raise RuntimeError(pf.get('error'))
     _v841_write(status='running',phase='load',message='Loading frozen Stage-2 / V6.44 / V6.69 / V8.35',processed=0,total=4,errors=0)
 
-    S=pd.read_csv(V841_S2,compression='gzip',low_memory=False).reset_index(drop=True)
+    # EXACT historical V6.44 source contract copied from _v644_build:
+    # T=_v622_load_trades(); filter V624_START..V624_END; reset index; THEN assign stage2_row_id.
+    S=_v622_load_trades().copy()
     S['listing_id']=S.listing_id.astype(str)
     S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
     S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
     S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce')
-    S=S.dropna(subset=['listing_id','entry_date','exit_date','entry_px']).copy()
+    S=S[(S.entry_date>=V624_START)&(S.entry_date<=V624_END)].copy()
+    S=S.dropna(subset=['listing_id','entry_date','exit_date','entry_px']).reset_index(drop=True)
     S['stage2_row_id']=np.arange(len(S),dtype=int)
 
     T=pd.read_csv(V841_V644,compression='gzip',low_memory=False)
@@ -69274,11 +69278,18 @@ def _v841_run():
     R0=pd.DataFrame(rec)
     if R0.empty:raise RuntimeError('No V6.44 triggers reconstructed from Stage-2')
 
-    R0['_pxk']=R0.reconstructed_entry_px.round(6);T['_pxk']=T.entry_px.round(6)
-    J=T.merge(R0,left_on=['listing_id','entry_date','_pxk'],right_on=['listing_id','reconstructed_entry_date','_pxk'],how='left',validate='many_to_many')
-    J=J.sort_values(['listing_id','entry_date','stage2_row_id'],kind='stable').drop_duplicates(['listing_id','entry_date','entry_px'],keep='first')
-    recon_cov=100*float(J.stage2_row_id.notna().mean())
-    if recon_cov<95:raise RuntimeError(f'Reconstructed V6.44 provenance coverage too low: {recon_cov:.2f}%')
+    # Match historical cache to reconstructed trigger by exact listing/date, then nearest next-open price.
+    A=T.merge(R0,left_on=['listing_id','entry_date'],right_on=['listing_id','reconstructed_entry_date'],how='left',validate='many_to_many')
+    A['entry_px_abs_diff']=(pd.to_numeric(A.entry_px,errors='coerce')-pd.to_numeric(A.reconstructed_entry_px,errors='coerce')).abs()
+    A['entry_px_rel_diff']=A.entry_px_abs_diff/pd.to_numeric(A.entry_px,errors='coerce').abs().replace(0,np.nan)
+    A=A.sort_values(['listing_id','entry_date','entry_px','entry_px_abs_diff','stage2_row_id'],kind='stable')
+    J=A.drop_duplicates(['listing_id','entry_date','entry_px'],keep='first').copy()
+    matched=J.stage2_row_id.notna() & (J.entry_px_rel_diff.fillna(np.inf)<=0.0005)
+    recon_cov=100*float(matched.mean())
+    date_cov=100*float(J.stage2_row_id.notna().mean())
+    px_med=float(pd.to_numeric(J.loc[matched,'entry_px_rel_diff'],errors='coerce').median()) if matched.any() else None
+    J.loc[~matched,['stage2_row_id','legacy_pivot','parent_entry_date','reconstructed_signal_date']]=np.nan
+    if recon_cov<95:raise RuntimeError(f'Exact V6.44 provenance reconstruction coverage too low: exact={recon_cov:.2f}% date={date_cov:.2f}% median_px_rel={px_med}')
 
     P=pd.read_csv(V841_V669,compression='gzip',low_memory=False)
     P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
@@ -69343,14 +69354,16 @@ def _v841_run():
     else:diag='PIVOT_CROSS_SEMANTICS_NOT_YET_EXPLAINED__DO_NOT_CHANGE_TRIGGER'
 
     sem=['recovered_v644_exact_trigger','recovered_v644_high_cross','legacy_pivot_close_cross','current_pivot_high_cross','current_pivot_close_cross','v835_pivot_cross']
-    R={'version':'V8.41A','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
+    R={'version':'V8.41B','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
        'source_parity':{'v644_provenance_reconstruction_coverage_pct':recon_cov,
+                        'v644_entry_date_reconstruction_coverage_pct':date_cov,
+                        'v644_entry_price_median_rel_diff_pct':(100*px_med if px_med is not None else None),
                         'recovered_signal_date_vs_v835_pct':100*sigpar,
                         'recovered_exact_trigger_reconstruction_pct':100*exact},
        'semantic_decomposition':{'v835_pivot_cross_pass_pct':100*v835,'legacy_pivot_close_cross_pct':100*legclose,'current_pivot_high_cross_pct':100*chigh,'current_pivot_close_cross_pct':100*cclose,
         'median_current_vs_legacy_pivot_abs_rel_diff_pct':100*anchor_med,'estimated_high_to_close_penalty_pp':100*field_pen,'estimated_pivot_anchor_penalty_pp':100*anchor_pen},
        'winner_stop_table':[_v841_stats(X,c) for c in sem],
-       'critical_interpretation':'Old V6.44 cache lacked forward provenance IDs. V8.41A reconstructed them from frozen V6.17 Stage-2 with the exact deployed V6.44 trigger. Recovered trigger = HIGH > Stage-2 entry-price pivot + volume context, then next-open. V8.35 used current supply pivot + close cross.',
+       'critical_interpretation':'Old V6.44 cache lacked forward provenance IDs. V8.41B reconstructed them from the exact historical V6.44 generator input (_v622_load_trades with the original date filter) and exact deployed trigger. Recovered trigger = HIGH > Stage-2 entry-price pivot + volume context, then next-open. V8.35 used current supply pivot + close cross.',
        'next':'If reconstructed provenance and exact trigger are near 100%, freeze recovered trigger semantics as lineage truth. Rebuild TRUE VCP qualification before this trigger; never add a second pivot-cross hard gate.',
        'errors':errs[:100]}
     V841_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
@@ -69362,7 +69375,7 @@ def _v841_worker():
     try:_v841_run()
     except Exception as ex:
         V841_DIR.mkdir(parents=True,exist_ok=True)
-        V841_RESULT.write_text(json.dumps({'version':'V8.41A','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+        V841_RESULT.write_text(json.dumps({'version':'V8.41B','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
         _v841_write(status='error',phase='failed',message='Failed',error=f'{type(ex).__name__}: {ex}',errors=1)
 @APP.route('/v841/preflight',methods=['GET','POST'])
 def v841_preflight_route():
@@ -69398,11 +69411,11 @@ def v841_page():
         except:return '—'
     rows=''.join(f"<tr><td>{e(z.get('semantic'))}</td><td>{e(z.get('pass_n'))}</td><td>{n(z.get('pass_pct'))}%</td><td>{n(z.get('winner20_retention_pct'))}%</td><td>{n(z.get('winner30_retention_pct'))}%</td><td>{n(z.get('stop_rejection_pct'))}%</td><td>{n(z.get('pass_pf'),3)}</td></tr>" for z in T)
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>V8.41A Pivot-Cross / Signal-Date Schema-Fallback Audit</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h1>V8.41B Exact V6.44 Generator Provenance Audit</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
 <div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V841_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v841/preflight'><button>A. Run Signal-Semantics Preflight</button></form><br><form method='post' action='/v841/run'><button>B. Run Exact Pivot-Cross Audit</button></form></div>
-<div class='c'><h2>Status</h2><p>{e(_v841_status().get('status'))} · {e(_v841_status().get('phase'))} · {e(_v841_status().get('message'))}</p><p><small>运行中请手动刷新本页查看进度；不会自动无限刷新。</small></p></div>
+<div class='c'><h2>Status</h2><p>{e(_v841_status().get('status'))} · {e(_v841_status().get('phase'))} · {e(_v841_status().get('message'))}</p><p><b>Runtime Error:</b> {e(_v841_status().get('error') or 'None')}</p><p><small>运行中请手动刷新本页查看进度；不会自动无限刷新。</small></p></div>
 <div class='c'><h2>Diagnosis</h2><div class='ok'>{e(R.get('diagnosis','—'))}</div></div>
-<div class='c'><h2>Source Parity</h2><table><tr><td>V6.44 ↔ Stage2 parent date</td><td>{n(S.get('v644_stage2_parent_date_pct'))}%</td></tr><tr><td>V6.44 ↔ Stage2 listing</td><td>{n(S.get('v644_stage2_listing_pct'))}%</td></tr><tr><td>Recovered signal date ↔ V8.35</td><td>{n(S.get('recovered_signal_date_vs_v835_pct'))}%</td></tr><tr><td>Recovered exact trigger reconstructed</td><td>{n(S.get('recovered_exact_trigger_reconstruction_pct'))}%</td></tr></table></div>
+<div class='c'><h2>Source Parity</h2><table><tr><td>V6.44 exact provenance reconstruction</td><td>{n(S.get('v644_provenance_reconstruction_coverage_pct'))}%</td></tr><tr><td>V6.44 entry-date reconstruction</td><td>{n(S.get('v644_entry_date_reconstruction_coverage_pct'))}%</td></tr><tr><td>Median entry-price relative diff</td><td>{n(S.get('v644_entry_price_median_rel_diff_pct'),4)}%</td></tr><tr><td>Recovered signal date ↔ V8.35</td><td>{n(S.get('recovered_signal_date_vs_v835_pct'))}%</td></tr><tr><td>Recovered exact trigger reconstructed</td><td>{n(S.get('recovered_exact_trigger_reconstruction_pct'))}%</td></tr></table></div>
 <div class='c'><h2>Semantic Decomposition</h2><table><tr><td>V8.35 current-pivot CLOSE cross</td><td>{n(D.get('v835_pivot_cross_pass_pct'))}%</td></tr><tr><td>Legacy pivot + CLOSE cross</td><td>{n(D.get('legacy_pivot_close_cross_pct'))}%</td></tr><tr><td>Current pivot + HIGH cross</td><td>{n(D.get('current_pivot_high_cross_pct'))}%</td></tr><tr><td>Current pivot + CLOSE cross recompute</td><td>{n(D.get('current_pivot_close_cross_pct'))}%</td></tr><tr><td>Median current-vs-legacy pivot diff</td><td>{n(D.get('median_current_vs_legacy_pivot_abs_rel_diff_pct'))}%</td></tr><tr><td>HIGH→CLOSE penalty</td><td>{n(D.get('estimated_high_to_close_penalty_pp'))} pp</td></tr><tr><td>Pivot-anchor penalty</td><td>{n(D.get('estimated_pivot_anchor_penalty_pp'))} pp</td></tr></table></div>
 <div class='c'><h2>Winner Survival / STOP Rejection</h2><table><tr><th>Semantic</th><th>N</th><th>Pass</th><th>+20 retain</th><th>+30 retain</th><th>STOP reject</th><th>PF</th></tr>{rows}</table></div>
 <div class='c'><div class='warn'><b>Interpretation:</b> {e(R.get('critical_interpretation',''))}</div><p><b>Next:</b> {e(R.get('next','Run audit first.'))}</p></div></div></body></html>"""
@@ -69411,7 +69424,7 @@ _v841_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v841_home_base is not None:
     def _v841_home_wrap(*args,**kwargs):
         resp=_v841_home_base(*args,**kwargs)
-        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41A Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
+        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41B Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
             body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
