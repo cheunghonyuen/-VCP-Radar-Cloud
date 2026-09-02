@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825g-home-card-real' style='background:#ecfdf5;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825h-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧱 V8.25H Recent VCP Candidate Builder</h2>
+        <p>从 V8.25G 30只 recent price cache 生成 research-only VCP candidates。先 Preflight，再 Build。0下载 / 0 Champion 改动 / 0调参。</p>
+        <a href='/v825h'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25H</button></a>
+        </div>
+        <div id='v825g-home-card-real' style='background:#ecfdf5;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>📥 V8.25G Recent Dow-30 Price Cache Builder</h2>
         <p>只补30只 Dow 从 2023-11-30 起的日线价格。使用现有 Tiingo Daily Price API；不买 fundamentals add-on。</p>
         <a href='/v825g'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25G</button></a>
@@ -60880,3 +60885,210 @@ async function poll(){{try{{const s=await (await fetch("/api/v825g",{{cache:"no-
 $("go").onclick=async()=>{{const s=await (await fetch("/v825g/start",{{method:"POST"}})).json();render(s);poll()}};
 poll();
 </script></div></body></html>'''
+
+# ================= V8.25H RECENT VCP CANDIDATE BUILDER =================
+V825H_DIR = DATA_DIR / "v825h_recent_vcp_candidate_builder"
+V825H_RESULT = V825H_DIR / "result.json"
+V825H_CANDIDATES = V825H_DIR / "recent_vcp_candidates.csv.gz"
+V825H_BUILD_ID = "V825H_RECENT_VCP_CANDIDATES_20260902A"
+
+def _v825h_load_prices(ticker):
+    fp = V825G_PRICE_DIR / f"{ticker}.csv.gz"
+    if not fp.exists():
+        return None
+    D = pd.read_csv(fp, compression="gzip")
+    if "Date" not in D.columns:
+        return None
+    D["Date"] = pd.to_datetime(D["Date"], errors="coerce")
+    D = D.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    colmap = {}
+    for k, names in {
+        "open":["adjOpen","open","Open"],
+        "high":["adjHigh","high","High"],
+        "low":["adjLow","low","Low"],
+        "close":["adjClose","close","Close"],
+        "volume":["adjVolume","volume","Volume"],
+    }.items():
+        c = next((x for x in names if x in D.columns), None)
+        if c is None:
+            return None
+        colmap[k] = c
+    X = pd.DataFrame({"Date":D["Date"]})
+    for k,c in colmap.items():
+        X[k] = pd.to_numeric(D[c], errors="coerce")
+    X = X.dropna().reset_index(drop=True)
+    X["ticker"] = ticker
+    return X
+
+def _v825h_features(D):
+    X = D.copy()
+    X["ma50"] = X["close"].rolling(50).mean()
+    X["ma150"] = X["close"].rolling(150).mean()
+    X["ma200"] = X["close"].rolling(200).mean()
+    X["hh20_prev"] = X["high"].rolling(20).max().shift(1)
+    X["range20_pct"] = (X["high"].rolling(20).max()-X["low"].rolling(20).min())/X["close"]
+    X["range10_pct"] = (X["high"].rolling(10).max()-X["low"].rolling(10).min())/X["close"]
+    X["vol20"] = X["volume"].rolling(20).mean()
+    X["rvol20"] = X["volume"]/X["vol20"]
+    X["high252"] = X["high"].rolling(252).max()
+    X["dist_52w_high"] = X["close"]/X["high252"] - 1
+    X["trend_ok"] = (X["close"]>X["ma50"]) & (X["ma50"]>X["ma150"]) & (X["ma150"]>X["ma200"])
+    X["near_high"] = X["dist_52w_high"] >= -0.15
+    X["tightening"] = X["range10_pct"] < X["range20_pct"]*0.75
+    X["breakout"] = X["close"] > X["hh20_prev"]
+    X["volume_confirm"] = X["rvol20"] >= 1.2
+    return X
+
+def _v825h_outcome(X, i, hold=60, stop_pct=0.07):
+    entry = float(X.loc[i,"close"])
+    fut = X.iloc[i+1:min(len(X), i+1+hold)].copy()
+    if fut.empty:
+        return None
+    stop_px = entry*(1-stop_pct)
+    stop_hits = fut.index[fut["low"]<=stop_px]
+    if len(stop_hits):
+        j = stop_hits[0]
+        exit_px = stop_px
+        exit_date = X.loc[j,"Date"]
+        reason = "STOP"
+    else:
+        j = fut.index[-1]
+        exit_px = float(X.loc[j,"close"])
+        exit_date = X.loc[j,"Date"]
+        reason = "TIME"
+    mfe = float(fut["high"].max()/entry - 1)
+    return {
+        "entry_px":entry,
+        "exit_date":exit_date,
+        "exit_px":exit_px,
+        "ret":exit_px/entry - 1,
+        "mfe":mfe,
+        "is_stop":reason=="STOP",
+        "winner50":mfe>=0.50,
+        "exit_reason":reason,
+    }
+
+def _v825h_preflight():
+    V825H_DIR.mkdir(parents=True, exist_ok=True)
+    audits=[]; usable=0; rows_total=0
+    for t in V825_DOW30:
+        D=_v825h_load_prices(t)
+        if D is None or D.empty:
+            audits.append({"ticker":t,"usable":False,"rows":0})
+            continue
+        rows_total += len(D)
+        ok = len(D)>=300 and D["Date"].min()<=pd.Timestamp("2023-12-15") and D["Date"].max()>=pd.Timestamp("2026-08-01")
+        audits.append({"ticker":t,"usable":bool(ok),"rows":int(len(D)),
+                       "date_min":str(D["Date"].min().date()),"date_max":str(D["Date"].max().date())})
+        usable += int(ok)
+    verdict = "PASS" if usable>=27 else "FAIL_RECENT_PRICE_CACHE_COVERAGE"
+    result = {
+        "version":"V8.25H Recent VCP Candidate Builder",
+        "build_id":V825H_BUILD_ID,
+        "verdict":verdict,
+        "usable_tickers":usable,
+        "total_tickers":len(V825_DOW30),
+        "rows_total":rows_total,
+        "next_action":"RUN_RESEARCH_ONLY_RECENT_CANDIDATE_BUILD" if verdict=="PASS" else "STOP_AND_FIX_PRICE_CACHE_ONLY",
+        "boundaries":"Research-only candidate generation. No fundamentals, no downloads, no Champion modification, no tuning."
+    }
+    _v825g_write(V825H_DIR/"preflight.json", result)
+    return result
+
+def _v825h_build():
+    P=_v825g_read(V825H_DIR/"preflight.json",{})
+    if P.get("verdict")!="PASS":
+        raise RuntimeError("V8.25H Preflight must PASS first")
+    rows=[]
+    for t in V825_DOW30:
+        D=_v825h_load_prices(t)
+        if D is None or len(D)<300:
+            continue
+        X=_v825h_features(D)
+        sig = X["trend_ok"] & X["near_high"] & X["tightening"] & X["breakout"] & X["volume_confirm"]
+        last_dt=None
+        for i in X.index[sig.fillna(False)]:
+            dt=X.loc[i,"Date"]
+            if last_dt is not None and (dt-last_dt).days<14:
+                continue
+            out=_v825h_outcome(X,i)
+            if out is None:
+                continue
+            rows.append({
+                "listing_id":f"{t}__{dt.date()}",
+                "ticker":t,
+                "entry_date":dt,
+                **out,
+                "rvol20":float(X.loc[i,"rvol20"]),
+                "range10_pct":float(X.loc[i,"range10_pct"]),
+                "range20_pct":float(X.loc[i,"range20_pct"]),
+                "dist_52w_high":float(X.loc[i,"dist_52w_high"]),
+                "close_vs_ma50":float(X.loc[i,"close"]/X.loc[i,"ma50"]-1),
+                "ma50_vs_ma150":float(X.loc[i,"ma50"]/X.loc[i,"ma150"]-1),
+                "ma150_vs_ma200":float(X.loc[i,"ma150"]/X.loc[i,"ma200"]-1),
+            })
+            last_dt=dt
+    C=pd.DataFrame(rows)
+    if not C.empty:
+        C=C.sort_values(["entry_date","ticker"]).reset_index(drop=True)
+        C.to_csv(V825H_CANDIDATES,index=False,compression="gzip")
+    labeled = C[(C["is_stop"]) | (C["winner50"])] if not C.empty else C
+    stops=int(labeled["is_stop"].sum()) if not labeled.empty else 0
+    winners=int(labeled["winner50"].sum()) if not labeled.empty else 0
+    verdict="RECENT_RESEARCH_CANDIDATES_READY" if len(labeled)>=30 and winners>=5 and stops>=15 else "RECENT_RESEARCH_SAMPLE_TOO_SMALL"
+    result={
+        "version":"V8.25H Recent VCP Candidate Builder",
+        "build_id":V825H_BUILD_ID,
+        "verdict":verdict,
+        "candidate_rows":int(len(C)),
+        "labeled_rows":int(len(labeled)),
+        "stops":stops,
+        "winner50":winners,
+        "tickers_with_candidates":int(C["ticker"].nunique()) if not C.empty else 0,
+        "date_min":str(C["entry_date"].min().date()) if not C.empty else None,
+        "date_max":str(C["entry_date"].max().date()) if not C.empty else None,
+        "output":str(V825H_CANDIDATES),
+        "next_action":"RUN_FREE_PIT_CONTROL_VS_OVERLAY_ON_THIS_EXACT_RECENT_SAMPLE" if verdict=="RECENT_RESEARCH_CANDIDATES_READY" else "DO_NOT_PAY__FREE_RESEARCH_SAMPLE_TOO_SMALL",
+        "boundaries":"Research-only. Candidate rules frozen before result review. No rescue tuning."
+    }
+    _v825g_write(V825H_RESULT,result)
+    return result
+
+@APP.route("/v825h/preflight",methods=["GET","POST"])
+def v825h_preflight_route():
+    try:_v825h_preflight()
+    except Exception as ex:_v825g_write(V825H_DIR/"preflight.json",{"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"})
+    return redirect("/v825h")
+
+@APP.route("/v825h/build",methods=["POST"])
+def v825h_build_route():
+    try:_v825h_build()
+    except Exception as ex:_v825g_write(V825H_RESULT,{"verdict":"BUILD_ERROR","error":f"{type(ex).__name__}: {ex}"})
+    return redirect("/v825h")
+
+@APP.get("/v825h")
+def v825h_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P=_v825g_read(V825H_DIR/"preflight.json",{})
+    R=_v825g_read(V825H_RESULT,{})
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1000px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧱 V8.25H Recent VCP Candidate Builder</h1>
+<div class="o"><b>只从 V8.25G 已完成的30只 recent price cache 生成 research-only VCP candidates。</b> 不用 fundamentals、不下载、不改 Champion、不调参。</div></div>
+<div class="c"><form method="post" action="/v825h/preflight"><button>A. Run Candidate Preflight</button></form>
+<h2>Preflight: {e(P.get("verdict","NOT_RUN"))}</h2>
+<div class="g">Usable tickers <b>{e(P.get("usable_tickers","—"))}/30</b> · Rows total <b>{e(P.get("rows_total","—"))}</b><br>
+Rules: trend + near-high + tightening + breakout + RVOL20≥1.2 · 7% stop · 60d outcome</div></div>
+<div class="c"><form method="post" action="/v825h/build"><button>B. Build Research-Only Recent Candidates</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">Candidates <b>{e(R.get("candidate_rows","—"))}</b> · Labeled STOP/+50 <b>{e(R.get("labeled_rows","—"))}</b><br>
+STOP <b>{e(R.get("stops","—"))}</b> · +50 <b>{e(R.get("winner50","—"))}</b> · Tickers <b>{e(R.get("tickers_with_candidates","—"))}</b><br>
+Date {e(R.get("date_min","—"))} → {e(R.get("date_max","—"))}<br>
+Next: <b>{e(R.get("next_action","—"))}</b></div>
+<p>{e(R.get("boundaries",""))}</p></div></div></body></html>'''
