@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825m-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825n-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🛰️ V8.25N Frozen Shadow Forward Validation</h2>
+        <p>冻结 M 模型，给尚未成熟的 recent candidates 预先打 Shadow 分；以后只更新60日结果，旧分数永不重算。真正 forward validation。</p>
+        <a href='/v825n'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25N</button></a>
+        </div>
+        <div id='v825m-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧪 V8.25M Frozen Multivariate LOO Validation</h2>
         <p>验证 L 的 entry-anatomy separation 是否能在 Leave-One-Out 下保留 +20 winners 并减少 STOP。固定 features / 固定 operating points / 0 threshold search。</p>
         <a href='/v825m'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25M</button></a>
@@ -62322,3 +62327,351 @@ Features: <b>{e(", ".join(R.get("predeclared_features") or []))}</b>
 <p><b>Frozen gate:</b> {e(R.get("decision_rule",""))}</p>
 <p>{e(R.get("boundaries",""))}</p></div>
 </div></body></html>'''
+
+# ================= V8.25N FROZEN SHADOW FORWARD VALIDATION =================
+V825N_DIR = DATA_DIR / "v825n_frozen_shadow_forward_validation"
+V825N_LEDGER = V825N_DIR / "shadow_ledger.csv.gz"
+V825N_RESULT = V825N_DIR / "result.json"
+V825N_BUILD_ID = "V825N_FROZEN_SHADOW_FORWARD_20260902A"
+
+V825N_DIRECTIONS = {
+    "ret_20d": 1.0,
+    "range20_pct": 1.0,
+    "volatility20": 1.0,
+    "close_vs_ma50": 1.0,
+    "up_day_ratio20": 1.0,
+    "contraction_10v20": -1.0,
+    "ma20_slope20": 1.0,
+    "ma50_slope20": 1.0,
+}
+
+def _v825n_reference_dataset():
+    G = _v825m_build_dataset().copy()
+    ref = {}
+    for c in V825M_FEATURES:
+        s = pd.to_numeric(G[c], errors="coerce")
+        med = float(s.median())
+        vals = np.sort(s.fillna(med).to_numpy())
+        ref[c] = {
+            "median": med,
+            "sorted_values": vals.tolist(),
+            "n": int(len(vals)),
+            "direction": float(V825N_DIRECTIONS[c]),
+        }
+    return G, ref
+
+def _v825n_score_row(feature_dict, ref):
+    parts = []
+    for c in V825M_FEATURES:
+        raw = feature_dict.get(c)
+        try:
+            v = float(raw)
+            if not np.isfinite(v):
+                raise ValueError()
+        except Exception:
+            v = float(ref[c]["median"])
+        vals = np.asarray(ref[c]["sorted_values"], dtype=float)
+        pct = float(np.searchsorted(vals, v, side="right") / max(1, len(vals)))
+        parts.append(pct * float(ref[c]["direction"]))
+    return float(np.mean(parts)) if parts else None
+
+def _v825n_candidate_status():
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["entry_px"] = pd.to_numeric(C["entry_px"], errors="coerce")
+    C["ret"] = pd.to_numeric(C["ret"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+
+    rows = []
+    for _, r in C.iterrows():
+        ticker = str(r["ticker"]).upper().strip()
+        lid = str(r.get("listing_id", f"{ticker}__{pd.Timestamp(r['entry_date']).date()}"))
+        D = _v825h_load_prices(ticker)
+        if D is None or D.empty:
+            rows.append({
+                "listing_id": lid, "ticker": ticker, "entry_date": r["entry_date"],
+                "available_forward_days": 0, "mature_60d": False,
+                "tradable_mfe": None, "is_stop": None, "realized_ret": None
+            })
+            continue
+
+        future = D[D["Date"] > r["entry_date"]].copy()
+        avail = int(len(future))
+        mature = avail >= 60
+
+        tmfe = None
+        is_stop = None
+        realized_ret = None
+        if mature:
+            tradable = D[(D["Date"] > r["entry_date"]) & (D["Date"] <= r["exit_date"])].copy()
+            tmfe = float(tradable["high"].max()/float(r["entry_px"])-1.0) if len(tradable) else None
+            is_stop = bool(r["is_stop"])
+            realized_ret = float(r["ret"]) if pd.notna(r["ret"]) else None
+
+        rows.append({
+            "listing_id": lid, "ticker": ticker, "entry_date": r["entry_date"],
+            "available_forward_days": avail, "mature_60d": mature,
+            "tradable_mfe": tmfe, "is_stop": is_stop, "realized_ret": realized_ret
+        })
+    return pd.DataFrame(rows)
+
+def _v825n_load_ledger():
+    if not V825N_LEDGER.exists():
+        return pd.DataFrame()
+    D = pd.read_csv(V825N_LEDGER, compression="gzip")
+    D["entry_date"] = pd.to_datetime(D["entry_date"], errors="coerce")
+    return D
+
+def _v825n_save_ledger(D):
+    V825N_DIR.mkdir(parents=True, exist_ok=True)
+    D.to_csv(V825N_LEDGER, index=False, compression="gzip")
+
+def _v825n_bool_series(s):
+    if s.dtype == bool:
+        return s
+    return s.astype(str).str.lower().isin(["true","1","yes"])
+
+def _v825n_create_or_update_shadow():
+    V825N_DIR.mkdir(parents=True, exist_ok=True)
+    _, ref = _v825n_reference_dataset()
+    status = _v825n_candidate_status()
+    old = _v825n_load_ledger()
+
+    old_ids = set(old["listing_id"].astype(str)) if not old.empty and "listing_id" in old.columns else set()
+    new_rows = []
+
+    for _, r in status[~status["mature_60d"]].iterrows():
+        lid = str(r["listing_id"])
+        if lid in old_ids:
+            continue
+        feats = _v825l_entry_features(str(r["ticker"]), r["entry_date"])
+        if feats is None:
+            continue
+        score = _v825n_score_row(feats, ref)
+        new_rows.append({
+            "listing_id": lid,
+            "ticker": str(r["ticker"]),
+            "entry_date": r["entry_date"],
+            "shadow_created_at": datetime.now(timezone.utc).isoformat(),
+            "model_build_id": V825N_BUILD_ID,
+            "shadow_score": score,
+            "shadow_rank_at_creation": np.nan,
+            "available_forward_days_at_creation": int(r["available_forward_days"]),
+            "mature_60d": False,
+            "matured_at": None,
+            "tradable_mfe": None,
+            "winner20": None,
+            "is_stop": None,
+            "realized_ret": None,
+        })
+
+    if new_rows:
+        N = pd.DataFrame(new_rows)
+        old = N if old.empty else pd.concat([old, N], ignore_index=True)
+
+    if old.empty:
+        cols = ["listing_id","ticker","entry_date","shadow_created_at","model_build_id","shadow_score",
+                "shadow_rank_at_creation","available_forward_days_at_creation","mature_60d","matured_at",
+                "tradable_mfe","winner20","is_stop","realized_ret"]
+        old = pd.DataFrame(columns=cols)
+        _v825n_save_ledger(old)
+        return _v825n_summarize(old)
+
+    old["shadow_score"] = pd.to_numeric(old["shadow_score"], errors="coerce")
+    if "shadow_rank_at_creation" not in old.columns:
+        old["shadow_rank_at_creation"] = np.nan
+    ranks = old["shadow_score"].rank(pct=True, method="average")
+    missing_rank = pd.to_numeric(old["shadow_rank_at_creation"], errors="coerce").isna()
+    old.loc[missing_rank, "shadow_rank_at_creation"] = ranks[missing_rank]
+
+    st = status.set_index("listing_id")
+    for i, r in old.iterrows():
+        lid = str(r["listing_id"])
+        if lid not in st.index:
+            continue
+        s = st.loc[lid]
+        if bool(s["mature_60d"]):
+            was_mature = str(r.get("mature_60d","")).lower() in ["true","1","yes"]
+            old.at[i, "mature_60d"] = True
+            if not was_mature or pd.isna(r.get("matured_at")):
+                old.at[i, "matured_at"] = datetime.now(timezone.utc).isoformat()
+            old.at[i, "tradable_mfe"] = s["tradable_mfe"]
+            old.at[i, "winner20"] = bool((s["tradable_mfe"] or 0) >= .20) if pd.notna(s["tradable_mfe"]) else None
+            old.at[i, "is_stop"] = s["is_stop"]
+            old.at[i, "realized_ret"] = s["realized_ret"]
+
+    _v825n_save_ledger(old)
+    return _v825n_summarize(old)
+
+def _v825n_summarize(L):
+    if L is None or L.empty:
+        result = {
+            "version":"V8.25N Frozen Shadow Forward Validation",
+            "build_id":V825N_BUILD_ID,
+            "verdict":"WAITING_FOR_SHADOW_CANDIDATES",
+            "ledger_rows":0,"mature_rows":0,"pending_rows":0,
+            "mature_winner20":0,"mature_stops":0,"shadow_auc":None,
+            "fixed_operating_points":[],
+            "next_action":"WAIT_FOR_NEW_RIGHT_CENSORED_FROZEN_CANDIDATES",
+            "decision_rule":"Do not judge until >=12 genuinely forward matured shadow cases with >=2 tradable +20 winners and >=6 STOPs.",
+            "boundaries":"Shadow only. Frozen V8.25M model. No production rule change."
+        }
+        _v825g_write(V825N_RESULT, result)
+        return result
+
+    L = L.copy()
+    L["shadow_score"] = pd.to_numeric(L["shadow_score"], errors="coerce")
+    L["shadow_rank_at_creation"] = pd.to_numeric(L["shadow_rank_at_creation"], errors="coerce")
+    mature_mask = _v825n_bool_series(L["mature_60d"])
+    M = L[mature_mask].copy()
+    P = L[~mature_mask].copy()
+
+    result = {
+        "version":"V8.25N Frozen Shadow Forward Validation",
+        "build_id":V825N_BUILD_ID,
+        "ledger_rows":int(len(L)),
+        "mature_rows":int(len(M)),
+        "pending_rows":int(len(P)),
+        "mature_winner20":0,
+        "mature_stops":0,
+        "shadow_auc":None,
+        "fixed_operating_points":[]
+    }
+
+    if len(M):
+        M["winner20"] = _v825n_bool_series(M["winner20"])
+        M["is_stop"] = _v825n_bool_series(M["is_stop"])
+        result["mature_winner20"] = int(M["winner20"].sum())
+        result["mature_stops"] = int(M["is_stop"].sum())
+
+        if M["winner20"].nunique() >= 2:
+            result["shadow_auc"] = _v825m_auc(M["winner20"].astype(int), M["shadow_score"])
+
+        for keep_top in [0.25,0.33,0.50]:
+            keep = M["shadow_rank_at_creation"] >= (1.0-keep_top)
+            K = M[keep].copy()
+            wt = int(M["winner20"].sum())
+            st = int(M["is_stop"].sum())
+            wk = int(K["winner20"].sum())
+            sk = int(K["is_stop"].sum())
+            result["fixed_operating_points"].append({
+                "keep_top_fraction":keep_top,
+                "mature_rows":int(len(M)),
+                "kept_rows":int(len(K)),
+                "winners_kept":wk,"winners_total":wt,
+                "winner_recall":float(wk/max(1,wt)),
+                "stops_kept":sk,"stops_total":st,
+                "stop_reduction":float((st-sk)/max(1,st))
+            })
+
+    if len(M) < 12 or result["mature_winner20"] < 2 or result["mature_stops"] < 6:
+        verdict = "ACCUMULATING_GENUINE_FORWARD_SHADOW_DATA"
+        next_action = "KEEP_MODEL_FROZEN__WAIT_FOR_MORE_60D_MATURITIES"
+    else:
+        auc = result["shadow_auc"]
+        viable = [g for g in result["fixed_operating_points"]
+                  if g["winner_recall"] >= .75 and g["stop_reduction"] >= .40]
+        if auc is not None and auc >= .75 and viable:
+            verdict = "SHADOW_FORWARD_PASS__CONSIDER_FORMAL_PRODUCTION_GATE_AUDIT"
+            next_action = "RUN_FINAL_PRODUCTION_READINESS_AUDIT__NO_AUTO_PROMOTION"
+        elif auc is not None and auc >= .65:
+            verdict = "SHADOW_FORWARD_PARTIAL__RESEARCH_ONLY"
+            next_action = "KEEP_SHADOW_RUNNING__NO_PRODUCTION_FILTER"
+        else:
+            verdict = "SHADOW_FORWARD_FAIL__DO_NOT_PROMOTE_FILTER"
+            next_action = "FREEZE_FAILURE__NO_RETUNE_ON_SHADOW_SAMPLE"
+
+    result["verdict"] = verdict
+    result["next_action"] = next_action
+    result["decision_rule"] = "Do not judge until >=12 genuinely forward matured shadow cases with >=2 tradable +20 winners and >=6 STOPs. PASS then requires shadow AUC>=0.75 and one fixed keep-top {25%,33%,50%} point with winner recall>=75% and STOP reduction>=40%."
+    result["boundaries"] = "Frozen V8.25M model. Scores immutable after creation. Outcome updates only. No downloads, no threshold search, no retuning, no production rule change."
+
+    preview = L[["ticker","entry_date","shadow_score","shadow_rank_at_creation","mature_60d","tradable_mfe","winner20","is_stop","realized_ret"]].copy()
+    preview["entry_date"] = pd.to_datetime(preview["entry_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    result["ledger_preview"] = preview.sort_values(["mature_60d","shadow_rank_at_creation"], ascending=[True,False]).to_dict("records")
+
+    _v825g_write(V825N_RESULT, result)
+    return result
+
+@APP.route("/v825n/run", methods=["GET","POST"])
+def v825n_run_route():
+    try:
+        _v825n_create_or_update_shadow()
+    except Exception as ex:
+        _v825g_write(V825N_RESULT, {
+            "version":"V8.25N Frozen Shadow Forward Validation",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825n")
+
+@APP.get("/v825n")
+def v825n_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825g_read(V825N_RESULT,{})
+    ops=""
+    for g in R.get("fixed_operating_points") or []:
+        ops += (
+            f"<tr><td>Top {int(float(g.get('keep_top_fraction',0))*100)}%</td>"
+            f"<td>{e(g.get('mature_rows'))}</td>"
+            f"<td>{e(g.get('winners_kept'))}/{e(g.get('winners_total'))}</td>"
+            f"<td>{e(round(float(g.get('winner_recall',0))*100,1))}%</td>"
+            f"<td>{e(g.get('stops_kept'))}/{e(g.get('stops_total'))}</td>"
+            f"<td>{e(round(float(g.get('stop_reduction',0))*100,1))}%</td></tr>"
+        )
+
+    rows=""
+    for x in R.get("ledger_preview") or []:
+        tm=x.get("tradable_mfe"); rr=x.get("realized_ret")
+        tm_txt = "—" if tm is None or (isinstance(tm,float) and not np.isfinite(tm)) else f"{float(tm)*100:.1f}%"
+        rr_txt = "—" if rr is None or (isinstance(rr,float) and not np.isfinite(rr)) else f"{float(rr)*100:.2f}%"
+        rows += (
+            f"<tr><td><b>{e(x.get('ticker'))}</b></td>"
+            f"<td>{e(x.get('entry_date'))}</td>"
+            f"<td>{e(round(float(x.get('shadow_score',0)),3))}</td>"
+            f"<td>{e(round(float(x.get('shadow_rank_at_creation',0))*100,1))}%</td>"
+            f"<td>{e(x.get('mature_60d'))}</td>"
+            f"<td>{e(tm_txt)}</td><td>{e(x.get('winner20'))}</td>"
+            f"<td>{e(x.get('is_stop'))}</td><td>{e(rr_txt)}</td></tr>"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1250px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🛰️ V8.25N Frozen Shadow Forward Validation</h1>
+<div class='o'><b>真正向前，不再回看。</b> 冻结 M 的8个features、方向和等权公式，只给尚未成熟的 recent candidates 预先打分；以后只更新60日结果，旧分数不重算。</div></div>
+
+<div class='c'><form method='post' action='/v825n/run'><button>▶ Create / Update Frozen Shadow Ledger</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Shadow ledger <b>{e(R.get('ledger_rows','—'))}</b> · Mature <b>{e(R.get('mature_rows','—'))}</b> · Pending <b>{e(R.get('pending_rows','—'))}</b><br>
+Mature +20 winners <b>{e(R.get('mature_winner20','—'))}</b> · Mature STOP <b>{e(R.get('mature_stops','—'))}</b><br>
+Shadow AUC <b>{e(round(float(R.get('shadow_auc',0)),3) if R.get('shadow_auc') is not None else '—')}</b></div></div>
+
+<div class='c'><h2>Frozen Shadow Ledger</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Entry</th><th>Frozen score</th><th>Frozen rank</th><th>Mature?</th><th>Tradable MFE</th><th>+20?</th><th>STOP?</th><th>Realized</th></tr>
+{rows or "<tr><td colspan=9>Run once to create shadow ledger.</td></tr>"}
+</table></div></div>
+
+<div class='c'><h2>Fixed Operating Points — Mature Shadow Only</h2><div style='overflow:auto'><table>
+<tr><th>Keep</th><th>Mature rows</th><th>Winners kept</th><th>Winner recall</th><th>STOP kept</th><th>STOP reduction</th></tr>
+{ops or "<tr><td colspan=6>Not enough mature shadow cases yet.</td></tr>"}
+</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}</div>
+<div class='g'><b>Next:</b> {e(R.get('next_action','Run once to start shadow ledger'))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
