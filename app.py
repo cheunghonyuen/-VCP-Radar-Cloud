@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825f-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825g-home-card-real' style='background:#ecfdf5;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>📥 V8.25G Recent Dow-30 Price Cache Builder</h2>
+        <p>只补30只 Dow 从 2023-11-30 起的日线价格。使用现有 Tiingo Daily Price API；不买 fundamentals add-on。</p>
+        <a href='/v825g'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25G</button></a>
+        </div>
+        <div id='v825f-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🗂️ V8.25F Recent Price / Cache Coverage Audit</h2>
         <p>先查现有 price/cache 是否覆盖 2023-11-30 以后，再决定是否生成 research-only recent VCP candidates。0下载 / 0重扫 / 0调参。</p>
         <a href='/v825f'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25F</button></a>
@@ -60720,3 +60725,158 @@ Dow symbols with recent cache: <b>{e(R.get('recent_dow_symbol_count','—'))}/30
 <div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div>
 <p>{e(R.get('boundaries',''))}</p></div>
 </div></body></html>"""
+
+# ================= V8.25G RECENT DOW-30 PRICE CACHE BUILDER =================
+V825G_DIR = DATA_DIR / "v825g_recent_dow30_price_cache"
+V825G_PRICE_DIR = V825G_DIR / "daily"
+V825G_STATUS = V825G_DIR / "status.json"
+V825G_RESULT = V825G_DIR / "result.json"
+V825G_START = "2023-11-30"
+v825g_thread = None
+
+def _v825g_read(path, default=None):
+    try:
+        if Path(path).exists():
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {} if default is None else default
+
+def _v825g_write(path, obj):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(obj, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+def _v825g_status():
+    s={"status":"idle","progress":0,"processed":0,"total":len(V825_DOW30),"errors":0,"message":"尚未开始","result":None}
+    q=_v825g_read(V825G_STATUS,{})
+    s.update(q)
+    return s
+
+def _v825g_set(**kw):
+    s=_v825g_status(); s.update(kw); _v825g_write(V825G_STATUS,s)
+
+def _v825g_audit_file(ticker):
+    fp=V825G_PRICE_DIR/f"{ticker}.csv.gz"
+    if not fp.exists():
+        return {"ticker":ticker,"valid":False,"rows":0}
+    try:
+        D=pd.read_csv(fp,compression="gzip")
+        z=pd.to_datetime(D["Date"],errors="coerce").dropna()
+        ok=bool(len(z)>=50 and z.min()<=pd.Timestamp("2023-12-15") and z.max()>=pd.Timestamp("2025-01-01"))
+        return {"ticker":ticker,"valid":ok,"rows":int(len(D)),
+                "date_min":str(z.min().date()) if len(z) else None,
+                "date_max":str(z.max().date()) if len(z) else None}
+    except Exception as ex:
+        return {"ticker":ticker,"valid":False,"rows":0,"error":f"{type(ex).__name__}: {ex}"}
+
+def _v825g_preflight():
+    if not TIINGO_TOKEN:
+        return {"verdict":"TOKEN_MISSING","start_date":V825G_START}
+    existing=[t for t in V825_DOW30 if _v825g_audit_file(t).get("valid")]
+    pending=[t for t in V825_DOW30 if t not in existing]
+    return {"verdict":"PASS","start_date":V825G_START,"existing_valid":len(existing),"pending":len(pending),
+            "gap_seconds":float(current_gap),"estimated_min_minutes":round(len(pending)*float(current_gap)/60,1)}
+
+def _v825g_worker():
+    global v825g_thread
+    try:
+        V825G_PRICE_DIR.mkdir(parents=True,exist_ok=True)
+        completed=set(t for t in V825_DOW30 if _v825g_audit_file(t).get("valid"))
+        errors={}
+        total=len(V825_DOW30)
+        for t in V825_DOW30:
+            if t in completed:
+                continue
+            _v825g_set(status="running",progress=int(100*len(completed)/total),processed=len(completed),
+                       total=total,errors=len(errors),message=f"{t} · recent daily prices · {len(completed)+1}/{total}")
+            try:
+                D=tiingo_history(t,start=V825G_START,retries=2)
+                out=D.reset_index()
+                if "Date" not in out.columns:
+                    out=out.rename(columns={out.columns[0]:"Date"})
+                out["Date"]=pd.to_datetime(out["Date"],errors="coerce")
+                out=out.dropna(subset=["Date"]).sort_values("Date")
+                fp=V825G_PRICE_DIR/f"{t}.csv.gz"
+                out.to_csv(fp,index=False,compression="gzip")
+                if not _v825g_audit_file(t).get("valid"):
+                    raise RuntimeError("POST_SAVE_AUDIT_FAILED")
+                completed.add(t)
+                errors.pop(t,None)
+            except TiingoRateLimitPause as ex:
+                _v825g_set(status="paused_rate_limit",progress=int(100*len(completed)/total),processed=len(completed),
+                           total=total,errors=len(errors),message=str(ex))
+                return
+            except Exception as ex:
+                errors[t]=f"{type(ex).__name__}: {ex}"
+
+        audits=[_v825g_audit_file(t) for t in V825_DOW30]
+        valid=[x for x in audits if x.get("valid")]
+        coverage=len(valid)/total
+        latest=max([pd.Timestamp(x["date_max"]) for x in valid if x.get("date_max")],default=None)
+        verdict="RECENT_DOW30_PRICE_CACHE_READY" if coverage>=.90 else "RECENT_DOW30_PRICE_CACHE_INCOMPLETE"
+        result={"verdict":verdict,"valid_tickers":len(valid),"total_tickers":total,"coverage":coverage,
+                "date_max_any":str(latest.date()) if latest is not None else None,"errors":errors,
+                "cache_dir":str(V825G_PRICE_DIR),
+                "next_action":"BUILD_RESEARCH_ONLY_RECENT_VCP_CANDIDATES_FROM_THIS_CACHE" if coverage>=.90 else "RESUME_ONLY_FAILED_TICKERS"}
+        _v825g_write(V825G_RESULT,result)
+        _v825g_set(status="done",progress=100,processed=len(valid),total=total,errors=len(errors),
+                   message=f"{verdict} · {len(valid)}/{total}",result=result)
+    except Exception as ex:
+        _v825g_set(status="error",message=f"{type(ex).__name__}: {ex}")
+    finally:
+        v825g_thread=None
+
+def _v825g_start():
+    global v825g_thread
+    if v825g_thread is not None and v825g_thread.is_alive():
+        return False
+    if _v825g_preflight().get("verdict")!="PASS":
+        return False
+    v825g_thread=threading.Thread(target=_v825g_worker,daemon=True)
+    v825g_thread.start()
+    return True
+
+@APP.route("/v825g/preflight",methods=["GET","POST"])
+def v825g_preflight_route():
+    _v825g_write(V825G_DIR/"preflight.json",_v825g_preflight())
+    return redirect("/v825g")
+
+@APP.post("/v825g/start")
+def v825g_start_route():
+    return jsonify({"started":_v825g_start(),**_v825g_status()})
+
+@APP.get("/api/v825g")
+def v825g_api():
+    return jsonify(_v825g_status())
+
+@APP.get("/v825g")
+def v825g_page():
+    PF=_v825g_read(V825G_DIR/"preflight.json",{})
+    S=_v825g_status()
+    R=_v825g_read(V825G_RESULT,{})
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1000px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:999px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:{int(S.get("progress",0))}%}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>📥 V8.25G Recent Dow-30 Price Cache Builder</h1>
+<div class="o"><b>只补真正缺的 recent price data。</b> 30只 Dow，从 2023-11-30 起；使用现有 Tiingo Daily Price API，不买 fundamentals add-on，不扫全市场。</div></div>
+<div class="c"><form method="post" action="/v825g/preflight"><button>A. Run Price Preflight</button></form>
+<h2>Preflight: {PF.get("verdict","NOT_RUN")}</h2>
+<div class="g">Start <b>{PF.get("start_date","—")}</b> · Existing <b>{PF.get("existing_valid","—")}</b> · Pending <b>{PF.get("pending","—")}</b><br>
+Gap <b>{PF.get("gap_seconds","—")}s</b> · Estimated minimum <b>{PF.get("estimated_min_minutes","—")} min</b></div></div>
+<div class="c"><button id="go">B. Build / Resume Recent Dow-30 Price Cache</button>
+<h2 id="msg">{S.get("message","尚未开始")}</h2><div class="track"><div id="bar" class="bar"></div></div>
+<p><span id="pct">{S.get("progress",0)}%</span> · <span id="cnt">{S.get("processed",0)}/{S.get("total",30)}</span> · errors <span id="err">{S.get("errors",0)}</span></p>
+<div class="g"><b>Final:</b> {R.get("verdict","—")}<br>Coverage {round(float(R.get("coverage",0))*100,1) if R else "—"}% · Date max {R.get("date_max_any","—")}<br>Next: {R.get("next_action","—")}</div></div>
+<script>
+const $=x=>document.getElementById(x);
+function render(s){{$("msg").textContent=s.message||"";$("pct").textContent=(s.progress||0)+"%";$("bar").style.width=(s.progress||0)+"%";$("cnt").textContent=(s.processed||0)+"/"+(s.total||30);$("err").textContent=s.errors||0}}
+async function poll(){{try{{const s=await (await fetch("/api/v825g",{{cache:"no-store"}})).json();render(s);if(s.status==="running")setTimeout(poll,1500)}}catch(e){{$("msg").textContent="status error "+e}}}}
+$("go").onclick=async()=>{{const s=await (await fetch("/v825g/start",{{method:"POST"}})).json();render(s);poll()}};
+poll();
+</script></div></body></html>'''
