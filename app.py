@@ -67402,3 +67402,169 @@ def v833_page():
 <div class='c'><h2>Field Parity</h2><table><tr><th>Field</th><th>Coverage</th><th>Exact parity</th><th>Median abs diff</th><th>Median rel diff</th></tr>{rows}</table></div>
 <div class='c'><p>{e(R.get('interpretation',''))}</p><p><b>Next:</b> {e(R.get('next',''))}</p>{"<a href='/v833/export'><button>Export Exact Parity Detail</button></a>" if V833_DETAIL.exists() else ''}</div>
 <script>async function poll(){{try{{let s=await (await fetch('/api/v833',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1200);}}catch(e){{}}}}async function go(){{let r=await fetch('/v833/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
+
+# ================= V8.34 RECOVERED-LINEAGE VCP QUALIFICATION TRUTH AUDIT =================
+V834_DIR = DATA_DIR / "v834_recovered_lineage_vcp_qualification_truth"
+V834_PREFLIGHT = V834_DIR / "preflight.json"
+V834_STATUS = V834_DIR / "status.json"
+V834_RESULT = V834_DIR / "result.json"
+V834_DETAIL = V834_DIR / "lineage_audit.csv.gz"
+V834_V617 = DATA_DIR / 'v617_final_validation_stage2' / 'trades.csv.gz'
+V834_V644 = DATA_DIR / 'v644_source_supported_breakout_ab' / 'v644_trade_cache.csv.gz'
+V834_V669 = DATA_DIR / 'v669_low10_structural_stop_ab' / 'paired_exit_trades.csv.gz'
+V834_BUILD_ID = 'v834-recovered-lineage-vcp-qualification-truth-20260902'
+v834_thread=None
+
+def _v834_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V834_STATUS.exists():
+        try:x.update(json.loads(V834_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v834_write(**kw):
+    V834_DIR.mkdir(parents=True,exist_ok=True);x=_v834_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat();V834_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v834_alive():return v834_thread is not None and v834_thread.is_alive()
+
+def _v834_func_source(name):
+    import ast
+    txt=Path(__file__).read_text(encoding='utf-8',errors='replace');tree=ast.parse(txt)
+    for n in tree.body:
+        if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name==name:
+            return '\n'.join(txt.splitlines()[n.lineno-1:n.end_lineno])
+    return ''
+
+def _v834_pf():
+    import pandas as pd, time
+    t0=time.time();V834_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        missing_files=[str(p) for p in [V834_V617,V834_V644,V834_V669] if not p.exists()]
+        if missing_files:raise RuntimeError('Missing recovered-lineage artifact(s): '+', '.join(missing_files))
+        A=pd.read_csv(V834_V617,nrows=50,compression='gzip',low_memory=False)
+        B=pd.read_csv(V834_V644,nrows=100,compression='gzip',low_memory=False)
+        C=pd.read_csv(V834_V669,nrows=100,compression='gzip',low_memory=False)
+        need617=['listing_id','entry_date','entry_px','exit_reason','dna']
+        need644=['variant','listing_id','entry_date','entry_px','exit_reason','delay_sessions','trigger_anchor']
+        need669=['listing_id','entry_date','entry_px','control_reason','control_ret']
+        miss617=[x for x in need617 if x not in A.columns];miss644=[x for x in need644 if x not in B.columns];miss669=[x for x in need669 if x not in C.columns]
+        funcs={n:bool(_v834_func_source(n)) for n in ['_v617fv2_selected','_v644_prepare','_v644_tight_breakout_volume','_v669_run']}
+        verdict='PASS' if not (miss617 or miss644 or miss669) and all(funcs.values()) else 'FAIL__LINEAGE_SCHEMA_OR_SOURCE_CODE'
+        out={'version':'V8.34','build_id':V834_BUILD_ID,'verdict':verdict,'paths':{'v617':str(V834_V617),'v644':str(V834_V644),'v669':str(V834_V669)},'missing_columns':{'v617':miss617,'v644':miss644,'v669':miss669},'code_functions_found':funcs,'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.34','build_id':V834_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V834_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v834_stats(df,ret_col=None,stop_col=None):
+    import pandas as pd
+    out={'n':int(len(df))}
+    if stop_col and stop_col in df.columns:
+        st=df[stop_col].astype(str).str.upper().str.contains('STOP7',regex=False);out['stop_rate_pct']=100*float(st.mean()) if len(st) else None
+    if ret_col and ret_col in df.columns:
+        r=pd.to_numeric(df[ret_col],errors='coerce').dropna();out['win_rate_pct']=100*float((r>0).mean()) if len(r) else None;out['avg_ret_pct']=100*float(r.mean()) if len(r) else None
+        gp=float(r[r>0].sum());gl=float(-r[r<=0].sum());out['pf']=gp/gl if gl>0 else None
+    return out
+
+def _v834_run():
+    import pandas as pd, numpy as np, re, time
+    t0=time.time();pf=_v834_pf()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    _v834_write(status='running',phase='load',message='Loading recovered V6.17 → V6.44 → V6.69 lineage',processed=0,total=4,errors=0)
+    S2=pd.read_csv(V834_V617,compression='gzip',low_memory=False);T=pd.read_csv(V834_V644,compression='gzip',low_memory=False);P69=pd.read_csv(V834_V669,compression='gzip',low_memory=False)
+    for d in [S2,T,P69]:
+        d['entry_date']=pd.to_datetime(d['entry_date'],errors='coerce').dt.normalize();d['entry_px']=pd.to_numeric(d['entry_px'],errors='coerce')
+    tight=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+    _v834_write(status='running',phase='parity',message='Reconciling V6.69 entries to V6.44 TIGHT breakout stream',processed=1,total=4,errors=0)
+    K=['listing_id','entry_date'];A=P69[K+['entry_px','control_reason','control_ret']].copy();B=tight[K+['entry_px','exit_reason','delay_sessions','trigger_anchor']].copy();A['listing_id']=A.listing_id.astype(str);B['listing_id']=B.listing_id.astype(str)
+    B=B.drop_duplicates(K,keep='first');M=A.merge(B,on=K,how='left',suffixes=('_669','_644'),indicator=True)
+    key_par=100*float((M['_merge']=='both').mean());x=pd.to_numeric(M['entry_px_669'],errors='coerce');y=pd.to_numeric(M['entry_px_644'],errors='coerce');ok=x.notna()&y.notna();pxpar=100*float((np.abs(x[ok]-y[ok])<=1e-6).mean()) if ok.any() else 0.0
+    _v834_write(status='running',phase='source_truth',message='Auditing exact first-layer selection and trigger source code',processed=2,total=4,errors=0)
+    f617=_v834_func_source('_v617fv2_selected');fprep=_v834_func_source('_v644_prepare');f644=_v834_func_source('_v644_tight_breakout_volume')
+    momentum_dna=all(re.search(p,f617,re.I) for p in [r'ret60',r'ret120',r'ret252',r'vol_vs20',r'quantile\s*\(\s*\.75'])
+    strict_terms=['stage2(','supply(','c1','c2','c3','pivot_tight','dry','sector_score','group_breadth']
+    present={q:bool(re.search(re.escape(q),f617,re.I)) for q in strict_terms};vcp_count=sum(present.values())
+    pivot_is_stage2_entry=bool(re.search(r'pivot\s*=\s*float\s*\(\s*r\.entry_px\s*\)',fprep,re.I))
+    trigger_high=bool(re.search(r'h\s*>\s*pivot',f644,re.I));trigger_vol=bool(re.search(r'v\s*>\s*va',f644,re.I));next_open=bool(re.search(r'entry\s*=\s*float\s*\(\s*nxt\.open',f644,re.I))
+    s2=S2.copy();
+    if 'return' not in s2.columns and all(c in s2.columns for c in ['entry_px','exit_px']):s2['return']=pd.to_numeric(s2.exit_px,errors='coerce')/pd.to_numeric(s2.entry_px,errors='coerce')-1
+    tight2=tight.copy();tight2['ret']=pd.to_numeric(tight2.exit_px,errors='coerce')/pd.to_numeric(tight2.entry_px,errors='coerce')-1
+    s2_stats=_v834_stats(s2,'return','exit_reason');tight_stats=_v834_stats(tight2,'ret','exit_reason');p69_stats=_v834_stats(P69,'control_ret','control_reason')
+    dna=[]
+    for k,g in s2.groupby(s2.dna.astype(str)):
+        z=_v834_stats(g,'return','exit_reason');z['dna']=str(k);dna.append(z)
+    rules=[
+      {'layer':'V6.17 first-layer selection','actual':'Prior-year Q75 ret60/ret120/ret252 + vol_vs20<=0.80; DNA A/B union','strict_vcp_gate':'NO','risk':'CRITICAL'},
+      {'layer':'VCP contraction sequence','actual':'Not enforced in _v617fv2_selected','strict_vcp_gate':'NO','risk':'CRITICAL'},
+      {'layer':'Volume dry-up anatomy','actual':'Only vol_vs20<=0.80 DNA condition; not supply() dry-up structure','strict_vcp_gate':'NO','risk':'HIGH'},
+      {'layer':'V6.44 pivot','actual':'pivot = prior Stage-2 entry_px','strict_vcp_gate':'NO (anchor reuse)','risk':'HIGH'},
+      {'layer':'V6.44 trigger','actual':'high > pivot + volume > rolling-50 average; enter next-session open','strict_vcp_gate':'TRIGGER ONLY','risk':'MEDIUM'},
+      {'layer':'V6.69 entry stream','actual':'Inherits V6.44 TIGHT entries; V6.69 only changes stop challenger','strict_vcp_gate':'INHERITS ABOVE','risk':'CRITICAL'}]
+    if key_par>=99 and pxpar>=98 and momentum_dna and vcp_count==0 and pivot_is_stage2_entry and trigger_high and trigger_vol and next_open:diag='ROOT_CAUSE_FOUND__RECOVERED_LINEAGE_FIRST_LAYER_IS_MOMENTUM_DNA_NOT_STRICT_VCP_QUALIFICATION'
+    elif key_par>=99 and momentum_dna and vcp_count<=1:diag='STRONG_EVIDENCE__FIRST_LAYER_NOT_STRICT_VCP__NEEDS_FEATURE_STORE_RECONSTRUCTION'
+    else:diag='LINEAGE_AUDIT_INCONCLUSIVE__DO_NOT_CHANGE_PRODUCTION'
+    result={'version':'V8.34','build_id':V834_BUILD_ID,'diagnosis':diag,'lineage':'V6.17 Stage-2 DNA → V6.44 TIGHT breakout → V6.69 STOP7 → Frozen ledger','parity':{'v669_to_v644_key_pct':key_par,'entry_px_exact_pct':pxpar},'source_truth':{'momentum_dna_q75_confirmed':momentum_dna,'strict_vcp_primitives_in_v617_selector':present,'strict_vcp_primitive_count':vcp_count,'v644_pivot_is_stage2_entry_px':pivot_is_stage2_entry,'v644_high_breakout':trigger_high,'v644_volume_context':trigger_vol,'v644_next_open_execution':next_open},'economics':{'v617_stage2':s2_stats,'v644_tight':tight_stats,'v669_control':p69_stats,'v617_dna_cohorts':dna},'enforcement_matrix':rules,'critical_interpretation':'Recovered lineage does NOT begin with a Minervini-style structural VCP qualification gate. V6.17 Stage-2 admission is momentum/volume DNA based on historical return quantiles; V6.44 then waits for a breakout relative to the earlier Stage-2 entry price. High STOP rate therefore cannot be blamed on VCP itself until a true point-in-time VCP qualification layer is reconstructed.','next':'V8.35: reconstruct true point-in-time VCP Qualification on the recovered historical cache (Trend Template + actual contraction sequence + final tightness + supply dry-up + pivot), then A/B against this lineage with Entry/Stop/Exit frozen. No threshold search.','elapsed_sec':round(time.time()-t0,2)}
+    V834_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');M.to_csv(V834_DETAIL,index=False,compression='gzip');_v834_write(status='done',phase='complete',message=f'Done · {diag}',processed=4,total=4,errors=0,elapsed_sec=result['elapsed_sec']);return result
+
+def _v834_worker():
+    global v834_thread
+    import time
+    t0=time.time()
+    try:_v834_run()
+    except Exception as ex:_v834_write(status='error',phase='failed',message='V8.34 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,2))
+    finally:v834_thread=None
+
+@APP.route('/v834/preflight',methods=['GET','POST'])
+def v834_preflight_route():_v834_pf();return redirect('/v834')
+@APP.post('/v834/start')
+def v834_start():
+    global v834_thread
+    if _v834_alive():return jsonify({'started':False,**_v834_status()})
+    p=_v834_pf()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v834_thread=threading.Thread(target=_v834_worker,daemon=True);v834_thread.start();return jsonify({'started':True,**_v834_status()})
+@APP.get('/api/v834')
+def v834_api():return jsonify(_v834_status())
+@APP.get('/v834/export')
+def v834_export():
+    if not V834_DETAIL.exists():return ('not ready',404)
+    return send_file(V834_DETAIL,as_attachment=True,download_name='v834_recovered_lineage_entry_parity.csv.gz')
+@APP.get('/v834')
+def v834_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v834_status()
+    try:
+        if V834_PREFLIGHT.exists():P=json.loads(V834_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V834_RESULT.exists():R=json.loads(V834_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    eco=R.get('economics',{}) or {};truth=R.get('source_truth',{}) or {};par=R.get('parity',{}) or {}
+    def fmtstat(name,x):
+        x=x or {};return f"<tr><td><b>{e(name)}</b></td><td>{e(x.get('n','—'))}</td><td>{e('—' if x.get('stop_rate_pct') is None else round(float(x.get('stop_rate_pct')),2))}%</td><td>{e('—' if x.get('win_rate_pct') is None else round(float(x.get('win_rate_pct')),2))}%</td><td>{e('—' if x.get('pf') is None else round(float(x.get('pf')),3))}</td><td>{e('—' if x.get('avg_ret_pct') is None else round(float(x.get('avg_ret_pct')),3))}%</td></tr>"
+    erows=''.join(fmtstat(*z) for z in [('V6.17 Stage-2',eco.get('v617_stage2')),('V6.44 TIGHT breakout',eco.get('v644_tight')),('V6.69 CONTROL STOP7',eco.get('v669_control'))])
+    rrows=''.join(f"<tr><td>{e(x.get('layer'))}</td><td>{e(x.get('actual'))}</td><td><b>{e(x.get('strict_vcp_gate'))}</b></td><td>{e(x.get('risk'))}</td></tr>" for x in R.get('enforcement_matrix',[]))
+    dnarows=''.join(f"<tr><td>{e(x.get('dna'))}</td><td>{e(x.get('n'))}</td><td>{e(round(float(x.get('stop_rate_pct') or 0),2))}%</td><td>{e(round(float(x.get('win_rate_pct') or 0),2))}%</td><td>{e('—' if x.get('pf') is None else round(float(x.get('pf')),3))}</td></tr>" for x in eco.get('v617_dna_cohorts',[]))
+    diagnosis=str(R.get('diagnosis','—'));box='bad' if 'ROOT_CAUSE_FOUND' in diagnosis else 'ok'
+    export_html="<a href='/v834/export'><button>Export lineage parity</button></a>" if V834_DETAIL.exists() else ''
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#0f172a;margin:0}}.w{{max-width:1100px;margin:auto;padding:22px}}.c{{background:#fff;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe2ea;text-align:left;vertical-align:top}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.bad{{border:2px solid #ef4444;background:#fef2f2;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V8.34 Recovered-Lineage VCP Qualification Truth Audit</h1><div class="warn"><b>只审第一层真相，不调参。</b> Exact lineage: V6.17 Stage-2 DNA → V6.44 TIGHT breakout → V6.69 STOP7 → Frozen ledger。0 Tiingo / 0 universe rescan / 0 current-engine proxy。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V834_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v834/preflight"><button>A. Run Lineage Preflight</button></form><br><button onclick="go()">B. Run First-Layer Truth Audit</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class="c"><h2>Diagnosis</h2><div class="{box}"><b>{e(diagnosis)}</b></div><p>V6.69 → V6.44 key parity: <b>{e(round(float(par.get('v669_to_v644_key_pct') or 0),3))}%</b> · Entry-price exact parity: <b>{e(round(float(par.get('entry_px_exact_pct') or 0),3))}%</b></p></div>
+<div class="c"><h2>第一层代码真相</h2><p><b>Momentum DNA Q75 confirmed:</b> {e(truth.get('momentum_dna_q75_confirmed','—'))}</p><p><b>Strict VCP primitive count inside V6.17 selector:</b> {e(truth.get('strict_vcp_primitive_count','—'))}</p><p><b>V6.44 pivot = Stage-2 entry_px:</b> {e(truth.get('v644_pivot_is_stage2_entry_px','—'))} · high breakout: {e(truth.get('v644_high_breakout','—'))} · volume context: {e(truth.get('v644_volume_context','—'))} · next-open execution: {e(truth.get('v644_next_open_execution','—'))}</p></div>
+<div class="c"><h2>Rule Enforcement Matrix</h2><table><tr><th>Layer</th><th>Actual recovered logic</th><th>Strict VCP Gate?</th><th>Risk</th></tr>{rrows}</table></div>
+<div class="c"><h2>STOP / Economics by Lineage Stage</h2><table><tr><th>Stage</th><th>N</th><th>STOP Rate</th><th>Win Rate</th><th>PF</th><th>AvgRet</th></tr>{erows}</table></div>
+<div class="c"><h2>V6.17 DNA Cohorts</h2><table><tr><th>DNA</th><th>N</th><th>STOP Rate</th><th>Win Rate</th><th>PF</th></tr>{dnarows or '<tr><td colspan=5>—</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>Interpretation:</b> {e(R.get('critical_interpretation',''))}</div><p><b>Next:</b> {e(R.get('next',''))}</p>{export_html}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v834',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1000)}}catch(e){{}}}}async function go(){{let r=await fetch('/v834/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll()}}poll()</script></div></body></html>'''
+
+_v834_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v834_home_base is not None:
+    def _v834_home_wrap(*args,**kwargs):
+        resp=_v834_home_base(*args,**kwargs)
+        card="""<div id='v834-home-card-real' style='background:#fef2f2;border:7px solid #dc2626;border-radius:26px;padding:26px;margin:20px 0'><h2>🧬 V8.34 Recovered-Lineage VCP Qualification Truth Audit</h2><p>追 exact lineage 第一层：V6.17 DNA → V6.44 TIGHT breakout → V6.69 STOP7。确认它到底是不是严格 Minervini VCP Qualification；0调参、0重扫。</p><a href='/v834'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.34</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v834_home_base:APP.view_functions[ep]=_v834_home_wrap
