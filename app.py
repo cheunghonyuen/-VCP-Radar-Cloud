@@ -68500,3 +68500,304 @@ if _v838_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v838_home_base:APP.view_functions[ep]=_v838_home_wrap
+
+
+# ================= V8.39 PORTFOLIO ACCOUNTING / RETURN-SCALE EXACT PARITY AUDIT =================
+# Diagnostic only. No VCP threshold changes, no price reload, no Tiingo, no universe rescan.
+# Reconciles candidate-level returns, admitted-trade returns, dollar-PnL PF, historical V6.69
+# account metrics, and the 10-slot admission bottleneck before any further model changes.
+V839_DIR = DATA_DIR / "v839_portfolio_accounting_return_scale_exact_parity"
+V839_PREFLIGHT = V839_DIR / "preflight.json"
+V839_RESULT = V839_DIR / "result.json"
+V839_BUILD_ID = "v839-accounting-return-scale-parity-20260903"
+V839_LINEAGE = V669_TRADES
+V839_HIST_RESULT = V669_RESULT
+V839_PORT_RESULT = V838_RESULT
+V839_ADMITTED = V838_ADMITTED
+
+
+def _v839_num(x):
+    try:
+        y=float(x)
+        return y if np.isfinite(y) else None
+    except Exception:
+        return None
+
+
+def _v839_pf_returns(s):
+    import pandas as pd, numpy as np
+    r=pd.to_numeric(s,errors='coerce').dropna()
+    if r.empty:return None
+    gp=float(r[r>0].sum()); gl=float(-r[r<0].sum())
+    return float(gp/gl) if gl>0 else None
+
+
+def _v839_preflight():
+    import pandas as pd, numpy as np
+    V839_DIR.mkdir(parents=True,exist_ok=True)
+    err=None
+    try:
+        missing=[]
+        for name,p in [('V6.69 paired lineage',V839_LINEAGE),('V6.69 historical result',V839_HIST_RESULT),
+                       ('V8.38B portfolio result',V839_PORT_RESULT),('V8.38B admitted trades',V839_ADMITTED)]:
+            if not p.exists():missing.append(name+': '+str(p))
+        if missing:raise RuntimeError('Missing required artifacts: '+' | '.join(missing))
+        P=pd.read_csv(V839_LINEAGE,compression='gzip',nrows=50,low_memory=False)
+        L=pd.read_csv(V839_ADMITTED,compression='gzip',nrows=50,low_memory=False)
+        needp=['entry_px','control_exit_px','control_ret','control_reason']
+        needl=['variant','entry_px','exit_px','ret','pnl','capital','reason']
+        mp=[c for c in needp if c not in P.columns]; ml=[c for c in needl if c not in L.columns]
+        if mp or ml:raise RuntimeError(f'Schema mismatch lineage={mp} admitted={ml}')
+        H=json.loads(V839_HIST_RESULT.read_text(encoding='utf-8'))
+        R=json.loads(V839_PORT_RESULT.read_text(encoding='utf-8'))
+        hist=next((x for x in H.get('account',[]) if x.get('strategy')=='CONTROL_STOP7'),None)
+        base=next((x for x in R.get('portfolio',[]) if x.get('strategy')=='BASE'),None)
+        if not hist or not base:raise RuntimeError('Historical CONTROL_STOP7 or V8.38B BASE account block missing')
+        verdict='PASS'
+    except Exception as ex:
+        verdict='ERROR'; err=f'{type(ex).__name__}: {ex}'
+        hist=base=None
+    o={'version':'V8.39','build_id':V839_BUILD_ID,'verdict':verdict,'error':err,
+       'lineage_path':str(V839_LINEAGE),'historical_result_path':str(V839_HIST_RESULT),
+       'portfolio_result_path':str(V839_PORT_RESULT),'admitted_path':str(V839_ADMITTED)}
+    V839_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return o
+
+
+def _v839_run():
+    import pandas as pd, numpy as np
+    pf=_v839_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError(pf.get('error') or 'Preflight failed')
+
+    P=pd.read_csv(V839_LINEAGE,compression='gzip',low_memory=False)
+    L=pd.read_csv(V839_ADMITTED,compression='gzip',low_memory=False)
+    H=json.loads(V839_HIST_RESULT.read_text(encoding='utf-8'))
+    R=json.loads(V839_PORT_RESULT.read_text(encoding='utf-8'))
+
+    for c in ['entry_px','control_exit_px','control_ret']:
+        P[c]=pd.to_numeric(P[c],errors='coerce')
+    for c in ['entry_px','exit_px','ret','pnl','capital']:
+        L[c]=pd.to_numeric(L[c],errors='coerce')
+
+    # 1) Exact return-scale identity on the recovered source.
+    P['ret_from_px']=P.control_exit_px/P.entry_px-1.0
+    pvalid=P[['control_ret','ret_from_px']].dropna()
+    p_abs=(pvalid.control_ret-pvalid.ret_from_px).abs()
+    p_formula_exact=float((p_abs<=1e-10).mean()) if len(pvalid) else None
+    p_formula_med=float(p_abs.median()) if len(pvalid) else None
+    p_formula_p99=float(p_abs.quantile(.99)) if len(pvalid) else None
+
+    # 2) Exact return-scale identity on the admitted portfolio ledger.
+    L['ret_from_px']=L.exit_px/L.entry_px-1.0
+    lvalid=L[['ret','ret_from_px']].dropna()
+    l_abs=(lvalid['ret']-lvalid.ret_from_px).abs()
+    l_formula_exact=float((l_abs<=1e-10).mean()) if len(lvalid) else None
+    l_formula_med=float(l_abs.median()) if len(lvalid) else None
+
+    # 3) Dollar-PnL identity. This is the PF numerator/denominator used by V6.69/V8.38.
+    L['pnl_from_ret']=L.capital*L['ret']
+    pnlvalid=L[['pnl','pnl_from_ret']].dropna()
+    pnl_abs=(pnlvalid.pnl-pnlvalid.pnl_from_ret).abs()
+    pnl_formula_exact=float((pnl_abs<=1e-10).mean()) if len(pnlvalid) else None
+    pnl_formula_med=float(pnl_abs.median()) if len(pnlvalid) else None
+
+    baseL=L[L.variant.astype(str).eq('BASE')].copy()
+    tightL=L[L.variant.astype(str).eq('TIGHT_ONLY')].copy()
+
+    def stats(g):
+        if g.empty:return {}
+        r=pd.to_numeric(g['ret'],errors='coerce').dropna()
+        pnl=pd.to_numeric(g['pnl'],errors='coerce').dropna()
+        gp=float(pnl[pnl>0].sum()); gl=float(-pnl[pnl<0].sum())
+        q=r.quantile([0,.01,.05,.25,.5,.75,.95,.99,1]).to_dict() if len(r) else {}
+        return {
+            'n':int(len(g)),
+            'avg_ret':float(r.mean()) if len(r) else None,
+            'median_ret':float(r.median()) if len(r) else None,
+            'return_pf':_v839_pf_returns(r),
+            'dollar_pnl_pf':float(gp/gl) if gl>0 else None,
+            'win_rate':float((r>0).mean()) if len(r) else None,
+            'gt100':int((r>=1).sum()),'gt200':int((r>=2).sum()),'gt500':int((r>=5).sum()),
+            'ret_quantiles':{str(k):float(v) for k,v in q.items()},
+            'capital_min':_v839_num(g.capital.min()),'capital_median':_v839_num(g.capital.median()),'capital_max':_v839_num(g.capital.max()),
+        }
+
+    hist=next(x for x in H.get('account',[]) if x.get('strategy')=='CONTROL_STOP7')
+    base=next(x for x in R.get('portfolio',[]) if x.get('strategy')=='BASE')
+    tight=next(x for x in R.get('portfolio',[]) if x.get('strategy')=='TIGHT_ONLY')
+
+    # Candidate-level economics are deliberately a DIFFERENT population from admitted 10-slot trades.
+    cand=P.control_ret.dropna()
+    candidate_stats={
+        'n':int(len(cand)),
+        'avg_ret':float(cand.mean()),
+        'median_ret':float(cand.median()),
+        'return_pf':_v839_pf_returns(cand),
+        'win_rate':float((cand>0).mean()),
+        'stop_rate':float(P.control_reason.astype(str).str.contains('STOP7',regex=False).mean()),
+        'gt100':int((cand>=1).sum()),'gt200':int((cand>=2).sum()),'gt500':int((cand>=5).sum())
+    }
+
+    base_stats=stats(baseL); tight_stats=stats(tightL)
+
+    # Historical-account parity checks against the exact V6.69 account result.
+    parity={
+        'admitted_exact':int(base.get('admitted_positions',-1))==int(hist.get('admitted_positions',-2)),
+        'pf_abs_diff':abs(float(base.get('pf'))-float(hist.get('profit_factor'))),
+        'cagr_abs_diff':abs(float(base.get('cagr'))-float(hist.get('cagr'))),
+        'maxdd_abs_diff':abs(float(base.get('maxdd'))-float(hist.get('maxdd'))),
+        'win_rate_abs_diff':abs(float(base.get('win_rate'))-float(hist.get('win_rate'))),
+        'stop_rate_abs_diff':abs(float(base.get('stop_rate'))-float(hist.get('stop_rate'))),
+    }
+
+    # Classify the suspected issue only from exact identities.
+    scale_ok=(p_formula_exact is not None and p_formula_exact>=.9999 and
+              l_formula_exact is not None and l_formula_exact>=.9999 and
+              pnl_formula_exact is not None and pnl_formula_exact>=.9999)
+    hist_account_ok=(parity['pf_abs_diff']<=.10 and parity['maxdd_abs_diff']<=.002 and
+                     parity['win_rate_abs_diff']<=.002 and parity['stop_rate_abs_diff']<=.002 and
+                     abs(int(base.get('admitted_positions',0))-int(hist.get('admitted_positions',0)))<=1)
+    cagr_close=parity['cagr_abs_diff']<=.03
+
+    if scale_ok and hist_account_ok and cagr_close:
+        verdict='ACCOUNTING_SCALE_VALID__HIGH_PF_IS_CAPACITY_SELECTED_ACCOUNT_METRIC__NOT_TRADE_LEVEL_PF'
+    elif not scale_ok:
+        verdict='RETURN_OR_PNL_SCALE_IDENTITY_FAIL__FIX_ACCOUNTING_BEFORE_MODEL_TESTS'
+    else:
+        verdict='RETURN_SCALE_OK__ACCOUNT_PARITY_STILL_NEEDS_RECONCILIATION'
+
+    # A concise causal explanation for the 233-position count.
+    admission_rate=100*float(base.get('admitted_positions',0))/max(1,len(P))
+    result={
+        'version':'V8.39','build_id':V839_BUILD_ID,'verdict':verdict,
+        'scale_identity':{
+            'candidate_return_formula_exact_pct':100*p_formula_exact if p_formula_exact is not None else None,
+            'candidate_return_median_abs_diff':p_formula_med,'candidate_return_p99_abs_diff':p_formula_p99,
+            'admitted_return_formula_exact_pct':100*l_formula_exact if l_formula_exact is not None else None,
+            'admitted_return_median_abs_diff':l_formula_med,
+            'admitted_pnl_equals_capital_times_return_exact_pct':100*pnl_formula_exact if pnl_formula_exact is not None else None,
+            'admitted_pnl_median_abs_diff':pnl_formula_med,
+        },
+        'candidate_trade_level':candidate_stats,
+        'admitted_base':base_stats,'admitted_tight_only':tight_stats,
+        'historical_v669_control_account':hist,'v838b_base_account':base,'v838b_tight_account':tight,
+        'historical_account_parity':parity,
+        'population_reconciliation':{
+            'candidate_rows':int(len(P)),
+            'base_admitted_positions':int(base.get('admitted_positions',0)),
+            'base_skipped_capacity_or_cash':int(base.get('skipped_capacity_or_cash',0)),
+            'admission_rate_pct':admission_rate,
+            'explanation':'64k candidate/trade-level metrics and 10-slot admitted-account metrics are different populations. A saturated first-come 10-slot book can admit only a tiny, path-dependent subset; PF/AvgTrade must not be compared across these populations as if they were the same statistic.'
+        },
+        'metric_semantics':{
+            'candidate_pf':'sum positive control_ret / abs(sum negative control_ret), all recovered candidate trades',
+            'account_pf':'sum positive realized dollar pnl / abs(sum negative realized dollar pnl), admitted 10-slot trades only',
+            'avg_trade':'mean exit_px/entry_px - 1 over admitted trades; not portfolio CAGR and not a percent-rescaled candidate metric',
+            'cagr':'daily MTM account equity CAGR',
+            'maxdd':'peak-to-trough drawdown of daily MTM account equity'
+        },
+        'next':'Do not tune VCP gates from PF 129 vs PF 3.677; they are different populations/metrics. If V8.39 validates scale/accounting, return to the causal challenger result: TIGHT_ONLY failed the 10-slot account test. Then investigate admission/ranking and pivot-cross time semantics rather than retuning the tight threshold.',
+    }
+    V839_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return result
+
+
+@APP.route('/v839/preflight',methods=['GET','POST'])
+def v839_preflight_route():
+    _v839_preflight()
+    return redirect('/v839')
+
+
+@APP.route('/v839/run',methods=['GET','POST'])
+def v839_run_route():
+    try:_v839_run()
+    except Exception as ex:
+        V839_DIR.mkdir(parents=True,exist_ok=True)
+        V839_RESULT.write_text(json.dumps({'version':'V8.39','build_id':V839_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v839')
+
+
+@APP.get('/api/v839')
+def v839_api():
+    p={}
+    if V839_RESULT.exists():
+        try:p=json.loads(V839_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    return jsonify(p)
+
+
+@APP.get('/v839')
+def v839_page():
+    def e(x):return html.escape(str(x))
+    P={}
+    R={}
+    if V839_PREFLIGHT.exists():
+        try:P=json.loads(V839_PREFLIGHT.read_text(encoding='utf-8'))
+        except Exception:pass
+    if V839_RESULT.exists():
+        try:R=json.loads(V839_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    sc=R.get('scale_identity',{})
+    cand=R.get('candidate_trade_level',{})
+    adm=R.get('admitted_base',{})
+    par=R.get('historical_account_parity',{})
+    pop=R.get('population_reconciliation',{})
+    sem=R.get('metric_semantics',{})
+    def pct(v):
+        try:return f"{100*float(v):.2f}%"
+        except:return '—'
+    def num(v,d=3):
+        try:return f"{float(v):.{d}f}"
+        except:return '—'
+    def row(label,a,b):
+        return f"<tr><td>{e(label)}</td><td>{e(a)}</td><td>{e(b)}</td></tr>"
+    comp=''
+    comp+=row('Population N',cand.get('n','—'),adm.get('n','—'))
+    comp+=row('Avg trade return',pct(cand.get('avg_ret')),pct(adm.get('avg_ret')))
+    comp+=row('Median return',pct(cand.get('median_ret')),pct(adm.get('median_ret')))
+    comp+=row('Return-based PF',num(cand.get('return_pf')),num(adm.get('return_pf')))
+    comp+=row('Dollar-PnL PF','n/a',num(adm.get('dollar_pnl_pf')))
+    comp+=row('Win rate',pct(cand.get('win_rate')),pct(adm.get('win_rate')))
+    comp+=row('>= +100%',cand.get('gt100','—'),adm.get('gt100','—'))
+    comp+=row('>= +200%',cand.get('gt200','—'),adm.get('gt200','—'))
+    comp+=row('>= +500%',cand.get('gt500','—'),adm.get('gt500','—'))
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:920px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:14px}}td,th{{padding:9px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'>
+<a href='/'>← 首页</a>
+<div class='c'><h1>🧾 V8.39 Portfolio Accounting / Return-Scale Exact Parity Audit</h1><div class='warn'><b>只审计，不调 VCP。</b> 解释 PF 129 / AvgTrade 241% 到底是缩放错误，还是 10-slot admitted population 与 64k candidate population 本来就不同。0 Tiingo / 0 rescan / 0 threshold tuning.</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V839_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v839/preflight'><button>A. Run Accounting Preflight</button></form><br><form method='post' action='/v839/run'><button>B. Run Exact Accounting Audit</button></form></div>
+<div class='c'><h2>Verdict</h2><div class='ok'>{e(R.get('verdict','—'))}</div></div>
+<div class='c'><h2>Return / PnL Identity</h2><table>
+<tr><th>Check</th><th>Result</th></tr>
+{row('Candidate control_ret == exit_px / entry_px - 1',str(num(sc.get('candidate_return_formula_exact_pct'),2))+'%','')}
+{row('Admitted ret == exit_px / entry_px - 1',str(num(sc.get('admitted_return_formula_exact_pct'),2))+'%','')}
+{row('Admitted pnl == capital × ret',str(num(sc.get('admitted_pnl_equals_capital_times_return_exact_pct'),2))+'%','')}
+</table></div>
+<div class='c'><h2>64k Candidate vs 10-Slot Admitted BASE</h2><table><tr><th>Metric</th><th>Candidate-level</th><th>Admitted account trades</th></tr>{comp}</table>
+<p><b>Admission:</b> {e(pop.get('base_admitted_positions','—'))} / {e(pop.get('candidate_rows','—'))} = {num(pop.get('admission_rate_pct'),3)}%</p>
+<p>{e(pop.get('explanation',''))}</p></div>
+<div class='c'><h2>Historical V6.69 Account Parity</h2><table>
+<tr><th>Check</th><th>Difference</th></tr>
+<tr><td>Admitted count exact</td><td>{e(par.get('admitted_exact','—'))}</td></tr>
+<tr><td>PF abs diff</td><td>{num(par.get('pf_abs_diff'),6)}</td></tr>
+<tr><td>CAGR abs diff</td><td>{num(par.get('cagr_abs_diff'),6)}</td></tr>
+<tr><td>MaxDD abs diff</td><td>{num(par.get('maxdd_abs_diff'),6)}</td></tr>
+<tr><td>Win-rate abs diff</td><td>{num(par.get('win_rate_abs_diff'),6)}</td></tr>
+<tr><td>STOP-rate abs diff</td><td>{num(par.get('stop_rate_abs_diff'),6)}</td></tr>
+</table></div>
+<div class='c'><h2>Metric Semantics</h2><p><b>Candidate PF:</b> {e(sem.get('candidate_pf',''))}</p><p><b>Account PF:</b> {e(sem.get('account_pf',''))}</p><p><b>AvgTrade:</b> {e(sem.get('avg_trade',''))}</p><p><b>CAGR:</b> {e(sem.get('cagr',''))}</p><p><b>MaxDD:</b> {e(sem.get('maxdd',''))}</p></div>
+<div class='c'><div class='warn'><b>Next:</b> {e(R.get('next','Run the audit first.'))}</div></div>
+</div></body></html>"""
+
+
+_v839_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v839_home_base is not None:
+    def _v839_home_wrap(*args,**kwargs):
+        resp=_v839_home_base(*args,**kwargs)
+        card="""<div id='v839-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>🧾 V8.39 Portfolio Accounting / Return-Scale Exact Parity</h2><p>先把 PF 129 / AvgTrade 241% 的口径查清：return scale、dollar-PnL PF、10-slot admission population 与 V6.69 historical account exact parity。只审计，不调 VCP。</p><a href='/v839'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.39</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v839_home_base:APP.view_functions[ep]=_v839_home_wrap
