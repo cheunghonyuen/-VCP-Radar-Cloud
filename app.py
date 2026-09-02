@@ -68801,3 +68801,350 @@ if _v839_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v839_home_base:APP.view_functions[ep]=_v839_home_wrap
+
+
+# ================= V8.40 CAUSAL ADMISSION / RANKING OPPORTUNITY-COST AUDIT =================
+# Diagnostic only. No VCP threshold changes. No price download. No universe rescan.
+# Uses recovered V6.69 candidate outcomes + V8.38B admitted ledger + V8.35 PIT features.
+V840_DIR = DATA_DIR / "v840_causal_admission_ranking_opportunity_cost"
+V840_PREFLIGHT = V840_DIR / "preflight.json"
+V840_RESULT = V840_DIR / "result.json"
+V840_DETAIL = V840_DIR / "candidate_admission_audit.csv.gz"
+V840_BUILD_ID = "v840-admission-ranking-opportunity-cost-20260903"
+V840_LINEAGE = V669_TRADES
+V840_ADMITTED = V838_ADMITTED
+V840_PIT = V835_DETAIL
+
+
+def _v840_bool(s):
+    if getattr(s,'dtype',None)==bool:
+        return s.fillna(False)
+    return s.map(lambda v:str(v).strip().lower() in ('1','true','t','yes','y')).fillna(False)
+
+
+def _v840_pf(s):
+    import pandas as pd, numpy as np
+    r=pd.to_numeric(s,errors='coerce').dropna()
+    if r.empty:return None
+    gp=float(r[r>0].sum()); gl=float(-r[r<0].sum())
+    return float(gp/gl) if gl>0 else None
+
+
+def _v840_preflight():
+    import pandas as pd
+    V840_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        req_files=[('recovered lineage',V840_LINEAGE),('V8.38B admitted ledger',V840_ADMITTED),('V8.35 PIT audit',V840_PIT)]
+        missing=[f'{n}: {p}' for n,p in req_files if not p.exists()]
+        if missing:raise RuntimeError('Missing artifacts: '+' | '.join(missing))
+        P=pd.read_csv(V840_LINEAGE,compression='gzip',nrows=30,low_memory=False)
+        A=pd.read_csv(V840_ADMITTED,compression='gzip',nrows=30,low_memory=False)
+        F=pd.read_csv(V840_PIT,compression='gzip',nrows=30,low_memory=False)
+        need_p=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret']
+        need_a=['variant','listing_id','entry_date','exit_date','entry_px','exit_px','ret','reason']
+        need_f=['listing_id','entry_date','audit_ok','tight_pivot','extension_ok','demand_confirm']
+        miss_p=[c for c in need_p if c not in P.columns]
+        miss_a=[c for c in need_a if c not in A.columns]
+        miss_f=[c for c in need_f if c not in F.columns]
+        if miss_p or miss_a or miss_f:raise RuntimeError(f'Schema missing lineage={miss_p} admitted={miss_a} PIT={miss_f}')
+        verdict='PASS';err=None
+    except Exception as ex:
+        verdict='ERROR';err=f'{type(ex).__name__}: {ex}'
+    o={'version':'V8.40','build_id':V840_BUILD_ID,'verdict':verdict,'error':err,
+       'lineage_path':str(V840_LINEAGE),'admitted_path':str(V840_ADMITTED),'pit_path':str(V840_PIT),
+       'contract':'Admission/ranking audit only. Outcomes frozen to recovered V6.69 CONTROL. PIT features frozen to V8.35. No threshold sweep; no account CAGR claim from ranking shadows.'}
+    V840_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return o
+
+
+def _v840_load():
+    import pandas as pd, numpy as np
+    P=pd.read_csv(V840_LINEAGE,compression='gzip',low_memory=False).reset_index(drop=False).rename(columns={'index':'candidate_order'})
+    P['listing_id']=P.listing_id.astype(str)
+    P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+    P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
+    for c in ['entry_px','control_exit_px','control_ret']:P[c]=pd.to_numeric(P[c],errors='coerce')
+    P=P.dropna(subset=['listing_id','entry_date','control_exit_date','entry_px','control_exit_px','control_ret']).copy()
+    P['is_stop']=P.control_reason.astype(str).str.contains('STOP7',regex=False)
+    P['winner20']=P.control_ret>=.20;P['winner30']=P.control_ret>=.30
+
+    # Frozen PIT membership/features: collapse listing/date only if semantics are consistent.
+    F=pd.read_csv(V840_PIT,compression='gzip',low_memory=False)
+    F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
+    F=F[_v840_bool(F.audit_ok)].copy()
+    for c in ['tight_pivot','extension_ok','demand_confirm']:F[c]=_v840_bool(F[c])
+    K=['listing_id','entry_date']
+    chk=F.groupby(K,dropna=False).agg(
+        n=('tight_pivot','size'),
+        tight_n=('tight_pivot','nunique'),
+        ext_n=('extension_ok','nunique'),
+        dem_n=('demand_confirm','nunique')).reset_index()
+    bad=chk[(chk.tight_n>1)|(chk.ext_n>1)|(chk.dem_n>1)]
+    if len(bad):raise RuntimeError(f'PIT duplicate-key feature conflict: {len(bad)} keys')
+    FF=F[K+['tight_pivot','extension_ok','demand_confirm']].drop_duplicates(K,keep='first')
+    P=P.merge(FF,on=K,how='left',validate='many_to_one')
+    for c in ['tight_pivot','extension_ok','demand_confirm']:P[c]=P[c].fillna(False).astype(bool)
+
+    # Match exact V8.38B BASE admitted rows back to source candidates using a multiset key.
+    A=pd.read_csv(V840_ADMITTED,compression='gzip',low_memory=False)
+    A=A[A.variant.astype(str).eq('BASE')].copy()
+    A['listing_id']=A.listing_id.astype(str)
+    A['entry_date']=pd.to_datetime(A.entry_date,errors='coerce').dt.normalize()
+    A['exit_date']=pd.to_datetime(A.exit_date,errors='coerce').dt.normalize()
+    for c in ['entry_px','exit_px','ret']:A[c]=pd.to_numeric(A[c],errors='coerce')
+
+    P['_ep_key']=P.entry_px.round(8);P['_xp_key']=P.control_exit_px.round(8)
+    A['_ep_key']=A.entry_px.round(8);A['_xp_key']=A.exit_px.round(8)
+    key=['listing_id','entry_date','control_exit_date','_ep_key','_xp_key']
+    AA=A.rename(columns={'exit_date':'control_exit_date'})
+    P['_occ']=P.groupby(key,dropna=False).cumcount()
+    AA['_occ']=AA.groupby(key,dropna=False).cumcount()
+    admitted_keys=AA[key+['_occ']].copy();admitted_keys['admitted_base']=True
+    P=P.merge(admitted_keys,on=key+['_occ'],how='left',validate='one_to_one')
+    P['admitted_base']=P.admitted_base.fillna(False).astype(bool)
+    return P,A
+
+
+def _v840_active_positions(adm,dt):
+    # V6.69 exits are processed before same-day entries. For candidate admission on dt,
+    # positions from earlier dates remain active only when exit_date > dt.
+    q=adm[(adm.entry_date<dt)&(adm.exit_date>dt)]
+    return q
+
+
+def _v840_capacity_shadow(P,priority_cols):
+    import pandas as pd, numpy as np
+    # Capacity-only shadow: exact candidate entry/exit dates, max 10 concurrent slots.
+    # It intentionally ignores cash/MTM sizing and therefore does NOT claim CAGR/MaxDD.
+    pos=[];chosen=[]
+    for dt,g in P.groupby('entry_date',sort=True):
+        dt=pd.Timestamp(dt).normalize()
+        pos=[x for x in pos if x['exit_date']>dt]
+        slots=max(0,10-len(pos))
+        if slots<=0:continue
+        G=g.copy()
+        sortcols=[];asc=[]
+        for c in priority_cols:
+            sortcols.append(c);asc.append(False)
+        sortcols+=['listing_id','candidate_order'];asc+=[True,True]
+        G=G.sort_values(sortcols,ascending=asc,kind='stable')
+        for _,r in G.head(slots).iterrows():
+            x={'candidate_order':int(r.candidate_order),'exit_date':pd.Timestamp(r.control_exit_date)}
+            pos.append(x);chosen.append(int(r.candidate_order))
+    Q=P[P.candidate_order.isin(chosen)].copy()
+    return Q
+
+
+def _v840_shadow_stats(Q,P):
+    import pandas as pd
+    r=pd.to_numeric(Q.control_ret,errors='coerce').dropna()
+    total20=max(1,int(P.winner20.sum()));total30=max(1,int(P.winner30.sum()))
+    return {
+        'n':int(len(Q)),
+        'win_rate_pct':100*float((r>0).mean()) if len(r) else None,
+        'stop_rate_pct':100*float(Q.is_stop.mean()) if len(Q) else None,
+        'avg_trade_pct':100*float(r.mean()) if len(r) else None,
+        'pf':_v840_pf(r),
+        'winner20_admitted':int(Q.winner20.sum()),
+        'winner30_admitted':int(Q.winner30.sum()),
+        'winner20_capture_pct':100*int(Q.winner20.sum())/total20,
+        'winner30_capture_pct':100*int(Q.winner30.sum())/total30,
+    }
+
+
+def _v840_run():
+    import pandas as pd, numpy as np
+    pf=_v840_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError(pf.get('error') or 'Preflight failed')
+    P,A=_v840_load()
+
+    # Reconcile the actual BASE admission population.
+    admitted=P[P.admitted_base].copy();rejected=P[~P.admitted_base].copy()
+    actual={
+        'candidates':int(len(P)),'admitted':int(len(admitted)),'rejected':int(len(rejected)),
+        'admission_rate_pct':100*len(admitted)/max(1,len(P)),
+        'admitted_stop_rate_pct':100*float(admitted.is_stop.mean()) if len(admitted) else None,
+        'rejected_stop_rate_pct':100*float(rejected.is_stop.mean()) if len(rejected) else None,
+        'admitted_winner20':int(admitted.winner20.sum()),'rejected_winner20':int(rejected.winner20.sum()),
+        'admitted_winner30':int(admitted.winner30.sum()),'rejected_winner30':int(rejected.winner30.sum()),
+        'admitted_pf':_v840_pf(admitted.control_ret),'rejected_pf':_v840_pf(rejected.control_ret),
+        'admitted_avg_ret_pct':100*float(admitted.control_ret.mean()) if len(admitted) else None,
+        'rejected_avg_ret_pct':100*float(rejected.control_ret.mean()) if len(rejected) else None,
+    }
+
+    # Capacity pressure: tag rejected candidates whose entry day had 10 active/eod BASE positions.
+    # EOD active includes same-day admitted names and excludes names exiting that morning.
+    counts=[]
+    stop_blockers=[];worst_block=[];active_n=[]
+    for _,r in rejected.iterrows():
+        dt=pd.Timestamp(r.entry_date)
+        active=A[(A.entry_date<=dt)&(A.exit_date>dt)]
+        n=int(len(active));active_n.append(n)
+        stop_blockers.append(int(active.reason.astype(str).str.contains('STOP7',regex=False).sum()))
+        worst_block.append(float(pd.to_numeric(active.ret,errors='coerce').min()) if len(active) else np.nan)
+    rejected['active_base_slots_eod']=active_n
+    rejected['active_stop_blockers']=stop_blockers
+    rejected['worst_active_blocker_ret']=worst_block
+    rejected['capacity_blocked']=rejected.active_base_slots_eod>=10
+
+    cap=rejected[rejected.capacity_blocked].copy()
+    cap20=cap[cap.winner20].copy();cap30=cap[cap.winner30].copy()
+    opportunity={
+        'capacity_blocked_candidates':int(len(cap)),
+        'capacity_blocked_winner20':int(cap.winner20.sum()),
+        'capacity_blocked_winner30':int(cap.winner30.sum()),
+        'capacity_blocked_stops':int(cap.is_stop.sum()),
+        'winner20_with_at_least_one_active_stop_blocker':int((cap20.active_stop_blockers>0).sum()),
+        'winner30_with_at_least_one_active_stop_blocker':int((cap30.active_stop_blockers>0).sum()),
+        'winner20_median_active_stop_blockers':float(cap20.active_stop_blockers.median()) if len(cap20) else None,
+        'winner20_median_expost_edge_vs_worst_blocker_pct':100*float((cap20.control_ret-cap20.worst_active_blocker_ret).median()) if len(cap20) else None,
+        'note':'Blocker comparisons are ex-post diagnosis only; they are not a causal ranking rule because blocker future returns are unknown at admission time.'
+    }
+
+    def feat_rates(Q):
+        return {c:100*float(Q[c].mean()) if len(Q) else None for c in ['tight_pivot','extension_ok','demand_confirm']}
+    feature_groups={
+        'actual_admitted':feat_rates(admitted),
+        'all_rejected':feat_rates(rejected),
+        'capacity_rejected_winner20':feat_rates(cap20),
+        'capacity_rejected_stops':feat_rates(cap[cap.is_stop]),
+    }
+
+    # Predeclared capacity-only ranking shadows. No threshold change; lexicographic priority only.
+    shadow_specs=[
+        ('FIRST_COME_CAPACITY_ONLY',[]),
+        ('TIGHT_FIRST',['tight_pivot']),
+        ('DEMAND_FIRST',['demand_confirm']),
+        ('EXTENSION_FIRST',['extension_ok']),
+        ('TIGHT_THEN_DEMAND',['tight_pivot','demand_confirm']),
+        ('DEMAND_THEN_TIGHT',['demand_confirm','tight_pivot']),
+        ('TIGHT_DEMAND_EXTENSION',['tight_pivot','demand_confirm','extension_ok']),
+    ]
+    shadows=[]
+    for name,cols in shadow_specs:
+        Q=_v840_capacity_shadow(P,cols)
+        m=_v840_shadow_stats(Q,P);m.update({'name':name,'priority':cols})
+        shadows.append(m)
+
+    # Rank diagnostics only; do not choose a production winner from hindsight economics.
+    # Flag whether any non-outcome-based priority materially improves winner capture and stop rate vs first-come shadow.
+    baseS=shadows[0]
+    improving=[]
+    for s in shadows[1:]:
+        if (s['winner20_capture_pct'] is not None and baseS['winner20_capture_pct'] is not None and
+            s['winner20_capture_pct']>=baseS['winner20_capture_pct']+2.0 and
+            s['stop_rate_pct']<=baseS['stop_rate_pct']):
+            improving.append(s['name'])
+    if len(cap20)>=100 and improving:
+        verdict='MATERIAL_ADMISSION_OPPORTUNITY_COST_FOUND__PREDECLARED_RANK_PRIORITY_HAS_SIGNAL__NEXT_EXACT_10_SLOT_AB'
+    elif len(cap20)>=100:
+        verdict='MATERIAL_ADMISSION_OPPORTUNITY_COST_FOUND__NO_SIMPLE_PRIORITY_PROVEN__DO_NOT_TUNE'
+    else:
+        verdict='ADMISSION_OPPORTUNITY_COST_NOT_MATERIAL__RETURN_TO_SIGNAL_PROCESS'
+
+    # Persist row-level audit.
+    detail=P.copy()
+    detail=detail.merge(rejected[['candidate_order','active_base_slots_eod','active_stop_blockers','worst_active_blocker_ret','capacity_blocked']],
+                        on='candidate_order',how='left',validate='one_to_one')
+    detail.to_csv(V840_DETAIL,index=False,compression='gzip')
+
+    result={
+        'version':'V8.40','build_id':V840_BUILD_ID,'verdict':verdict,
+        'actual_base_admission':actual,'opportunity_cost':opportunity,'feature_rates_pct':feature_groups,
+        'capacity_only_ranking_shadows':shadows,'promising_shadow_priorities':improving,
+        'guardrails':{
+            'no_threshold_tuning':True,'no_outcome_based_rank_used':True,'no_cagr_claim':True,
+            'ranking_shadow_semantics':'max 10 concurrent slots using frozen candidate entry/exit dates; ignores cash/MTM sizing; intended only to test admission ordering signal before a full causal account replay.'
+        },
+        'next':('Freeze the best predeclared non-outcome ranking priority and run one exact V8.38-style 10-slot account A/B with cached prices.'
+                if improving else
+                'Do not sweep ranking weights. Inspect pivot-cross timing / signal process, or add parity-certified RS/leadership only if provenance is available.')
+    }
+    V840_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return result
+
+
+@APP.route('/v840/preflight',methods=['GET','POST'])
+def v840_preflight_route():
+    _v840_preflight();return redirect('/v840')
+
+
+@APP.route('/v840/run',methods=['GET','POST'])
+def v840_run_route():
+    try:_v840_run()
+    except Exception as ex:
+        V840_DIR.mkdir(parents=True,exist_ok=True)
+        V840_RESULT.write_text(json.dumps({'version':'V8.40','build_id':V840_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v840')
+
+
+@APP.get('/api/v840')
+def v840_api():
+    x={}
+    if V840_RESULT.exists():
+        try:x=json.loads(V840_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    return jsonify(x)
+
+
+@APP.get('/v840')
+def v840_page():
+    def e(x):return html.escape(str(x))
+    P={};R={}
+    if V840_PREFLIGHT.exists():
+        try:P=json.loads(V840_PREFLIGHT.read_text(encoding='utf-8'))
+        except Exception:pass
+    if V840_RESULT.exists():
+        try:R=json.loads(V840_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    A=R.get('actual_base_admission',{});O=R.get('opportunity_cost',{});F=R.get('feature_rates_pct',{});S=R.get('capacity_only_ranking_shadows',[])
+    def n(v,d=2):
+        try:return f"{float(v):.{d}f}"
+        except:return '—'
+    rows=''
+    for s in S:
+        rows+=f"<tr><td>{e(s.get('name'))}</td><td>{e(s.get('n'))}</td><td>{n(s.get('stop_rate_pct'))}%</td><td>{n(s.get('win_rate_pct'))}%</td><td>{n(s.get('pf'),3)}</td><td>{n(s.get('winner20_capture_pct'))}%</td><td>{n(s.get('winner30_capture_pct'))}%</td></tr>"
+    frows=''
+    for g,v in F.items():
+        frows+=f"<tr><td>{e(g)}</td><td>{n(v.get('tight_pivot'))}%</td><td>{n(v.get('demand_confirm'))}%</td><td>{n(v.get('extension_ok'))}%</td></tr>"
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'>
+<a href='/'>← 首页</a>
+<div class='c'><h1>🚦 V8.40 Causal Admission / Ranking Opportunity-Cost Audit</h1><div class='warn'><b>不调 VCP 阈值。</b> 直接审计 64k candidates 为什么只有约 0.36% 真正拿到 10-slot 资本：被拒绝的 +20/+30 winner、占位 STOP、以及预先声明的 PIT ranking priority。0 Tiingo / 0 rescan。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V840_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v840/preflight'><button>A. Run Admission Preflight</button></form><br><form method='post' action='/v840/run'><button>B. Run Opportunity-Cost Audit</button></form></div>
+<div class='c'><h2>Verdict</h2><div class='ok'>{e(R.get('verdict','—'))}</div><p><b>Promising predeclared priorities:</b> {e(', '.join(R.get('promising_shadow_priorities',[])) or '—')}</p></div>
+<div class='c'><h2>Actual BASE Admission</h2><table>
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Candidates</td><td>{e(A.get('candidates','—'))}</td></tr>
+<tr><td>Admitted</td><td>{e(A.get('admitted','—'))} ({n(A.get('admission_rate_pct'),3)}%)</td></tr>
+<tr><td>Rejected +20 winners</td><td>{e(A.get('rejected_winner20','—'))}</td></tr>
+<tr><td>Rejected +30 winners</td><td>{e(A.get('rejected_winner30','—'))}</td></tr>
+<tr><td>Admitted STOP rate</td><td>{n(A.get('admitted_stop_rate_pct'))}%</td></tr>
+<tr><td>Rejected STOP rate</td><td>{n(A.get('rejected_stop_rate_pct'))}%</td></tr>
+</table></div>
+<div class='c'><h2>Capacity Opportunity Cost</h2><table>
+<tr><td>Capacity-blocked candidates</td><td>{e(O.get('capacity_blocked_candidates','—'))}</td></tr>
+<tr><td>Capacity-blocked +20 winners</td><td>{e(O.get('capacity_blocked_winner20','—'))}</td></tr>
+<tr><td>Capacity-blocked +30 winners</td><td>{e(O.get('capacity_blocked_winner30','—'))}</td></tr>
+<tr><td>+20 winners blocked while ≥1 active future STOP occupied a slot</td><td>{e(O.get('winner20_with_at_least_one_active_stop_blocker','—'))}</td></tr>
+<tr><td>Median active STOP blockers for blocked +20</td><td>{n(O.get('winner20_median_active_stop_blockers'))}</td></tr>
+<tr><td>Median ex-post edge vs worst blocker</td><td>{n(O.get('winner20_median_expost_edge_vs_worst_blocker_pct'))}%</td></tr>
+</table><p><small>{e(O.get('note',''))}</small></p></div>
+<div class='c'><h2>PIT Feature Rates by Cohort</h2><table><tr><th>Cohort</th><th>Tight Pivot</th><th>Demand</th><th>Extension OK</th></tr>{frows}</table></div>
+<div class='c'><h2>Predeclared Capacity-Only Ranking Shadows</h2><table><tr><th>Priority</th><th>N</th><th>STOP</th><th>Win%</th><th>PF</th><th>+20 capture</th><th>+30 capture</th></tr>{rows}</table>
+<div class='warn'><b>Important:</b> 这里只是 slot-occupancy/ranking 诊断，不是账户回测；不报告 CAGR / MaxDD。只有出现明确改善的预声明 priority，下一版才允许跑一次 exact cached-price 10-slot A/B。</div></div>
+<div class='c'><div class='warn'><b>Next:</b> {e(R.get('next','Run the audit first.'))}</div></div>
+</div></body></html>"""
+
+
+_v840_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v840_home_base is not None:
+    def _v840_home_wrap(*args,**kwargs):
+        resp=_v840_home_base(*args,**kwargs)
+        card="""<div id='v840-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>🚦 V8.40 Admission / Ranking Opportunity-Cost Audit</h2><p>不调阈值。查真正 10-slot 资本为什么只接纳约 0.36% candidates：被拒 Big Winner、STOP 占位、PIT ranking priority。</p><a href='/v840'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.40</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v840_home_base:APP.view_functions[ep]=_v840_home_wrap
