@@ -67996,3 +67996,174 @@ if _v836_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v836_home_base:APP.view_functions[ep]=_v836_home_wrap
+
+# ================= V8.37 VCP PROCESS RECONSTRUCTION PREDECLARED A/B =================
+# Uses V8.35 point-in-time trade-level audit and V8.36 attribution evidence.
+# No threshold tuning. Tests only predeclared winner-preserving process variants.
+V837_DIR = DATA_DIR / "v837_vcp_process_reconstruction_ab"
+V837_PREFLIGHT = V837_DIR / "preflight.json"
+V837_STATUS = V837_DIR / "status.json"
+V837_RESULT = V837_DIR / "result.json"
+V837_DETAIL = V837_DIR / "variant_trade_membership.csv.gz"
+V837_BUILD_ID = "v837-vcp-process-predeclared-ab-20260903"
+V837_SOURCE = V835_DETAIL
+v837_thread = None
+
+V837_VARIANTS = [
+    ("BASE", []),
+    ("TIGHT_ONLY", ["tight_pivot"]),
+    ("TIGHT_EXT", ["tight_pivot","extension_ok"]),
+    ("TIGHT_DEMAND", ["tight_pivot","demand_confirm"]),
+    ("TIGHT_EXT_DEMAND", ["tight_pivot","extension_ok","demand_confirm"]),
+]
+
+def _v837_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V837_STATUS.exists():
+        try:x.update(json.loads(V837_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v837_write(**kw):
+    V837_DIR.mkdir(parents=True,exist_ok=True);x=_v837_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V837_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v837_alive():return v837_thread is not None and v837_thread.is_alive()
+
+def _v837_bool(s):
+    if getattr(s,'dtype',None)==bool:return s.fillna(False)
+    return s.map(lambda v:str(v).strip().lower() in ('1','true','t','yes','y')).fillna(False)
+
+def _v837_metrics(df):
+    import pandas as pd,numpy as np
+    if df is None or df.empty:return {'n':0,'stop_rate_pct':None,'win_rate_pct':None,'pf':None,'avg_ret_pct':None,'winner20':0,'winner30':0,'median_ret_pct':None}
+    r=pd.to_numeric(df['control_ret'],errors='coerce');m=r.notna();r=r[m];z=df.loc[m]
+    stop=z['control_reason'].astype(str).str.upper().str.contains('STOP7',regex=False)
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    return {'n':int(len(r)),'stop_rate_pct':100*float(stop.mean()) if len(stop) else None,'win_rate_pct':100*float((r>0).mean()) if len(r) else None,
+            'pf':gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0),'avg_ret_pct':100*float(r.mean()) if len(r) else None,
+            'median_ret_pct':100*float(r.median()) if len(r) else None,'winner20':int((r>=.20).sum()),'winner30':int((r>=.30).sum())}
+
+def _v837_pf():
+    import pandas as pd,time
+    t0=time.time();V837_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V837_SOURCE.exists():raise RuntimeError('V8.35 PIT detail missing; run V8.35 B first')
+        req=['listing_id','entry_date','entry_px','control_reason','control_ret','audit_ok','tight_pivot','extension_ok','demand_confirm']
+        H=pd.read_csv(V837_SOURCE,nrows=30,compression='gzip',low_memory=False)
+        miss=[c for c in req if c not in H.columns]
+        D=pd.read_csv(V837_SOURCE,usecols=[c for c in req if c in H.columns],compression='gzip',low_memory=False)
+        valid=int(_v837_bool(D['audit_ok']).sum()) if 'audit_ok' in D.columns else 0
+        verdict='PASS' if not miss and valid>=1000 else 'FAIL__V835_DETAIL_OR_SCHEMA'
+        out={'version':'V8.37','build_id':V837_BUILD_ID,'verdict':verdict,'rows':int(len(D)),'audit_ok_rows':valid,'coverage_pct':100*valid/max(1,len(D)),
+             'variants':[{'name':n,'gates':g} for n,g in V837_VARIANTS],
+             'frozen':'V8.35 exact PIT features + recovered CONTROL outcomes. No pivot_cross hard gate; no trend_template hard gate; no contraction/dry hard gate; no threshold search; Entry/-7% STOP/Exit outcomes frozen.',
+             'missing_columns':miss,'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.37','build_id':V837_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V837_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v837_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();P=_v837_pf()
+    if P.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    _v837_write(status='running',phase='load',message='Loading V8.35 PIT detail; no price replay',processed=0,total=len(V837_VARIANTS),errors=0)
+    D=pd.read_csv(V837_SOURCE,compression='gzip',low_memory=False)
+    D=D[_v837_bool(D['audit_ok'])].copy()
+    for c in ['tight_pivot','extension_ok','demand_confirm']:
+        D[c]=_v837_bool(D[c])
+    D['control_ret']=pd.to_numeric(D['control_ret'],errors='coerce')
+    D=D[D.control_ret.notna()].copy()
+    base=_v837_metrics(D);b20=max(1,int(base['winner20']));b30=max(1,int(base['winner30']));bstop=float(base['stop_rate_pct'])
+    results=[];membership=[]
+    for i,(name,gates) in enumerate(V837_VARIANTS,1):
+        mask=pd.Series(True,index=D.index)
+        for g in gates:mask &= D[g]
+        Q=D[mask].copy();m=_v837_metrics(Q)
+        m.update({'name':name,'gates':gates,'pass_pct':100*len(Q)/max(1,len(D)),
+                  'winner20_retention_pct':100*int(m['winner20'])/b20,'winner30_retention_pct':100*int(m['winner30'])/b30,
+                  'stop_rate_drop_pp':bstop-float(m['stop_rate_pct']) if m['stop_rate_pct'] is not None else None,
+                  'pf_delta':float(m['pf'])-float(base['pf']) if m['pf'] is not None and base['pf'] is not None else None})
+        results.append(m)
+        membership.append(pd.DataFrame({'row_index':Q.index.astype(int),'variant':name}))
+        _v837_write(status='running',phase='variants',message=f'Evaluated {name}',processed=i,total=len(V837_VARIANTS),errors=0,elapsed_sec=round(time.time()-t0,1))
+    # Frozen economic screen: prioritize winner retention and stop/PF improvement; no threshold search.
+    challengers=[x for x in results if x['name']!='BASE']
+    qualified=[x for x in challengers if x['winner20_retention_pct']>=40 and x['winner30_retention_pct']>=40 and x['pf_delta']>0 and x['stop_rate_drop_pp']>0]
+    if qualified:
+        # Deterministic ranking, not parameter search: highest +20 retention, then PF, then lower STOP.
+        best=sorted(qualified,key=lambda x:(x['winner20_retention_pct'],x['pf'],-x['stop_rate_pct']),reverse=True)[0]
+        verdict='WINNER_PRESERVING_VCP_PROCESS_VARIANT_FOUND__NEXT_CAUSAL_10_SLOT_PORTFOLIO'
+    else:
+        best=max(challengers,key=lambda x:(x['winner20_retention_pct'],x['pf'])) if challengers else results[0]
+        verdict='NO_VARIANT_PASSES_WINNER_PRESERVATION_ECONOMIC_GATE__DO_NOT_PROMOTE'
+    R={'version':'V8.37','build_id':V837_BUILD_ID,'verdict':verdict,'base':base,'variants':results,'best_candidate':best,
+       'decision_rule':'+20 retention>=40%, +30 retention>=40%, PF>BASE, STOP rate<BASE. Variants were predeclared from V8.36 attribution; no threshold sweep.',
+       'important':'This is a trade-level structural A/B only. It deliberately does NOT claim portfolio CAGR or account MaxDD. Those require the next causal 10-slot replay after a winner-preserving variant survives.',
+       'next':'If a variant passes, freeze it exactly and run one causal 10-slot portfolio replay with the recovered lineage. Separately repair pivot_cross time semantics before reconsidering it.',
+       'elapsed_sec':round(time.time()-t0,2)}
+    V837_DIR.mkdir(parents=True,exist_ok=True)
+    if membership:pd.concat(membership,ignore_index=True).to_csv(V837_DETAIL,index=False,compression='gzip')
+    V837_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    _v837_write(status='done',phase='complete',message='Done · '+verdict,processed=len(V837_VARIANTS),total=len(V837_VARIANTS),errors=0,elapsed_sec=R['elapsed_sec'])
+    return R
+
+def _v837_worker():
+    global v837_thread
+    import time
+    t0=time.time()
+    try:_v837_run()
+    except Exception as ex:_v837_write(status='error',phase='failed',message='V8.37 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v837_thread=None
+
+@APP.route('/v837/preflight',methods=['GET','POST'])
+def v837_preflight_route():_v837_pf();return redirect('/v837')
+@APP.post('/v837/start')
+def v837_start():
+    global v837_thread
+    if _v837_alive():return jsonify({'started':False,**_v837_status()})
+    p=_v837_pf()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v837_thread=threading.Thread(target=_v837_worker,daemon=True);v837_thread.start();return jsonify({'started':True,**_v837_status()})
+@APP.get('/api/v837')
+def v837_api():return jsonify(_v837_status())
+@APP.get('/v837/export')
+def v837_export():
+    if not V837_DETAIL.exists():return ('not ready',404)
+    return send_file(V837_DETAIL,as_attachment=True,download_name='v837_variant_trade_membership.csv.gz')
+@APP.get('/v837')
+def v837_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v837_status()
+    try:
+        if V837_PREFLIGHT.exists():P=json.loads(V837_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V837_RESULT.exists():R=json.loads(V837_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def f(x,n=2):
+        try:return round(float(x),n)
+        except:return '—'
+    rows=''
+    for x in R.get('variants',[]):
+        rows+=f"<tr><td><b>{e(x.get('name'))}</b></td><td>{e(x.get('n','—'))}</td><td>{e(f(x.get('pass_pct')))}%</td><td>{e(f(x.get('stop_rate_pct')))}%</td><td>{e(f(x.get('win_rate_pct')))}%</td><td>{e(f(x.get('pf'),3))}</td><td>{e(f(x.get('avg_ret_pct'),3))}%</td><td>{e(f(x.get('winner20_retention_pct')))}%</td><td>{e(f(x.get('winner30_retention_pct')))}%</td></tr>"
+    verdict=R.get('verdict','—');best=R.get('best_candidate',{}) or {};cls='ok' if 'FOUND' in str(verdict) else 'warn'
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#0f172a;margin:0}}.w{{max-width:1200px;margin:auto;padding:22px}}.c{{background:#fff;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:9px;border-bottom:1px solid #dbe2ea;text-align:left;vertical-align:top}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🧬 V8.37 VCP Process Reconstruction — Predeclared A/B</h1><div class="warn"><b>不再把 7 个静态条件全部 Hard Gate。</b> 只测试 V8.36 已经证明更有选择性的预声明组合：Tight Pivot / Extension / Demand。Pivot-cross、Trend Template、Contraction、Dry 暂不升为 Hard Gate。Entry / -7% STOP / Exit outcome 全冻结。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V837_BUILD_ID))}</p><p>Rows {e(P.get('rows','—'))} · audit_ok {e(P.get('audit_ok_rows','—'))} · coverage {e(f(P.get('coverage_pct')))}%</p><p><b>Frozen:</b> {e(P.get('frozen',''))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method="post" action="/v837/preflight"><button>A. Run Process Preflight</button></form><br><button onclick="go()">B. Run Predeclared VCP Process A/B</button><p id="st">{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class="c"><h2>Verdict</h2><div class="{cls}"><b>{e(verdict)}</b></div><p><b>Best candidate:</b> {e(best.get('name','—'))} · STOP {e(f(best.get('stop_rate_pct')))}% · PF {e(f(best.get('pf'),3))} · +20 retention {e(f(best.get('winner20_retention_pct')))}% · +30 retention {e(f(best.get('winner30_retention_pct')))}%</p></div>
+<div class="c"><h2>CONTROL vs Process Variants</h2><table><tr><th>Variant</th><th>N</th><th>Pass</th><th>STOP Rate</th><th>Win Rate</th><th>PF</th><th>AvgTrade</th><th>+20 Retention</th><th>+30 Retention</th></tr>{rows or '<tr><td colspan=9>—</td></tr>'}</table></div>
+<div class="c"><div class="warn"><b>Decision rule:</b> {e(R.get('decision_rule',''))}<br><br><b>重要：</b> {e(R.get('important',''))}</div><p><b>Next:</b> {e(R.get('next',''))}</p>{"<a href='/v837/export'><button>Export variant membership</button></a>" if V837_DETAIL.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v837',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,800);else if(s.status==='done')setTimeout(()=>location.reload(),500)}}catch(e){{}}}}async function go(){{let r=await fetch('/v837/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll()}}poll()</script></div></body></html>'''
+
+_v837_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v837_home_base is not None:
+    def _v837_home_wrap(*args,**kwargs):
+        resp=_v837_home_base(*args,**kwargs)
+        card="""<div id='v837-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'><h2>🧬 V8.37 VCP Process Reconstruction A/B</h2><p>根据 V8.36 attribution，只测试 winner-preserving 的预声明组合：Tight Pivot / Extension / Demand。先找真正有区分力的 VCP process，再做 10-slot。</p><a href='/v837'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.37</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+            body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v837_home_base:APP.view_functions[ep]=_v837_home_wrap
