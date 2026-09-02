@@ -46783,7 +46783,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v830-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v831-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧭 V8.31 Entry / Breakout Parity Root-Cause Audit</h2>
+        <p>专查 V8.30 formal-breakout recompute parity 只有 6.87% 的根因：entry_date/signal_date 对齐、entry_px 对应 close/open、engine/cache revision provenance。只诊断，不调参。</p>
+        <a href='/v831'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.31</button></a>
+        </div>
+        <div id='v830-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧪 V8.30D Exact Engine DRY-Edge A/B Replay</h2>
         <p>只测试一个 source-supported 改动：把正式引擎现有的 Volume Dry-Up soft edge 提升为 Hard Gate。正式 supply() pivot / breakout / Entry / -7% Stop / Exit / Top25 排序全部冻结；10-slot causal replay。</p>
         <a href='/v830'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.30</button></a>
@@ -66611,6 +66616,183 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
 <details class='c'><summary><b>Exact source snippets</b></summary>{sn or 'Run audit first.'}</details>
 </div></body></html>"""
 
+
+
+# ================= V8.31 ENTRY / BREAKOUT PARITY ROOT-CAUSE AUDIT =================
+# Diagnostic only. No model tuning, no gate changes, no stop/exit changes.
+# Purpose: explain why V8.30 exact formal-breakout recompute parity is only ~6.87%.
+V831_DIR = DATA_DIR / "v831_entry_breakout_parity_root_cause"
+V831_PREFLIGHT = V831_DIR / "preflight.json"
+V831_STATUS = V831_DIR / "status.json"
+V831_RESULT = V831_DIR / "result.json"
+V831_TRACE = V831_DIR / "parity_trace.csv.gz"
+V831_BUILD_ID = "v831-entry-breakout-parity-root-cause-20260902"
+v831_thread = None
+
+def _v831_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"current_listing":None,"elapsed_sec":0,"last_heartbeat":None,"error":None}
+    if V831_STATUS.exists():
+        try:x.update(json.loads(V831_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v831_write_status(**kw):
+    V831_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v831_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V831_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+def _v831_alive():
+    return v831_thread is not None and v831_thread.is_alive()
+
+def _v831_engine():
+    import importlib.util,hashlib
+    ep=Path(__file__).with_name('jlaw_v6_1_DECISION_FAST.py')
+    if not ep.exists():raise RuntimeError('Missing deployed jlaw_v6_1_DECISION_FAST.py')
+    spec=importlib.util.spec_from_file_location('v831_exact_engine',str(ep));eng=importlib.util.module_from_spec(spec);spec.loader.exec_module(eng)
+    return ep,eng,hashlib.sha256(ep.read_bytes()).hexdigest()
+
+def _v831_preflight():
+    import inspect
+    V831_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos(); T=D[D['reference_rank']>=.75].copy()
+    req=['listing_id','entry_date','entry_px','reference_rank']
+    missing=[c for c in req if c not in T.columns]
+    M,lidcol=_v826a_manifest();lids=set(T['listing_id'].astype(str));mlids=set(M[lidcol].astype(str));cov=len(lids&mlids)/max(1,len(lids))
+    ep,eng,sha=_v831_engine(); funcs={k:hasattr(eng,k) for k in ['ind','supply']}
+    verdict='PASS' if (not missing and len(T)>=15000 and cov>=.95 and all(funcs.values())) else 'FAIL__SCHEMA_ENGINE_OR_MANIFEST'
+    out={"version":"V8.31 Entry / Breakout Parity Root-Cause Audit","build_id":V831_BUILD_ID,"verdict":verdict,"top25_rows":int(len(T)),"unique_listings":int(len(lids)),"manifest_mapping":float(cov),"missing_columns":missing,"engine_path":str(ep),"engine_sha256":sha,"functions":funcs,"shift_grid":[-3,-2,-1,0,1,2,3],"boundary":"Diagnostic only; frozen ledger and engine unchanged. 0 Tiingo, 0 universe rescan."}
+    V831_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return out
+
+def _v831_formal_at(eng,d,i):
+    if i is None or i<260 or i>=len(d):return None
+    x=d.iloc[:i+1]
+    try:ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(x)
+    except Exception:return None
+    try:
+        prev=float(x.close.iloc[-2]);close=float(x.close.iloc[-1]);piv=float(piv);vr=float(vr)
+        ext=close/piv-1 if np.isfinite(piv) and piv!=0 else np.nan
+        formal=bool(np.isfinite(piv) and prev<=piv and close>piv and np.isfinite(ext) and ext<=.03 and np.isfinite(vr) and vr>=1.20)
+    except Exception:return None
+    return {'formal':formal,'pivot':piv if np.isfinite(piv) else np.nan,'close':close,'open':float(x.open.iloc[-1]),'prev_close':prev,'extension':float(ext) if np.isfinite(ext) else np.nan,'vr':vr if np.isfinite(vr) else np.nan,'supply_score':float(ss) if np.isfinite(ss) else np.nan,'tight':float(tight) if np.isfinite(tight) else np.nan}
+
+def _v831_run():
+    import time
+    t0=time.time();P=json.loads(V831_PREFLIGHT.read_text(encoding='utf-8')) if V831_PREFLIGHT.exists() else {}
+    if P.get('verdict')!='PASS':raise RuntimeError('V8.31 Preflight must PASS first')
+    D=_v826b_load_oos();T=D[D['reference_rank']>=.75].copy().reset_index(drop=True);T['_v831_row']=np.arange(len(T));T['entry_date']=pd.to_datetime(T['entry_date']).dt.normalize()
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    ep,eng,sha=_v831_engine();bylid={str(k):g.copy() for k,g in T.groupby(T['listing_id'].astype(str),sort=True)}
+    shifts=[-3,-2,-1,0,1,2,3];rows=[];errors=[];lids=sorted(bylid)
+    for n,lid in enumerate(lids,1):
+        try:
+            mr=mmap.get(lid)
+            if mr is None:raise RuntimeError('manifest missing')
+            q,hi,amb=_v826a_prepare_price(mr)
+            if q is None:raise RuntimeError('historical price unavailable')
+            try:d=eng.ind(q.copy())
+            except Exception:d=q.copy()
+            d['date']=pd.to_datetime(d['date']).dt.normalize();pos={pd.Timestamp(dt).normalize():i for i,dt in enumerate(d['date'])}
+            for _,r in bylid[lid].iterrows():
+                ed=pd.Timestamp(r['entry_date']).normalize();base_i=pos.get(ed);rec={'_v831_row':int(r['_v831_row']),'listing_id':lid,'entry_date':ed,'entry_px':float(r['entry_px']) if pd.notna(r['entry_px']) else np.nan,'entry_date_found':base_i is not None}
+                if base_i is None:
+                    rows.append(rec);continue
+                for sh in shifts:
+                    ii=base_i+sh
+                    z=_v831_formal_at(eng,d,ii)
+                    pref=f's{sh:+d}'.replace('+','p').replace('-','m')
+                    if z is None:
+                        rec[pref+'_formal']=np.nan;continue
+                    rec[pref+'_date']=d.loc[ii,'date'];rec[pref+'_formal']=bool(z['formal']);rec[pref+'_close']=z['close'];rec[pref+'_open']=z['open'];rec[pref+'_pivot']=z['pivot'];rec[pref+'_vr']=z['vr'];rec[pref+'_extension']=z['extension']
+                    epv=rec['entry_px']
+                    rec[pref+'_entry_vs_close_abs']=abs(epv/z['close']-1) if np.isfinite(epv) and z['close'] else np.nan
+                    rec[pref+'_entry_vs_open_abs']=abs(epv/z['open']-1) if np.isfinite(epv) and z['open'] else np.nan
+                rows.append(rec)
+        except Exception as ex:errors.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
+        if n==1 or n%10==0 or n==len(lids):_v831_write_status(status='running',phase='parity_trace',message=f'Parity trace {n}/{len(lids)} · {lid}',processed=n,total=len(lids),errors=len(errors),current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
+    X=pd.DataFrame(rows)
+    if X.empty:raise RuntimeError('Parity trace produced zero rows')
+    shift_rows=[]
+    for sh in shifts:
+        pref=f's{sh:+d}'.replace('+','p').replace('-','m');fc=pref+'_formal';cc=pref+'_entry_vs_close_abs';oc=pref+'_entry_vs_open_abs'
+        valid=X[fc].notna() if fc in X else pd.Series(False,index=X.index)
+        vals=pd.to_numeric(X.loc[valid,fc],errors='coerce') if valid.any() else pd.Series(dtype=float)
+        closeerr=pd.to_numeric(X.loc[valid,cc],errors='coerce').dropna() if cc in X else pd.Series(dtype=float)
+        openerr=pd.to_numeric(X.loc[valid,oc],errors='coerce').dropna() if oc in X else pd.Series(dtype=float)
+        shift_rows.append({'shift':sh,'rows':int(valid.sum()),'formal_breakout_rate':float(vals.mean()) if len(vals) else np.nan,'entry_px_close_median_abs_pct':float(closeerr.median()) if len(closeerr) else np.nan,'entry_px_open_median_abs_pct':float(openerr.median()) if len(openerr) else np.nan,'entry_px_close_within_0_5pct':float((closeerr<=.005).mean()) if len(closeerr) else np.nan,'entry_px_open_within_0_5pct':float((openerr<=.005).mean()) if len(openerr) else np.nan})
+    S=pd.DataFrame(shift_rows)
+    best_formal=S.loc[S['formal_breakout_rate'].idxmax()].to_dict() if S['formal_breakout_rate'].notna().any() else {}
+    best_close=S.loc[S['entry_px_close_median_abs_pct'].idxmin()].to_dict() if S['entry_px_close_median_abs_pct'].notna().any() else {}
+    best_open=S.loc[S['entry_px_open_median_abs_pct'].idxmin()].to_dict() if S['entry_px_open_median_abs_pct'].notna().any() else {}
+    rate0=float(S.loc[S['shift']==0,'formal_breakout_rate'].iloc[0]) if (S['shift']==0).any() else np.nan
+    best_rate=float(best_formal.get('formal_breakout_rate',np.nan))
+    # Root-cause classification is descriptive, not a trading rule.
+    if np.isfinite(best_rate) and best_rate>=max(.50,rate0+0.25):
+        diagnosis='DATE_ALIGNMENT_MISMATCH_LIKELY'
+    elif np.isfinite(float(best_close.get('entry_px_close_median_abs_pct',np.nan))) and float(best_close.get('entry_px_close_median_abs_pct'))>.01 and np.isfinite(float(best_open.get('entry_px_open_median_abs_pct',np.nan))) and float(best_open.get('entry_px_open_median_abs_pct'))>.01:
+        diagnosis='PRICE_PROVENANCE_OR_ENGINE_REVISION_MISMATCH_LIKELY'
+    else:
+        diagnosis='ENGINE_REVISION_OR_LEDGER_PROVENANCE_MISMATCH_REQUIRES_SOURCE_RECONCILIATION'
+    # Best price anchor label helps distinguish signal-close vs next-open execution.
+    price_anchor={'best_close_shift':best_close.get('shift'),'best_close_median_abs_pct':best_close.get('entry_px_close_median_abs_pct'),'best_open_shift':best_open.get('shift'),'best_open_median_abs_pct':best_open.get('entry_px_open_median_abs_pct')}
+    result={'version':'V8.31 Entry / Breakout Parity Root-Cause Audit','build_id':V831_BUILD_ID,'elapsed_sec':round(time.time()-t0,1),'diagnosis':diagnosis,'engine_path':str(ep),'engine_sha256':sha,'ledger_rows':int(len(T)),'trace_rows':int(len(X)),'entry_date_found_rate':float(X['entry_date_found'].fillna(False).mean()),'shift_table':shift_rows,'best_formal_shift':best_formal,'price_anchor':price_anchor,'errors':errors[:100], 'interpretation':'If parity jumps at a non-zero shift, entry_date/signal_date alignment is wrong. If entry_px matches another close/open shift, execution-date semantics are wrong. If neither explains the gap, frozen ledger and current engine/cache provenance are not the same revision and must be reconciled before any VCP gate tuning.', 'boundaries':'Diagnostic only. No Top25/Entry/Stop/Exit/Ranking changes; no threshold search; Historical Cache only; 0 Tiingo; 0 universe rescan.'}
+    V831_DIR.mkdir(parents=True,exist_ok=True);V831_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');X.to_csv(V831_TRACE,index=False,compression='gzip')
+    return result
+
+def _v831_worker():
+    global v831_thread
+    import time
+    t0=time.time()
+    try:
+        _v831_write_status(status='running',phase='start',message='Starting entry/breakout parity root-cause audit',processed=0,total=0,errors=0,error=None)
+        R=_v831_run();_v831_write_status(status='done',phase='complete',message=f"Done · {R.get('diagnosis')}",processed=R.get('trace_rows',0),total=R.get('trace_rows',0),errors=len(R.get('errors',[])),elapsed_sec=R.get('elapsed_sec',round(time.time()-t0,1)),error=None)
+    except Exception as ex:_v831_write_status(status='error',phase='failed',message='V8.31 failed',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v831_thread=None
+
+@APP.route('/v831/preflight',methods=['GET','POST'])
+def v831_preflight_route():
+    try:_v831_preflight()
+    except Exception as ex:
+        V831_DIR.mkdir(parents=True,exist_ok=True);V831_PREFLIGHT.write_text(json.dumps({'verdict':'AUDIT_ERROR','build_id':V831_BUILD_ID,'error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v831')
+
+@APP.post('/v831/start')
+def v831_start():
+    global v831_thread
+    if _v831_alive():return jsonify({'started':False,**_v831_status()})
+    P=json.loads(V831_PREFLIGHT.read_text(encoding='utf-8')) if V831_PREFLIGHT.exists() else {}
+    if P.get('verdict')!='PASS':return jsonify({'started':False,'error':'Run Preflight and require PASS first'}),400
+    v831_thread=threading.Thread(target=_v831_worker,daemon=True);v831_thread.start();return jsonify({'started':True,**_v831_status()})
+
+@APP.get('/api/v831')
+def v831_api():return jsonify(_v831_status())
+
+@APP.get('/v831/export')
+def v831_export():
+    if not V831_TRACE.exists():return ('Run V8.31 first',404)
+    return send_file(V831_TRACE,as_attachment=True,download_name='v831_entry_breakout_parity_trace.csv.gz')
+
+@APP.get('/v831')
+def v831_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v831_status()
+    try:
+        if V831_PREFLIGHT.exists():P=json.loads(V831_PREFLIGHT.read_text(encoding='utf-8'))
+        if V831_RESULT.exists():R=json.loads(V831_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def pc(v):
+        try:return f'{100*float(v):.2f}%'
+        except Exception:return '—'
+    rows=''.join(f"<tr><td>{e(x.get('shift'))}</td><td>{e(x.get('rows'))}</td><td>{pc(x.get('formal_breakout_rate'))}</td><td>{pc(x.get('entry_px_close_median_abs_pct'))}</td><td>{pc(x.get('entry_px_open_median_abs_pct'))}</td><td>{pc(x.get('entry_px_close_within_0_5pct'))}</td><td>{pc(x.get('entry_px_open_within_0_5pct'))}</td></tr>" for x in R.get('shift_table',[])) or '<tr><td colspan=7>Run audit first.</td></tr>'
+    bf=R.get('best_formal_shift') or {};pa=R.get('price_anchor') or {}
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1200px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧭 V8.31 Entry / Breakout Parity Root-Cause Audit</h1><div class='warn'><b>只诊断 6.87% parity 为什么这么低。</b>不调 VCP、不改 DRY、不改 Entry/Stop/Exit。逐笔检查 frozen entry_date 前后 ±3 个交易日的正式 supply()/pivot/breakout，并核对 frozen entry_px 到底对应哪一天的 close/open。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V831_BUILD_ID))}</p><p>Top25 rows {e(P.get('top25_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Manifest {pc(P.get('manifest_mapping'))}</p><p>Engine SHA256: <code>{e(P.get('engine_sha256','—'))}</code></p><form method='post' action='/v831/preflight'><button>A. Run Parity Preflight</button></form><br><button onclick='go()'>B. Run Entry/Breakout Parity Audit</button><p id='st'>{e(S0.get('status'))} · {e(S0.get('message'))}</p></div>
+<div class='c'><h2>Diagnosis</h2><div class='ok'><b>{e(R.get('diagnosis','—'))}</b></div><p>Entry date found: {pc(R.get('entry_date_found_rate'))} · Best formal shift: <b>{e(bf.get('shift','—'))}</b> · Best parity: <b>{pc(bf.get('formal_breakout_rate'))}</b></p><p>Best close-price anchor shift: <b>{e(pa.get('best_close_shift','—'))}</b> · median error {pc(pa.get('best_close_median_abs_pct'))}; Best open-price anchor shift: <b>{e(pa.get('best_open_shift','—'))}</b> · median error {pc(pa.get('best_open_median_abs_pct'))}</p></div>
+<div class='c'><h2>Shift / Price-Anchor Matrix</h2><div style='overflow:auto'><table><tr><th>Shift</th><th>Rows</th><th>Formal breakout</th><th>EntryPx↔Close median err</th><th>EntryPx↔Open median err</th><th>Close within 0.5%</th><th>Open within 0.5%</th></tr>{rows}</table></div></div>
+<div class='c'><p>{e(R.get('interpretation',''))}</p><p>{e(R.get('boundaries',''))}</p>{"<a href='/v831/export'><button>Export Parity Trace</button></a>" if V831_TRACE.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v831',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1800);}}catch(e){{}}}}async function go(){{let r=await fetch('/v831/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
 
 # ================= V8.30 EXACT DRY-UP HARD-GATE A/B REPLAY =================
 # One source-supported intervention only: promote the engine's existing DRY soft edge to a hard qualification gate.
