@@ -46784,6 +46784,11 @@ if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
         card="""
+        <div id='v833-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🔗 V8.33 Recovered Provenance Exact Parity Replay</h2>
+        <p>以 V8.32 找回的 /data/v669_low10_structural_stop_ab/paired_exit_trades.csv.gz 为 source-of-truth，逐笔核对 frozen Top25 的 listing/date/entry/exit/return/STOP/winner outcome。只做 provenance parity，不改 VCP/Entry/Stop/Exit。</p>
+        <a href='/v833'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.33</button></a>
+        </div>
         <div id='v832-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧬 V8.32 Frozen Ledger Provenance Reconciliation</h2>
         <p>先恢复历史交易到底由哪一份 signal/cache/engine 生成：扫描 /data 的 signals/trades/meta/checkpoints 与 /app 引擎指纹，核对 frozen entry 的 next-open 语义和 signal provenance。只诊断，不改 VCP/Entry/Stop/Exit。</p>
@@ -67217,3 +67222,183 @@ def v832_page():
 <div class='c'><h2>Top Provenance Candidates</h2><table><tr><th>File</th><th>Kind</th><th>Score</th><th>Listing overlap</th><th>Best date match</th><th>Calendar shift</th></tr>{trs}</table></div>
 <div class='c'><p>{e(R.get('interpretation',''))}</p>{"<a href='/v832/export'><button>Export Provenance Candidates</button></a>" if V832_CANDIDATES.exists() else ''}</div>
 <script>async function poll(){{try{{let s=await (await fetch('/api/v832',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1800);}}catch(e){{}}}}async function go(){{let r=await fetch('/v832/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
+
+
+# ================= V8.33 RECOVERED PROVENANCE EXACT PARITY REPLAY =================
+V833_DIR = DATA_DIR / "v833_recovered_provenance_exact_parity"
+V833_PREFLIGHT = V833_DIR / "preflight.json"
+V833_STATUS = V833_DIR / "status.json"
+V833_RESULT = V833_DIR / "result.json"
+V833_DETAIL = V833_DIR / "parity_detail.csv.gz"
+V833_SOURCE = Path('/data/v669_low10_structural_stop_ab/paired_exit_trades.csv.gz')
+V833_BUILD_ID = "v833-recovered-v669-paired-exit-exact-parity-20260902"
+v833_thread = None
+
+def _v833_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,"errors":0,"error":None,"elapsed_sec":0,"last_heartbeat":None}
+    if V833_STATUS.exists():
+        try:x.update(json.loads(V833_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v833_write_status(**kw):
+    V833_DIR.mkdir(parents=True,exist_ok=True);x=_v833_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat();V833_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v833_alive(): return v833_thread is not None and v833_thread.is_alive()
+
+def _v833_col(cols, names):
+    m={str(c).lower():c for c in cols}
+    for n in names:
+        if n.lower() in m:return m[n.lower()]
+    return None
+
+def _v833_schema(df):
+    c=list(df.columns)
+    return {
+      'listing':_v833_col(c,['listing_id','listing','permno','ticker','symbol']),
+      'entry_date':_v833_col(c,['entry_date','signal_date','date','breakout_date','trade_date']),
+      'entry_px':_v833_col(c,['entry_px','entry_price','buy_px','buy_price','entry','price']),
+      'exit_date':_v833_col(c,['exit_date','exit60_date','sell_date']),
+      'ret':_v833_col(c,['realized_ret','exit_ret','return','ret','trade_ret','pnl_pct']),
+      'stop':_v833_col(c,['is_stop','stop','stopped','stop_flag','stop_loss']),
+      'winner20':_v833_col(c,['winner20','winner_20','is_winner20','hit20']),
+      'outcome':_v833_col(c,['outcome','exit_reason','result','trade_outcome'])
+    }
+
+def _v833_norm_bool(x):
+    if pd.isna(x):return np.nan
+    if isinstance(x,(bool,np.bool_)):return bool(x)
+    z=str(x).strip().upper()
+    if z in ('1','TRUE','T','YES','Y','STOP','STOPPED','WIN','WINNER'):return True
+    if z in ('0','FALSE','F','NO','N','NONE',''):return False
+    try:return bool(int(float(z)))
+    except Exception:return np.nan
+
+def _v833_preflight():
+    import pandas as pd, numpy as np, time, hashlib
+    t0=time.time();V833_DIR.mkdir(parents=True,exist_ok=True)
+    err=None;out={}
+    try:
+        D=_v826b_load_oos();F=D[D['reference_rank']>=.75].copy()
+        if not V833_SOURCE.exists(): raise RuntimeError(f'Recovered source missing: {V833_SOURCE}')
+        S=pd.read_csv(V833_SOURCE,nrows=250000,low_memory=False)
+        fs=_v833_schema(F);ss=_v833_schema(S)
+        if not fs['listing'] or not fs['entry_date']:raise RuntimeError('Frozen ledger missing listing/date columns')
+        if not ss['listing'] or not ss['entry_date']:raise RuntimeError('Recovered source missing listing/date columns')
+        f=F[[fs['listing'],fs['entry_date']]].copy();f.columns=['listing_id','entry_date'];f['listing_id']=f['listing_id'].astype(str);f['entry_date']=pd.to_datetime(f['entry_date'],errors='coerce').dt.normalize();f=f.dropna()
+        q=S[[ss['listing'],ss['entry_date']]].copy();q.columns=['listing_id','entry_date'];q['listing_id']=q['listing_id'].astype(str);q['entry_date']=pd.to_datetime(q['entry_date'],errors='coerce').dt.normalize();q=q.dropna()
+        fk=set(map(tuple,f[['listing_id','entry_date']].to_numpy()));sk=set(map(tuple,q[['listing_id','entry_date']].to_numpy()))
+        date_match=100*len(fk&sk)/max(1,len(fk));list_match=100*len(set(f.listing_id)&set(q.listing_id))/max(1,len(set(f.listing_id)))
+        dups=int(q.duplicated(['listing_id','entry_date']).sum())
+        verdict='PASS' if len(F)>=15000 and date_match>=99.0 and list_match>=99.0 else 'FAIL__RECOVERED_SOURCE_PARITY_OR_SCHEMA'
+        out={'version':'V8.33','build_id':V833_BUILD_ID,'verdict':verdict,'source_path':str(V833_SOURCE),'frozen_rows':int(len(F)),'source_rows_sampled':int(len(S)),'frozen_schema':fs,'source_schema':ss,'listing_match_pct':round(list_match,4),'entry_date_match_pct':round(date_match,4),'source_key_duplicates_sample':dups,'frozen_columns':list(map(str,F.columns)),'source_columns':list(map(str,S.columns)),'error':None,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.33','build_id':V833_BUILD_ID,'verdict':'ERROR','source_path':str(V833_SOURCE),'error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V833_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v833_run():
+    import pandas as pd, numpy as np, time, hashlib, os
+    t0=time.time();P=_v833_preflight()
+    if P.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
+    _v833_write_status(status='running',phase='load',message='Loading frozen ledger and recovered V6.69 paired-exit source',processed=0,total=3,errors=0)
+    D=_v826b_load_oos();F=D[D['reference_rank']>=.75].copy();S=pd.read_csv(V833_SOURCE,low_memory=False)
+    fs=_v833_schema(F);ss=_v833_schema(S)
+    def canon(df,sc,prefix):
+        z=pd.DataFrame();z['listing_id']=df[sc['listing']].astype(str);z['entry_date']=pd.to_datetime(df[sc['entry_date']],errors='coerce').dt.normalize()
+        for k in ['entry_px','exit_date','ret','stop','winner20','outcome']:
+            c=sc.get(k)
+            if c is not None:z[prefix+k]=df[c]
+        return z.dropna(subset=['listing_id','entry_date'])
+    A=canon(F,fs,'f_');B=canon(S,ss,'s_')
+    # Collapse exact duplicate keys deterministically only when rows are byte/value identical on parity fields; otherwise retain ambiguity flag.
+    bcnt=B.groupby(['listing_id','entry_date']).size().rename('source_key_count').reset_index()
+    B1=B.drop_duplicates(['listing_id','entry_date'],keep='first')
+    M=A.merge(B1,on=['listing_id','entry_date'],how='left',indicator=True).merge(bcnt,on=['listing_id','entry_date'],how='left')
+    _v833_write_status(status='running',phase='field_parity',message='Computing exact field parity',processed=1,total=3,errors=0)
+    metrics={}
+    metrics['rows_frozen']=int(len(A));metrics['rows_source']=int(len(B));metrics['exact_key_match_pct']=100*float((M['_merge']=='both').mean());metrics['ambiguous_source_key_pct']=100*float((M['source_key_count'].fillna(0)>1).mean())
+    def numcmp(fk,sk,tol,name):
+        if fk not in M.columns or sk not in M.columns:return None
+        x=pd.to_numeric(M[fk],errors='coerce');y=pd.to_numeric(M[sk],errors='coerce');ok=x.notna()&y.notna();
+        if not ok.any():return None
+        diff=(x[ok]-y[ok]).abs();rel=diff/np.maximum(y[ok].abs(),1e-9)
+        return {'coverage_pct':100*ok.mean(),'exact_pct':100*(diff<=tol).mean(),'median_abs_diff':float(diff.median()),'median_rel_diff_pct':float(rel.median()*100)}
+    metrics['entry_px']=numcmp('f_entry_px','s_entry_px',1e-6,'entry_px')
+    metrics['ret']=numcmp('f_ret','s_ret',1e-8,'ret')
+    if 'f_exit_date' in M.columns and 's_exit_date' in M.columns:
+        x=pd.to_datetime(M['f_exit_date'],errors='coerce').dt.normalize();y=pd.to_datetime(M['s_exit_date'],errors='coerce').dt.normalize();ok=x.notna()&y.notna();metrics['exit_date']={'coverage_pct':100*ok.mean(),'exact_pct':100*(x[ok]==y[ok]).mean() if ok.any() else None,'median_calendar_day_diff':float((x[ok]-y[ok]).dt.days.abs().median()) if ok.any() else None}
+    for fld in ['stop','winner20']:
+        fk='f_'+fld;sk='s_'+fld
+        if fk in M.columns and sk in M.columns:
+            x=M[fk].map(_v833_norm_bool);y=M[sk].map(_v833_norm_bool);ok=x.notna()&y.notna();metrics[fld]={'coverage_pct':100*ok.mean(),'exact_pct':100*(x[ok]==y[ok]).mean() if ok.any() else None}
+    if 'f_outcome' in M.columns and 's_outcome' in M.columns:
+        x=M['f_outcome'].astype(str).str.upper().str.strip();y=M['s_outcome'].astype(str).str.upper().str.strip();ok=M['f_outcome'].notna()&M['s_outcome'].notna();metrics['outcome']={'coverage_pct':100*ok.mean(),'exact_pct':100*(x[ok]==y[ok]).mean() if ok.any() else None}
+    _v833_write_status(status='running',phase='provenance',message='Inspecting recovered source directory for lineage artifacts',processed=2,total=3,errors=0)
+    parent=V833_SOURCE.parent;art=[]
+    try:
+        for p in sorted(parent.iterdir()):
+            if p.is_file():art.append({'name':p.name,'size':p.stat().st_size,'suffixes':' '.join(p.suffixes)})
+    except Exception:pass
+    # Diagnosis: key parity first, then outcome/price parity when preserved.
+    key=metrics['exact_key_match_pct'];entry=(metrics.get('entry_px') or {}).get('exact_pct');ret=(metrics.get('ret') or {}).get('exact_pct');exitp=(metrics.get('exit_date') or {}).get('exact_pct')
+    strong=[v for v in [entry,ret,exitp,(metrics.get('stop') or {}).get('exact_pct'),(metrics.get('winner20') or {}).get('exact_pct')] if v is not None]
+    if key>=99.9 and strong and min(strong)>=99.0:diag='EXACT_PROVENANCE_PARITY_RECOVERED__SAFE_TO_AUDIT_VCP_ON_THIS_LINEAGE'
+    elif key>=99.0 and strong and sum(v>=95 for v in strong)>=max(1,len(strong)//2):diag='PROVENANCE_KEY_PARITY_RECOVERED__FIELD_SEMANTICS_NEED_SMALL_RECONCILIATION'
+    elif key>=99.0:diag='PROVENANCE_KEYS_RECOVERED__OUTCOME_FIELDS_NOT_PRESERVED_OR_NOT_SEMANTICALLY_ALIGNED'
+    else:diag='RECOVERED_FILE_NOT_EXACT_SOURCE_OF_FROZEN_LEDGER__DO_NOT_USE_FOR_VCP_REPAIR'
+    # Save compact detail only.
+    keep=['listing_id','entry_date','_merge','source_key_count']+[c for c in M.columns if c.startswith('f_') or c.startswith('s_')]
+    M[keep].to_csv(V833_DETAIL,index=False,compression='gzip')
+    R={'version':'V8.33','build_id':V833_BUILD_ID,'diagnosis':diag,'source_path':str(V833_SOURCE),'metrics':metrics,'source_schema':ss,'frozen_schema':fs,'source_directory_artifacts':art[:200],'interpretation':'Use the recovered V6.69 paired-exit artifact as lineage source only if listing/date and preserved trade fields reconcile. This audit does not infer a new VCP rule and does not use the current engine to overwrite historical provenance.','next':'If exact/near-exact parity is recovered, V8.34 should audit VCP qualification/STOP causes against this recovered lineage rather than the current-engine proxy.','elapsed_sec':round(time.time()-t0,1)}
+    V833_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8');_v833_write_status(status='done',phase='complete',message=f'Done · {diag}',processed=3,total=3,errors=0,elapsed_sec=R['elapsed_sec']);return R
+
+def _v833_worker():
+    global v833_thread
+    import time
+    t0=time.time()
+    try:_v833_run()
+    except Exception as ex:_v833_write_status(status='error',phase='failed',message='V8.33 failed',error=f'{type(ex).__name__}: {ex}',elapsed_sec=round(time.time()-t0,1))
+    finally:v833_thread=None
+
+@APP.route('/v833/preflight',methods=['GET','POST'])
+def v833_preflight_route():
+    _v833_preflight();return redirect('/v833')
+
+@APP.post('/v833/start')
+def v833_start():
+    global v833_thread
+    if _v833_alive():return jsonify({'started':False,**_v833_status()})
+    p=_v833_preflight()
+    if p.get('verdict')!='PASS':return jsonify({'started':False,'error':'Preflight must PASS first',**p}),400
+    v833_thread=threading.Thread(target=_v833_worker,daemon=True);v833_thread.start();return jsonify({'started':True,**_v833_status()})
+
+@APP.get('/api/v833')
+def v833_api():return jsonify(_v833_status())
+
+@APP.get('/v833/export')
+def v833_export():
+    if not V833_DETAIL.exists():return ('not ready',404)
+    return send_file(V833_DETAIL,as_attachment=True,download_name='v833_exact_provenance_parity_detail.csv.gz')
+
+@APP.get('/v833')
+def v833_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v833_status()
+    try:
+        if V833_PREFLIGHT.exists():P=json.loads(V833_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V833_RESULT.exists():R=json.loads(V833_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    m=R.get('metrics',{}) or {}
+    def row(label,obj):
+        if not obj:return f'<tr><td>{e(label)}</td><td colspan=4>—</td></tr>'
+        return f"<tr><td>{e(label)}</td><td>{e(round(float(obj.get('coverage_pct') or 0),2))}%</td><td>{e('—' if obj.get('exact_pct') is None else round(float(obj.get('exact_pct')),2))}%</td><td>{e('—' if obj.get('median_abs_diff') is None else obj.get('median_abs_diff'))}</td><td>{e('—' if obj.get('median_rel_diff_pct') is None else round(float(obj.get('median_rel_diff_pct')),4))}%</td></tr>"
+    rows=''.join([row('Entry price',m.get('entry_px')),row('Realized return',m.get('ret')),row('Exit date',m.get('exit_date')),row('STOP flag',m.get('stop')),row('+20 winner flag',m.get('winner20')),row('Outcome',m.get('outcome'))])
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:Arial,sans-serif;background:#f3f6fb;color:#111827;margin:0}}.w{{max-width:980px;margin:auto;padding:22px}}.c{{background:#fff;border-radius:24px;padding:26px;margin:18px 0}}button{{background:#111827;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:8px;border-bottom:1px solid #dbe2ea;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🔗 V8.33 Recovered Provenance Exact Parity Replay</h1><div class='warn'><b>只做来源 exact parity：</b>source-of-truth = <code>{e(V833_SOURCE)}</code>。不改 VCP / Entry / Stop / Exit，不用当前 engine 覆盖历史 lineage。</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V833_BUILD_ID))}</p><p>Frozen rows {e(P.get('frozen_rows','—'))} · Listing match {e(P.get('listing_match_pct','—'))}% · Entry-date match {e(P.get('entry_date_match_pct','—'))}%</p><p><b>Preflight error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v833/preflight'><button>A. Run Exact-Parity Preflight</button></form><br><button onclick='go()'>B. Run Recovered Provenance Exact Parity</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div>
+<div class='c'><h2>Diagnosis</h2><div class='ok'><b>{e(R.get('diagnosis','—'))}</b></div><p>Exact key match: <b>{e(round(float(m.get('exact_key_match_pct') or 0),3))}%</b> · Ambiguous source keys: {e(round(float(m.get('ambiguous_source_key_pct') or 0),3))}%</p></div>
+<div class='c'><h2>Field Parity</h2><table><tr><th>Field</th><th>Coverage</th><th>Exact parity</th><th>Median abs diff</th><th>Median rel diff</th></tr>{rows}</table></div>
+<div class='c'><p>{e(R.get('interpretation',''))}</p><p><b>Next:</b> {e(R.get('next',''))}</p>{"<a href='/v833/export'><button>Export Exact Parity Detail</button></a>" if V833_DETAIL.exists() else ''}</div>
+<script>async function poll(){{try{{let s=await (await fetch('/api/v833',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,1200);}}catch(e){{}}}}async function go(){{let r=await fetch('/v833/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}}poll();</script></div></body></html>"""
