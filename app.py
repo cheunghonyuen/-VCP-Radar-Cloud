@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825l-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825m-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧪 V8.25M Frozen Multivariate LOO Validation</h2>
+        <p>验证 L 的 entry-anatomy separation 是否能在 Leave-One-Out 下保留 +20 winners 并减少 STOP。固定 features / 固定 operating points / 0 threshold search。</p>
+        <a href='/v825m'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25M</button></a>
+        </div>
+        <div id='v825l-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🔬 V8.25L Winner-vs-STOP Entry Anatomy Audit</h2>
         <p>Exact H frozen sample：比较 Tradable +20 winners vs STOPs 的 entry-time price/volume/VCP anatomy；保护 +30/+40 rare tail。0下载 / 0阈值搜索 / 0调参。</p>
         <a href='/v825l'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25L</button></a>
@@ -62003,4 +62008,317 @@ Comparison rows <b>{e(S.get("comparison_rows","—"))}</b> · Strong descriptive
 <div class="c"><div class="b"><b>Domains not claimed by this audit:</b><br>{unavailable or "—"}</div></div>
 <div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
 <p><b>Frozen screen:</b> {e(R.get("decision_rule",""))}</p><p>{e(R.get("boundaries",""))}</p></div>
+</div></body></html>'''
+
+# ================= V8.25M FROZEN MULTIVARIATE LOO VALIDATION =================
+V825M_DIR = DATA_DIR / "v825m_frozen_multivariate_loo_validation"
+V825M_RESULT = V825M_DIR / "result.json"
+V825M_BUILD_ID = "V825M_FROZEN_MULTIVARIATE_LOO_20260902A"
+
+V825M_FEATURES = [
+    "ret_20d",
+    "range20_pct",
+    "volatility20",
+    "close_vs_ma50",
+    "up_day_ratio20",
+    "contraction_10v20",
+    "ma20_slope20",
+    "ma50_slope20",
+]
+
+def _v825m_auc(y, x):
+    y = pd.Series(y).astype(int).reset_index(drop=True)
+    x = pd.to_numeric(pd.Series(x), errors="coerce").reset_index(drop=True)
+    m = x.notna() & y.notna()
+    y = y[m]; x = x[m]
+    if len(y) < 6 or y.nunique() < 2:
+        return None
+    pos = x[y == 1].to_numpy()
+    neg = x[y == 0].to_numpy()
+    if len(pos) == 0 or len(neg) == 0:
+        return None
+    wins = 0.0
+    total = len(pos) * len(neg)
+    for a in pos:
+        wins += float((a > neg).sum()) + 0.5 * float((a == neg).sum())
+    return float(wins / total)
+
+def _v825m_build_dataset():
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["entry_px"] = pd.to_numeric(C["entry_px"], errors="coerce")
+    C["ret"] = pd.to_numeric(C["ret"], errors="coerce")
+    C["mfe"] = pd.to_numeric(C["mfe"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+
+    aud = []
+    for i, r in C.iterrows():
+        ticker = str(r["ticker"]).upper().strip()
+        D = _v825h_load_prices(ticker)
+        if D is None or D.empty:
+            aud.append({"idx":i,"right_censored":True,"tradable_mfe":None})
+            continue
+        future = D[D["Date"] > r["entry_date"]].copy()
+        right_censored = len(future) < 60
+        tradable = D[(D["Date"] > r["entry_date"]) & (D["Date"] <= r["exit_date"])].copy()
+        tmfe = float(tradable["high"].max()/float(r["entry_px"])-1.0) if len(tradable) else None
+        aud.append({"idx":i,"right_censored":bool(right_censored),"tradable_mfe":tmfe})
+
+    C = C.join(pd.DataFrame(aud).set_index("idx"), how="left")
+    U = C[~C["right_censored"].fillna(True)].copy()
+    U["winner20"] = pd.to_numeric(U["tradable_mfe"], errors="coerce").ge(.20)
+
+    feat_rows = []
+    for idx, r in U.iterrows():
+        f = _v825l_entry_features(str(r["ticker"]).upper().strip(), r["entry_date"])
+        if f is None:
+            continue
+        z = {
+            "idx":idx,
+            "ticker":str(r["ticker"]),
+            "entry_date":r["entry_date"],
+            "is_stop":bool(r["is_stop"]),
+            "winner20":bool(r["winner20"]),
+            "tradable_mfe":float(r["tradable_mfe"]),
+        }
+        z.update(f)
+        feat_rows.append(z)
+
+    F = pd.DataFrame(feat_rows)
+    if F.empty:
+        raise RuntimeError("No V8.25L anatomy rows available")
+
+    G = F[F["winner20"] | F["is_stop"]].copy().reset_index(drop=True)
+
+    if G["winner20"].sum() < 4 or G["is_stop"].sum() < 15:
+        raise RuntimeError("Insufficient frozen winner/STOP comparison sample")
+
+    for c in V825M_FEATURES:
+        if c not in G.columns:
+            raise RuntimeError(f"Missing predeclared feature: {c}")
+
+    return G
+
+def _v825m_prepare_train_test(train, test):
+    Xtr = pd.DataFrame(index=train.index)
+    Xte = pd.DataFrame(index=test.index)
+
+    direction = {
+        "ret_20d": 1.0,
+        "range20_pct": 1.0,
+        "volatility20": 1.0,
+        "close_vs_ma50": 1.0,
+        "up_day_ratio20": 1.0,
+        "contraction_10v20": -1.0,
+        "ma20_slope20": 1.0,
+        "ma50_slope20": 1.0,
+    }
+
+    for c in V825M_FEATURES:
+        tr = pd.to_numeric(train[c], errors="coerce")
+        te = pd.to_numeric(test[c], errors="coerce")
+        med = float(tr.median())
+        tr = tr.fillna(med)
+        te = te.fillna(med)
+
+        vals = np.sort(tr.to_numpy())
+        tr_rank = tr.rank(pct=True, method="average").to_numpy()
+        te_rank = np.array([
+            np.searchsorted(vals, v, side="right") / max(1, len(vals))
+            for v in te.to_numpy()
+        ])
+
+        Xtr[c] = tr_rank * direction[c]
+        Xte[c] = te_rank * direction[c]
+
+    return Xtr, Xte
+
+def _v825m_score_fixed(X):
+    return X[V825M_FEATURES].mean(axis=1)
+
+def _v825m_run():
+    V825M_DIR.mkdir(parents=True, exist_ok=True)
+    G = _v825m_build_dataset().copy()
+
+    loo_rows = []
+    for i in range(len(G)):
+        test = G.iloc[[i]].copy()
+        train = G.drop(G.index[i]).copy()
+
+        _, Xte = _v825m_prepare_train_test(train, test)
+        score = float(_v825m_score_fixed(Xte).iloc[0])
+
+        loo_rows.append({
+            "ticker":str(test.iloc[0]["ticker"]),
+            "entry_date":str(pd.Timestamp(test.iloc[0]["entry_date"]).date()),
+            "winner20":bool(test.iloc[0]["winner20"]),
+            "is_stop":bool(test.iloc[0]["is_stop"]),
+            "tradable_mfe":float(test.iloc[0]["tradable_mfe"]),
+            "loo_score":score,
+        })
+
+    O = pd.DataFrame(loo_rows)
+    y = O["winner20"].astype(int)
+    auc = _v825m_auc(y, O["loo_score"])
+
+    O["score_rank_pct"] = O["loo_score"].rank(pct=True, method="average")
+
+    gates = []
+    for keep_top in [0.25, 0.33, 0.50]:
+        keep = O["score_rank_pct"] >= (1.0 - keep_top)
+        kept = O[keep].copy()
+
+        winners_total = int(O["winner20"].sum())
+        stops_total = int(O["is_stop"].sum())
+        winners_kept = int(kept["winner20"].sum())
+        stops_kept = int(kept["is_stop"].sum())
+        winners_dropped = winners_total - winners_kept
+        stops_dropped = stops_total - stops_kept
+
+        gates.append({
+            "keep_top_fraction":keep_top,
+            "kept_rows":int(len(kept)),
+            "winners_kept":winners_kept,
+            "winners_total":winners_total,
+            "winner_recall":float(winners_kept/max(1,winners_total)),
+            "stops_kept":stops_kept,
+            "stops_total":stops_total,
+            "stop_reduction":float(stops_dropped/max(1,stops_total)),
+            "winners_dropped":winners_dropped,
+            "stops_dropped":stops_dropped,
+        })
+
+    viable = [
+        g for g in gates
+        if g["winner_recall"] >= .75 and g["stop_reduction"] >= .40
+    ]
+
+    if auc is not None and auc >= .75 and len(viable) >= 1:
+        verdict = "FROZEN_LOO_VALIDATION_PASS__ENTRY_ANATOMY_GENERALIZES"
+        next_action = "PROMOTE_TO_SHADOW_ONLY_VALIDATION__NO_PRODUCTION_RULE_CHANGE_YET"
+    elif auc is not None and auc >= .65:
+        verdict = "FROZEN_LOO_PARTIAL_SIGNAL__NOT_ENOUGH_FOR_FILTER_PROMOTION"
+        next_action = "KEEP_AS_RESEARCH_ONLY__ACCUMULATE_MORE_FROZEN_OOS_SAMPLE"
+    else:
+        verdict = "FROZEN_LOO_FAIL__L_SEPARATION_WAS_NOT_ROBUST"
+        next_action = "DO_NOT_RETUNE__KEEP_H_RULES_FROZEN"
+
+    result = {
+        "version":"V8.25M Frozen Multivariate LOO Validation",
+        "build_id":V825M_BUILD_ID,
+        "verdict":verdict,
+        "sample":{
+            "comparison_rows":int(len(O)),
+            "winner20":int(O["winner20"].sum()),
+            "stops":int(O["is_stop"].sum())
+        },
+        "predeclared_features":V825M_FEATURES,
+        "model":"Equal-weight percentile composite; train-only median imputation and train-only empirical ranking; no fitted coefficients.",
+        "loo_auc":auc,
+        "fixed_operating_points":gates,
+        "winner_protection":O[O["winner20"]].sort_values("tradable_mfe", ascending=False).to_dict("records"),
+        "lowest_score_stops":O[O["is_stop"]].sort_values("loo_score").head(10).to_dict("records"),
+        "decision_rule":"PASS only if LOO AUC>=0.75 and at least one fixed keep-top {25%,33%,50%} operating point retains >=75% of tradable +20 winners while removing >=40% of STOPs. No threshold optimization.",
+        "next_action":next_action,
+        "boundaries":"Exact frozen V8.25H/L sample. No downloads, no new candidates, no fundamentals, no feature additions after seeing M results, no coefficient fitting, no threshold search, no retuning."
+    }
+    _v825g_write(V825M_RESULT, result)
+    return result
+
+@APP.route("/v825m/run", methods=["GET","POST"])
+def v825m_run_route():
+    try:
+        _v825m_run()
+    except Exception as ex:
+        _v825g_write(V825M_RESULT, {
+            "version":"V8.25M Frozen Multivariate LOO Validation",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825m")
+
+@APP.get("/v825m")
+def v825m_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825g_read(V825M_RESULT,{})
+    S=R.get("sample") or {}
+
+    op_rows=""
+    for g in R.get("fixed_operating_points") or []:
+        op_rows += (
+            f"<tr><td>Top {int(float(g.get('keep_top_fraction',0))*100)}%</td>"
+            f"<td>{e(g.get('kept_rows'))}</td>"
+            f"<td>{e(g.get('winners_kept'))}/{e(g.get('winners_total'))}</td>"
+            f"<td>{e(round(float(g.get('winner_recall',0))*100,1))}%</td>"
+            f"<td>{e(g.get('stops_kept'))}/{e(g.get('stops_total'))}</td>"
+            f"<td>{e(round(float(g.get('stop_reduction',0))*100,1))}%</td>"
+            f"<td>{e(g.get('winners_dropped'))}</td></tr>"
+        )
+
+    wr=""
+    for x in R.get("winner_protection") or []:
+        wr += (
+            f"<tr><td><b>{e(x.get('ticker'))}</b></td>"
+            f"<td>{e(x.get('entry_date'))}</td>"
+            f"<td>{e(round(float(x.get('tradable_mfe',0))*100,1))}%</td>"
+            f"<td>{e(round(float(x.get('loo_score',0)),3))}</td>"
+            f"<td>{e(round(float(x.get('score_rank_pct',0))*100,1))}%</td></tr>"
+        )
+
+    sr=""
+    for x in R.get("lowest_score_stops") or []:
+        sr += (
+            f"<tr><td>{e(x.get('ticker'))}</td>"
+            f"<td>{e(x.get('entry_date'))}</td>"
+            f"<td>{e(round(float(x.get('loo_score',0)),3))}</td>"
+            f"<td>{e(round(float(x.get('score_rank_pct',0))*100,1))}%</td></tr>"
+        )
+
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+
+<div class="c"><h1>🧪 V8.25M Frozen Multivariate LOO Validation</h1>
+<div class="o"><b>这是验证，不是调参。</b> 用 L 已声明的 entry-anatomy families 做固定等权 composite；Leave-One-Out 每次只用其余样本构造训练分位数。0 coefficient fitting，0 threshold search。</div></div>
+
+<div class="c"><form method="post" action="/v825m/run"><button>▶ Run Frozen Multivariate LOO</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">
+Comparison rows <b>{e(S.get("comparison_rows","—"))}</b> · +20 winners <b>{e(S.get("winner20","—"))}</b> · STOP <b>{e(S.get("stops","—"))}</b><br>
+LOO AUC <b>{e(round(float(R.get("loo_auc",0)),3) if R.get("loo_auc") is not None else "—")}</b><br>
+Features: <b>{e(", ".join(R.get("predeclared_features") or []))}</b>
+</div></div>
+
+<div class="c"><h2>Fixed Operating Points</h2><div style="overflow:auto"><table>
+<tr><th>Keep</th><th>Rows kept</th><th>Winners kept</th><th>Winner recall</th><th>STOP kept</th><th>STOP reduction</th><th>Winners lost</th></tr>
+{op_rows or "<tr><td colspan=7>Run validation first.</td></tr>"}
+</table></div></div>
+
+<div class="c"><h2>Protect the Rare Tradable Winners</h2><div style="overflow:auto"><table>
+<tr><th>Ticker</th><th>Entry</th><th>Tradable MFE</th><th>LOO score</th><th>Rank</th></tr>
+{wr or "<tr><td colspan=5>Run validation first.</td></tr>"}
+</table></div></div>
+
+<div class="c"><h2>Lowest-Score STOPs</h2><div style="overflow:auto"><table>
+<tr><th>Ticker</th><th>Entry</th><th>LOO score</th><th>Rank</th></tr>
+{sr or "<tr><td colspan=4>Run validation first.</td></tr>"}
+</table></div></div>
+
+<div class="c"><div class="b"><b>Model:</b> {e(R.get("model",""))}</div>
+<div class="g"><b>Next:</b> {e(R.get("next_action","Run validation first"))}</div>
+<p><b>Frozen gate:</b> {e(R.get("decision_rule",""))}</p>
+<p>{e(R.get("boundaries",""))}</p></div>
 </div></body></html>'''
