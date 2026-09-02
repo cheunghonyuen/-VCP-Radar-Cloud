@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825n-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825o-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧭 V8.25O Frozen Reference Rank + Continuous Shadow</h2>
+        <p>修正 N：每笔 Shadow rank 相对 M 冻结参考分布锁死，并持续从现有 Dow-30 recent cache 加入新的 contemporaneous candidates。0下载 / 0调参。</p>
+        <a href='/v825o'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25O</button></a>
+        </div>
+        <div id='v825n-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🛰️ V8.25N Frozen Shadow Forward Validation</h2>
         <p>冻结 M 模型，给尚未成熟的 recent candidates 预先打 Shadow 分；以后只更新60日结果，旧分数永不重算。真正 forward validation。</p>
         <a href='/v825n'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25N</button></a>
@@ -62673,5 +62678,371 @@ Shadow AUC <b>{e(round(float(R.get('shadow_auc',0)),3) if R.get('shadow_auc') is
 
 <div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}</div>
 <div class='g'><b>Next:</b> {e(R.get('next_action','Run once to start shadow ledger'))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
+
+# ================= V8.25O FROZEN REFERENCE RANK + CONTINUOUS SHADOW =================
+# Goals:
+# 1) Preserve V8.25N's immutable shadow scores.
+# 2) Replace cohort-relative shadow rank with a truly frozen reference rank
+#    computed against the V8.25M mature comparison reference distribution.
+# 3) Continuously accumulate NEW contemporaneous recent candidates from the
+#    already-existing V8.25G Dow-30 price cache without downloading new data.
+#
+# Boundaries:
+# - Same V8.25M 8 features / directions / equal weights.
+# - No coefficient fitting, no threshold search, no retroactive score changes.
+# - No new downloads, no full-market rescan, no Champion modification.
+# - Historical shadow rows keep their original score forever.
+V825O_DIR = DATA_DIR / "v825o_frozen_reference_rank_continuous_shadow"
+V825O_LEDGER = V825O_DIR / "shadow_ledger.csv.gz"
+V825O_RESULT = V825O_DIR / "result.json"
+V825O_BUILD_ID = "V825O_FROZEN_REFERENCE_RANK_20260902A"
+
+def _v825o_reference_score_distribution():
+    # Exact mature reference comparison set used by M.
+    G = _v825m_build_dataset().copy()
+    _, ref = _v825n_reference_dataset()
+
+    scores = []
+    for _, r in G.iterrows():
+        feats = {c:r.get(c) for c in V825M_FEATURES}
+        score = _v825n_score_row(feats, ref)
+        scores.append(float(score))
+    vals = np.sort(np.asarray(scores, dtype=float))
+    return ref, vals
+
+def _v825o_reference_rank(score, ref_scores):
+    if score is None or not np.isfinite(score):
+        return None
+    return float(np.searchsorted(ref_scores, float(score), side="right") / max(1, len(ref_scores)))
+
+def _v825o_recent_signal_candidates():
+    """
+    Generate current/recent research shadow candidates ONLY from existing
+    V8.25G Dow-30 price cache. Uses the same frozen H signal construction:
+    trend + near_high + tightening + breakout + volume_confirm.
+    No parameter changes.
+    """
+    rows = []
+    for t in V825_DOW30:
+        D = _v825h_load_prices(t)
+        if D is None or len(D) < 300:
+            continue
+        X = _v825h_features(D)
+
+        sig = (
+            X["trend_ok"] &
+            X["near_high"] &
+            X["tightening"] &
+            X["breakout"] &
+            X["volume_confirm"]
+        ).fillna(False)
+
+        idxs = list(X.index[sig])
+        if not idxs:
+            continue
+
+        # Only recent window: last 120 calendar days in cache.
+        max_dt = pd.Timestamp(X["Date"].max())
+        cutoff = max_dt - pd.Timedelta(days=120)
+
+        last_dt = None
+        for i in idxs:
+            dt = pd.Timestamp(X.loc[i,"Date"])
+            if dt < cutoff:
+                continue
+            if last_dt is not None and (dt-last_dt).days < 14:
+                continue
+
+            # Candidate identity only; outcome intentionally unknown at creation.
+            feats = _v825l_entry_features(t, dt)
+            if feats is None:
+                continue
+
+            rows.append({
+                "listing_id": f"{t}__{dt.date()}",
+                "ticker": t,
+                "entry_date": dt,
+                "feature_dict": feats,
+            })
+            last_dt = dt
+    return rows
+
+def _v825o_load_ledger():
+    if not V825O_LEDGER.exists():
+        return pd.DataFrame()
+    D = pd.read_csv(V825O_LEDGER, compression="gzip")
+    if "entry_date" in D.columns:
+        D["entry_date"] = pd.to_datetime(D["entry_date"], errors="coerce")
+    return D
+
+def _v825o_save_ledger(D):
+    V825O_DIR.mkdir(parents=True, exist_ok=True)
+    D.to_csv(V825O_LEDGER, index=False, compression="gzip")
+
+def _v825o_status_map():
+    # Reuse H candidate history status where available.
+    base = _v825n_candidate_status()
+    if base is None or base.empty:
+        return {}
+    return {str(r["listing_id"]):r for _,r in base.iterrows()}
+
+def _v825o_create_or_update():
+    V825O_DIR.mkdir(parents=True, exist_ok=True)
+
+    ref, ref_scores = _v825o_reference_score_distribution()
+    status_map = _v825o_status_map()
+    old = _v825o_load_ledger()
+
+    # Seed from existing N ledger if O is new.
+    if old.empty and V825N_LEDGER.exists():
+        N = _v825n_load_ledger()
+        if not N.empty:
+            old = N.copy()
+            # Preserve original immutable scores, but replace rank field with
+            # an explicit reference-based rank computed from the frozen M reference.
+            old["reference_rank_frozen"] = [
+                _v825o_reference_rank(float(s), ref_scores) if pd.notna(s) else None
+                for s in pd.to_numeric(old["shadow_score"], errors="coerce")
+            ]
+            old["rank_source"] = "M_FROZEN_REFERENCE"
+            old["ledger_origin"] = "MIGRATED_FROM_V825N"
+
+    if old.empty:
+        old = pd.DataFrame(columns=[
+            "listing_id","ticker","entry_date","shadow_created_at","model_build_id",
+            "shadow_score","reference_rank_frozen","rank_source","ledger_origin",
+            "mature_60d","matured_at","tradable_mfe","winner20","is_stop","realized_ret"
+        ])
+
+    old_ids = set(old["listing_id"].astype(str)) if "listing_id" in old.columns else set()
+
+    # Add newly observable recent candidates from current cache.
+    new_rows = []
+    for cand in _v825o_recent_signal_candidates():
+        lid = str(cand["listing_id"])
+        if lid in old_ids:
+            continue
+
+        score = _v825n_score_row(cand["feature_dict"], ref)
+        rank = _v825o_reference_rank(score, ref_scores)
+
+        new_rows.append({
+            "listing_id": lid,
+            "ticker": cand["ticker"],
+            "entry_date": cand["entry_date"],
+            "shadow_created_at": datetime.now(timezone.utc).isoformat(),
+            "model_build_id": V825O_BUILD_ID,
+            "shadow_score": float(score),
+            "reference_rank_frozen": rank,
+            "rank_source": "M_FROZEN_REFERENCE",
+            "ledger_origin": "V825O_CONTINUOUS_SHADOW",
+            "mature_60d": False,
+            "matured_at": None,
+            "tradable_mfe": None,
+            "winner20": None,
+            "is_stop": None,
+            "realized_ret": None,
+        })
+
+    if new_rows:
+        old = pd.concat([old, pd.DataFrame(new_rows)], ignore_index=True)
+
+    # Update outcomes only for rows that correspond to H historical candidates.
+    # Never touch shadow_score or reference_rank_frozen.
+    for i, r in old.iterrows():
+        lid = str(r["listing_id"])
+        if lid not in status_map:
+            continue
+        s = status_map[lid]
+        if bool(s["mature_60d"]):
+            was_mature = str(r.get("mature_60d","")).lower() in ["true","1","yes"]
+            old.at[i,"mature_60d"] = True
+            if not was_mature or pd.isna(r.get("matured_at")):
+                old.at[i,"matured_at"] = datetime.now(timezone.utc).isoformat()
+            old.at[i,"tradable_mfe"] = s["tradable_mfe"]
+            old.at[i,"winner20"] = bool((s["tradable_mfe"] or 0) >= .20) if pd.notna(s["tradable_mfe"]) else None
+            old.at[i,"is_stop"] = s["is_stop"]
+            old.at[i,"realized_ret"] = s["realized_ret"]
+
+    # Deduplicate just in case.
+    old = old.sort_values(["entry_date","ticker"]).drop_duplicates("listing_id", keep="first").reset_index(drop=True)
+
+    _v825o_save_ledger(old)
+    return _v825o_summarize(old, len(ref_scores))
+
+def _v825o_bool_series(s):
+    if s.dtype == bool:
+        return s
+    return s.astype(str).str.lower().isin(["true","1","yes"])
+
+def _v825o_summarize(L, reference_n):
+    if L is None or L.empty:
+        result = {
+            "version":"V8.25O Frozen Reference Rank + Continuous Shadow",
+            "build_id":V825O_BUILD_ID,
+            "verdict":"WAITING_FOR_CONTEMPORANEOUS_SHADOW_CANDIDATES",
+            "ledger_rows":0,"mature_rows":0,"pending_rows":0,
+            "reference_n":reference_n,
+            "next_action":"KEEP_MODEL_FROZEN__RUN_PERIODICALLY_AS_NEW_CACHE_DATES_APPEAR"
+        }
+        _v825g_write(V825O_RESULT, result)
+        return result
+
+    D = L.copy()
+    D["shadow_score"] = pd.to_numeric(D["shadow_score"], errors="coerce")
+    D["reference_rank_frozen"] = pd.to_numeric(D["reference_rank_frozen"], errors="coerce")
+
+    mature_mask = _v825o_bool_series(D["mature_60d"])
+    M = D[mature_mask].copy()
+    P = D[~mature_mask].copy()
+
+    result = {
+        "version":"V8.25O Frozen Reference Rank + Continuous Shadow",
+        "build_id":V825O_BUILD_ID,
+        "verdict":"ACCUMULATING_GENUINE_FORWARD_SHADOW_DATA",
+        "ledger_rows":int(len(D)),
+        "mature_rows":int(len(M)),
+        "pending_rows":int(len(P)),
+        "reference_n":int(reference_n),
+        "mature_winner20":0,
+        "mature_stops":0,
+        "shadow_auc":None,
+        "fixed_operating_points":[]
+    }
+
+    if len(M):
+        M["winner20"] = _v825o_bool_series(M["winner20"])
+        M["is_stop"] = _v825o_bool_series(M["is_stop"])
+        result["mature_winner20"] = int(M["winner20"].sum())
+        result["mature_stops"] = int(M["is_stop"].sum())
+
+        if M["winner20"].nunique() >= 2:
+            result["shadow_auc"] = _v825m_auc(M["winner20"].astype(int), M["shadow_score"])
+
+        for keep_top in [0.25,0.33,0.50]:
+            keep = M["reference_rank_frozen"] >= (1.0-keep_top)
+            K = M[keep].copy()
+            wt = int(M["winner20"].sum())
+            st = int(M["is_stop"].sum())
+            wk = int(K["winner20"].sum())
+            sk = int(K["is_stop"].sum())
+            result["fixed_operating_points"].append({
+                "keep_top_fraction":keep_top,
+                "mature_rows":int(len(M)),
+                "kept_rows":int(len(K)),
+                "winners_kept":wk,"winners_total":wt,
+                "winner_recall":float(wk/max(1,wt)),
+                "stops_kept":sk,"stops_total":st,
+                "stop_reduction":float((st-sk)/max(1,st))
+            })
+
+    # Same strict N forward gate.
+    if len(M) < 12 or result["mature_winner20"] < 2 or result["mature_stops"] < 6:
+        verdict = "ACCUMULATING_GENUINE_FORWARD_SHADOW_DATA"
+        next_action = "KEEP_MODEL_FROZEN__RUN_PERIODICALLY_AND_WAIT_FOR_60D_MATURITIES"
+    else:
+        auc = result["shadow_auc"]
+        viable = [g for g in result["fixed_operating_points"]
+                  if g["winner_recall"] >= .75 and g["stop_reduction"] >= .40]
+        if auc is not None and auc >= .75 and viable:
+            verdict = "SHADOW_FORWARD_PASS__CONSIDER_FORMAL_PRODUCTION_GATE_AUDIT"
+            next_action = "RUN_FINAL_PRODUCTION_READINESS_AUDIT__NO_AUTO_PROMOTION"
+        elif auc is not None and auc >= .65:
+            verdict = "SHADOW_FORWARD_PARTIAL__RESEARCH_ONLY"
+            next_action = "KEEP_SHADOW_RUNNING__NO_PRODUCTION_FILTER"
+        else:
+            verdict = "SHADOW_FORWARD_FAIL__DO_NOT_PROMOTE_FILTER"
+            next_action = "FREEZE_FAILURE__NO_RETUNE_ON_SHADOW_SAMPLE"
+
+    result["verdict"] = verdict
+    result["next_action"] = next_action
+    result["decision_rule"] = "Each row gets a frozen score AND frozen percentile rank versus the immutable V8.25M mature reference distribution. Judge only after >=12 matured shadow rows with >=2 +20 winners and >=6 STOPs; PASS then requires AUC>=0.75 plus a fixed top {25%,33%,50%} reference-rank cut with winner recall>=75% and STOP reduction>=40%."
+    result["boundaries"] = "Frozen M model/reference. Scores and reference ranks immutable after creation. Continuous accumulation from existing Dow-30 cache only. No downloads, no threshold search, no retuning, no production rule change."
+
+    prev = D[["ticker","entry_date","shadow_score","reference_rank_frozen","ledger_origin","mature_60d","tradable_mfe","winner20","is_stop","realized_ret"]].copy()
+    prev["entry_date"] = pd.to_datetime(prev["entry_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    result["ledger_preview"] = prev.sort_values(["mature_60d","reference_rank_frozen"], ascending=[True,False]).to_dict("records")
+
+    _v825g_write(V825O_RESULT, result)
+    return result
+
+@APP.route("/v825o/run", methods=["GET","POST"])
+def v825o_run_route():
+    try:
+        _v825o_create_or_update()
+    except Exception as ex:
+        _v825g_write(V825O_RESULT, {
+            "version":"V8.25O Frozen Reference Rank + Continuous Shadow",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825o")
+
+@APP.get("/v825o")
+def v825o_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825g_read(V825O_RESULT,{})
+    ops=""
+    for g in R.get("fixed_operating_points") or []:
+        ops += (
+            f"<tr><td>Top {int(float(g.get('keep_top_fraction',0))*100)}%</td>"
+            f"<td>{e(g.get('mature_rows'))}</td>"
+            f"<td>{e(g.get('winners_kept'))}/{e(g.get('winners_total'))}</td>"
+            f"<td>{e(round(float(g.get('winner_recall',0))*100,1))}%</td>"
+            f"<td>{e(g.get('stops_kept'))}/{e(g.get('stops_total'))}</td>"
+            f"<td>{e(round(float(g.get('stop_reduction',0))*100,1))}%</td></tr>"
+        )
+
+    rows=""
+    for x in R.get("ledger_preview") or []:
+        tm=x.get("tradable_mfe"); rr=x.get("realized_ret")
+        tm_txt = "—" if tm is None or pd.isna(tm) else f"{float(tm)*100:.1f}%"
+        rr_txt = "—" if rr is None or pd.isna(rr) else f"{float(rr)*100:.2f}%"
+        rows += (
+            f"<tr><td><b>{e(x.get('ticker'))}</b></td>"
+            f"<td>{e(x.get('entry_date'))}</td>"
+            f"<td>{e(round(float(x.get('shadow_score',0)),3))}</td>"
+            f"<td>{e(round(float(x.get('reference_rank_frozen',0))*100,1))}%</td>"
+            f"<td>{e(x.get('ledger_origin'))}</td>"
+            f"<td>{e(x.get('mature_60d'))}</td>"
+            f"<td>{e(tm_txt)}</td><td>{e(x.get('winner20'))}</td>"
+            f"<td>{e(x.get('is_stop'))}</td><td>{e(rr_txt)}</td></tr>"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1300px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🧭 V8.25O Frozen Reference Rank + Continuous Shadow</h1>
+<div class='o'><b>修正 N 的关键问题：</b> 每笔候选的 rank 不再相对当前 Shadow cohort，而是相对 M 的冻结成熟参考分布锁死；同时从现有 Dow-30 recent cache 持续加入新的 contemporaneous shadow candidates。</div></div>
+
+<div class='c'><form method='post' action='/v825o/run'><button>▶ Create / Update Continuous Frozen Shadow</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Ledger <b>{e(R.get('ledger_rows','—'))}</b> · Mature <b>{e(R.get('mature_rows','—'))}</b> · Pending <b>{e(R.get('pending_rows','—'))}</b><br>
+Frozen reference N <b>{e(R.get('reference_n','—'))}</b> · Mature +20 <b>{e(R.get('mature_winner20','—'))}</b> · Mature STOP <b>{e(R.get('mature_stops','—'))}</b><br>
+Shadow AUC <b>{e(round(float(R.get('shadow_auc',0)),3) if R.get('shadow_auc') is not None else '—')}</b></div></div>
+
+<div class='c'><h2>Continuous Frozen Shadow Ledger</h2><div style='overflow:auto'><table>
+<tr><th>Ticker</th><th>Entry</th><th>Frozen score</th><th>Frozen reference rank</th><th>Origin</th><th>Mature?</th><th>Tradable MFE</th><th>+20?</th><th>STOP?</th><th>Realized</th></tr>
+{rows or "<tr><td colspan=10>Run once to create/update the ledger.</td></tr>"}
+</table></div></div>
+
+<div class='c'><h2>Fixed Operating Points — Mature Shadow Only</h2><div style='overflow:auto'><table>
+<tr><th>Keep</th><th>Mature rows</th><th>Winners kept</th><th>Winner recall</th><th>STOP kept</th><th>STOP reduction</th></tr>
+{ops or "<tr><td colspan=6>Not enough mature shadow cases yet.</td></tr>"}
+</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}</div>
+<div class='g'><b>Next:</b> {e(R.get('next_action','Run once to create/update the ledger'))}</div>
 <p>{e(R.get('boundaries',''))}</p></div>
 </div></body></html>"""
