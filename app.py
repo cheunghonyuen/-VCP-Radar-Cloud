@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825e-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825f-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🗂️ V8.25F Recent Price / Cache Coverage Audit</h2>
+        <p>先查现有 price/cache 是否覆盖 2023-11-30 以后，再决定是否生成 research-only recent VCP candidates。0下载 / 0重扫 / 0调参。</p>
+        <a href='/v825f'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25F</button></a>
+        </div>
+        <div id='v825e-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧪 V8.25E Free-Window Contemporaneous VCP Feasibility</h2>
         <p>免费第一关：用现有 V6.94 candidate store + 免费 PIT cache，在真实重叠近年窗口比较 Control vs Fundamentals Overlay。先 Preflight，再 OOS。</p>
         <a href='/v825e'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25E</button></a>
@@ -60356,4 +60361,362 @@ Control features: <b>{e(P.get('control_feature_count','—'))}</b><br>
 <p><b>Sample:</b> {e(R.get('sample_rows','—'))} rows · {e(R.get('sample_tickers','—'))} tickers · +50 {e(R.get('winners50','—'))} · STOP {e(R.get('stops','—'))}</p>
 <p><b>Next:</b> {e(R.get('next_action','—'))}</p>
 <p>{e(R.get('interpretation',''))}</p></div>
+</div></body></html>"""
+
+
+# ================= V8.25F RECENT PRICE / CACHE COVERAGE AUDIT =================
+# Read-only audit before any new contemporaneous candidate generation.
+# Questions:
+# 1) Do existing price/cache assets cover >= 2023-11-30?
+# 2) How many Dow-30 symbols have usable recent data?
+# 3) What is the latest available date across daily / 5m / 1m / known replay/cache families?
+# No downloads, no regeneration, no replay, no tuning.
+V825F_DIR = DATA_DIR / "v825f_recent_price_cache_coverage_audit"
+V825F_RESULT = V825F_DIR / "result.json"
+V825F_BUILD_ID = "V825F_RECENT_PRICE_CACHE_COVERAGE_20260902A"
+
+def _v825f_safe_csv_meta(path, ticker_hint=None):
+    out = {
+        "path": str(path),
+        "exists": Path(path).exists(),
+        "rows": 0,
+        "columns": [],
+        "date_min": None,
+        "date_max": None,
+        "ticker": ticker_hint,
+        "error": None,
+    }
+    if not out["exists"]:
+        return out
+    try:
+        p = Path(path)
+        comp = "gzip" if p.suffix == ".gz" or p.name.endswith(".csv.gz") else "infer"
+        D = pd.read_csv(p, compression=comp)
+        out["rows"] = int(len(D))
+        out["columns"] = list(D.columns)[:80]
+        date_col = next((c for c in ["date","datetime","timestamp","time","entry_date"] if c in D.columns), None)
+        if date_col:
+            z = pd.to_datetime(D[date_col], errors="coerce", utc=True)
+            z = z.dropna()
+            if len(z):
+                out["date_min"] = str(z.min())
+                out["date_max"] = str(z.max())
+        for c in ["ticker","symbol","listing_id"]:
+            if c in D.columns and ticker_hint is None:
+                vals = D[c].astype(str).head(3).tolist()
+                out["ticker_sample"] = vals
+                break
+    except Exception as ex:
+        out["error"] = f"{type(ex).__name__}: {ex}"
+    return out
+
+def _v825f_scan_dir(base, name, max_files=400):
+    result = {
+        "name": name,
+        "base": str(base),
+        "exists": Path(base).exists(),
+        "files_scanned": 0,
+        "symbol_files": 0,
+        "symbols": [],
+        "recent_symbols": [],
+        "date_min": None,
+        "date_max": None,
+        "errors": [],
+        "samples": [],
+    }
+    b = Path(base)
+    if not b.exists():
+        return result
+
+    files = []
+    for pat in ["*.csv.gz","*.csv","*.parquet","*.json"]:
+        files.extend(sorted(b.rglob(pat)))
+    files = files[:max_files]
+    result["files_scanned"] = len(files)
+
+    all_min = []
+    all_max = []
+    syms = set()
+    recent_syms = set()
+    cutoff = pd.Timestamp("2023-11-30", tz="UTC")
+
+    for p in files:
+        ticker = p.name.split(".")[0].upper()
+        if ticker in V825_DOW30:
+            syms.add(ticker)
+
+        meta = None
+        try:
+            if p.name.endswith(".csv") or p.name.endswith(".csv.gz"):
+                meta = _v825f_safe_csv_meta(p, ticker)
+            elif p.suffix == ".parquet":
+                D = pd.read_parquet(p)
+                meta = {
+                    "path": str(p), "exists": True, "rows": int(len(D)),
+                    "columns": list(D.columns)[:80], "ticker": ticker, "error": None,
+                    "date_min": None, "date_max": None,
+                }
+                dc = next((c for c in ["date","datetime","timestamp","time"] if c in D.columns), None)
+                if dc:
+                    z = pd.to_datetime(D[dc], errors="coerce", utc=True).dropna()
+                    if len(z):
+                        meta["date_min"] = str(z.min())
+                        meta["date_max"] = str(z.max())
+            elif p.suffix == ".json":
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                rows = obj if isinstance(obj, list) else []
+                meta = {
+                    "path": str(p), "exists": True, "rows": len(rows),
+                    "columns": sorted(rows[0].keys()) if rows and isinstance(rows[0], dict) else [],
+                    "ticker": ticker, "error": None, "date_min": None, "date_max": None,
+                }
+                if rows:
+                    vals = []
+                    for r in rows[:5000]:
+                        if not isinstance(r, dict):
+                            continue
+                        v = r.get("date") or r.get("datetime") or r.get("timestamp") or r.get("time")
+                        dt = pd.to_datetime(v, errors="coerce", utc=True)
+                        if pd.notna(dt):
+                            vals.append(dt)
+                    if vals:
+                        meta["date_min"] = str(min(vals))
+                        meta["date_max"] = str(max(vals))
+        except Exception as ex:
+            result["errors"].append({"path": str(p), "error": f"{type(ex).__name__}: {ex}"})
+            continue
+
+        if meta is None:
+            continue
+
+        if len(result["samples"]) < 20:
+            result["samples"].append(meta)
+
+        if meta.get("date_min"):
+            try: all_min.append(pd.Timestamp(meta["date_min"]))
+            except Exception: pass
+        if meta.get("date_max"):
+            try:
+                mx = pd.Timestamp(meta["date_max"])
+                all_max.append(mx)
+                if ticker in V825_DOW30 and mx >= cutoff:
+                    recent_syms.add(ticker)
+            except Exception:
+                pass
+
+    result["symbols"] = sorted(syms)
+    result["symbol_files"] = len(syms)
+    result["recent_symbols"] = sorted(recent_syms)
+    result["date_min"] = str(min(all_min)) if all_min else None
+    result["date_max"] = str(max(all_max)) if all_max else None
+    return result
+
+def _v825f_known_asset_dirs():
+    candidates = []
+    # Explicitly known project roots / cache families from prior versions.
+    for nm in [
+        "V617_DIR","V617FV1_DIR","V620_DIR","V621_DIR","V622_DIR","V623_DIR","V624_DIR",
+        "V625_DIR","V626_DIR","V627_DIR","V628_DIR","V629_DIR","V630_DIR","V631_DIR",
+        "V632_DIR","V633_DIR","V634_DIR","V635_DIR","V636_DIR","V637_DIR","V638_DIR",
+        "V639_DIR","V640_DIR","V641_DIR","V642_DIR","V643_DIR","V644_DIR","V645_DIR",
+        "V646_DIR","V647_DIR","V648_DIR","V649_DIR","V650_DIR","V651_DIR","V652_DIR",
+        "V653_DIR","V654_DIR","V655_DIR","V656_DIR","V657_DIR","V658_DIR","V659_DIR",
+        "V660_DIR","V661_DIR","V662_DIR","V663_DIR","V664_DIR","V665_DIR","V666_DIR",
+        "V667_DIR","V668_DIR","V669_DIR","V670_DIR","V671_DIR","V672_DIR","V673_DIR",
+        "V674_DIR","V675_DIR","V676_DIR","V677_DIR","V678_DIR","V679_DIR","V680_DIR",
+        "V681_DIR","V682_DIR","V683_DIR","V684_DIR","V685_DIR","V686_DIR","V687_DIR",
+        "V688_DIR","V689_DIR","V690_DIR","V691_DIR","V692_DIR","V693_DIR","V694_DIR",
+        "DAYTRADE_DATA_DIR","DATA_DIR"
+    ]:
+        v = globals().get(nm)
+        if v:
+            try:
+                p = Path(v)
+                if p.exists():
+                    candidates.append((nm, p))
+            except Exception:
+                pass
+
+    # De-duplicate paths.
+    seen = set()
+    out = []
+    for nm,p in candidates:
+        s = str(p.resolve())
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append((nm,p))
+    return out
+
+def _v825f_run():
+    V825F_DIR.mkdir(parents=True, exist_ok=True)
+
+    cutoff = pd.Timestamp("2023-11-30", tz="UTC")
+    dirs = _v825f_known_asset_dirs()
+    scans = []
+
+    # Keep this audit bounded: inspect project-level likely cache/replay directories,
+    # but do not recurse indiscriminately through the whole volume.
+    priority = []
+    for nm,p in dirs:
+        low = p.name.lower()
+        if any(tok in low for tok in ["cache","replay","histor","daily","feature","market","v617","v644","v694","daytrade"]):
+            priority.append((nm,p))
+    # Always include DATA_DIR as final discovery root, but cap file scanning.
+    if not priority:
+        priority = dirs[:8]
+    else:
+        priority = priority[:12]
+
+    for nm,p in priority:
+        scans.append(_v825f_scan_dir(p, nm, max_files=250))
+
+    # Direct V6.94 candidate-store date coverage.
+    v694 = {
+        "exists": False, "rows": 0, "date_min": None, "date_max": None,
+        "recent_rows": 0, "recent_dow_rows": 0
+    }
+    try:
+        D = _v825e_candidate_store()
+        v694["exists"] = True
+        v694["rows"] = int(len(D))
+        if len(D):
+            v694["date_min"] = str(D.entry_date.min().date())
+            v694["date_max"] = str(D.entry_date.max().date())
+            recent = D[D.entry_date >= pd.Timestamp("2023-11-30")]
+            v694["recent_rows"] = int(len(recent))
+            v694["recent_dow_rows"] = int(recent[recent.ticker.isin(V825_DOW30)].shape[0])
+    except Exception as ex:
+        v694["error"] = f"{type(ex).__name__}: {ex}"
+
+    # Direct V6.44 trigger-cache date coverage.
+    v644 = {
+        "exists": False, "rows": 0, "date_min": None, "date_max": None,
+        "recent_rows": 0, "recent_dow_rows": 0
+    }
+    try:
+        if V644_TRADE_CACHE.exists():
+            T = pd.read_csv(V644_TRADE_CACHE, compression="gzip")
+            v644["exists"] = True
+            v644["rows"] = int(len(T))
+            if "entry_date" in T.columns:
+                ed = pd.to_datetime(T["entry_date"], errors="coerce").dt.normalize()
+                z = ed.dropna()
+                if len(z):
+                    v644["date_min"] = str(z.min().date())
+                    v644["date_max"] = str(z.max().date())
+                    rec = T.loc[ed >= pd.Timestamp("2023-11-30")].copy()
+                    v644["recent_rows"] = int(len(rec))
+                    if "ticker" in rec.columns:
+                        v644["recent_dow_rows"] = int(rec["ticker"].astype(str).str.upper().isin(V825_DOW30).sum())
+    except Exception as ex:
+        v644["error"] = f"{type(ex).__name__}: {ex}"
+
+    latest_candidates = []
+    recent_dow_union = set()
+    for s in scans:
+        if s.get("date_max"):
+            try: latest_candidates.append(pd.Timestamp(s["date_max"]))
+            except Exception: pass
+        recent_dow_union.update(s.get("recent_symbols") or [])
+
+    latest_any = max(latest_candidates) if latest_candidates else None
+    latest_any_str = str(latest_any) if latest_any is not None else None
+
+    if latest_any is None or latest_any < cutoff:
+        verdict = "NO_EXISTING_PRICE_CACHE_COVERS_FREE_PIT_WINDOW"
+        next_action = "DO_NOT_GENERATE_CANDIDATES__NEED_RECENT_PRICE_DATA_SOURCE_OR_CACHE_FIRST"
+    elif len(recent_dow_union) < 10:
+        verdict = "RECENT_PRICE_COVERAGE_TOO_THIN"
+        next_action = "DO_NOT_GENERATE_CANDIDATES__AUDIT_RECENT_PRICE_SOURCE_SCOPE"
+    else:
+        verdict = "RECENT_PRICE_CACHE_AVAILABLE_FOR_RESEARCH_GENERATION"
+        next_action = "BUILD_RESEARCH_ONLY_RECENT_VCP_CANDIDATES_FROM_EXISTING_CACHE__KEEP_RULES_FROZEN"
+
+    result = {
+        "version": "V8.25F Recent Price / Cache Coverage Audit",
+        "build_id": V825F_BUILD_ID,
+        "verdict": verdict,
+        "cutoff": "2023-11-30",
+        "latest_any_price_cache_date": latest_any_str,
+        "recent_dow_symbols_union": sorted(recent_dow_union),
+        "recent_dow_symbol_count": len(recent_dow_union),
+        "v694_candidate_store": v694,
+        "v644_trigger_cache": v644,
+        "asset_scans": scans,
+        "next_action": next_action,
+        "boundaries": "READ-ONLY cache coverage audit. 0 downloads, 0 regeneration, 0 replay, 0 strategy tuning."
+    }
+    _v825_jwrite(V825F_RESULT, result)
+    return result
+
+@APP.route("/v825f/run", methods=["GET","POST"])
+def v825f_run_route():
+    try:
+        _v825f_run()
+    except Exception as ex:
+        _v825_jwrite(V825F_RESULT, {
+            "version":"V8.25F Recent Price / Cache Coverage Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825f")
+
+@APP.get("/api/v825f")
+def v825f_api():
+    return jsonify(_v825_jread(V825F_RESULT, {"verdict":"NOT_RUN"}))
+
+@APP.get("/v825f")
+def v825f_page():
+    import html
+    e=lambda x: html.escape(str(x))
+    R = _v825_jread(V825F_RESULT,{})
+    V6 = R.get("v644_trigger_cache") or {}
+    V9 = R.get("v694_candidate_store") or {}
+
+    scan_rows = ""
+    for s in R.get("asset_scans") or []:
+        scan_rows += (
+            f"<tr><td><b>{e(s.get('name'))}</b></td>"
+            f"<td>{e(s.get('files_scanned'))}</td>"
+            f"<td>{e(s.get('date_min'))}</td>"
+            f"<td>{e(s.get('date_max'))}</td>"
+            f"<td>{e(len(s.get('recent_symbols') or []))}</td>"
+            f"<td>{e(', '.join((s.get('recent_symbols') or [])[:15]))}</td></tr>"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1400px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🗂️ V8.25F Recent Price / Cache Coverage Audit</h1>
+<div class='o'><b>先查现有价格资产，再决定要不要生成近年 research candidates。</b> 只回答：有没有覆盖 2023-11-30 以后、Dow30 覆盖多少、最晚到哪天。</div></div>
+
+<div class='c'><form method='post' action='/v825f/run'><button>▶ Run Recent Price / Cache Audit</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>
+Cutoff: <b>{e(R.get('cutoff','—'))}</b><br>
+Latest any cache date: <b>{e(R.get('latest_any_price_cache_date','—'))}</b><br>
+Dow symbols with recent cache: <b>{e(R.get('recent_dow_symbol_count','—'))}/30</b><br>
+{e(', '.join(R.get('recent_dow_symbols_union') or []))}
+</div></div>
+
+<div class='c'><h2>Known Research Assets</h2>
+<div class='g'><b>V6.44 trigger cache</b> · rows {e(V6.get('rows','—'))} · {e(V6.get('date_min','—'))} → {e(V6.get('date_max','—'))} · recent rows {e(V6.get('recent_rows','—'))} · recent Dow rows {e(V6.get('recent_dow_rows','—'))}</div>
+<br>
+<div class='g'><b>V6.94 candidate store</b> · rows {e(V9.get('rows','—'))} · {e(V9.get('date_min','—'))} → {e(V9.get('date_max','—'))} · recent rows {e(V9.get('recent_rows','—'))} · recent Dow rows {e(V9.get('recent_dow_rows','—'))}</div>
+</div>
+
+<div class='c'><h2>Cache / Replay Family Coverage</h2><div style='overflow:auto'><table>
+<tr><th>Asset family</th><th>Files scanned</th><th>Date min</th><th>Date max</th><th>Recent Dow count</th><th>Recent Dow symbols</th></tr>
+{scan_rows or "<tr><td colspan=6>Run audit first.</td></tr>"}
+</table></div></div>
+
+<div class='c'><div class='g'><b>Next:</b> {e(R.get('next_action','Run audit first'))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
 </div></body></html>"""
