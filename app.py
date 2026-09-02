@@ -46783,7 +46783,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v828-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v829-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧾 V8.29 VCP Qualification / Pivot / Trigger Code Audit</h2>
+        <p>不回测、不调参。直接审正式引擎代码：VCP Qualification → Pivot → Breakout Trigger 到底哪些是 Hard Gate、哪些只是 Soft Edge/Score，并核对 Top25 ledger provenance。</p>
+        <a href='/v829'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.29</button></a>
+        </div>
+        <div id='v828-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🔬 V8.28 Strict VCP Qualification Forensic Audit</h2>
         <p>先审第一层：Trend Template / T1→T2→T3 contraction / pivot / volume dry-up / breakout demand / entry location。对比 Big Winner、True Failure STOP、Recovered +20 STOP；只诊断，不调参。</p>
         <a href='/v828'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.28</button></a>
@@ -66424,3 +66429,179 @@ def v828_page():
     pr="".join("<tr><td>"+e(x.get("check"))+"</td>"+"".join(f"<td>{pct(x.get(g))}</td>" for g in groups)+"</tr>" for x in R.get("structural_pass_rates",[])) or "<tr><td colspan=4>—</td></tr>"
     cnt=R.get("group_counts",{})
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1250px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#ecfeff;border:2px solid #0891b2;border-radius:14px;padding:14px}}a{{color:#5b21b6}}</style></head><body><div class='w'><a href='/'>← 首页</a><div class='c'><h1>🔬 V8.28 Strict VCP Qualification Forensic Audit</h1><div class='warn'><b>第一层优先。</b> 先证明机器找到的是不是严格 VCP，再谈 Stop / Exit / MaxDD。完全冻结 Top25、Entry、-7% Stop、Exit；0 Tiingo、0 universe rescan。</div></div><div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p>V8.27 trade rows: {e(P.get('v827_trade_rows','—'))} · Cache mapping: {float(P.get('manifest_mapping_coverage',0)):.1%}</p><p>{e(P.get('measurement_contract',''))}</p><form method='post' action='/v828/preflight'><button>A. Run First-Layer Preflight</button></form><br><button onclick='startRun()'>B. Start Strict VCP Forensic Audit</button><p id='st'>{e(S.get('status'))} · {e(S.get('message'))}</p></div><div class='c'><h2>Three Cohorts</h2><p><b>Big Winner +20:</b> {e(cnt.get('BIG_WINNER_20P','—'))} · <b>True Failure STOP:</b> {e(cnt.get('TRUE_FAILURE_STOP','—'))} · <b>Recovered +20 STOP:</b> {e(cnt.get('RECOVERED_20P_STOP','—'))}</p><div class='ok'><b>Diagnosis:</b> {e(R.get('diagnosis','—'))}</div></div><div class='c'><h2>Structural Pass Rates</h2><div style='overflow:auto'><table><tr><th>Check</th><th>BIG WINNER +20</th><th>TRUE FAILURE STOP</th><th>RECOVERED +20 STOP</th></tr>{pr}</table></div></div><div class='c'><h2>Raw VCP Anatomy Medians</h2><div style='overflow:auto'><table><tr><th>Feature</th><th>BIG WINNER +20</th><th>TRUE FAILURE STOP</th><th>RECOVERED +20 STOP</th></tr>{mr}</table></div></div><div class='c'><div class='info'><b>How to read:</b> 如果 True Failure 在 Trend Template / contraction shrink / pivot / dry-up / breakout demand 明显弱于 Big Winner，第一层 VCP Qualification 确认有漏网；如果 Recovered +20 与 Big Winner 很接近，则那一批主要转去查 Trigger / Stop / Re-entry，而不是把它们误杀成“坏 VCP”。</div><p><b>限制：</b> {e(R.get('important_limit',''))}</p>{"<a href='/v828/export'><button>Export Trade-Level Forensic CSV</button></a>" if V828_TRADE_CSV.exists() else ""}</div><script>async function poll(){{try{{let s=await (await fetch('/api/v828',{{cache:'no-store'}})).json();document.getElementById('st').innerText=s.status+' · '+s.phase+' · '+s.message+' · '+(s.processed||0)+'/'+(s.total||0)+' · errors '+(s.errors||0);if(s.status==='running')setTimeout(poll,2000);}}catch(e){{}}}} async function startRun(){{let r=await fetch('/v828/start',{{method:'POST'}});let s=await r.json();document.getElementById('st').innerText=s.error||s.message||'started';poll();}} poll();</script></div></body></html>"""
+
+
+# ================= V8.29 VCP QUALIFICATION / PIVOT / TRIGGER CODE AUDIT =================
+V829_DIR = DATA_DIR / "v829_vcp_qualification_pivot_trigger_code_audit"
+V829_RESULT = V829_DIR / "result.json"
+V829_BUILD_ID = "v829-code-audit-20260902a"
+
+def _v829_engine_path():
+    return Path(__file__).with_name("jlaw_v6_1_DECISION_FAST.py")
+
+def _v829_func_source(src, tree, name):
+    import ast
+    for node in tree.body:
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name==name:
+            seg=ast.get_source_segment(src,node)
+            if seg:return seg
+            lines=src.splitlines()
+            a=max(0,getattr(node,'lineno',1)-1); b=getattr(node,'end_lineno',a+1)
+            return "\n".join(lines[a:b])
+    return ""
+
+def _v829_snippets(text, patterns, radius=2, limit=18):
+    import re
+    lines=text.splitlines(); hits=[]; seen=set()
+    for i,line in enumerate(lines):
+        if any(re.search(p,line,re.I) for p in patterns):
+            a=max(0,i-radius); b=min(len(lines),i+radius+1)
+            key=(a,b)
+            if key in seen:continue
+            seen.add(key)
+            hits.append({"line":i+1,"text":"\n".join(f"{j+1}: {lines[j]}" for j in range(a,b))})
+            if len(hits)>=limit:break
+    return hits
+
+def _v829_has(txt, pats):
+    import re
+    return all(re.search(p,txt,re.I|re.S) is not None for p in pats)
+
+def _v829_any(txt, pats):
+    import re
+    return any(re.search(p,txt,re.I|re.S) is not None for p in pats)
+
+def _v829_audit():
+    import ast,re,hashlib
+    t0=time.time(); ep=_v829_engine_path()
+    if not ep.exists():
+        raise RuntimeError("GitHub root missing jlaw_v6_1_DECISION_FAST.py; cannot audit the actual production engine")
+    src=ep.read_text(encoding='utf-8',errors='replace')
+    tree=ast.parse(src)
+    names=[n.name for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))]
+    wanted=["stage2","supply","historical_signals","_v6_edges","_v6_decision_tier","_v6_rank_signals","market_ok","rs_score"]
+    funcs={k:_v829_func_source(src,tree,k) for k in wanted}
+    hs=funcs.get('historical_signals',''); sup=funcs.get('supply',''); edges=funcs.get('_v6_edges',''); st2=funcs.get('stage2','')
+
+    # Exact source-level evidence. We intentionally distinguish a hard admission condition
+    # from a feature that merely contributes to an edge count / rank score.
+    refs=lambda txt,terms: [x for x in terms if re.search(r'\b'+re.escape(x)+r'\b',txt,re.I)]
+    hs_refs=refs(hs,["stage2","supply","c1","c2","c3","dry","pivot","piv","volratio","vr","extension","edge_count","_v6_edges"])
+    edge_refs=refs(edges,["c1","c2","c3","dry","pivot_tight","volratio","extension","supply_score"])
+
+    strict_breakout = _v829_has(hs,[r'prev\s*<=\s*piv',r'close\s*>\s*piv']) or _v829_has(hs,[r'prev\s*<=\s*pivot',r'close\s*>\s*pivot'])
+    ext_gate = _v829_any(hs,[r'ext\w*\s*<=\s*\.0?3',r'extension\s*<=\s*\.0?3'])
+    vol_gate = _v829_any(hs,[r'vr\s*>=\s*1\.2',r'volratio\s*>=\s*1\.2'])
+    stage2_hard = _v829_any(hs,[r'if\s+not\s+stage2\s*\(',r'if\s+stage2\s*\([^\n]*\)\s*:\s*continue',r'if\s+not\s+s2',r'continue[^\n]*stage2'])
+    # Contraction/dry-up are hard only if historical_signals itself explicitly filters on them;
+    # use of _v6_edges means they can be soft ranking/admission edges instead.
+    contraction_direct = _v829_any(hs,[r'c1[^\n]{0,100}c2[^\n]{0,100}c3',r'c3[^\n]{0,100}c2[^\n]{0,100}c1'])
+    contraction_hard = contraction_direct and _v829_any(hs,[r'continue',r'if'])
+    dry_direct = bool(re.search(r'\bdry\b',hs,re.I))
+    dry_hard = dry_direct and _v829_any(hs,[r'if[^\n]*\bdry\b',r'\bdry\b[^\n]*continue'])
+    edges_used = "_v6_edges" in hs or bool(edges)
+
+    rules=[]
+    def add(concept,actual,enforcement,evidence,risk):
+        rules.append({"concept":concept,"actual":actual,"enforcement":enforcement,"evidence":evidence,"risk":risk})
+    add("Trend Template / Stage 2",
+        "stage2() exists" if st2 else "stage2() not found",
+        "HARD/BASE GATE" if stage2_hard else ("REFERENCED / NEEDS MANUAL TRACE" if "stage2" in hs else "NOT SEEN IN historical_signals"),
+        "historical_signals refs: "+", ".join(hs_refs) if hs_refs else "No key refs found",
+        "Low" if stage2_hard else "Medium")
+    add("T1→T2→T3 contraction sequence",
+        "supply() computes contraction components; _v6_edges references: "+(", ".join([x for x in edge_refs if x in ('c1','c2','c3')]) or "none"),
+        "HARD GATE" if contraction_hard else ("SOFT EDGE / SCORE" if edges_used and any(x in edge_refs for x in ('c1','c2','c3')) else "NOT PROVEN"),
+        "Direct contraction filter inside historical_signals="+str(bool(contraction_hard)),
+        "HIGH" if not contraction_hard else "Low")
+    add("Volume dry-up before breakout",
+        "supply() / V6 edge input includes dry" if ("dry" in sup or "dry" in edges) else "dry input not found",
+        "HARD GATE" if dry_hard else ("SOFT EDGE / SCORE" if edges_used and "dry" in edge_refs else "NOT PROVEN"),
+        "Direct dry-up filter inside historical_signals="+str(bool(dry_hard)),
+        "HIGH" if not dry_hard else "Low")
+    add("Pivot breakout confirmation",
+        "prev<=pivot AND close>pivot" if strict_breakout else "Exact close-cross pattern not proven from source scan",
+        "HARD BREAKOUT GATE" if strict_breakout else "NEEDS TRACE",
+        "historical_signals exact source scan",
+        "Low" if strict_breakout else "HIGH")
+    add("Entry extension from pivot",
+        "<=3% source condition found" if ext_gate else "3% gate not proven",
+        "HARD BREAKOUT GATE" if ext_gate else "NEEDS TRACE",
+        "historical_signals source scan",
+        "Low" if ext_gate else "HIGH")
+    add("Breakout demand / volume",
+        ">=1.20x source condition found" if vol_gate else "1.20x gate not proven",
+        "HARD BREAKOUT GATE" if vol_gate else ("SOFT EDGE / SCORE" if "volratio" in edge_refs else "NEEDS TRACE"),
+        "historical_signals / _v6_edges source scan",
+        "Low" if vol_gate else "Medium")
+
+    # Frozen ledger provenance / current forensic evidence.
+    ledger={}
+    try:
+        p=_v828_v827_trade_path(); ledger={"path":str(p),"exists":p.exists()}
+        if p.exists():
+            q=pd.read_csv(p,nrows=5); ledger.update({"columns":list(q.columns),"size_bytes":p.stat().st_size})
+    except Exception as ex: ledger={"error":f"{type(ex).__name__}: {ex}"}
+    v828={}
+    try:
+        if V828_RESULT.exists():
+            rr=json.loads(V828_RESULT.read_text(encoding='utf-8'))
+            v828={"diagnosis":rr.get('diagnosis'),"group_counts":rr.get('group_counts'),"structural_pass_rates":rr.get('structural_pass_rates')}
+    except Exception as ex:v828={"error":f"{type(ex).__name__}: {ex}"}
+
+    soft=[r['concept'] for r in rules if 'SOFT' in r['enforcement']]
+    hard_break=[r['concept'] for r in rules if r['concept'] in ("Pivot breakout confirmation","Entry extension from pivot","Breakout demand / volume") and 'HARD' in r['enforcement']]
+    if ("T1→T2→T3 contraction sequence" in soft or "Volume dry-up before breakout" in soft) and len(hard_break)>=2:
+        diagnosis="VCP_QUALIFICATION_TOO_WIDE__CONTRACTION_DRYUP_ARE_SOFT_WHILE_FORMAL_BREAKOUT_IS_HARD"
+        next_step="V8.30 should test a STRICT VCP QUALIFICATION hard gate as an A/B replay, while leaving the existing formal breakout trigger frozen. Before changing trigger, align the V8.28 proxy pivot with exact engine supply() pivot on matched entries."
+    elif soft:
+        diagnosis="FIRST_LAYER_HAS_SOFT_VCP_EDGES__REQUIRES_STRICT_GATE_AB"
+        next_step="Promote only source-supported VCP structure features to a controlled hard-gate A/B; do not tune stop/exit yet."
+    else:
+        diagnosis="NO_OBVIOUS_SOFT_GATE_FROM_STATIC_SCAN__RUN_EXACT_MATCHED_ENTRY_TRACE"
+        next_step="Trace exact production entry rows through supply()/historical_signals before changing any rule."
+    out={"version":"V8.29 VCP Qualification / Pivot / Trigger Code Audit","build_id":V829_BUILD_ID,
+         "generated_at":datetime.now(timezone.utc).isoformat(),"elapsed_sec":round(time.time()-t0,3),
+         "engine_path":str(ep),"engine_sha256":hashlib.sha256(src.encode('utf-8')).hexdigest(),"engine_bytes":len(src.encode('utf-8')),
+         "functions_found":{k:bool(funcs.get(k)) for k in wanted},"historical_signals_refs":hs_refs,"v6_edge_refs":edge_refs,
+         "rules":rules,"diagnosis":diagnosis,"next_step":next_step,"ledger":ledger,"v828_evidence":v828,
+         "important_limit":"Static source audit proves what the current engine code requires, but V8.28 used an independent 20-day pivot proxy. Therefore low V8.28 entry_closed_above_pivot must NOT be treated as proof that the production formal-breakout gate was bypassed until an exact supply()-pivot matched-entry trace is run.",
+         "source_snippets":_v829_snippets(hs+"\n\n# supply\n"+sup+"\n\n# _v6_edges\n"+edges,[r'prev\s*<=',r'close\s*>',r'1\.2',r'\.03',r'c1',r'c2',r'c3',r'\bdry\b',r'_v6_edges'],2,24)}
+    V829_DIR.mkdir(parents=True,exist_ok=True); V829_RESULT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return out
+
+@APP.post('/v829/run')
+def v829_run():
+    try:_v829_audit()
+    except Exception as ex:
+        V829_DIR.mkdir(parents=True,exist_ok=True)
+        V829_RESULT.write_text(json.dumps({"version":"V8.29","diagnosis":"ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding='utf-8')
+    return redirect('/v829')
+
+@APP.get('/v829')
+def v829_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R={}
+    try:
+        if V829_RESULT.exists():R=json.loads(V829_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    rows=""
+    for r in R.get('rules',[]):
+        enf=str(r.get('enforcement','')); bg='#ecfdf5' if 'HARD' in enf else ('#fff7ed' if 'SOFT' in enf else '#f8fafc')
+        rows+=f"<tr style='background:{bg}'><td><b>{e(r.get('concept'))}</b></td><td>{e(r.get('actual'))}</td><td><b>{e(enf)}</b></td><td>{e(r.get('evidence'))}</td><td>{e(r.get('risk'))}</td></tr>"
+    if not rows:rows="<tr><td colspan=5>Run code audit first.</td></tr>"
+    ff="".join(f"<tr><td>{e(k)}</td><td>{'✅' if v else '❌'}</td></tr>" for k,v in R.get('functions_found',{}).items())
+    sn="".join(f"<details><summary>source line ~{e(x.get('line'))}</summary><pre>{e(x.get('text'))}</pre></details>" for x in R.get('source_snippets',[]))
+    led=R.get('ledger',{})
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:18px}}.w{{max-width:1250px;margin:auto}}.c{{background:white;border-radius:22px;padding:20px;margin:15px 0}}button{{background:#0f172a;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px 6px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}.warn{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:14px}}.ok{{background:#ecfdf5;border:2px solid #10b981;border-radius:14px;padding:14px}}.info{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:14px}}pre{{white-space:pre-wrap;word-break:break-word;font-size:11px;background:#f8fafc;padding:10px;border-radius:10px}}a{{color:#5b21b6}}</style></head><body><div class='w'>
+<a href='/'>← 首页</a><div class='c'><h1>🧾 V8.29 VCP Qualification / Pivot / Trigger Code Audit</h1><div class='warn'><b>只审第一层代码，不回测、不调参。</b> 直接读取部署中的 jlaw_v6_1_DECISION_FAST.py，确认 VCP Qualification → Pivot → Breakout Trigger 哪些是真 Hard Gate、哪些只是 Edge/Score。Top25 / Entry / Stop / Exit 全冻结；0 Tiingo。</div></div>
+<div class='c'><h2>Exact Engine Audit</h2><form method='post' action='/v829/run'><button>A. Run Exact Code Audit</button></form><p>Engine: {e(R.get('engine_path','—'))}</p><p>SHA256: {e(R.get('engine_sha256','—'))}</p><p>Elapsed: {e(R.get('elapsed_sec','—'))}s</p></div>
+<div class='c'><h2>Diagnosis</h2><div class='ok'><b>{e(R.get('diagnosis','NOT_RUN'))}</b></div><p><b>Next:</b> {e(R.get('next_step','—'))}</p></div>
+<div class='c'><h2>Rule Enforcement Matrix</h2><div style='overflow:auto'><table><tr><th>VCP / Entry concept</th><th>Actual engine logic</th><th>Enforcement</th><th>Evidence</th><th>Risk</th></tr>{rows}</table></div></div>
+<div class='c'><h2>Engine Functions Present</h2><table><tr><th>Function</th><th>Found</th></tr>{ff or '<tr><td colspan=2>—</td></tr>'}</table></div>
+<div class='c'><h2>Frozen Ledger Provenance</h2><p><b>Path:</b> {e(led.get('path','—'))}</p><p><b>Exists:</b> {e(led.get('exists','—'))} · <b>Size:</b> {e(led.get('size_bytes','—'))}</p><p><b>Columns:</b> {e(', '.join(led.get('columns',[])) if isinstance(led.get('columns'),list) else led.get('columns','—'))}</p></div>
+<div class='c'><div class='info'><b>重要限制：</b> {e(R.get('important_limit',''))}</div></div>
+<details class='c'><summary><b>Exact source snippets</b></summary>{sn or 'Run audit first.'}</details>
+</div></body></html>"""
