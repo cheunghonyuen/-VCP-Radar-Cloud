@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826b-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v826c-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🩻 V8.26C Top25 MaxDD / Portfolio Admission Anatomy</h2>
+        <p>Top25 cutoff 不改：拆解 -54.76% MaxDD 的 peak→trough 持仓/STOP/同日拥挤/行业集中，并测试固定 admission 结构。复用 V8.26A/B cache。</p>
+        <a href='/v826c'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26C</button></a>
+        </div>
+        <div id='v826b-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>💵 V8.26B Economic / 10-Slot Portfolio Audit</h2>
         <p>不再用 Winner Recall 判生死：直接审计 BASE vs 固定 Top25/33/50 的 PF、AvgTrade、10-slot CAGR、daily-MTM MaxDD、年度稳定性。复用 V8.26A OOS/cache。</p>
         <a href='/v826b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26B</button></a>
@@ -64182,6 +64187,506 @@ async function poll(){{
 }}
 $('go').onclick=async()=>{{
  let s=await (await fetch('/v826b/start',{{method:'POST'}})).json();
+ $('msg').textContent=s.message||s.status||'';
+ poll();
+}};
+poll();
+</script>
+</div></body></html>"""
+
+# ================= V8.26C TOP25 MAXDD / PORTFOLIO ADMISSION ANATOMY =================
+# Diagnose why fixed Top25 improves candidate PF/AvgTrade yet worsens 10-slot MaxDD.
+# Reuses V8.26A OOS + historical price cache only.
+# No Top25 threshold changes, no feature/model changes, no Tiingo, no rescan.
+#
+# Predeclared structural admission variants:
+#   TOP25_CURRENT              = V8.26B behavior
+#   TOP25_DAILY2               = max 2 new positions per entry day
+#   TOP25_ONE_TICKER           = no duplicate active ticker
+#   TOP25_SECTOR2              = max 2 active positions per mapped sector
+#   TOP25_DAILY2_ONE_TICKER    = daily2 + one active ticker
+#   TOP25_MAX8                 = max 8 concurrent positions
+#
+# These are structural portfolio tests, NOT a threshold search.
+V826C_DIR = DATA_DIR / "v826c_top25_maxdd_admission_anatomy"
+V826C_PREFLIGHT = V826C_DIR / "preflight.json"
+V826C_STATUS = V826C_DIR / "status.json"
+V826C_RESULT = V826C_DIR / "result.json"
+V826C_BUILD_ID = "V826C_TOP25_MAXDD_ADMISSION_20260902A"
+v826c_thread = None
+
+def _v826c_status():
+    x={"status":"idle","phase":"","message":"尚未开始","processed":0,"total":0,
+       "elapsed_sec":0,"error":None}
+    if V826C_STATUS.exists():
+        try:x.update(json.loads(V826C_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v826c_write_status(**kw):
+    V826C_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v826c_status();x.update(kw)
+    V826C_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return x
+
+def _v826c_alive():
+    return v826c_thread is not None and v826c_thread.is_alive()
+
+def _v826c_listing_meta():
+    M,lidcol=_v826a_manifest()
+    symcol=next((c for c in ["ticker","symbol","Symbol","Ticker"] if c in M.columns),None)
+    out={}
+    for _,r in M.iterrows():
+        lid=str(r[lidcol])
+        ticker=str(r[symcol]).upper().strip() if symcol and pd.notna(r[symcol]) else None
+        out[lid]={
+            "ticker":ticker,
+            "sector":SECTOR.get(ticker) if ticker else None,
+            "sector_name":SECTOR_NAME.get(SECTOR.get(ticker)) if ticker and SECTOR.get(ticker) else None
+        }
+    return out, symcol
+
+def _v826c_preflight():
+    V826C_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    meta,symcol=_v826c_listing_meta()
+    T=D[D["reference_rank"]>=.75].copy()
+    mapped=sum(1 for lid in T["listing_id"].astype(str) if lid in meta)
+    ticker_mapped=sum(1 for lid in T["listing_id"].astype(str) if meta.get(lid,{}).get("ticker"))
+    sector_mapped=sum(1 for lid in T["listing_id"].astype(str) if meta.get(lid,{}).get("sector"))
+    out={
+        "version":"V8.26C Top25 MaxDD / Portfolio Admission Anatomy",
+        "build_id":V826C_BUILD_ID,
+        "verdict":"PASS" if len(T)>=10000 and mapped/max(1,len(T))>=.95 else "FAIL__TOP25_OOS_OR_MANIFEST_NOT_READY",
+        "top25_rows":int(len(T)),
+        "listing_meta_coverage":float(mapped/max(1,len(T))),
+        "ticker_coverage":float(ticker_mapped/max(1,len(T))),
+        "sector_coverage":float(sector_mapped/max(1,len(T))),
+        "manifest_symbol_column":symcol,
+        "variants":["TOP25_CURRENT","TOP25_DAILY2","TOP25_ONE_TICKER","TOP25_SECTOR2","TOP25_DAILY2_ONE_TICKER","TOP25_MAX8"],
+        "next_action":"RUN_MAXDD_ANATOMY_AND_FIXED_ADMISSION_TESTS"
+    }
+    V826C_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return out
+
+def _v826c_admit(D, policy, meta):
+    D=D.sort_values(["entry_date","reference_rank","frozen_score","listing_id"],
+                    ascending=[True,False,False,True]).copy()
+
+    max_positions=8 if policy=="TOP25_MAX8" else 10
+    daily_cap=2 if policy in ["TOP25_DAILY2","TOP25_DAILY2_ONE_TICKER"] else None
+    one_ticker=policy in ["TOP25_ONE_TICKER","TOP25_DAILY2_ONE_TICKER"]
+    sector_cap=2 if policy=="TOP25_SECTOR2" else None
+
+    cash=float(V826B_INITIAL_EQUITY)
+    open_pos=[]
+    admitted=[]
+    stats={"skipped_capacity":0,"skipped_daily_cap":0,"skipped_duplicate_ticker":0,
+           "skipped_sector_cap":0,"skipped_cash":0}
+
+    days=sorted(set(D["entry_date"].tolist())|set(D["exit60_date"].tolist()))
+    by_entry={d:g for d,g in D.groupby("entry_date",sort=True)}
+
+    def close_due(day):
+        nonlocal cash,open_pos
+        due=[p for p in open_pos if p["exit_date"]<=day]
+        keep=[p for p in open_pos if p["exit_date"]>day]
+        for p in sorted(due,key=lambda z:(z["exit_date"],z["listing_id"])):
+            cash += float(p["capital"])*(1.0+float(p["realized_ret"]))
+        open_pos=keep
+
+    for day in days:
+        close_due(day)
+        g=by_entry.get(day)
+        if g is None:continue
+        opened_today=0
+        for _,r in g.iterrows():
+            if len(open_pos)>=max_positions:
+                stats["skipped_capacity"]+=1;continue
+            if daily_cap is not None and opened_today>=daily_cap:
+                stats["skipped_daily_cap"]+=1;continue
+
+            lid=str(r["listing_id"])
+            ticker=meta.get(lid,{}).get("ticker")
+            sector=meta.get(lid,{}).get("sector")
+
+            if one_ticker and ticker and any(p.get("ticker")==ticker for p in open_pos):
+                stats["skipped_duplicate_ticker"]+=1;continue
+            if sector_cap is not None and sector:
+                nsec=sum(1 for p in open_pos if p.get("sector")==sector)
+                if nsec>=sector_cap:
+                    stats["skipped_sector_cap"]+=1;continue
+
+            equity_book=cash+sum(float(p["capital"]) for p in open_pos)
+            cap=min(equity_book*V826B_RISK_PCT/0.07,equity_book*.25,cash)
+            if not np.isfinite(cap) or cap<100:
+                stats["skipped_cash"]+=1;continue
+
+            cash-=cap
+            p={
+                "listing_id":lid,
+                "ticker":ticker,
+                "sector":sector,
+                "entry_date":pd.Timestamp(r["entry_date"]).normalize(),
+                "exit_date":pd.Timestamp(r["exit60_date"]).normalize(),
+                "entry_px":float(r["entry_px"]),
+                "realized_ret":float(r["realized_ret"]),
+                "capital":float(cap),
+                "reference_rank":float(r["reference_rank"]),
+                "frozen_score":float(r["frozen_score"]),
+                "winner20":bool(r["winner20"]),
+                "is_stop":bool(r["is_stop"]),
+            }
+            open_pos.append(p);admitted.append(p.copy());opened_today+=1
+
+    return pd.DataFrame(admitted),stats
+
+def _v826c_equity_curve(adm,price_maps):
+    if adm is None or adm.empty:return pd.DataFrame()
+    first=pd.Timestamp(adm["entry_date"].min()).normalize()
+    last=pd.Timestamp(adm["exit_date"].max()).normalize()
+    cal=pd.bdate_range(first,last)
+    entries={d:g for d,g in adm.groupby("entry_date",sort=True)}
+    exits={d:g for d,g in adm.groupby("exit_date",sort=True)}
+    cash=float(V826B_INITIAL_EQUITY);active={};last_px={};rows=[]
+
+    for day in cal:
+        day=pd.Timestamp(day).normalize()
+        gx=exits.get(day)
+        if gx is not None:
+            for _,r in gx.iterrows():
+                key=(str(r["listing_id"]),pd.Timestamp(r["entry_date"]).normalize())
+                if key in active:
+                    p=active.pop(key)
+                    cash += float(p["capital"])*(1.0+float(p["realized_ret"]))
+
+        ge=entries.get(day)
+        if ge is not None:
+            for _,r in ge.iterrows():
+                key=(str(r["listing_id"]),pd.Timestamp(r["entry_date"]).normalize())
+                cash -= float(r["capital"]);active[key]=r.to_dict()
+
+        mtm=0.0
+        for key,p in active.items():
+            lid=str(p["listing_id"]);pm=price_maps.get(lid,{})
+            px=pm.get(day)
+            if px is not None and np.isfinite(px):last_px[key]=float(px)
+            else:px=last_px.get(key,float(p["entry_px"]))
+            mtm += float(p["capital"])*(float(px)/float(p["entry_px"]))
+
+        rows.append({"date":day,"equity":float(cash+mtm),"open_positions":int(len(active))})
+
+    E=pd.DataFrame(rows)
+    if not E.empty:
+        E["peak"]=E["equity"].cummax()
+        E["dd"]=E["equity"]/E["peak"]-1.0
+    return E
+
+def _v826c_curve_metrics(E):
+    if E is None or E.empty:return {}
+    years=max((E["date"].iloc[-1]-E["date"].iloc[0]).days/365.25,1/365.25)
+    final=float(E["equity"].iloc[-1])
+    cagr=(final/V826B_INITIAL_EQUITY)**(1/years)-1 if final>0 else -1.0
+    yr=[]
+    for y,g in E.groupby(E["date"].dt.year,sort=True):
+        a=float(g["equity"].iloc[0]);b=float(g["equity"].iloc[-1])
+        yr.append({"year":int(y),"return":float(b/a-1) if a else 0.0,
+                   "maxdd":float((g["equity"]/g["equity"].cummax()-1).min())})
+    return {
+        "cagr":float(cagr),
+        "max_drawdown":float(E["dd"].min()),
+        "final_equity":final,
+        "positive_year_share":float(np.mean([x["return"]>0 for x in yr])) if yr else 0.0,
+        "avg_open_positions":float(E["open_positions"].mean()),
+        "max_open_positions":int(E["open_positions"].max()),
+        "yearly":yr
+    }
+
+def _v826c_drawdown_anatomy(adm,E,meta):
+    if adm is None or adm.empty or E is None or E.empty:return {}
+    trough_i=int(E["dd"].idxmin())
+    trough=pd.Timestamp(E.loc[trough_i,"date"]).normalize()
+    peak_equity=float(E.loc[trough_i,"peak"])
+    pre=E.loc[:trough_i]
+    peak_candidates=pre.index[np.isclose(pre["equity"],peak_equity,rtol=1e-10,atol=1e-8)]
+    peak_i=int(peak_candidates[-1]) if len(peak_candidates) else int(pre["equity"].idxmax())
+    peak=pd.Timestamp(E.loc[peak_i,"date"]).normalize()
+
+    active=adm[(adm["entry_date"]<=trough)&(adm["exit_date"]>trough)].copy()
+    entered_window=adm[(adm["entry_date"]>=peak)&(adm["entry_date"]<=trough)].copy()
+    stopped_window=adm[(adm["exit_date"]>=peak)&(adm["exit_date"]<=trough)&(adm["is_stop"])].copy()
+
+    tick_counts={}
+    sec_counts={}
+    for _,r in active.iterrows():
+        t=r.get("ticker") or "UNKNOWN"
+        s=r.get("sector") or "UNKNOWN"
+        tick_counts[t]=tick_counts.get(t,0)+1
+        sec_counts[s]=sec_counts.get(s,0)+1
+
+    daily_entries=adm.groupby("entry_date").size()
+    win_daily=daily_entries[(daily_entries.index>=peak)&(daily_entries.index<=trough)]
+
+    return {
+        "peak_date":str(peak.date()),
+        "trough_date":str(trough.date()),
+        "drawdown":float(E.loc[trough_i,"dd"]),
+        "peak_equity":peak_equity,
+        "trough_equity":float(E.loc[trough_i,"equity"]),
+        "active_positions_at_trough":int(len(active)),
+        "active_ticker_counts":dict(sorted(tick_counts.items(),key=lambda kv:kv[1],reverse=True)[:10]),
+        "active_sector_counts":dict(sorted(sec_counts.items(),key=lambda kv:kv[1],reverse=True)[:10]),
+        "entries_during_drawdown":int(len(entered_window)),
+        "stops_during_drawdown":int(len(stopped_window)),
+        "winner20_entries_during_drawdown":int(entered_window["winner20"].sum()) if len(entered_window) else 0,
+        "max_same_day_entries_during_drawdown":int(win_daily.max()) if len(win_daily) else 0,
+        "days_with_3plus_entries_during_drawdown":int((win_daily>=3).sum()) if len(win_daily) else 0,
+        "trough_positions":[
+            {
+                "ticker":r.get("ticker"),"sector":r.get("sector"),
+                "entry_date":str(pd.Timestamp(r["entry_date"]).date()),
+                "exit_date":str(pd.Timestamp(r["exit_date"]).date()),
+                "reference_rank":float(r["reference_rank"]),
+                "winner20":bool(r["winner20"]),"is_stop":bool(r["is_stop"])
+            } for _,r in active.sort_values("reference_rank",ascending=False).iterrows()
+        ]
+    }
+
+def _v826c_run():
+    V826C_DIR.mkdir(parents=True,exist_ok=True)
+    D=_v826b_load_oos()
+    T=D[D["reference_rank"]>=.75].copy()
+    meta,_=_v826c_listing_meta()
+
+    variants=[
+        "TOP25_CURRENT","TOP25_DAILY2","TOP25_ONE_TICKER",
+        "TOP25_SECTOR2","TOP25_DAILY2_ONE_TICKER","TOP25_MAX8"
+    ]
+
+    admissions={};info={};all_lids=set()
+    for name in variants:
+        a,st=_v826c_admit(T,name,meta)
+        admissions[name]=a;info[name]={"admission_stats":st}
+        if not a.empty:all_lids.update(a["listing_id"].astype(str).tolist())
+
+    _v826c_write_status(status="running",phase="cached_prices",
+        message="Loading historical cached prices for admitted Top25 positions…",
+        processed=0,total=len(all_lids),error=None)
+    price_maps=_v826b_price_maps(all_lids)
+
+    for n,name in enumerate(variants,1):
+        _v826c_write_status(status="running",phase="portfolio_anatomy",
+            message=f"Portfolio anatomy {name} ({n}/{len(variants)})",
+            processed=n-1,total=len(variants),error=None)
+        a=admissions[name]
+        E=_v826c_equity_curve(a,price_maps)
+        info[name]["portfolio_trade_metrics"]=_v826b_trade_portfolio_metrics(a)
+        info[name]["portfolio_mtm"]=_v826c_curve_metrics(E)
+        info[name]["maxdd_anatomy"]=_v826c_drawdown_anatomy(a,E,meta)
+        info[name]["admitted_trades"]=int(len(a))
+
+    # Rebuild BASE benchmark exactly from V8.26B for comparison.
+    base_adm,_=_v826b_admit(D)
+    base_lids=set(base_adm["listing_id"].astype(str).tolist()) if not base_adm.empty else set()
+    missing_base=base_lids-set(price_maps.keys())
+    if missing_base:
+        extra=_v826b_price_maps(missing_base);price_maps.update(extra)
+    base_E=_v826c_equity_curve(base_adm,price_maps)
+    base={
+        "portfolio_trade_metrics":_v826b_trade_portfolio_metrics(base_adm),
+        "portfolio_mtm":_v826c_curve_metrics(base_E),
+        "maxdd_anatomy":_v826c_drawdown_anatomy(base_adm,base_E,meta),
+        "admitted_trades":int(len(base_adm))
+    }
+
+    bcagr=float(base["portfolio_mtm"].get("cagr",0))
+    bdd=abs(float(base["portfolio_mtm"].get("max_drawdown",0)))
+    bpf=float(base["portfolio_trade_metrics"].get("pf",0))
+    bavg=float(base["portfolio_trade_metrics"].get("avg_trade",0))
+
+    qualifying=[]
+    for name in variants:
+        z=info[name];pm=z["portfolio_mtm"];tm=z["portfolio_trade_metrics"]
+        # Preserve the Top25 candidate selection; evaluate only implementation.
+        gate={
+            "portfolio_pf_ge_base":float(tm.get("pf",0))>=bpf,
+            "portfolio_avgtrade_ge_base":float(tm.get("avg_trade",0))>=bavg,
+            "cagr_ge_base":float(pm.get("cagr",0))>=bcagr,
+            "maxdd_no_worse_than_base":abs(float(pm.get("max_drawdown",0)))<=bdd,
+            "positive_year_share_ge_70pct":float(pm.get("positive_year_share",0))>=.70
+        }
+        z["relative_gate"]=gate
+        if all(gate.values()):qualifying.append(name)
+
+    if qualifying:
+        verdict="TOP25_SELECTION_EDGE_RESCUED_BY_STRUCTURAL_ADMISSION"
+        next_action="PROMOTE_BEST_QUALIFYING_ADMISSION_TO_SHADOW_CHALLENGER_ONLY__NO_PRODUCTION_CHANGE"
+    else:
+        verdict="TOP25_PORTFOLIO_IMPLEMENTATION_NOT_RESCUED_BY_FIXED_ADMISSION_TESTS"
+        next_action="DO_NOT_TUNE_MORE__KEEP_TOP25_AS_RESEARCH_ONLY_AND_V825O_FORWARD_SHADOW_RUNNING"
+
+    result={
+        "version":"V8.26C Top25 MaxDD / Portfolio Admission Anatomy",
+        "build_id":V826C_BUILD_ID,
+        "verdict":verdict,
+        "base":base,
+        "top25_variants":info,
+        "qualifying_variants":qualifying,
+        "decision_rule":"A structural admission variant passes only if, vs BASE, 10-slot trade PF>=BASE, portfolio AvgTrade>=BASE, CAGR>=BASE, absolute daily-MTM MaxDD<=BASE, and positive-year share>=70%. Top25 cutoff stays exactly 75th percentile; no threshold search.",
+        "diagnostic_scope":"MaxDD peak/trough window, active ticker/sector concentration, same-day entry clustering, STOPs during drawdown, and fixed structural admission variants only.",
+        "boundaries":"Reuse V8.26A/B OOS and historical cached prices only. No Top25 cutoff changes, no feature/model changes, no Tiingo, no universe rescan, no parameter search, no rescue tuning.",
+        "next_action":next_action
+    }
+    V826C_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+def _v826c_worker():
+    global v826c_thread
+    t0=time.time()
+    try:
+        P=json.loads(V826C_PREFLIGHT.read_text(encoding="utf-8")) if V826C_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":raise RuntimeError("V8.26C Preflight must PASS first")
+        _v826c_write_status(status="running",phase="start",message="Starting Top25 MaxDD anatomy…",
+                            processed=0,total=6,elapsed_sec=0,error=None)
+        R=_v826c_run()
+        _v826c_write_status(status="done",phase="done",message=f"完成：{R.get('verdict')}",
+                            processed=6,total=6,elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        _v826c_write_status(status="error",phase="error",message=f"{type(ex).__name__}: {ex}",
+                            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v826c_thread=None
+
+@APP.route("/v826c/preflight",methods=["GET","POST"])
+def v826c_preflight_route():
+    try:_v826c_preflight()
+    except Exception as ex:
+        V826C_DIR.mkdir(parents=True,exist_ok=True)
+        V826C_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v826c")
+
+@APP.post("/v826c/start")
+def v826c_start_route():
+    global v826c_thread
+    if _v826c_alive():return jsonify({"started":False,**_v826c_status()})
+    P=json.loads(V826C_PREFLIGHT.read_text(encoding="utf-8")) if V826C_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":return jsonify({"started":False,"status":"blocked","message":"Run PASS Preflight first"})
+    v826c_thread=threading.Thread(target=_v826c_worker,daemon=True)
+    v826c_thread.start()
+    return jsonify({"started":True,**_v826c_status()})
+
+@APP.get("/api/v826c")
+def v826c_api():
+    return jsonify(_v826c_status())
+
+@APP.get("/v826c")
+def v826c_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P={}
+    if V826C_PREFLIGHT.exists():
+        try:P=json.loads(V826C_PREFLIGHT.read_text(encoding="utf-8"))
+        except Exception:P={}
+    R={}
+    if V826C_RESULT.exists():
+        try:R=json.loads(V826C_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    S=_v826c_status()
+
+    rows=""
+    for name in ["TOP25_CURRENT","TOP25_DAILY2","TOP25_ONE_TICKER","TOP25_SECTOR2","TOP25_DAILY2_ONE_TICKER","TOP25_MAX8"]:
+        z=(R.get("top25_variants") or {}).get(name,{})
+        tm=z.get("portfolio_trade_metrics") or {}
+        pm=z.get("portfolio_mtm") or {}
+        md=z.get("maxdd_anatomy") or {}
+        rows += (
+            f"<tr><td><b>{e(name)}</b></td><td>{e(z.get('admitted_trades','—'))}</td>"
+            f"<td>{e(round(float(tm.get('pf',0)),3))}</td>"
+            f"<td>{e(round(float(tm.get('avg_trade',0))*100,3))}%</td>"
+            f"<td>{e(round(float(pm.get('cagr',0))*100,2))}%</td>"
+            f"<td>{e(round(float(pm.get('max_drawdown',0))*100,2))}%</td>"
+            f"<td>{e(round(float(pm.get('positive_year_share',0))*100,1))}%</td>"
+            f"<td>{e(md.get('peak_date','—'))}</td><td>{e(md.get('trough_date','—'))}</td>"
+            f"<td>{e(md.get('stops_during_drawdown','—'))}</td>"
+            f"<td>{e(md.get('max_same_day_entries_during_drawdown','—'))}</td></tr>"
+        )
+
+    current=(R.get("top25_variants") or {}).get("TOP25_CURRENT",{})
+    md=current.get("maxdd_anatomy") or {}
+    pos=""
+    for x in md.get("trough_positions") or []:
+        pos += (
+            f"<tr><td>{e(x.get('ticker','—'))}</td><td>{e(x.get('sector','—'))}</td>"
+            f"<td>{e(x.get('entry_date'))}</td><td>{e(x.get('exit_date'))}</td>"
+            f"<td>{e(round(float(x.get('reference_rank',0))*100,1))}%</td>"
+            f"<td>{e(x.get('winner20'))}</td><td>{e(x.get('is_stop'))}</td></tr>"
+        )
+
+    base=R.get("base") or {}
+    bpm=base.get("portfolio_mtm") or {}
+    btm=base.get("portfolio_trade_metrics") or {}
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1500px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🩻 V8.26C Top25 MaxDD / Portfolio Admission Anatomy</h1>
+<div class='o'><b>Top25 不改。</b> 只查为什么候选 PF 1.717 / AvgTrade 3.724% 到 10-slot 后 MaxDD 恶化，并测试几个预先声明的结构性 admission 方案。0 threshold search / 0 model tuning。</div></div>
+
+<div class='c'><form method='post' action='/v826c/preflight'><button>A. Run Top25 / Manifest Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Top25 rows <b>{e(P.get('top25_rows','—'))}</b> · Listing meta <b>{e(round(float(P.get('listing_meta_coverage',0))*100,1) if P else '—')}%</b> ·
+Ticker <b>{e(round(float(P.get('ticker_coverage',0))*100,1) if P else '—')}%</b> · Sector <b>{e(round(float(P.get('sector_coverage',0))*100,1) if P else '—')}%</b><br>
+Next: <b>{e(P.get('next_action','—'))}</b></div></div>
+
+<div class='c'><button id='go'>B. Run MaxDD Anatomy + Fixed Admission Tests</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
+<div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span></p></div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Qualifying variants: <b>{e(', '.join(R.get('qualifying_variants') or []) or 'NONE')}</b><br>
+BASE benchmark: PF <b>{e(round(float(btm.get('pf',0)),3))}</b> · CAGR <b>{e(round(float(bpm.get('cagr',0))*100,2))}%</b> · MaxDD <b>{e(round(float(bpm.get('max_drawdown',0))*100,2))}%</b><br>
+Next: <b>{e(R.get('next_action','—'))}</b></div></div>
+
+<div class='c'><h2>Fixed Admission Comparison</h2><div style='overflow:auto'><table>
+<tr><th>Variant</th><th>Trades</th><th>PF</th><th>AvgTrade</th><th>CAGR</th><th>MaxDD</th><th>Positive years</th><th>DD peak</th><th>DD trough</th><th>STOPs in DD</th><th>Max same-day entries</th></tr>
+{rows or "<tr><td colspan=11>Run audit first.</td></tr>"}</table></div></div>
+
+<div class='c'><h2>Current Top25 — Maximum Drawdown Anatomy</h2>
+<div class='b'>Peak <b>{e(md.get('peak_date','—'))}</b> → Trough <b>{e(md.get('trough_date','—'))}</b> · Drawdown <b>{e(round(float(md.get('drawdown',0))*100,2) if md else '—')}%</b><br>
+Entries during DD <b>{e(md.get('entries_during_drawdown','—'))}</b> · STOPs during DD <b>{e(md.get('stops_during_drawdown','—'))}</b> · +20 entries <b>{e(md.get('winner20_entries_during_drawdown','—'))}</b><br>
+Max same-day entries <b>{e(md.get('max_same_day_entries_during_drawdown','—'))}</b> · Days with ≥3 entries <b>{e(md.get('days_with_3plus_entries_during_drawdown','—'))}</b><br>
+Ticker concentration: <b>{e(md.get('active_ticker_counts','—'))}</b><br>
+Sector concentration: <b>{e(md.get('active_sector_counts','—'))}</b></div>
+<div style='overflow:auto'><table><tr><th>Ticker</th><th>Sector</th><th>Entry</th><th>Exit</th><th>Rank</th><th>+20?</th><th>STOP?</th></tr>
+{pos or "<tr><td colspan=7>No trough positions yet.</td></tr>"}</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
+
+<script>
+const $=x=>document.getElementById(x);
+async function poll(){{
+ try{{
+  let s=await (await fetch('/api/v826c',{{cache:'no-store'}})).json();
+  let pct=s.total?Math.round(100*s.processed/s.total):0;
+  $('msg').textContent=s.message||s.status||'';
+  $('pct').textContent=pct+'%';$('bar').style.width=pct+'%';
+  $('cnt').textContent=(s.processed||0)+'/'+(s.total||0);
+  if(s.status==='running'||s.status==='starting')setTimeout(poll,1800);
+ }}catch(e){{$('msg').textContent='status error: '+e;}}
+}}
+$('go').onclick=async()=>{{
+ let s=await (await fetch('/v826c/start',{{method:'POST'}})).json();
  $('msg').textContent=s.message||s.status||'';
  poll();
 }};
