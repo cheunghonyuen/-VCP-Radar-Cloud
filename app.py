@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825d-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825e-home-card-real' style='background:#f5f3ff;border:7px solid #7c3aed;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧪 V8.25E Free-Window Contemporaneous VCP Feasibility</h2>
+        <p>免费第一关：用现有 V6.94 candidate store + 免费 PIT cache，在真实重叠近年窗口比较 Control vs Fundamentals Overlay。先 Preflight，再 OOS。</p>
+        <a href='/v825e'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25E</button></a>
+        </div>
+        <div id='v825d-home-card-real' style='background:#ecfeff;border:7px solid #0891b2;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🕒 V8.25D Recent-Period Free PIT Pilot</h2>
         <p>把免费 fundamentals 与近年 V6.44 frozen trades 对齐。先 Preflight 样本量，再决定是否跑 OOS。0下载 / 0重扫 / 0调参。</p>
         <a href='/v825d'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25D</button></a>
@@ -60042,4 +60047,313 @@ Control features joined: <b>{e(P.get('control_features_with_any_joined_data','�
 <h3>Overlay</h3><div class='g'>{mb(R.get('overlay')) if R else '—'}</div>
 <p><b>Sample:</b> {e(R.get('sample_rows','—'))} · +50 {e(R.get('winners50','—'))} · STOP {e(R.get('stops','—'))}</p>
 <p><b>Next:</b> {e(R.get('next_action','—'))}</p></div>
+</div></body></html>"""
+
+
+# ================= V8.25E FREE-WINDOW CONTEMPORANEOUS VCP FEASIBILITY =================
+# Purpose:
+# Use ONLY the already-existing V6.94 candidate feature store inside the ACTUAL free
+# PIT fundamentals window. This is a feasibility study, NOT a Champion replay and
+# NOT a new production strategy.
+#
+# Control: existing PIT-safe price/volume candidate features
+# Overlay: same Control + PIT fundamentals
+# Sample: Dow-30 free basket, recent window only, STOP vs +50 labels
+# No downloads, no universe rescan, no V6.44 modification, no threshold rescue.
+V825E_DIR = DATA_DIR / "v825e_free_window_contemporaneous_vcp_feasibility"
+V825E_PREFLIGHT = V825E_DIR / "preflight.json"
+V825E_RESULT = V825E_DIR / "result.json"
+V825E_BUILD_ID = "V825E_FREE_WINDOW_CONTEMPORANEOUS_20260902A"
+
+def _v825e_candidate_store():
+    fp = V694_DIR / "clean_candidate_path_features.csv.gz"
+    if not fp.exists():
+        raise RuntimeError("V6.94 clean candidate feature store missing")
+    D = pd.read_csv(fp, compression="gzip")
+    need = ["listing_id","entry_date","exit_date","ret","is_stop"]
+    miss = [c for c in need if c not in D.columns]
+    if miss:
+        raise RuntimeError("V6.94 schema missing: " + ",".join(miss))
+    D["listing_id"] = D["listing_id"].astype(str)
+    D["ticker"] = D["listing_id"].str.split("__").str[0].str.upper().str.strip()
+    D["entry_date"] = pd.to_datetime(D["entry_date"], errors="coerce").dt.normalize()
+    D["exit_date"] = pd.to_datetime(D["exit_date"], errors="coerce").dt.normalize()
+    D["ret"] = pd.to_numeric(D["ret"], errors="coerce")
+    if D["is_stop"].dtype != bool:
+        D["is_stop"] = D["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+    D = D.dropna(subset=["entry_date","exit_date","ret"]).copy()
+    return D
+
+def _v825e_actual_common_start(tickers):
+    depths = [_v825c_cache_depth(t) for t in sorted(set(tickers))]
+    valid = [x for x in depths if x.get("schema_ok") and x.get("earliest_release")]
+    if not valid:
+        raise RuntimeError("No valid V8.25 free PIT cache files")
+    # Conservative common start: all included valid-cache tickers have data by this date.
+    common_start = max(pd.Timestamp(x["earliest_release"]) for x in valid)
+    return common_start, valid
+
+def _v825e_control_features(D):
+    deny = set([
+        "ret","is_stop","winner50","winner100","listing_id","ticker",
+        "entry_date","exit_date","exit_reason","entry_px","entry_px_raw",
+        "exit_px","exit_px_raw","control_ret","low10_ret",
+        "parent_opportunity_id","stage2_row_id","parent_entry_date",
+        "source_generator_id","label_stop","label_50","y","core_pit_ok"
+    ])
+    deny_tokens = ["exit","future","forward","label","outcome","mfe","mae"]
+    out = []
+    for c in D.columns:
+        if c in deny or any(tok in c.lower() for tok in deny_tokens):
+            continue
+        z = pd.to_numeric(D[c], errors="coerce")
+        if z.notna().sum() >= max(20, int(.55 * len(D))) and z.nunique(dropna=True) >= 5:
+            D[c] = z
+            out.append(c)
+    return out
+
+def _v825e_preflight():
+    V825E_DIR.mkdir(parents=True, exist_ok=True)
+
+    D = _v825e_candidate_store()
+    D = D[D["ticker"].isin(V825_DOW30)].copy()
+    if D.empty:
+        raise RuntimeError("No Dow-30 rows in V6.94 candidate store")
+
+    common_start, valid_depth = _v825e_actual_common_start(D["ticker"])
+    recent_start = max(pd.Timestamp("2023-10-01"), common_start)
+
+    # Only candidate rows contemporaneous with the free PIT cache.
+    R = D[D["entry_date"] >= recent_start].copy()
+    R["label_stop"] = R["is_stop"].astype(bool)
+    R["label_50"] = R["ret"].ge(.50)
+    R = R[R["label_stop"] | R["label_50"]].copy()
+    R = R[~(R["label_stop"] & R["label_50"])].copy()
+    R["y"] = R["label_50"].astype(int)
+
+    _, defs = _v825_defs()
+    codes = _v820_pick_codes(defs)
+    X = _v825_attach(R, codes)
+
+    fund = ["rev_yoy","eps_yoy","ni_yoy","rev_yoy_accel","eps_yoy_accel"]
+    coverage = {}
+    for f in fund:
+        z = pd.to_numeric(X[f], errors="coerce")
+        coverage[f] = {
+            "non_null": int(z.notna().sum()),
+            "coverage": float(z.notna().mean()) if len(X) else 0.0,
+            "unique": int(z.nunique(dropna=True))
+        }
+
+    # Same-sample requirement for fair Control vs Overlay.
+    X["core_pit_ok"] = X[["rev_yoy","eps_yoy"]].notna().all(axis=1)
+    core = X[X["core_pit_ok"]].copy()
+
+    controls = _v825e_control_features(core.copy()) if len(core) else []
+    winners = int(core["y"].sum()) if len(core) else 0
+    stops = int((core["y"] == 0).sum()) if len(core) else 0
+
+    # Keep this as a strict feasibility gate. If sample is weak, stop without tuning.
+    if len(R) < 30:
+        verdict = "INSUFFICIENT_RECENT_CANDIDATE_LABELS"
+        next_action = "DO_NOT_PAY__FREE_WINDOW_HAS_TOO_FEW_LABELED_CANDIDATES"
+    elif len(core) < 30 or winners < 5 or stops < 15:
+        verdict = "INSUFFICIENT_PIT_ELIGIBLE_RECENT_SAMPLE"
+        next_action = "DO_NOT_PAY__FREE_WINDOW_TOO_SMALL_FOR_DECISIVE_TEST"
+    elif len(controls) < 3:
+        verdict = "INSUFFICIENT_CONTROL_FEATURE_COVERAGE"
+        next_action = "AUDIT_RECENT_CONTROL_FEATURE_COVERAGE_ONLY"
+    else:
+        verdict = "PASS_CONTEMPORANEOUS_FREE_PILOT_READY"
+        next_action = "RUN_FROZEN_CONTROL_VS_PIT_OVERLAY_OOS"
+
+    result = {
+        "version": "V8.25E Free-Window Contemporaneous VCP Feasibility",
+        "build_id": V825E_BUILD_ID,
+        "verdict": verdict,
+        "recent_start": str(recent_start.date()),
+        "candidate_rows_recent": int(len(D[D["entry_date"] >= recent_start])),
+        "labeled_stop_plus50_rows": int(len(R)),
+        "pit_eligible_rows": int(len(core)),
+        "pit_eligible_winners50": winners,
+        "pit_eligible_stops": stops,
+        "control_feature_count": len(controls),
+        "fundamental_coverage": coverage,
+        "valid_cache_tickers": len(valid_depth),
+        "valid_cache_ticker_list": [x["ticker"] for x in valid_depth],
+        "sample_tickers": int(core["ticker"].nunique()) if len(core) else 0,
+        "selected_codes": codes,
+        "next_action": next_action,
+        "interpretation": "Feasibility only. This sample is NOT the frozen V6.44 Champion and cannot replace Champion evidence.",
+        "boundaries": "Cache-only. No downloads, no universe rescan, no Champion modification, no parameter tuning."
+    }
+    _v825_jwrite(V825E_PREFLIGHT, result)
+    return result
+
+def _v825e_run():
+    P = _v825_jread(V825E_PREFLIGHT, {})
+    if P.get("verdict") != "PASS_CONTEMPORANEOUS_FREE_PILOT_READY":
+        raise RuntimeError("V8.25E Preflight must PASS before OOS")
+
+    D = _v825e_candidate_store()
+    D = D[D["ticker"].isin(V825_DOW30)].copy()
+    D = D[D["entry_date"] >= pd.Timestamp(P["recent_start"])].copy()
+    D["label_stop"] = D["is_stop"].astype(bool)
+    D["label_50"] = D["ret"].ge(.50)
+    D = D[D["label_stop"] | D["label_50"]].copy()
+    D = D[~(D["label_stop"] & D["label_50"])].copy()
+    D["y"] = D["label_50"].astype(int)
+
+    _, defs = _v825_defs()
+    codes = _v820_pick_codes(defs)
+    X = _v825_attach(D, codes)
+
+    # Fair same-row comparison: both models see only rows where core PIT fundamentals exist.
+    X = X[X[["rev_yoy","eps_yoy"]].notna().all(axis=1)].copy()
+
+    controls = _v825e_control_features(X)
+    fund = ["rev_yoy","eps_yoy","ni_yoy"]
+    for f in ["rev_yoy_accel","eps_yoy_accel"]:
+        z = pd.to_numeric(X[f], errors="coerce")
+        if z.notna().mean() >= .45 and z.nunique(dropna=True) >= 5:
+            fund.append(f)
+
+    C = _v825_oos(X, controls, "FREE_WINDOW_CONTROL_PRICE_VOLUME")
+    O = _v825_oos(X, controls + fund, "FREE_WINDOW_OVERLAY_PLUS_PIT_FUNDAMENTALS")
+
+    if not C.get("available") or not O.get("available"):
+        verdict = "FREE_WINDOW_PILOT_INCONCLUSIVE_OOS_SAMPLE"
+    else:
+        cm = C["top20_metrics"]
+        om = O["top20_metrics"]
+        auc_gain = (O.get("pooled_auc") or 0) - (C.get("pooled_auc") or 0)
+        med_gain = (O.get("median_fold_auc") or 0) - (C.get("median_fold_auc") or 0)
+        pf_gain = om.get("pf",0) - cm.get("pf",0)
+        avg_gain = om.get("avg_trade",0) - cm.get("avg_trade",0)
+        dd_ok = om.get("max_dd",0) >= cm.get("max_dd",0) - 0.25
+        passed = bool(
+            auc_gain >= .03 and
+            med_gain >= .02 and
+            pf_gain > 0 and
+            avg_gain > 0 and
+            dd_ok
+        )
+        verdict = (
+            "FREE_WINDOW_PIT_PASS__PAID_BROAD_TEST_JUSTIFIED"
+            if passed else
+            "FREE_WINDOW_PIT_FAIL__DO_NOT_PAY"
+        )
+
+    result = {
+        "version": "V8.25E Free-Window Contemporaneous VCP Feasibility",
+        "build_id": V825E_BUILD_ID,
+        "verdict": verdict,
+        "recent_start": P["recent_start"],
+        "sample_rows": int(len(X)),
+        "sample_tickers": int(X["ticker"].nunique()) if len(X) else 0,
+        "winners50": int(X["y"].sum()) if len(X) else 0,
+        "stops": int((X["y"] == 0).sum()) if len(X) else 0,
+        "control_features": controls,
+        "fundamental_features": fund,
+        "control": C,
+        "overlay": O,
+        "decision_rule": "Frozen gate: overlay must improve pooled AUC >=0.03, median-fold AUC >=0.02, top20 PF and AvgTrade, with no material MaxDD deterioration. No rescue tuning.",
+        "next_action": (
+            "CONSIDER_PAID_BROAD_UNIVERSE_PIT_SECOND_STAGE"
+            if "PASS__PAID" in verdict else
+            "STOP_PAID_FUNDAMENTALS_EXPANSION"
+            if "FAIL__DO_NOT_PAY" in verdict else
+            "DO_NOT_PAY__FREE_OOS_SAMPLE_INCONCLUSIVE"
+        ),
+        "interpretation": "Research feasibility only. Even a PASS does not promote a strategy or replace V6.44 Champion evidence.",
+        "boundaries": "Cache-only contemporaneous free-window test. No downloads, no rescan, no parameter rescue."
+    }
+    _v825_jwrite(V825E_RESULT, result)
+    return result
+
+@APP.route("/v825e/preflight", methods=["GET","POST"])
+def v825e_preflight_route():
+    try:
+        _v825e_preflight()
+    except Exception as ex:
+        _v825_jwrite(V825E_PREFLIGHT, {
+            "verdict": "AUDIT_ERROR",
+            "error": f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825e")
+
+@APP.route("/v825e/run", methods=["POST"])
+def v825e_run_route():
+    try:
+        _v825e_run()
+    except Exception as ex:
+        _v825_jwrite(V825E_RESULT, {
+            "verdict": "PILOT_ERROR",
+            "error": f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825e")
+
+@APP.get("/v825e")
+def v825e_page():
+    import html
+    e=lambda x: html.escape(str(x))
+    P=_v825_jread(V825E_PREFLIGHT,{})
+    R=_v825_jread(V825E_RESULT,{})
+    cov=P.get("fundamental_coverage") or {}
+    covtxt=" · ".join(
+        f"{k}:{float(v.get('coverage',0))*100:.1f}% ({v.get('non_null',0)})"
+        for k,v in cov.items()
+    )
+
+    def mb(x):
+        if not x or not x.get("available"):
+            return e((x or {}).get("reason","—"))
+        m=x.get("top20_metrics") or {}
+        return (
+            f"OOS rows <b>{e(x.get('oos_rows'))}</b> · "
+            f"AUC <b>{e(round(float(x.get('pooled_auc') or 0),4))}</b> · "
+            f"median-fold <b>{e(round(float(x.get('median_fold_auc') or 0),4))}</b><br>"
+            f"Top20 trades <b>{e(m.get('trades'))}</b> · "
+            f"PF <b>{e(round(float(m.get('pf',0)),3))}</b> · "
+            f"AvgTrade <b>{e(round(float(m.get('avg_trade',0))*100,2))}%</b> · "
+            f"Win {e(round(float(m.get('win_rate',0))*100,1))}% · "
+            f"Big50 {e(round(float(m.get('big50_rate',0))*100,1))}% · "
+            f"Stop {e(round(float(m.get('stop_rate',0))*100,1))}% · "
+            f"MaxDD {e(round(float(m.get('max_dd',0))*100,1))}%"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>🧪 V8.25E Free-Window Contemporaneous VCP Feasibility</h1>
+<div class='o'><b>免费第一关，时间窗完全对齐。</b> 不再用旧 V6.44 trades；只用现有 V6.94 candidate store 在免费 PIT fundamentals 真正覆盖的近年窗口做研究可行性测试。</div></div>
+
+<div class='c'><form method='post' action='/v825e/preflight'><button>A. Run Contemporaneous Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>
+Recent start: <b>{e(P.get('recent_start','—'))}</b><br>
+Recent candidate rows: <b>{e(P.get('candidate_rows_recent','—'))}</b> ·
+STOP/+50 labeled: <b>{e(P.get('labeled_stop_plus50_rows','—'))}</b><br>
+PIT eligible rows: <b>{e(P.get('pit_eligible_rows','—'))}</b> ·
++50 <b>{e(P.get('pit_eligible_winners50','—'))}</b> ·
+STOP <b>{e(P.get('pit_eligible_stops','—'))}</b><br>
+Sample tickers: <b>{e(P.get('sample_tickers','—'))}</b> ·
+Control features: <b>{e(P.get('control_feature_count','—'))}</b><br>
+{e(covtxt)}
+</div>
+<p><b>Next:</b> {e(P.get('next_action','—'))}</p>
+<p>{e(P.get('interpretation',''))}</p></div>
+
+<div class='c'><form method='post' action='/v825e/run'><button>B. Run Frozen Control vs PIT Overlay OOS</button></form>
+<h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<h3>Control · Price/Volume</h3><div class='g'>{mb(R.get('control')) if R else '—'}</div>
+<h3>Overlay · + PIT Fundamentals</h3><div class='g'>{mb(R.get('overlay')) if R else '—'}</div>
+<p><b>Sample:</b> {e(R.get('sample_rows','—'))} rows · {e(R.get('sample_tickers','—'))} tickers · +50 {e(R.get('winners50','—'))} · STOP {e(R.get('stops','—'))}</p>
+<p><b>Next:</b> {e(R.get('next_action','—'))}</p>
+<p>{e(R.get('interpretation',''))}</p></div>
 </div></body></html>"""
