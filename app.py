@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825o-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v826a-home-card-real' style='background:#fefce8;border:7px solid #ca8a04;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🧱 V8.26A Historical STOP-Avoidance Walk-Forward</h2>
+        <p>M 的8-feature frozen model → 更大历史 candidate/cache；先 Schema/Parity Preflight，再 resumable strict year-forward。0下载 / 0全市场重扫 / 0调参。</p>
+        <a href='/v826a'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26A</button></a>
+        </div>
+        <div id='v825o-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧭 V8.25O Frozen Reference Rank + Continuous Shadow</h2>
         <p>修正 N：每笔 Shadow rank 相对 M 冻结参考分布锁死，并持续从现有 Dow-30 recent cache 加入新的 contemporaneous candidates。0下载 / 0调参。</p>
         <a href='/v825o'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25O</button></a>
@@ -63045,4 +63050,627 @@ Shadow AUC <b>{e(round(float(R.get('shadow_auc',0)),3) if R.get('shadow_auc') is
 <div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}</div>
 <div class='g'><b>Next:</b> {e(R.get('next_action','Run once to create/update the ledger'))}</div>
 <p>{e(R.get('boundaries',''))}</p></div>
+</div></body></html>"""
+
+# ================= V8.26A HISTORICAL STOP-AVOIDANCE WALK-FORWARD =================
+# Larger-history validation of the EXACT frozen V8.25M entry-anatomy model.
+# Reuses V6.69 candidate cache + V6.17 Historical Cache. No downloads/universe rescan.
+# Exact target semantics retained from H/J/M:
+#   60 forward sessions, 7% stop, tradable MFE ends at stop/60d,
+#   winner20 := tradable MFE >= +20%, STOP may overlap a prior +20 winner.
+# Strict year-forward: each test year uses earlier years only for preprocessing/reference ranks.
+# Resumable per-listing checkpoints.
+V826A_DIR = DATA_DIR / "v826a_historical_stop_avoidance_walkforward"
+V826A_PREFLIGHT = V826A_DIR / "preflight.json"
+V826A_STATUS = V826A_DIR / "status.json"
+V826A_RESULT = V826A_DIR / "result.json"
+V826A_PARTS = V826A_DIR / "parts"
+V826A_FEATURES = list(V825M_FEATURES)
+V826A_DIRECTIONS = dict(V825N_DIRECTIONS)
+V826A_BUILD_ID = "V826A_HISTORICAL_STOP_AVOIDANCE_WF_20260902A"
+v826a_thread = None
+
+def _v826a_status():
+    x = {
+        "status":"idle","phase":"","message":"尚未开始",
+        "processed":0,"total":0,"rows":0,"errors":0,
+        "elapsed_sec":0,"error":None
+    }
+    if V826A_STATUS.exists():
+        try:x.update(json.loads(V826A_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v826a_write_status(**kw):
+    V826A_DIR.mkdir(parents=True, exist_ok=True)
+    x = _v826a_status(); x.update(kw)
+    V826A_STATUS.write_text(json.dumps(x, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return x
+
+def _v826a_alive():
+    return v826a_thread is not None and v826a_thread.is_alive()
+
+def _v826a_bool(s):
+    if getattr(s, "dtype", None) == bool:return s
+    return s.astype(str).str.lower().isin(["true","1","yes"])
+
+def _v826a_candidate_cache():
+    if not V669_TRADES.exists():
+        raise RuntimeError("V6.69 paired candidate cache missing")
+    P = pd.read_csv(V669_TRADES, compression="gzip")
+    need = ["listing_id","entry_date","entry_px"]
+    miss = [c for c in need if c not in P.columns]
+    if miss:
+        raise RuntimeError("V6.69 schema missing: " + ",".join(miss))
+    Q = pd.DataFrame({
+        "listing_id":P["listing_id"].astype(str),
+        "entry_date":pd.to_datetime(P["entry_date"], errors="coerce").dt.normalize(),
+        "entry_px_raw":pd.to_numeric(P["entry_px"], errors="coerce"),
+    })
+    for c in ["parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id"]:
+        if c in P.columns:Q[c] = P[c].to_numpy()
+    Q = Q.dropna(subset=["listing_id","entry_date","entry_px_raw"]).copy()
+    Q = Q[Q["entry_px_raw"] > 0].copy()
+    # Only exact duplicate records are removed; no guessed unique key collapse.
+    Q["_exact_key"] = (
+        Q["listing_id"].astype(str) + "|" +
+        Q["entry_date"].dt.strftime("%Y-%m-%d") + "|" +
+        Q["entry_px_raw"].round(8).astype(str)
+    )
+    Q = Q.drop_duplicates("_exact_key", keep="first").drop(columns=["_exact_key"])
+    return Q
+
+def _v826a_manifest():
+    M = _v615b_read_manifest()
+    if M is None or M.empty:
+        raise RuntimeError("V6.17 Historical manifest missing")
+    lidcol = next((c for c in ["listing_id","ListingID","listingId"] if c in M.columns), None)
+    if lidcol is None:
+        raise RuntimeError("Historical manifest missing listing_id")
+    return M, lidcol
+
+def _v826a_prepare_price(mr):
+    d = _v617fv1_read_price(mr)
+    if d is None or d.empty:return None, [], []
+    lc = {str(c).lower():c for c in d.columns}
+    need = ["date","open","high","low","close","volume"]
+    if not all(k in lc for k in need):
+        return None, [], []
+    q = pd.DataFrame({
+        "date":pd.to_datetime(d[lc["date"]], errors="coerce").dt.normalize(),
+        "open":pd.to_numeric(d[lc["open"]], errors="coerce"),
+        "high":pd.to_numeric(d[lc["high"]], errors="coerce"),
+        "low":pd.to_numeric(d[lc["low"]], errors="coerce"),
+        "close":pd.to_numeric(d[lc["close"]], errors="coerce"),
+        "volume":pd.to_numeric(d[lc["volume"]], errors="coerce"),
+    }).dropna(subset=["date","open","high","low","close","volume"])
+    q = q.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
+    if len(q) < 320:return None, [], []
+
+    ev = _v6894_detect_events(q[["date","open","close"]].copy())
+    hi = [x for x in ev if x["high_confidence"]]
+    amb = [x for x in ev if not x["high_confidence"]]
+    for col in ["open","high","low","close"]:
+        q[col] = [
+            float(v) * _v6894_factor_for_date(hi, dt)
+            for v,dt in zip(q[col], q["date"])
+        ]
+    return q, hi, amb
+
+def _v826a_entry_features_q(q, ed):
+    z = q[q["date"] <= pd.Timestamp(ed).normalize()].copy().reset_index(drop=True)
+    if len(z) < 260:return None
+    c=z["close"].astype(float); h=z["high"].astype(float); l=z["low"].astype(float); v=z["volume"].astype(float)
+
+    def ret(n):
+        return float(c.iloc[-1]/c.iloc[-1-n]-1) if len(c)>n else None
+    def slope(n,lag=20):
+        ma=c.rolling(n).mean()
+        if len(ma.dropna())<lag+1:return None
+        a=float(ma.iloc[-1]); b=float(ma.iloc[-1-lag])
+        return (a/b-1) if b else None
+
+    hi20=float(h.tail(20).max()); lo20=float(l.tail(20).min())
+    hi10=float(h.tail(10).max()); lo10=float(l.tail(10).min())
+    px=float(c.iloc[-1])
+    f={
+        "ret_20d":ret(20),
+        "range20_pct":(hi20-lo20)/px if px else None,
+        "volatility20":float(c.pct_change().tail(20).std()),
+        "close_vs_ma50":px/float(c.rolling(50).mean().iloc[-1])-1,
+        "up_day_ratio20":float((c.pct_change().tail(20)>0).mean()),
+        "contraction_10v20":((hi10-lo10)/(hi20-lo20)) if (hi20-lo20) else None,
+        "ma20_slope20":slope(20,20),
+        "ma50_slope20":slope(50,20),
+    }
+    if not all(k in f for k in V826A_FEATURES):return None
+    return f
+
+def _v826a_exact_outcome(q, ed, entry_px):
+    future = q[q["date"] > pd.Timestamp(ed).normalize()].head(60).copy().reset_index(drop=True)
+    if len(future) < 60:
+        return None
+    ep=float(entry_px); stop_px=ep*.93
+    hit = future.index[future["low"] <= stop_px]
+    if len(hit):
+        j=int(hit[0])
+        path=future.iloc[:j+1].copy()
+        realized=-.07
+        is_stop=True
+        exit_date=pd.Timestamp(future.loc[j,"date"]).normalize()
+    else:
+        path=future.copy()
+        realized=float(future.iloc[59]["close"]/ep-1)
+        is_stop=False
+        exit_date=pd.Timestamp(future.iloc[59]["date"]).normalize()
+    tmfe=float(path["high"].max()/ep-1) if len(path) else None
+    return {
+        "tradable_mfe":tmfe,
+        "winner20":bool(tmfe is not None and tmfe>=.20),
+        "is_stop":bool(is_stop),
+        "realized_ret":float(realized),
+        "exit60_date":exit_date,
+    }
+
+def _v826a_preflight():
+    V826A_DIR.mkdir(parents=True, exist_ok=True)
+    P=_v826a_candidate_cache()
+    M,lidcol=_v826a_manifest()
+
+    lids=sorted(set(P["listing_id"].astype(str)))
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    mapped=[x for x in lids if x in mmap]
+    mapping_cov=len(mapped)/max(1,len(lids))
+
+    dup_listing_date=int(P.duplicated(["listing_id","entry_date"], keep=False).sum())
+    exact_rows=int(len(P))
+    date_min=str(P["entry_date"].min().date()) if len(P) else None
+    date_max=str(P["entry_date"].max().date()) if len(P) else None
+
+    sample_lids=mapped[:25]
+    sample_ok=0; sample_feature_ok=0; sample_schema=[]
+    for lid in sample_lids:
+        try:
+            q,hi,amb=_v826a_prepare_price(mmap[lid])
+            ok=q is not None and len(q)>=320
+            if ok:sample_ok+=1
+            sub=P[P["listing_id"].eq(lid)].sort_values("entry_date")
+            feat_ok=False
+            if ok:
+                for _,r in sub.iterrows():
+                    f=_v826a_entry_features_q(q,r["entry_date"])
+                    if f and all(pd.notna(f.get(c)) and np.isfinite(float(f.get(c))) for c in V826A_FEATURES):
+                        feat_ok=True;break
+            if feat_ok:sample_feature_ok+=1
+            sample_schema.append({"listing_id":lid,"price_ok":bool(ok),"feature_ok":bool(feat_ok),
+                                  "rows":int(len(q)) if q is not None else 0,
+                                  "ambiguous_scale_events":int(len(amb))})
+        except Exception as ex:
+            sample_schema.append({"listing_id":lid,"price_ok":False,"feature_ok":False,"error":f"{type(ex).__name__}: {ex}"})
+
+    sample_n=max(1,len(sample_lids))
+    verdict = "PASS" if (
+        len(P)>=500 and mapping_cov>=.95 and
+        sample_ok/sample_n>=.80 and sample_feature_ok/sample_n>=.80
+    ) else "FAIL__HISTORICAL_CACHE_OR_SCHEMA_NOT_READY"
+
+    out={
+        "version":"V8.26A Historical STOP-Avoidance Walk-Forward",
+        "build_id":V826A_BUILD_ID,
+        "verdict":verdict,
+        "candidate_rows":exact_rows,
+        "unique_listings":int(len(lids)),
+        "manifest_mapped_listings":int(len(mapped)),
+        "manifest_mapping_coverage":float(mapping_cov),
+        "entry_date_min":date_min,"entry_date_max":date_max,
+        "listing_date_duplicate_rows":dup_listing_date,
+        "sample_listings":int(len(sample_lids)),
+        "sample_price_ok":int(sample_ok),
+        "sample_feature_ok":int(sample_feature_ok),
+        "features":V826A_FEATURES,
+        "sample_schema":sample_schema,
+        "parity":"Exact M 8-feature directions/equal weight. Exact 60-session/7% stop/tradable-MFE semantics. Split handling reuses V6.94/V6.89.4 logic.",
+        "next_action":"RUN_RESUMABLE_YEAR_FORWARD_VALIDATION" if verdict=="PASS" else "STOP__FIX_ONLY_REPORTED_SCHEMA_OR_CACHE_GAP"
+    }
+    V826A_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return out
+
+def _v826a_part_path(lid):
+    import hashlib
+    h=hashlib.sha1(str(lid).encode("utf-8")).hexdigest()[:16]
+    return V826A_PARTS / f"{h}.csv.gz"
+
+def _v826a_build_parts():
+    P=_v826a_candidate_cache()
+    M,lidcol=_v826a_manifest()
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    lids=sorted(set(P["listing_id"].astype(str)))
+    V826A_PARTS.mkdir(parents=True,exist_ok=True)
+
+    rows_done=0; errors=0; t0=time.time()
+    for n,lid in enumerate(lids,1):
+        pp=_v826a_part_path(lid)
+        if pp.exists():
+            try:
+                rows_done += len(pd.read_csv(pp,compression="gzip"))
+                continue
+            except Exception:
+                try:pp.unlink()
+                except Exception:pass
+
+        mr=mmap.get(lid)
+        outrows=[]
+        if mr is None:
+            errors+=1
+        else:
+            try:
+                q,hi,amb=_v826a_prepare_price(mr)
+                if q is None:
+                    errors+=1
+                else:
+                    sub=P[P["listing_id"].eq(lid)].sort_values("entry_date")
+                    for _,r in sub.iterrows():
+                        ed=pd.Timestamp(r["entry_date"]).normalize()
+
+                        # Conservative ambiguity exclusion: feature lookback through 60d forward.
+                        lookback_date=ed-pd.Timedelta(days=420)
+                        fwd=q[q["date"]>ed].head(60)
+                        end_date=pd.Timestamp(fwd["date"].max()).normalize() if len(fwd) else ed
+                        if any(lookback_date < x["date"] <= end_date for x in amb):
+                            continue
+
+                        ef=_v6894_factor_for_date(hi,ed)
+                        ep=float(r["entry_px_raw"])*ef
+                        if not np.isfinite(ep) or ep<=0:continue
+
+                        f=_v826a_entry_features_q(q,ed)
+                        if not f:continue
+                        if not all(pd.notna(f.get(c)) and np.isfinite(float(f.get(c))) for c in V826A_FEATURES):
+                            continue
+
+                        o=_v826a_exact_outcome(q,ed,ep)
+                        if o is None:continue
+
+                        rec={
+                            "listing_id":lid,"entry_date":ed,"entry_px":ep,
+                            **f,**o
+                        }
+                        for c in ["parent_opportunity_id","stage2_row_id","parent_entry_date","source_generator_id"]:
+                            if c in r.index:rec[c]=r[c]
+                        outrows.append(rec)
+            except Exception:
+                errors+=1
+
+        pd.DataFrame(outrows).to_csv(pp,index=False,compression="gzip")
+        rows_done += len(outrows)
+        if n==1 or n%25==0 or n==len(lids):
+            _v826a_write_status(
+                status="running",phase="historical_feature_cache",
+                message=f"Historical cache {n}/{len(lids)} listings · rows {rows_done}",
+                processed=n,total=len(lids),rows=rows_done,errors=errors,
+                elapsed_sec=round(time.time()-t0,1),error=None
+            )
+    return rows_done, errors
+
+def _v826a_score_test(train, test):
+    # Train-only empirical percentile transform + equal-weight directed score.
+    Xte=pd.DataFrame(index=test.index)
+    train_score_parts=[]
+    test_parts=[]
+    for c in V826A_FEATURES:
+        tr=pd.to_numeric(train[c],errors="coerce")
+        te=pd.to_numeric(test[c],errors="coerce")
+        med=float(tr.median())
+        tr=tr.fillna(med); te=te.fillna(med)
+        vals=np.sort(tr.to_numpy(dtype=float))
+        d=float(V826A_DIRECTIONS[c])
+        tr_pct=tr.rank(pct=True,method="average").to_numpy()*d
+        te_pct=np.asarray([np.searchsorted(vals,float(v),side="right")/max(1,len(vals)) for v in te],dtype=float)*d
+        train_score_parts.append(tr_pct)
+        test_parts.append(te_pct)
+
+    train_scores=np.mean(np.vstack(train_score_parts),axis=0)
+    test_scores=np.mean(np.vstack(test_parts),axis=0)
+    sorted_train_scores=np.sort(train_scores)
+    ranks=np.asarray([np.searchsorted(sorted_train_scores,float(s),side="right")/max(1,len(sorted_train_scores)) for s in test_scores])
+    return test_scores, ranks
+
+def _v826a_auc(y,x):
+    return _v825m_auc(pd.Series(y).astype(int),pd.Series(x))
+
+def _v826a_metrics(D):
+    if D is None or D.empty:return {"n":0}
+    r=pd.to_numeric(D["realized_ret"],errors="coerce").dropna()
+    if r.empty:return {"n":0}
+    gp=float(r[r>0].sum()); gl=float(-r[r<0].sum())
+    pf=gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0)
+    eq=r.cumsum(); dd=eq-eq.cummax()
+    return {
+        "n":int(len(r)),
+        "win_rate":float((r>0).mean()),
+        "avg_trade":float(r.mean()),
+        "pf":float(pf),
+        "trade_sequence_maxdd":float(dd.min()) if len(dd) else 0.0,
+        "winner20_rate":float(D["winner20"].astype(bool).mean()),
+        "stop_rate":float(D["is_stop"].astype(bool).mean()),
+        "net_trade_return_sum":float(r.sum())
+    }
+
+def _v826a_finalize():
+    parts=sorted(V826A_PARTS.glob("*.csv.gz"))
+    frames=[]
+    for fp in parts:
+        try:
+            d=pd.read_csv(fp,compression="gzip")
+            if not d.empty:frames.append(d)
+        except Exception:pass
+    if not frames:raise RuntimeError("No historical checkpoint rows")
+    F=pd.concat(frames,ignore_index=True)
+    F["entry_date"]=pd.to_datetime(F["entry_date"],errors="coerce")
+    F["winner20"]=_v826a_bool(F["winner20"])
+    F["is_stop"]=_v826a_bool(F["is_stop"])
+    F["realized_ret"]=pd.to_numeric(F["realized_ret"],errors="coerce")
+    F=F.dropna(subset=["entry_date","realized_ret"]).sort_values(["entry_date","listing_id"]).reset_index(drop=True)
+
+    years=sorted(int(x) for x in F["entry_date"].dt.year.dropna().unique())
+    oos=[]; yearly=[]
+    for y in years:
+        train=F[F["entry_date"].dt.year<y].copy()
+        test=F[F["entry_date"].dt.year==y].copy()
+        if len(train)<200 or len(test)<25:continue
+
+        scores,ranks=_v826a_score_test(train,test)
+        test["frozen_score"]=scores
+        test["reference_rank"]=ranks
+        test["test_year"]=y
+
+        comp=test[test["winner20"] | test["is_stop"]].copy()
+        auc=_v826a_auc(comp["winner20"].astype(int),comp["frozen_score"]) if len(comp)>=10 and comp["winner20"].nunique()>=2 else None
+
+        op=[]
+        for keep_top in [.25,.33,.50]:
+            keep=test["reference_rank"] >= (1-keep_top)
+            K=test[keep].copy()
+            wt=int(test["winner20"].sum()); st=int(test["is_stop"].sum())
+            wk=int(K["winner20"].sum()); sk=int(K["is_stop"].sum())
+            op.append({
+                "keep_top_fraction":keep_top,
+                "winner_recall":float(wk/max(1,wt)),
+                "stop_reduction":float((st-sk)/max(1,st)),
+                "winners_kept":wk,"winners_total":wt,
+                "stops_kept":sk,"stops_total":st,
+                "metrics":_v826a_metrics(K)
+            })
+
+        yearly.append({
+            "year":y,"train_n":int(len(train)),"test_n":int(len(test)),
+            "winner20":int(test["winner20"].sum()),"stops":int(test["is_stop"].sum()),
+            "winner_stop_overlap":int((test["winner20"] & test["is_stop"]).sum()),
+            "auc":auc,"baseline_metrics":_v826a_metrics(test),"operating_points":op
+        })
+        oos.append(test)
+
+    if not oos:raise RuntimeError("No strict year-forward OOS years after minimum sample gates")
+    O=pd.concat(oos,ignore_index=True)
+
+    comp=O[O["winner20"] | O["is_stop"]].copy()
+    pooled_auc=_v826a_auc(comp["winner20"].astype(int),comp["frozen_score"]) if comp["winner20"].nunique()>=2 else None
+    baseline=_v826a_metrics(O)
+
+    pooled_ops=[]
+    for keep_top in [.25,.33,.50]:
+        K=O[O["reference_rank"] >= (1-keep_top)].copy()
+        wt=int(O["winner20"].sum()); st=int(O["is_stop"].sum())
+        wk=int(K["winner20"].sum()); sk=int(K["is_stop"].sum())
+        km=_v826a_metrics(K)
+        pooled_ops.append({
+            "keep_top_fraction":keep_top,
+            "kept_n":int(len(K)),
+            "winner_recall":float(wk/max(1,wt)),
+            "stop_reduction":float((st-sk)/max(1,st)),
+            "winners_kept":wk,"winners_total":wt,
+            "stops_kept":sk,"stops_total":st,
+            "metrics":km
+        })
+
+    valid_year_auc=[float(x["auc"]) for x in yearly if x.get("auc") is not None and np.isfinite(float(x["auc"]))]
+    year_auc60_share=float(np.mean([x>=.60 for x in valid_year_auc])) if valid_year_auc else 0.0
+
+    viable=[]
+    for g in pooled_ops:
+        gm=g.get("metrics") or {}
+        if (
+            g["winner_recall"]>=.75 and
+            g["stop_reduction"]>=.30 and
+            float(gm.get("pf",0))>=float(baseline.get("pf",0)) and
+            float(gm.get("avg_trade",-99))>=float(baseline.get("avg_trade",-99))
+        ):
+            viable.append(g)
+
+    enough = (
+        len(yearly)>=5 and int(O["winner20"].sum())>=20 and int(O["is_stop"].sum())>=100
+    )
+    if enough and pooled_auc is not None and pooled_auc>=.65 and year_auc60_share>=.60 and viable:
+        verdict="HISTORICAL_YEAR_FORWARD_PASS__STOP_AVOIDANCE_GENERALIZES"
+        next_action="KEEP_V825O_FORWARD_SHADOW_RUNNING__PREPARE_FORMAL_SHADOW_PARITY_BRIDGE__NO_PRODUCTION_PROMOTION"
+    elif pooled_auc is not None and pooled_auc>=.60:
+        verdict="HISTORICAL_PARTIAL_SIGNAL__RESEARCH_ONLY"
+        next_action="DO_NOT_TUNE__KEEP_O_SHADOW_AND_ACCUMULATE_MORE_FORWARD_DATA"
+    else:
+        verdict="HISTORICAL_FAIL__M_SMALL_SAMPLE_EDGE_DID_NOT_GENERALIZE"
+        next_action="FREEZE_FAILURE__DO_NOT_RETUNE_ON_THIS_HISTORY"
+
+    result={
+        "version":"V8.26A Historical STOP-Avoidance Walk-Forward",
+        "build_id":V826A_BUILD_ID,
+        "verdict":verdict,
+        "full_feature_rows":int(len(F)),
+        "oos_rows":int(len(O)),
+        "oos_years":int(len(yearly)),
+        "oos_winner20":int(O["winner20"].sum()),
+        "oos_stops":int(O["is_stop"].sum()),
+        "oos_winner_stop_overlap":int((O["winner20"] & O["is_stop"]).sum()),
+        "pooled_auc":pooled_auc,
+        "year_auc_ge_0_60_share":year_auc60_share,
+        "baseline_metrics":baseline,
+        "pooled_operating_points":pooled_ops,
+        "yearly":yearly,
+        "features":V826A_FEATURES,
+        "model":"Exact V8.25M equal-weight directed percentile composite. Each test year uses earlier years only for feature medians, percentiles, score reference distribution, and fixed reference ranks.",
+        "decision_rule":"PASS requires >=5 OOS years, >=20 OOS tradable +20 winners, >=100 OOS STOPs, pooled AUC>=0.65, >=60% valid years AUC>=0.60, and at least one fixed top {25%,33%,50%} reference-rank gate with winner recall>=75%, STOP reduction>=30%, PF>=baseline and AvgTrade>=baseline.",
+        "maxdd_note":"trade_sequence_maxdd is candidate-level chronological cumulative-return drawdown, NOT 10-slot/account portfolio MaxDD. Portfolio path effects require a separate parity-safe replay if this screen passes.",
+        "next_action":next_action,
+        "boundaries":"0 downloads, 0 universe rescan, resumable per-listing historical cache reuse, exact frozen M features/directions/weights, exact 60d/7% stop outcome semantics, strict year-forward, no threshold search, no retuning."
+    }
+    V826A_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    O.to_csv(V826A_DIR/"strict_year_forward_oos_rows.csv.gz",index=False,compression="gzip")
+    F.to_csv(V826A_DIR/"historical_frozen_entry_anatomy.csv.gz",index=False,compression="gzip")
+    return result
+
+def _v826a_worker():
+    global v826a_thread
+    t0=time.time()
+    try:
+        P=json.loads(V826A_PREFLIGHT.read_text(encoding="utf-8")) if V826A_PREFLIGHT.exists() else {}
+        if P.get("verdict")!="PASS":
+            raise RuntimeError("V8.26A Preflight must PASS before long validation")
+        _v826a_write_status(status="running",phase="historical_feature_cache",message="Resumable historical feature build…",
+                            processed=0,total=int(P.get("unique_listings",0)),rows=0,errors=0,elapsed_sec=0,error=None)
+        _v826a_build_parts()
+        _v826a_write_status(status="running",phase="strict_year_forward",message="Strict year-forward validation…",
+                            elapsed_sec=round(time.time()-t0,1),error=None)
+        R=_v826a_finalize()
+        _v826a_write_status(status="done",phase="done",message=f"完成：{R.get('verdict')}",
+                            processed=int(P.get("unique_listings",0)),total=int(P.get("unique_listings",0)),
+                            rows=int(R.get("full_feature_rows",0)),elapsed_sec=round(time.time()-t0,1),error=None)
+    except Exception as ex:
+        _v826a_write_status(status="error",phase="error",message=f"{type(ex).__name__}: {ex}",
+                            elapsed_sec=round(time.time()-t0,1),error=f"{type(ex).__name__}: {ex}")
+    finally:
+        v826a_thread=None
+
+@APP.route("/v826a/preflight",methods=["GET","POST"])
+def v826a_preflight_route():
+    try:_v826a_preflight()
+    except Exception as ex:
+        V826A_DIR.mkdir(parents=True,exist_ok=True)
+        V826A_PREFLIGHT.write_text(json.dumps({"verdict":"AUDIT_ERROR","error":f"{type(ex).__name__}: {ex}"},ensure_ascii=False,indent=2),encoding="utf-8")
+    return redirect("/v826a")
+
+@APP.post("/v826a/start")
+def v826a_start_route():
+    global v826a_thread
+    if _v826a_alive():
+        return jsonify({"started":False,**_v826a_status()})
+    P=json.loads(V826A_PREFLIGHT.read_text(encoding="utf-8")) if V826A_PREFLIGHT.exists() else {}
+    if P.get("verdict")!="PASS":
+        return jsonify({"started":False,"status":"blocked","message":"Run PASS Preflight first"})
+    v826a_thread=threading.Thread(target=_v826a_worker,daemon=True)
+    v826a_thread.start()
+    return jsonify({"started":True,**_v826a_status()})
+
+@APP.get("/api/v826a")
+def v826a_api():
+    return jsonify(_v826a_status())
+
+@APP.get("/v826a")
+def v826a_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    P={}
+    if V826A_PREFLIGHT.exists():
+        try:P=json.loads(V826A_PREFLIGHT.read_text(encoding="utf-8"))
+        except Exception:P={}
+    R={}
+    if V826A_RESULT.exists():
+        try:R=json.loads(V826A_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    S=_v826a_status()
+
+    ops=""
+    for g in R.get("pooled_operating_points") or []:
+        m=g.get("metrics") or {}
+        ops += (
+            f"<tr><td>Top {int(float(g.get('keep_top_fraction',0))*100)}%</td>"
+            f"<td>{e(g.get('kept_n'))}</td>"
+            f"<td>{e(g.get('winners_kept'))}/{e(g.get('winners_total'))}</td>"
+            f"<td>{e(round(float(g.get('winner_recall',0))*100,1))}%</td>"
+            f"<td>{e(g.get('stops_kept'))}/{e(g.get('stops_total'))}</td>"
+            f"<td>{e(round(float(g.get('stop_reduction',0))*100,1))}%</td>"
+            f"<td>{e(round(float(m.get('pf',0)),3))}</td>"
+            f"<td>{e(round(float(m.get('avg_trade',0))*100,3))}%</td></tr>"
+        )
+    yrs=""
+    for x in R.get("yearly") or []:
+        yrs += (
+            f"<tr><td>{e(x.get('year'))}</td><td>{e(x.get('train_n'))}</td><td>{e(x.get('test_n'))}</td>"
+            f"<td>{e(x.get('winner20'))}</td><td>{e(x.get('stops'))}</td>"
+            f"<td>{e(round(float(x.get('auc')),3) if x.get('auc') is not None else '—')}</td></tr>"
+        )
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1350px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900;margin:4px}}
+.track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🧱 V8.26A Historical STOP-Avoidance Walk-Forward</h1>
+<div class='o'><b>先 Schema/Parity Preflight，后长跑。</b> 复用 V6.69 candidate cache + V6.17 Historical Cache，把 M 的8个 entry-anatomy features 原封不动扩到更大历史样本；严格逐年 past-only。0 Tiingo / 0 Universe rescan / 0 tuning。</div></div>
+
+<div class='c'><form method='post' action='/v826a/preflight'><button>A. Run Historical Schema / Parity Preflight</button></form>
+<h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Candidate rows <b>{e(P.get('candidate_rows','—'))}</b> · Unique listings <b>{e(P.get('unique_listings','—'))}</b><br>
+Manifest mapping <b>{e(round(float(P.get('manifest_mapping_coverage',0))*100,1) if P else '—')}%</b> ·
+Sample price OK <b>{e(P.get('sample_price_ok','—'))}/{e(P.get('sample_listings','—'))}</b> ·
+Sample feature OK <b>{e(P.get('sample_feature_ok','—'))}/{e(P.get('sample_listings','—'))}</b><br>
+Range {e(P.get('entry_date_min','—'))} → {e(P.get('entry_date_max','—'))}<br>
+Next: <b>{e(P.get('next_action','—'))}</b></div></div>
+
+<div class='c'><button id='go'>B. Build / Resume Historical Walk-Forward</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
+<div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span> · rows <span id='rows'>{e(S.get('rows',0))}</span> · errors <span id='err'>{e(S.get('errors',0))}</span></p></div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>OOS rows <b>{e(R.get('oos_rows','—'))}</b> · Years <b>{e(R.get('oos_years','—'))}</b> · +20 <b>{e(R.get('oos_winner20','—'))}</b> · STOP <b>{e(R.get('oos_stops','—'))}</b><br>
+Pooled AUC <b>{e(round(float(R.get('pooled_auc',0)),3) if R.get('pooled_auc') is not None else '—')}</b> · Years AUC≥.60 <b>{e(round(float(R.get('year_auc_ge_0_60_share',0))*100,1) if R else '—')}%</b><br>
+Next: <b>{e(R.get('next_action','—'))}</b></div></div>
+
+<div class='c'><h2>Pooled Fixed Operating Points</h2><div style='overflow:auto'><table>
+<tr><th>Keep</th><th>N</th><th>Winners kept</th><th>Recall</th><th>STOP kept</th><th>STOP reduction</th><th>PF</th><th>AvgTrade</th></tr>
+{ops or "<tr><td colspan=8>Run validation first.</td></tr>"}</table></div></div>
+
+<div class='c'><h2>Year-by-Year Strict OOS</h2><div style='overflow:auto'><table>
+<tr><th>Year</th><th>Train N</th><th>Test N</th><th>+20</th><th>STOP</th><th>AUC</th></tr>
+{yrs or "<tr><td colspan=6>Run validation first.</td></tr>"}</table></div></div>
+
+<div class='c'><div class='b'><b>Frozen gate:</b> {e(R.get('decision_rule',''))}<br><br><b>MaxDD note:</b> {e(R.get('maxdd_note',''))}</div>
+<p>{e(R.get('boundaries',''))}</p></div>
+
+<script>
+const $=x=>document.getElementById(x);
+async function poll(){{
+  try{{
+    let s=await (await fetch('/api/v826a',{{cache:'no-store'}})).json();
+    let pct=s.total?Math.round(100*s.processed/s.total):0;
+    $('msg').textContent=s.message||s.status||'';
+    $('pct').textContent=pct+'%'; $('bar').style.width=pct+'%';
+    $('cnt').textContent=(s.processed||0)+'/'+(s.total||0);
+    $('rows').textContent=s.rows||0; $('err').textContent=s.errors||0;
+    if(s.status==='running'||s.status==='starting')setTimeout(poll,1800);
+  }}catch(e){{$('msg').textContent='status error: '+e;}}
+}}
+$('go').onclick=async()=>{{
+  let s=await (await fetch('/v826a/start',{{method:'POST'}})).json();
+  $('msg').textContent=s.message||s.status||'';
+  poll();
+}};
+poll();
+</script>
 </div></body></html>"""
