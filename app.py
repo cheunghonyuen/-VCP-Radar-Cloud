@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v826d-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v826d1-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🫀 V8.26D1 Runtime Heartbeat / Cache Read Diagnostic</h2>
+        <p>只修 D 的黑盒加载：逐批读 cache，实时显示 current listing / processed / errors / elapsed / heartbeat。研究逻辑不变。</p>
+        <a href='/v826d1'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26D1</button></a>
+        </div>
+        <div id='v826d-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧾 V8.26D Drawdown Attribution / Winner Giveback Audit</h2>
         <p>只解释 Top25 -54.76% 最大回撤：逐仓归因、winner giveback、STOP 贡献，并对照 BASE。0 exit change / 0 tuning / 0 rescan。</p>
         <a href='/v826d'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.26D</button></a>
@@ -65149,6 +65154,282 @@ async function poll(){{
 }}
 $('go').onclick=async()=>{{
  let s=await (await fetch('/v826d/start',{{method:'POST'}})).json();
+ $('msg').textContent=s.message||s.status||'';
+ poll();
+}};
+poll();
+</script>
+</div></body></html>"""
+
+# ================= V8.26D1 RUNTIME HEARTBEAT / CACHE READ DIAGNOSTIC =================
+# Runtime-only fix for V8.26D:
+# - no research logic changes
+# - no model/filter/exit/admission changes
+# - batch cached-price loading
+# - per-listing heartbeat
+# - current listing, processed, errors, elapsed time
+# - stall detector
+V826D1_DIR = DATA_DIR / "v826d1_runtime_heartbeat_cache_read_diagnostic"
+V826D1_STATUS = V826D1_DIR / "status.json"
+V826D1_RESULT = V826D1_DIR / "result.json"
+V826D1_BUILD_ID = "V826D1_RUNTIME_HEARTBEAT_20260902A"
+v826d1_thread = None
+
+def _v826d1_status():
+    x={
+        "status":"idle","phase":"","message":"尚未开始",
+        "processed":0,"total":0,"errors":0,"current_listing":None,
+        "last_heartbeat":None,"elapsed_sec":0,"error":None
+    }
+    if V826D1_STATUS.exists():
+        try:x.update(json.loads(V826D1_STATUS.read_text(encoding="utf-8")))
+        except Exception:pass
+    return x
+
+def _v826d1_write_status(**kw):
+    V826D1_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v826d1_status();x.update(kw)
+    x["last_heartbeat"]=datetime.now(timezone.utc).isoformat()
+    V826D1_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return x
+
+def _v826d1_alive():
+    return v826d1_thread is not None and v826d1_thread.is_alive()
+
+def _v826d1_load_prices_streaming(listing_ids, heartbeat_every=10):
+    M,lidcol=_v826a_manifest()
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    lids=sorted(set(map(str,listing_ids)))
+    out={}
+    errors=[]
+    t0=time.time()
+
+    for n,lid in enumerate(lids,1):
+        mr=mmap.get(lid)
+        if mr is None:
+            errors.append({"listing_id":lid,"error":"manifest_missing"})
+        else:
+            try:
+                q,hi,amb=_v826a_prepare_price(mr)
+                if q is None:
+                    errors.append({"listing_id":lid,"error":"price_prepare_none"})
+                else:
+                    out[lid]={
+                        pd.Timestamp(d).normalize():float(c)
+                        for d,c in zip(q["date"],q["close"])
+                        if pd.notna(d) and pd.notna(c)
+                    }
+            except Exception as ex:
+                errors.append({"listing_id":lid,"error":f"{type(ex).__name__}: {ex}"})
+
+        if n==1 or n%heartbeat_every==0 or n==len(lids):
+            _v826d1_write_status(
+                status="running",
+                phase="cached_price_stream",
+                message=f"Reading cached prices {n}/{len(lids)} · current {lid}",
+                processed=n,
+                total=len(lids),
+                errors=len(errors),
+                current_listing=lid,
+                elapsed_sec=round(time.time()-t0,1),
+                error=None
+            )
+
+    return out, errors
+
+def _v826d1_run():
+    V826D1_DIR.mkdir(parents=True,exist_ok=True)
+
+    # Exact same admissions as D.
+    D=_v826b_load_oos()
+    T=D[D["reference_rank"]>=.75].copy()
+    meta,_=_v826c_listing_meta()
+    top_adm,_=_v826c_admit(T,"TOP25_CURRENT",meta)
+    base_adm,_=_v826b_admit(D)
+
+    all_lids=set(top_adm["listing_id"].astype(str)) | set(base_adm["listing_id"].astype(str))
+
+    _v826d1_write_status(
+        status="running",phase="cached_price_stream",
+        message=f"Preparing to stream {len(all_lids)} cached listings…",
+        processed=0,total=len(all_lids),errors=0,current_listing=None,
+        elapsed_sec=0,error=None
+    )
+
+    price_maps,errors=_v826d1_load_prices_streaming(all_lids,heartbeat_every=5)
+
+    # Abort only if cache read is materially incomplete.
+    coverage=len(price_maps)/max(1,len(all_lids))
+    if coverage < .95:
+        result={
+            "version":"V8.26D1 Runtime Heartbeat / Cache Read Diagnostic",
+            "build_id":V826D1_BUILD_ID,
+            "verdict":"CACHE_READ_INCOMPLETE__DO_NOT_RUN_ATTRIBUTION",
+            "requested_listings":int(len(all_lids)),
+            "loaded_listings":int(len(price_maps)),
+            "coverage":float(coverage),
+            "errors":errors[:100],
+            "next_action":"FIX_ONLY_REPORTED_CACHE_READ_FAILURES"
+        }
+        V826D1_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        return result
+
+    _v826d1_write_status(
+        status="running",phase="top25_attribution",
+        message="Cached prices loaded. Attributing TOP25 drawdown…",
+        processed=len(all_lids),total=len(all_lids),errors=len(errors),
+        current_listing=None,error=None
+    )
+    top_E=_v826c_equity_curve(top_adm,price_maps)
+    top=_v826d_analyze_variant("TOP25_CURRENT",top_adm,top_E,price_maps)
+
+    _v826d1_write_status(
+        status="running",phase="base_attribution",
+        message="Attributing BASE drawdown…",
+        processed=len(all_lids),total=len(all_lids),errors=len(errors),
+        current_listing=None,error=None
+    )
+    base_E=_v826c_equity_curve(base_adm,price_maps)
+    base=_v826d_analyze_variant("BASE",base_adm,base_E,price_maps)
+
+    tw=top.get("groups",{}).get("eventual_winner20",{})
+    ts=top.get("groups",{}).get("eventual_stop",{})
+    dd=abs(float(top.get("drawdown_dollars",0)))
+    winner_dd_share=abs(min(0.0,float(tw.get("peak_to_trough_dollars",0))))/dd if dd>0 else 0.0
+    stop_dd_share=abs(min(0.0,float(ts.get("peak_to_trough_dollars",0))))/dd if dd>0 else 0.0
+    giveback_ratio=float(top.get("gross_giveback_dollars_local_best_to_trough",0))/dd if dd>0 else 0.0
+
+    if winner_dd_share>=.35 and giveback_ratio>=.75:
+        verdict="TOP25_DRAWDOWN_DOMINATED_BY_WINNER_GIVEBACK_AND_SYNCHRONIZED_MTM"
+        next_action="AUDIT_FIXED_WINNER_PROTECTION_IDEAS_ONLY__NO_EXIT_TUNING_YET"
+    elif stop_dd_share>=.50:
+        verdict="TOP25_DRAWDOWN_DOMINATED_BY_STOP_CLUSTER"
+        next_action="AUDIT_EARLY_FAILURE_PATHS_ONLY__NO_ENTRY_THRESHOLD_TUNING"
+    else:
+        verdict="TOP25_DRAWDOWN_IS_MIXED__NO_SINGLE_DOMINANT_CAUSE"
+        next_action="KEEP_TOP25_RESEARCH_ONLY__SEPARATE_MARKET_EXPOSURE_AND_EXIT_PATH_AUDITS"
+
+    result={
+        "version":"V8.26D1 Runtime Heartbeat / Cache Read Diagnostic",
+        "build_id":V826D1_BUILD_ID,
+        "verdict":verdict,
+        "requested_listings":int(len(all_lids)),
+        "loaded_listings":int(len(price_maps)),
+        "cache_read_coverage":float(coverage),
+        "cache_errors":errors[:100],
+        "top25":top,
+        "base":base,
+        "diagnosis":{
+            "top25_winner20_negative_dd_share":float(winner_dd_share),
+            "top25_stop_negative_dd_share":float(stop_dd_share),
+            "top25_gross_giveback_to_drawdown_ratio":float(giveback_ratio),
+        },
+        "runtime_note":"D1 changes runtime observability only. Research logic and attribution formulas are unchanged from V8.26D.",
+        "next_action":next_action
+    }
+    V826D1_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+    return result
+
+def _v826d1_worker():
+    global v826d1_thread
+    t0=time.time()
+    try:
+        R=_v826d1_run()
+        _v826d1_write_status(
+            status="done",phase="done",message=f"完成：{R.get('verdict')}",
+            processed=int(R.get("requested_listings",0)),
+            total=int(R.get("requested_listings",0)),
+            errors=len(R.get("cache_errors",[])),
+            current_listing=None,
+            elapsed_sec=round(time.time()-t0,1),
+            error=None
+        )
+    except Exception as ex:
+        _v826d1_write_status(
+            status="error",phase="error",
+            message=f"{type(ex).__name__}: {ex}",
+            elapsed_sec=round(time.time()-t0,1),
+            error=f"{type(ex).__name__}: {ex}"
+        )
+    finally:
+        v826d1_thread=None
+
+@APP.post("/v826d1/start")
+def v826d1_start_route():
+    global v826d1_thread
+    if _v826d1_alive():
+        return jsonify({"started":False,**_v826d1_status()})
+    v826d1_thread=threading.Thread(target=_v826d1_worker,daemon=True)
+    v826d1_thread.start()
+    return jsonify({"started":True,**_v826d1_status()})
+
+@APP.get("/api/v826d1")
+def v826d1_api():
+    return jsonify(_v826d1_status())
+
+@APP.get("/v826d1")
+def v826d1_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R={}
+    if V826D1_RESULT.exists():
+        try:R=json.loads(V826D1_RESULT.read_text(encoding="utf-8"))
+        except Exception:R={}
+    S=_v826d1_status()
+    diag=R.get("diagnosis") or {}
+    top=R.get("top25") or {}
+
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1200px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+.track{{height:18px;background:#e5e7eb;border-radius:99px;overflow:hidden}}.bar{{height:100%;background:#16a34a;width:0%}}
+</style></head><body><div class='w'><a href='/'>← 首页</a>
+
+<div class='c'><h1>🫀 V8.26D1 Runtime Heartbeat / Cache Read Diagnostic</h1>
+<div class='o'><b>只修运行时可见性，不改研究逻辑。</b> 2212 个 cache 改成逐批读取，并实时显示 current listing / processed / errors / elapsed / heartbeat。</div></div>
+
+<div class='c'><button id='go'>▶ Run D1 Streaming Cache + Attribution</button>
+<h2 id='msg'>{e(S.get('message','尚未开始'))}</h2>
+<div class='track'><div id='bar' class='bar'></div></div>
+<p><span id='pct'>0%</span> · <span id='cnt'>{e(S.get('processed',0))}/{e(S.get('total',0))}</span> · errors <span id='err'>{e(S.get('errors',0))}</span></p>
+<p>Current listing: <b id='cur'>{e(S.get('current_listing','—'))}</b></p>
+<p>Elapsed: <b id='elapsed'>{e(S.get('elapsed_sec',0))}</b>s · Last heartbeat: <b id='hb'>{e(S.get('last_heartbeat','—'))}</b></p>
+</div>
+
+<div class='c'><h2>Verdict: {e(R.get('verdict','NOT_RUN'))}</h2>
+<div class='g'>Requested listings <b>{e(R.get('requested_listings','—'))}</b> · Loaded <b>{e(R.get('loaded_listings','—'))}</b> · Coverage <b>{e(round(float(R.get('cache_read_coverage',0))*100,1) if R else '—')}%</b><br>
+Top25 DD <b>{e(top.get('peak_date','—'))}</b> → <b>{e(top.get('trough_date','—'))}</b><br>
+Winner20 negative-DD share <b>{e(round(float(diag.get('top25_winner20_negative_dd_share',0))*100,1) if diag else '—')}%</b> ·
+STOP negative-DD share <b>{e(round(float(diag.get('top25_stop_negative_dd_share',0))*100,1) if diag else '—')}%</b> ·
+Gross giveback/DD <b>{e(round(float(diag.get('top25_gross_giveback_to_drawdown_ratio',0))*100,1) if diag else '—')}%</b><br>
+Next: <b>{e(R.get('next_action','—'))}</b></div></div>
+
+<div class='c'><div class='b'><b>Runtime note:</b> {e(R.get('runtime_note','V8.26D1 only changes runtime observability.'))}</div></div>
+
+<script>
+const $=x=>document.getElementById(x);
+async function poll(){{
+ try{{
+  let s=await (await fetch('/api/v826d1',{{cache:'no-store'}})).json();
+  let pct=s.total?Math.round(100*s.processed/s.total):0;
+  $('msg').textContent=s.message||s.status||'';
+  $('pct').textContent=pct+'%'; $('bar').style.width=pct+'%';
+  $('cnt').textContent=(s.processed||0)+'/'+(s.total||0);
+  $('err').textContent=s.errors||0;
+  $('cur').textContent=s.current_listing||'—';
+  $('elapsed').textContent=s.elapsed_sec||0;
+  $('hb').textContent=s.last_heartbeat||'—';
+
+  if(s.status==='running'||s.status==='starting')setTimeout(poll,1500);
+ }}catch(e){{$('msg').textContent='status error: '+e;}}
+}}
+$('go').onclick=async()=>{{
+ let s=await (await fetch('/v826d1/start',{{method:'POST'}})).json();
  $('msg').textContent=s.message||s.status||'';
  poll();
 }};
