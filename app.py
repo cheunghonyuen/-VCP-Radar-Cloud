@@ -46782,7 +46782,12 @@ _v7pf_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v7pf_home_base is not None:
     def _v7pf_home_wrap(*args,**kwargs):
         resp=_v7pf_home_base(*args,**kwargs)
-        card="""<div id='v825k-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
+        card="""<div id='v825l-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'>
+        <h2>🔬 V8.25L Winner-vs-STOP Entry Anatomy Audit</h2>
+        <p>Exact H frozen sample：比较 Tradable +20 winners vs STOPs 的 entry-time price/volume/VCP anatomy；保护 +30/+40 rare tail。0下载 / 0阈值搜索 / 0调参。</p>
+        <a href='/v825l'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25L</button></a>
+        </div>
+        <div id='v825k-home-card-real' style='background:#f0fdfa;border:7px solid #0f766e;border-radius:26px;padding:26px;margin:20px 0'>
         <h2>🧬 V8.25K Free PIT Fundamentals Separation Audit</h2>
         <p>Exact H frozen sample：只看 PIT Revenue/EPS/NI growth & acceleration 是否天然分离 Tradable +20/+30/+40 与 STOP。0下载 / 0阈值搜索 / 0调参。</p>
         <a href='/v825k'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.25K</button></a>
@@ -61681,6 +61686,321 @@ Strong separation: <b>{e(", ".join(R.get("strong_features") or []) or "NONE")}</
 <div class="c"><h2>Rare Tradable +30/+40 Tail — Protect These</h2><div style="overflow:auto"><table>
 <tr><th>Ticker</th><th>Entry</th><th>Tradable MFE</th><th>Stopped?</th><th>PIT feature vector</th></tr>
 {rare or "<tr><td colspan=5>Run audit first.</td></tr>"}</table></div></div>
+<div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
+<p><b>Frozen screen:</b> {e(R.get("decision_rule",""))}</p><p>{e(R.get("boundaries",""))}</p></div>
+</div></body></html>'''
+
+# ================= V8.25L WINNER-vs-STOP ENTRY ANATOMY AUDIT =================
+V825L_DIR = DATA_DIR / "v825l_winner_vs_stop_entry_anatomy_audit"
+V825L_RESULT = V825L_DIR / "result.json"
+V825L_BUILD_ID = "V825L_ENTRY_ANATOMY_20260902A"
+
+def _v825l_auc(y, x):
+    y = pd.Series(y).astype(int).reset_index(drop=True)
+    x = pd.to_numeric(pd.Series(x), errors="coerce").reset_index(drop=True)
+    m = x.notna() & y.notna()
+    y = y[m]; x = x[m]
+    if len(y) < 6 or y.nunique() < 2:
+        return None
+    pos = x[y == 1].to_numpy()
+    neg = x[y == 0].to_numpy()
+    if len(pos) == 0 or len(neg) == 0:
+        return None
+    wins = 0.0
+    total = len(pos) * len(neg)
+    for a in pos:
+        wins += float((a > neg).sum()) + 0.5 * float((a == neg).sum())
+    return float(wins / total)
+
+def _v825l_effect(pos, neg):
+    p = pd.to_numeric(pd.Series(pos), errors="coerce").dropna()
+    n = pd.to_numeric(pd.Series(neg), errors="coerce").dropna()
+    if len(p) < 2 or len(n) < 2:
+        return None
+    v = ((len(p)-1)*p.var(ddof=1) + (len(n)-1)*n.var(ddof=1)) / max(1, len(p)+len(n)-2)
+    if not np.isfinite(v) or v <= 1e-12:
+        return None
+    return float((p.mean()-n.mean()) / np.sqrt(v))
+
+def _v825l_entry_features(ticker, entry_date):
+    D = _v825h_load_prices(ticker)
+    if D is None or D.empty:
+        return None
+    D = D[D["Date"] <= pd.Timestamp(entry_date)].copy().reset_index(drop=True)
+    if len(D) < 260:
+        return None
+
+    c = D["close"].astype(float)
+    h = D["high"].astype(float)
+    l = D["low"].astype(float)
+    v = D["volume"].astype(float)
+
+    def ret(n):
+        return float(c.iloc[-1] / c.iloc[-1-n] - 1) if len(c) > n else None
+
+    def slope_ma(n, lag=20):
+        ma = c.rolling(n).mean()
+        if len(ma.dropna()) < lag+1:
+            return None
+        a = float(ma.iloc[-1]); b = float(ma.iloc[-1-lag])
+        return (a/b - 1) if b else None
+
+    hi20 = float(h.tail(20).max())
+    lo20 = float(l.tail(20).min())
+    hi10 = float(h.tail(10).max())
+    lo10 = float(l.tail(10).min())
+    hi55 = float(h.tail(55).max())
+    hi252 = float(h.tail(252).max())
+    vol20 = float(v.tail(20).mean())
+    vol50 = float(v.tail(50).mean())
+    vol5 = float(v.tail(5).mean())
+    px = float(c.iloc[-1])
+
+    tr = (h-l).astype(float)
+    atr10 = float(tr.tail(10).mean())
+    atr20 = float(tr.tail(20).mean())
+    atr50 = float(tr.tail(50).mean())
+
+    return {
+        "ret_5d": ret(5),
+        "ret_10d": ret(10),
+        "ret_20d": ret(20),
+        "ret_60d": ret(60),
+        "ret_120d": ret(120),
+        "extension_20d_high": px/hi20 - 1 if hi20 else None,
+        "extension_55d_high": px/hi55 - 1 if hi55 else None,
+        "extension_52w_high": px/hi252 - 1 if hi252 else None,
+        "range10_pct": (hi10-lo10)/px if px else None,
+        "range20_pct": (hi20-lo20)/px if px else None,
+        "contraction_10v20": ((hi10-lo10)/(hi20-lo20)) if (hi20-lo20) else None,
+        "atr10_pct": atr10/px if px else None,
+        "atr20_pct": atr20/px if px else None,
+        "atr10v20": atr10/atr20 if atr20 else None,
+        "atr20v50": atr20/atr50 if atr50 else None,
+        "rvol_5v20": vol5/vol20 if vol20 else None,
+        "rvol_20v50": vol20/vol50 if vol50 else None,
+        "close_vs_ma20": px/float(c.rolling(20).mean().iloc[-1])-1,
+        "close_vs_ma50": px/float(c.rolling(50).mean().iloc[-1])-1,
+        "close_vs_ma150": px/float(c.rolling(150).mean().iloc[-1])-1,
+        "close_vs_ma200": px/float(c.rolling(200).mean().iloc[-1])-1,
+        "ma20_slope20": slope_ma(20,20),
+        "ma50_slope20": slope_ma(50,20),
+        "ma150_slope20": slope_ma(150,20),
+        "up_day_ratio20": float((c.pct_change().tail(20) > 0).mean()),
+        "volatility20": float(c.pct_change().tail(20).std()),
+        "volatility60": float(c.pct_change().tail(60).std()),
+    }
+
+def _v825l_run():
+    V825L_DIR.mkdir(parents=True, exist_ok=True)
+    if not V825H_CANDIDATES.exists():
+        raise RuntimeError("V8.25H candidate file missing")
+
+    C = pd.read_csv(V825H_CANDIDATES, compression="gzip")
+    C["entry_date"] = pd.to_datetime(C["entry_date"], errors="coerce")
+    C["exit_date"] = pd.to_datetime(C["exit_date"], errors="coerce")
+    C["entry_px"] = pd.to_numeric(C["entry_px"], errors="coerce")
+    C["ret"] = pd.to_numeric(C["ret"], errors="coerce")
+    C["mfe"] = pd.to_numeric(C["mfe"], errors="coerce")
+    if C["is_stop"].dtype != bool:
+        C["is_stop"] = C["is_stop"].astype(str).str.lower().isin(["true","1","yes"])
+
+    aud = []
+    for i, r in C.iterrows():
+        ticker = str(r["ticker"]).upper().strip()
+        D = _v825h_load_prices(ticker)
+        if D is None or D.empty:
+            aud.append({"idx":i,"right_censored":True,"tradable_mfe":None})
+            continue
+        future = D[D["Date"] > r["entry_date"]].copy()
+        right_censored = len(future) < 60
+        tradable = D[(D["Date"] > r["entry_date"]) & (D["Date"] <= r["exit_date"])].copy()
+        tmfe = float(tradable["high"].max()/float(r["entry_px"])-1.0) if len(tradable) else None
+        aud.append({"idx":i,"right_censored":bool(right_censored),"tradable_mfe":tmfe})
+    C = C.join(pd.DataFrame(aud).set_index("idx"), how="left")
+    U = C[~C["right_censored"].fillna(True)].copy()
+    U["winner20"] = pd.to_numeric(U["tradable_mfe"], errors="coerce").ge(.20)
+
+    feat_rows = []
+    missing = []
+    for idx, r in U.iterrows():
+        f = _v825l_entry_features(str(r["ticker"]).upper().strip(), r["entry_date"])
+        if f is None:
+            missing.append(str(r.get("listing_id", f"{r['ticker']}__{r['entry_date']}")))
+            continue
+        z = {
+            "idx":idx,
+            "ticker":str(r["ticker"]),
+            "entry_date":r["entry_date"],
+            "is_stop":bool(r["is_stop"]),
+            "winner20":bool(r["winner20"]),
+            "tradable_mfe":float(r["tradable_mfe"]),
+        }
+        z.update(f)
+        for c in ["rvol20","range10_pct","range20_pct","dist_52w_high",
+                  "close_vs_ma50","ma50_vs_ma150","ma150_vs_ma200"]:
+            if c in r.index and pd.notna(r[c]):
+                z["H_"+c] = float(r[c])
+        feat_rows.append(z)
+
+    F = pd.DataFrame(feat_rows)
+    if F.empty:
+        raise RuntimeError("No entry anatomy rows available")
+
+    G = F[F["winner20"] | F["is_stop"]].copy()
+    feature_cols = [
+        c for c in F.columns
+        if c not in {"idx","ticker","entry_date","is_stop","winner20","tradable_mfe"}
+        and pd.to_numeric(F[c], errors="coerce").notna().sum() >= 8
+    ]
+
+    stats = []
+    for f in feature_cols:
+        z = pd.to_numeric(G[f], errors="coerce")
+        y = G["winner20"].astype(int)
+        w = z[G["winner20"]]
+        s = z[G["is_stop"]]
+        auc = _v825l_auc(y, z)
+        eff = _v825l_effect(w, s)
+        stats.append({
+            "feature":f,
+            "coverage":float(z.notna().mean()),
+            "n":int(z.notna().sum()),
+            "winner20_n":int(w.notna().sum()),
+            "stop_n":int(s.notna().sum()),
+            "winner20_median":float(w.median()) if w.notna().any() else None,
+            "stop_median":float(s.median()) if s.notna().any() else None,
+            "auc_winner20_vs_stop":auc,
+            "effect_d":eff,
+            "direction":"HIGHER_IN_WINNERS" if eff is not None and eff>0 else "LOWER_IN_WINNERS" if eff is not None and eff<0 else "—",
+        })
+
+    ranked = sorted(
+        [x for x in stats if x["auc_winner20_vs_stop"] is not None and x["effect_d"] is not None],
+        key=lambda x: (abs(x["auc_winner20_vs_stop"]-.5), abs(x["effect_d"])),
+        reverse=True
+    )
+    strongest = [
+        x for x in ranked
+        if x["coverage"] >= .70
+        and max(x["auc_winner20_vs_stop"],1-x["auc_winner20_vs_stop"]) >= .70
+        and abs(x["effect_d"]) >= .70
+    ]
+
+    winner_rows = []
+    for _, r in F[F["winner20"]].sort_values("tradable_mfe", ascending=False).iterrows():
+        winner_rows.append({
+            "ticker":str(r["ticker"]),
+            "entry_date":str(pd.Timestamp(r["entry_date"]).date()),
+            "tradable_mfe":float(r["tradable_mfe"]),
+            "top_features":{
+                k:(None if pd.isna(r.get(k)) else float(r.get(k)))
+                for k in [x["feature"] for x in ranked[:8]]
+                if k in r.index
+            }
+        })
+
+    Wn = int(U["winner20"].sum())
+    Sn = int(U["is_stop"].sum())
+    if Wn < 4 or Sn < 15:
+        verdict = "INCONCLUSIVE__WINNER_STOP_SAMPLE_TOO_SMALL"
+        next_action = "DO_NOT_TUNE__WAIT_FOR_MORE_FROZEN_SAMPLE"
+    elif len(strongest) >= 1:
+        verdict = "ENTRY_ANATOMY_SEPARATION_PRESENT__VALIDATE_WITH_FROZEN_LOO"
+        next_action = "RUN_FIXED_MULTIVARIATE_LOO_USING_ONLY_PREDECLARED_ENTRY_FEATURES__NO_THRESHOLD_SEARCH"
+    else:
+        verdict = "NO_CLEAR_ENTRY_ANATOMY_SEPARATION__DO_NOT_RETUNE"
+        next_action = "KEEP_H_RULES_FROZEN__DO_NOT_RESCUE_TUNE_ON_40_SAMPLE"
+
+    result = {
+        "version":"V8.25L Winner-vs-STOP Entry Anatomy Audit",
+        "build_id":V825L_BUILD_ID,
+        "verdict":verdict,
+        "sample":{
+            "candidates_total":int(len(C)),
+            "uncensored":int(len(U)),
+            "winner20":Wn,
+            "stops":Sn,
+            "neutral_nonstop_nontail":int((~U["winner20"] & ~U["is_stop"]).sum()),
+            "anatomy_rows":int(len(F)),
+            "comparison_rows":int(len(G)),
+            "missing_anatomy_rows":int(len(missing)),
+        },
+        "feature_stats":stats,
+        "ranked_features":[x["feature"] for x in ranked],
+        "strong_features":[x["feature"] for x in strongest],
+        "winner20_protection_rows":winner_rows,
+        "unavailable_domains":[
+            "True broad-market RS vs S&P500/Nasdaq is not in V8.25G Dow-only cache",
+            "External market-context breadth/regime is not injected here unless already present in H candidate fields",
+            "Fundamentals intentionally excluded from L because K already tested them separately"
+        ],
+        "decision_rule":"Read-only anatomy screen. Strong descriptive feature requires >=70% coverage, |AUC-0.5|>=0.20 and |effect d|>=0.70 for tradable +20 winners vs STOPs. No threshold search and no candidate filtering.",
+        "next_action":next_action,
+        "boundaries":"Exact frozen V8.25H candidates; exact J/K tradable-MFE/right-censor logic. Entry-time data only. No downloads, no new candidates, no stop/exit changes, no filters, no threshold search, no tuning."
+    }
+    _v825g_write(V825L_RESULT, result)
+    return result
+
+@APP.route("/v825l/run", methods=["GET","POST"])
+def v825l_run_route():
+    try:
+        _v825l_run()
+    except Exception as ex:
+        _v825g_write(V825L_RESULT, {
+            "version":"V8.25L Winner-vs-STOP Entry Anatomy Audit",
+            "verdict":"AUDIT_ERROR",
+            "error":f"{type(ex).__name__}: {ex}"
+        })
+    return redirect("/v825l")
+
+@APP.get("/v825l")
+def v825l_page():
+    import html
+    e=lambda x:html.escape(str(x))
+    R=_v825g_read(V825L_RESULT,{})
+    S=R.get("sample") or {}
+    rows=""
+    fmap={x.get("feature"):x for x in R.get("feature_stats") or []}
+    for f in R.get("ranked_features") or []:
+        x=fmap.get(f,{})
+        rows += (
+            f"<tr><td><b>{e(f)}</b></td>"
+            f"<td>{e(round(float(x.get('coverage',0))*100,1))}%</td>"
+            f"<td>{e(x.get('n'))}</td>"
+            f"<td>{e(round(float(x.get('auc_winner20_vs_stop') or 0),3) if x.get('auc_winner20_vs_stop') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('effect_d') or 0),2) if x.get('effect_d') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('winner20_median') or 0),4) if x.get('winner20_median') is not None else '—')}</td>"
+            f"<td>{e(round(float(x.get('stop_median') or 0),4) if x.get('stop_median') is not None else '—')}</td>"
+            f"<td>{e(x.get('direction'))}</td></tr>"
+        )
+    wr=""
+    for x in R.get("winner20_protection_rows") or []:
+        wr += f"<tr><td><b>{e(x.get('ticker'))}</b></td><td>{e(x.get('entry_date'))}</td><td>{e(round(float(x.get('tradable_mfe',0))*100,1))}%</td><td>{e(json.dumps(x.get('top_features') or {},ensure_ascii=False))}</td></tr>"
+    unavailable = "<br>".join("• "+e(x) for x in (R.get("unavailable_domains") or []))
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f6fa;color:#0f172a;margin:0;padding:16px}}
+.w{{max-width:1350px;margin:auto}}.c{{background:#fff;border-radius:22px;padding:22px;margin:15px 0}}
+.o{{background:#fff7ed;border:2px solid #f59e0b;border-radius:14px;padding:15px}}
+.g{{background:#ecfdf5;border:2px solid #059669;border-radius:14px;padding:15px}}
+.b{{background:#eff6ff;border:2px solid #2563eb;border-radius:14px;padding:15px}}
+button{{background:#0f172a;color:#fff;border:0;border-radius:12px;padding:13px 18px;font-weight:900}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}th,td{{padding:7px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>🔬 V8.25L Winner-vs-STOP Entry Anatomy Audit</h1>
+<div class="o"><b>只看入场当天，不调参数。</b> Exact H frozen sample：比较真正 Tradable +20 winners 与 STOPs 的 price / volume / contraction / extension / trend anatomy；保护 +30/+40 rare tail。</div></div>
+<div class="c"><form method="post" action="/v825l/run"><button>▶ Run Winner-vs-STOP Entry Anatomy Audit</button></form>
+<h2>Verdict: {e(R.get("verdict","NOT_RUN"))}</h2>
+<div class="g">Uncensored <b>{e(S.get("uncensored","—"))}</b> · Tradable +20 <b>{e(S.get("winner20","—"))}</b> · STOP <b>{e(S.get("stops","—"))}</b> · Neutral <b>{e(S.get("neutral_nonstop_nontail","—"))}</b><br>
+Comparison rows <b>{e(S.get("comparison_rows","—"))}</b> · Strong descriptive features: <b>{e(", ".join(R.get("strong_features") or []) or "NONE")}</b></div></div>
+<div class="c"><h2>Entry Anatomy — Ranked</h2><div style="overflow:auto"><table>
+<tr><th>Feature</th><th>Coverage</th><th>N</th><th>AUC</th><th>Effect d</th><th>Winner20 median</th><th>STOP median</th><th>Direction</th></tr>
+{rows or "<tr><td colspan=8>Run audit first.</td></tr>"}</table></div></div>
+<div class="c"><h2>Protect the Tradable +20/+30/+40 Winners</h2><div style="overflow:auto"><table>
+<tr><th>Ticker</th><th>Entry</th><th>Tradable MFE</th><th>Top entry features</th></tr>
+{wr or "<tr><td colspan=4>Run audit first.</td></tr>"}</table></div></div>
+<div class="c"><div class="b"><b>Domains not claimed by this audit:</b><br>{unavailable or "—"}</div></div>
 <div class="c"><div class="g"><b>Next:</b> {e(R.get("next_action","Run audit first"))}</div>
 <p><b>Frozen screen:</b> {e(R.get("decision_rule",""))}</p><p>{e(R.get("boundaries",""))}</p></div>
 </div></body></html>'''
