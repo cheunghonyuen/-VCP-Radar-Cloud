@@ -69985,3 +69985,291 @@ if _v843_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v843_home_base:APP.view_functions[ep]=_v843_home_wrap
+
+# ================= V8.44 RECOVERED-TRIGGER TIGHT-PIVOT CAUSAL 10-SLOT =================
+# Rationale:
+# - V8.41D froze the recovered V6.44 trigger semantics as lineage truth.
+# - V8.42 recomputed point-in-time pre-trigger VCP primitives on that recovered signal date.
+# - V8.43A found tight_pivot is the only positive standalone discriminator.
+# - V8.44 does ONE causal account A/B: recovered-trigger BASE vs exact V8.42 tight_pivot SHADOW.
+# Frozen: recovered V6.44 candidate stream; V6.69 CONTROL entry/exit economics; first-come 10 slots;
+# equity/10 sizing; cached daily-close MTM. No threshold/model/trigger/entry/STOP/exit changes.
+V844_DIR = DATA_DIR / 'v844_tight_pivot_recovered_trigger_causal_10slot'
+V844_PREFLIGHT = V844_DIR / 'preflight.json'
+V844_STATUS = V844_DIR / 'status.json'
+V844_RESULT = V844_DIR / 'result.json'
+V844_ADMITTED = V844_DIR / 'admitted_trades.csv.gz'
+V844_BUILD_ID = 'v844-tight-pivot-recovered-trigger-causal-10slot-20260903'
+V844_SOURCE = V842_DETAIL
+V844_ATTRITION_RESULT = V843_RESULT
+V844_LINEAGE = V669_TRADES
+V844_LINEAGE_RESULT = V669_RESULT
+v844_thread = None
+
+
+def _v844_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V844_STATUS.exists():
+        try:x.update(json.loads(V844_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v844_write(**kw):
+    V844_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v844_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V844_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+
+def _v844_alive():
+    return v844_thread is not None and v844_thread.is_alive()
+
+
+def _v844_bool(s):
+    if getattr(s,'dtype',None)==bool:return s.fillna(False)
+    return s.astype(str).str.strip().str.lower().isin(['true','1','yes','y','t']).fillna(False)
+
+
+def _v844_load_streams():
+    import pandas as pd, numpy as np
+    if not V844_SOURCE.exists():raise RuntimeError('V8.42 recovered-trigger TRUE-VCP detail missing')
+    if not V844_LINEAGE.exists():raise RuntimeError('V6.69 frozen CONTROL lineage missing')
+    A=pd.read_csv(V844_SOURCE,compression='gzip',low_memory=False)
+    need_a=['listing_id','entry_date','audit_ok','tight_pivot','recovered_v644_exact_trigger']
+    miss=[c for c in need_a if c not in A.columns]
+    if miss:raise RuntimeError('V8.42 schema missing: '+','.join(miss))
+    A['listing_id']=A['listing_id'].astype(str)
+    A['entry_date']=pd.to_datetime(A['entry_date'],errors='coerce').dt.normalize()
+    A=A[_v844_bool(A['audit_ok']) & _v844_bool(A['recovered_v644_exact_trigger'])].copy()
+    A['tight_pivot']=_v844_bool(A['tight_pivot'])
+    A=A.dropna(subset=['listing_id','entry_date']).copy()
+    K=['listing_id','entry_date']
+    # Membership is a point-in-time listing/date property. Collapse only when duplicates agree.
+    chk=(A.groupby(K,dropna=False).agg(n=('tight_pivot','size'),tight_nunique=('tight_pivot','nunique')).reset_index())
+    bad=chk[chk.tight_nunique>1]
+    if len(bad):raise RuntimeError(f'V8.42 duplicate-key tight_pivot semantic conflict: {len(bad)}')
+    AF=A[K+['tight_pivot']].sort_values(K,kind='stable').drop_duplicates(K,keep='first')
+
+    P=pd.read_csv(V844_LINEAGE,compression='gzip',low_memory=False).reset_index(drop=False).rename(columns={'index':'candidate_order'})
+    need_p=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret','candidate_order']
+    miss=[c for c in need_p if c not in P.columns]
+    if miss:raise RuntimeError('V6.69 lineage schema missing: '+','.join(miss))
+    P['listing_id']=P['listing_id'].astype(str)
+    P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+    P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
+    P['control_exit_date']=pd.to_datetime(P['control_exit_date'],errors='coerce').dt.normalize()
+    P['control_exit_px']=pd.to_numeric(P['control_exit_px'],errors='coerce')
+    P['control_ret']=pd.to_numeric(P['control_ret'],errors='coerce')
+    P=P.dropna(subset=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_ret']).copy()
+    J=P.merge(AF,on=K,how='inner',validate='many_to_one')
+    base=pd.DataFrame({
+        'variant':'BASE','candidate_order':J['candidate_order'].astype(int),'listing_id':J['listing_id'].astype(str),
+        'entry_date':J['entry_date'],'entry_px':J['entry_px'].astype(float),'exit_date':J['control_exit_date'],
+        'exit_px':J['control_exit_px'].astype(float),'exit_reason':J['control_reason'].astype(str),
+        'realized_ret':J['control_ret'].astype(float),'tight_pivot':J['tight_pivot'].astype(bool)
+    })
+    tight=base[base.tight_pivot].copy();tight['variant']='TIGHT_PIVOT_SHADOW'
+    X=pd.concat([base,tight],ignore_index=True)
+    attrs={'v842_rows':int(len(A)),'v842_unique_keys':int(len(AF)),'duplicate_keys_collapsed':int((chk.n>1).sum()),
+           'lineage_rows':int(len(P)),'joined_rows':int(len(J))}
+    return A,AF,P,J,base,tight,X,attrs
+
+
+def _v844_old_membership_overlap(AF):
+    """Anti-duplication audit: compare new V8.42 PIT tight membership with old V8.35 membership.
+    If the same listing/date universe and decisions are essentially identical, V8.38 already answered the 10-slot question.
+    """
+    import pandas as pd
+    out={'available':False,'matched_keys':0,'agreement_pct':None,'new_tight_pct':None,'old_tight_pct':None}
+    try:
+        if not V835_DETAIL.exists():return out
+        O=pd.read_csv(V835_DETAIL,compression='gzip',usecols=['listing_id','entry_date','audit_ok','tight_pivot'],low_memory=False)
+        O['listing_id']=O['listing_id'].astype(str);O['entry_date']=pd.to_datetime(O['entry_date'],errors='coerce').dt.normalize()
+        O=O[_v844_bool(O['audit_ok'])].copy();O['old_tight']=_v844_bool(O['tight_pivot'])
+        K=['listing_id','entry_date']
+        oc=(O.groupby(K,dropna=False)['old_tight'].nunique().reset_index(name='nunique'))
+        O=O.merge(oc[oc.nunique<=1][K],on=K,how='inner').sort_values(K,kind='stable').drop_duplicates(K,keep='first')
+        N=AF.rename(columns={'tight_pivot':'new_tight'})
+        M=N.merge(O[K+['old_tight']],on=K,how='inner')
+        if len(M):
+            out={'available':True,'matched_keys':int(len(M)),'agreement_pct':100*float((M.new_tight.astype(bool)==M.old_tight.astype(bool)).mean()),
+                 'new_tight_pct':100*float(M.new_tight.astype(bool).mean()),'old_tight_pct':100*float(M.old_tight.astype(bool).mean())}
+    except Exception as ex:
+        out['error']=f'{type(ex).__name__}: {ex}'
+    return out
+
+
+def _v844_preflight():
+    import pandas as pd, time
+    t0=time.time();V844_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        A,AF,P,J,B,T,X,attrs=_v844_load_streams()
+        attr={}
+        if V844_ATTRITION_RESULT.exists():
+            try:attr=json.loads(V844_ATTRITION_RESULT.read_text(encoding='utf-8'))
+            except Exception:attr={}
+        pos=attr.get('positive_gates',[]) or []
+        v843_ok=('tight_pivot' in pos) and str(attr.get('verdict','')).startswith('ATTRITION_ROOT_CAUSE_LOCALIZED')
+        join_cov=100*len(J)/max(1,len(AF))
+        tight_pct=100*len(T)/max(1,len(B))
+        old=_v844_old_membership_overlap(AF)
+        # Prevent repeating V8.38 if V8.42's recovered-trigger PIT membership is effectively identical.
+        old_test_exists=bool(V838_RESULT.exists())
+        same_old=bool(old_test_exists and old.get('available') and old.get('matched_keys',0)>=0.95*len(AF) and (old.get('agreement_pct') or 0)>=99.95)
+        if same_old:
+            verdict='NO_RERUN_NEEDED__V842_TIGHT_MEMBERSHIP_SAME_AS_V838_ALREADY_TESTED'
+        elif len(B)>=50000 and len(T)>=20000 and join_cov>=98.5 and v843_ok:
+            verdict='PASS'
+        else:
+            verdict='FAIL__RECOVERED_STREAM_OR_V843_FREEZE_PARITY'
+        out={'version':'V8.44','build_id':V844_BUILD_ID,'verdict':verdict,'error':None,
+             'base_rows':int(len(B)),'tight_rows':int(len(T)),'tight_pass_pct':tight_pct,'lineage_join_coverage_pct':join_cov,
+             'v843_tight_positive_gate_confirmed':bool(v843_ok),'source_attrs':attrs,'old_v838_membership_comparison':old,
+             'old_v838_result_exists':old_test_exists,
+             'anti_repeat_rule':'If V8.42 tight membership agrees >=99.95% with old V8.35/V8.38 on >=95% of keys, do not rerun the same 10-slot test.',
+             'frozen_contract':'Recovered V6.44 trigger stream from V8.42; exact V8.42 pre-trigger tight_pivot only; V6.69 CONTROL entry/exit economics; first-come 10 slots; equity/10 sizing; daily cached-close MTM; no other VCP gate; no threshold/model/trigger/entry/STOP/exit change; 0 Tiingo; 0 universe rescan.',
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.44','build_id':V844_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V844_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return out
+
+
+def _v844_price_maps(listing_ids):
+    # Exact same cached-price loader used by validated V8.38/V8.39 account replay.
+    return _v838_price_maps(listing_ids)
+
+
+def _v844_replay(X,price,cal,label,t0,vi,vn):
+    # Reuse validated V8.38/V8.39 causal account engine. Only membership stream changed.
+    Y=X.copy()
+    Y['variant']=Y['variant'].replace({'TIGHT_PIVOT_SHADOW':'TIGHT_ONLY'})
+    lab='TIGHT_ONLY' if label=='TIGHT_PIVOT_SHADOW' else label
+    m,L,C=_v838_replay(Y,price,cal,lab,t0,vi,vn)
+    m['strategy']=label
+    if len(L):L['variant']=label
+    return m,L,C
+
+
+def _v844_run():
+    import pandas as pd, numpy as np, time
+    t0=time.time();pf=_v844_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first: '+str(pf.get('verdict')))
+    A,AF,P,J,B,T,X,attrs=_v844_load_streams()
+    _v844_write(status='running',phase='prices',message='Loading cached daily MTM prices for recovered-trigger stream',processed=0,total=int(B.listing_id.nunique()),errors=0,error=None)
+    price,cal,errs=_v844_price_maps(B.listing_id.unique())
+    cov=100*len(price)/max(1,B.listing_id.nunique())
+    if cov<95:raise RuntimeError(f'Price cache coverage too low: {cov:.2f}%')
+    mets=[];led=[]
+    for i,label in enumerate(['BASE','TIGHT_PIVOT_SHADOW'],1):
+        m,L,C=_v844_replay(X,price,cal,label,t0,i,2);mets.append(m)
+        if len(L):led.append(L)
+    md={x['strategy']:x for x in mets};base=md['BASE'];tight=md['TIGHT_PIVOT_SHADOW']
+    delta={'cagr_pp':100*(tight['cagr']-base['cagr']),'maxdd_pp':100*(tight['maxdd']-base['maxdd']),
+           'pf':tight['pf']-base['pf'],'win_rate_pp':100*(tight['win_rate']-base['win_rate']),
+           'stop_rate_pp':100*(tight['stop_rate']-base['stop_rate']),'avg_trade_pp':100*(tight['avg_trade']-base['avg_trade']),
+           'positive_year_share_pp':100*((tight['positive_year_share'] or 0)-(base['positive_year_share'] or 0)),
+           'admitted_positions':int(tight['admitted_positions']-base['admitted_positions'])}
+    gate={'pf_not_worse':tight['pf']>=base['pf'],'avgtrade_not_worse':tight['avg_trade']>=base['avg_trade'],
+          'cagr_not_worse':tight['cagr']>=base['cagr'],'maxdd_not_worse':abs(tight['maxdd'])<=abs(base['maxdd']),
+          'positive_year_share_not_worse_by_gt5pp':tight['positive_year_share']>=base['positive_year_share']-.05}
+    econ=all(gate.values())
+    verdict='TIGHT_PIVOT_PASSES_RECOVERED_TRIGGER_CAUSAL_10_SLOT__KEEP_AS_SHADOW_FIRST_LAYER' if econ else 'TIGHT_PIVOT_FAILS_RECOVERED_TRIGGER_CAUSAL_10_SLOT__DO_NOT_PROMOTE'
+    R={'version':'V8.44','build_id':V844_BUILD_ID,'verdict':verdict,'price_listing_coverage_pct':cov,'price_errors':errs[:100],
+       'candidate_population':{'base_rows':int(len(B)),'tight_rows':int(len(T)),'tight_pass_pct':100*len(T)/max(1,len(B))},
+       'portfolio':[base,tight],'delta':delta,'economic_gate':gate,
+       'old_v838_membership_comparison':pf.get('old_v838_membership_comparison'),
+       'frozen':'V8.41D recovered V6.44 trigger stream + V8.42 exact pre-trigger tight_pivot; V6.69 CONTROL entry/exit; first-come 10-slot; equity/10 sizing; daily cached-close MTM; 0 threshold search / 0 Tiingo / 0 rescan.',
+       'interpretation':'This is the one portfolio-level causal test authorized by V8.43A. Candidate-level PF 4.377 is not treated as account PF; the decision is based only on admitted 10-slot account economics.',
+       'next':'If PASS, keep tight_pivot as SHADOW only and separately reconstruct the broken Trend Template semantics. If FAIL, do not tune tightness threshold; focus on admission/ranking opportunity cost and semantic reconstruction rather than repeating VCP gate sweeps.',
+       'elapsed_sec':round(time.time()-t0,1)}
+    V844_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    if led:pd.concat(led,ignore_index=True).to_csv(V844_ADMITTED,index=False,compression='gzip')
+    _v844_write(status='done',phase='complete',message='Done · '+verdict,processed=2,total=2,errors=len(errs),elapsed_sec=R['elapsed_sec'],error=None)
+    return R
+
+
+def _v844_worker():
+    global v844_thread
+    import time
+    t0=time.time()
+    try:_v844_run()
+    except Exception as ex:_v844_write(status='error',phase='failed',message='V8.44 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v844_thread=None
+
+
+@APP.route('/v844/preflight',methods=['GET','POST'])
+def v844_preflight_route():
+    _v844_preflight();return redirect('/v844')
+
+
+@APP.post('/v844/run')
+def v844_run_route():
+    global v844_thread
+    if _v844_alive():return redirect('/v844')
+    p=_v844_preflight()
+    if p.get('verdict')!='PASS':
+        _v844_write(status='idle',phase='preflight',message=p.get('verdict'),error=p.get('error'),processed=0,total=0,errors=0)
+        return redirect('/v844')
+    _v844_write(status='starting',phase='queued',message='Run accepted; starting recovered-trigger causal 10-slot A/B',processed=0,total=2,errors=0,error=None)
+    v844_thread=threading.Thread(target=_v844_worker,daemon=True);v844_thread.start()
+    return redirect('/v844')
+
+
+@APP.get('/api/v844')
+def v844_api():return jsonify(_v844_status())
+
+
+@APP.get('/v844/export')
+def v844_export():
+    if not V844_ADMITTED.exists():return ('not ready',404)
+    return send_file(V844_ADMITTED,as_attachment=True,download_name='v844_base_vs_tight_pivot_shadow_admitted.csv.gz')
+
+
+@APP.get('/v844')
+def v844_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v844_status()
+    try:
+        if V844_PREFLIGHT.exists():P=json.loads(V844_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V844_RESULT.exists():R=json.loads(V844_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    rows=''
+    for x in R.get('portfolio',[]):
+        rows+=f"<tr><td><b>{e(x.get('strategy'))}</b></td><td>{e(x.get('admitted_positions'))}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*float(x.get('avg_trade',0)),2)}%</td><td>{n(100*float(x.get('win_rate',0)),2)}%</td><td>{n(100*float(x.get('stop_rate',0)),2)}%</td><td>{n(100*float(x.get('cagr',0)),2)}%</td><td>{n(100*float(x.get('maxdd',0)),2)}%</td><td>{n(100*float(x.get('positive_year_share',0)),1)}%</td><td>{n(x.get('avg_open_positions'),2)}</td><td>{e(x.get('winner20'))}</td><td>{e(x.get('winner30'))}</td></tr>"
+    gates=R.get('economic_gate',{});grows=''.join(f"<tr><td>{e(k)}</td><td>{'✅' if v else '❌'}</td></tr>" for k,v in gates.items())
+    old=P.get('old_v838_membership_comparison',{}) or {};d=R.get('delta',{}) or {}
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1500px;margin:auto;padding:18px}}.c{{background:#fff;padding:26px;border-radius:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;padding:15px;border-radius:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;padding:15px;border-radius:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}@media(max-width:800px){{.c{{padding:18px}}table{{font-size:10px}}}}
+</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.44 Tight Pivot × Recovered Trigger Causal 10-Slot</h1><div class="o"><b>只做一次账户级因果验证。</b> BASE = V8.41D recovered V6.44 trigger stream；SHADOW = 同一 stream + V8.42 exact pre-trigger tight_pivot。Entry / STOP / Exit / 10-slot policy 全冻结。0 threshold tuning · 0 Tiingo · 0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V844_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>BASE rows: <b>{e(P.get('base_rows','—'))}</b> · Tight rows: <b>{e(P.get('tight_rows','—'))}</b> · Join: <b>{n(P.get('lineage_join_coverage_pct'))}%</b></p><p>Old V8.38 membership agreement: <b>{n(old.get('agreement_pct'))}%</b> across {e(old.get('matched_keys','—'))} keys. Anti-repeat rule is active.</p><form method="post" action="/v844/preflight"><button>A. Run V8.44 Preflight</button></form><br><form method="post" action="/v844/run"><button>B. Run Frozen Causal 10-Slot A/B</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Errors: {e(S.get('errors'))} · Runtime Error: {e(S.get('error') or 'None')}</p><p><small>运行中手动刷新看进度；不会自动无限刷新。</small></p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>10-Slot Account: BASE vs Tight Pivot Shadow</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Admitted</th><th>PF</th><th>Avg trade</th><th>Win</th><th>STOP</th><th>CAGR</th><th>MaxDD</th><th>Positive yrs</th><th>Avg open</th><th>+20</th><th>+30</th></tr>{rows or '<tr><td colspan="12">Run audit first.</td></tr>'}</table></div></div>
+<div class="c"><h2>Economic Gate</h2><table><tr><th>Requirement</th><th>Pass?</th></tr>{grows or '<tr><td colspan="2">—</td></tr>'}</table><p><b>Δ CAGR:</b> {n(d.get('cagr_pp'))} pp · <b>Δ MaxDD:</b> {n(d.get('maxdd_pp'))} pp · <b>Δ PF:</b> {n(d.get('pf'),3)} · <b>Δ AvgTrade:</b> {n(d.get('avg_trade_pp'))} pp</p></div>
+<div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','Candidate PF 4.377 is not account PF. This page decides only from admitted causal 10-slot economics.'))}<br><br><b>Next:</b> {e(R.get('next','先跑 V8.44。'))}</div>{"<p><a href='/v844/export'>Export admitted CSV.GZ</a></p>" if V844_ADMITTED.exists() else ''}</div>
+</div></body></html>'''
+
+
+# Mandatory homepage card for V8.44.
+_v844_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v844_home_base is not None:
+    def _v844_home_wrap(*args,**kwargs):
+        resp=_v844_home_base(*args,**kwargs)
+        card="""<div id='v844-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'><h2>🏦 V8.44 Tight Pivot × Recovered Trigger 10-Slot</h2><p>V8.43A 唯一正向 gate：tight_pivot。用 V8.41D recovered trigger stream 做一次 frozen causal 10-slot BASE vs SHADOW；含 anti-repeat parity check。</p><a href='/v844'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.44</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v844-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+                body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v844_home_base:APP.view_functions[ep]=_v844_home_wrap
