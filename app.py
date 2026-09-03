@@ -71991,7 +71991,7 @@ V850_RESULT = V850_DIR / 'result.json'
 V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
 V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
 V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
-V850_BUILD_ID = 'v850d-per-listing-timeout-skip-log-20260903'
+V850_BUILD_ID = 'v850e-prso-quarantine-audited-20260903'
 v850_thread = None
 
 def _v850_status():
@@ -72028,7 +72028,7 @@ def _v850_preflight():
              'state_machine':'CONTROL = ordinary Tight full causal first-come 10-slot. BLACK_REENTRY = if current next-session action_state is BLACK, liquidate all existing positions at cached open and block entries that session; when action_state returns NORMAL, immediately re-enable the ordinary Tight candidate stream. AMBER/RED do nothing in this test.',
              'timing':'V8.47 action_state is built from past-only expanding thresholds and next-session execution. Re-entry uses the first session whose causal action_state is NORMAL after BLACK.',
              'frozen':'Exact V8.42 tight_pivot membership + recovered V6.44/V6.69 entry/exit lineage; full candidate stream; first-come max10; current-equity/10 sizing; cached daily OPEN+CLOSE MTM.',
-             'hard_exclusions':['NO stress threshold tuning','NO lookback tuning','NO RED trim in challenger','NO AMBER pause in challenger','NO partial profit','NO shorting','NO trailing-stop mutation','NO rank mutation','0 Tiingo','0 universe rescan','per-listing timeout is operational skip-and-log only; final cached price coverage must remain >=95%'],
+             'hard_exclusions':['NO stress threshold tuning','NO lookback tuning','NO RED trim in challenger','NO AMBER pause in challenger','NO partial profit','NO shorting','NO trailing-stop mutation','NO rank mutation','0 Tiingo','0 universe rescan'],
              'elapsed_sec':round(time.time()-t0,2)}
     except Exception as ex:out={'version':'V8.50','build_id':V850_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
     V850_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
@@ -72095,71 +72095,46 @@ def _v850_period(C,start,end):
     if len(z)<2:return {'return':None,'maxdd':None}
     ret=float(z.equity.iloc[-1]/z.equity.iloc[0]-1);dd=float((z.equity/z.equity.cummax()-1).min());return {'return':ret,'maxdd':dd}
 
-def _v850_prepare_price_timeout(mr, timeout_sec=20.0):
-    """Run one local cached-price preparation in a daemon helper thread.
-    If a single corrupt/pathological listing stalls, return a timeout marker so the
-    serial V8.50 loader can skip-and-log it instead of freezing the entire replay.
-    This changes only operational fault tolerance; price semantics are unchanged
-    for every listing that completes normally.
-    """
-    import threading
-    box={}
-    def _job():
-        try:
-            box['value']=_v826a_prepare_price(mr)
-        except BaseException as ex:
-            box['error']=f'{type(ex).__name__}: {ex}'
-    th=threading.Thread(target=_job,daemon=True)
-    th.start();th.join(float(timeout_sec))
-    if th.is_alive():
-        return None,f'timeout_after_{float(timeout_sec):g}s'
-    if 'error' in box:
-        return None,box['error']
-    return box.get('value'),None
-
+V850_QUARANTINE_LISTINGS = {'PRSO__20010628__20260821'}
 
 def _v850_prices_progress(lids):
-    """V8.50-owned cached OPEN+CLOSE loader with per-listing timeout/skip-and-log.
-    Same price semantics as _v846a_prices for completed listings. No downloads,
-    no universe scan, no strategy/threshold change. A single stalled local cache
-    may not block the remaining 4k+ listings.
+    """V8.50-owned cached OPEN+CLOSE loader with one audited quarantine.
+    Price semantics are unchanged for every non-quarantined listing. The single
+    observed pathological cache PRSO__20010628__20260821 is skipped and logged
+    before _v826a_prepare_price is called, preventing the known 3225/4431 stall.
+    No downloads, no universe scan, no strategy/threshold change. Control parity
+    remains mandatory, so any material economic effect from the skip invalidates
+    interpretation automatically.
     """
     import pandas as pd,numpy as np,time
-    TIMEOUT_SEC=20.0
     M,lidcol=_v826a_manifest()
     mmap={str(r[lidcol]):r for _,r in M.iterrows()}
     ids=sorted(set(map(str,lids)))
-    out={};dates=set();errs=[];t0=time.time();timeouts=0
+    out={};dates=set();errs=[];t0=time.time()
     for n,lid in enumerate(ids,1):
-        # Always expose the exact listing before opening/preparing it.
+        # Show the current listing before opening/preparing it. If one listing is slow,
+        # the UI identifies the exact blocker rather than staying at the previous count.
         if n==1 or n%25==1:
             _v850_write(status='running',phase='prices',
                         message=f'Loading cached OPEN+CLOSE {n-1}/{len(ids)} · current {lid}',
                         processed=n-1,total=len(ids),errors=len(errs),
-                        current_listing=lid,timeout_count=timeouts,
-                        per_listing_timeout_sec=TIMEOUT_SEC,
+                        current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
+        if lid in V850_QUARANTINE_LISTINGS:
+            errs.append({'listing_id':lid,'error':'quarantined_known_stall'})
+            _v850_write(status='running',phase='prices',
+                        message=f'QUARANTINE {lid} · known stall · continuing {n}/{len(ids)}',
+                        processed=n,total=len(ids),errors=len(errs),
+                        current_listing=lid,last_skipped_listing=lid,
+                        last_skip_reason='quarantined_known_stall',
                         elapsed_sec=round(time.time()-t0,1),error=None)
+            continue
         mr=mmap.get(lid)
         if mr is None:
             errs.append({'listing_id':lid,'error':'manifest_missing'})
         else:
-            got,prep_err=_v850_prepare_price_timeout(mr,TIMEOUT_SEC)
-            if prep_err is not None:
-                if str(prep_err).startswith('timeout_after_'):
-                    timeouts+=1
-                errs.append({'listing_id':lid,'error':prep_err})
-                q=None
-                _v850_write(status='running',phase='prices',
-                            message=f'SKIP {lid} · {prep_err} · continuing {n}/{len(ids)}',
-                            processed=n,total=len(ids),errors=len(errs),
-                            current_listing=lid,last_skipped_listing=lid,
-                            last_skip_reason=prep_err,timeout_count=timeouts,
-                            per_listing_timeout_sec=TIMEOUT_SEC,
-                            elapsed_sec=round(time.time()-t0,1),error=None)
-            else:
-                try:q,hi,amb=got
-                except Exception as ex:
-                    q=None;errs.append({'listing_id':lid,'error':f'prepare_return_unpack: {type(ex).__name__}: {ex}'})
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception as ex:
+                q=None;errs.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
             if q is None or q.empty:
                 if not any(x.get('listing_id')==lid for x in errs):
                     errs.append({'listing_id':lid,'error':'price_empty'})
@@ -72182,11 +72157,9 @@ def _v850_prices_progress(lids):
                         errs.append({'listing_id':lid,'error':'no_valid_open_close'})
         if n==1 or n%25==0 or n==len(ids):
             _v850_write(status='running',phase='prices',
-                        message=f'Loading cached OPEN+CLOSE {n}/{len(ids)} · {lid} · timeouts {timeouts}',
+                        message=f'Loading cached OPEN+CLOSE {n}/{len(ids)} · {lid}',
                         processed=n,total=len(ids),errors=len(errs),
-                        current_listing=lid,timeout_count=timeouts,
-                        per_listing_timeout_sec=TIMEOUT_SEC,
-                        elapsed_sec=round(time.time()-t0,1),error=None)
+                        current_listing=lid,elapsed_sec=round(time.time()-t0,1),error=None)
     return out,sorted(dates),errs
 
 
@@ -72271,7 +72244,7 @@ def v850_page():
     def row(name,x):
         return f"<tr><td><b>{e(name)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('trade_count',0))}</td><td>{e(x.get('winner100',0))}</td></tr>"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>V8.50D BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b><br><b>V8.50D 仅加运行时保护：</b>单一 listing 本地价格准备超过 20 秒即 skip-and-log，继续下一只；最终仍要求价格覆盖 ≥95%。</div></div>
+<div class="c"><h1>V8.50E BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
 <div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V850_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight candidates {e(P.get('tight_candidate_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v850/preflight"><button>A. Run V8.50 Preflight</button></form><br><form method="post" action="/v850/run"><button>B. Run BLACK→NORMAL Full Causal A/B</button></form></div>
 <div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
 <div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
@@ -72285,7 +72258,7 @@ def v850_page():
 _v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
 if _v850_home_base is not None:
     def _v850_home_wrap(*args,**kwargs):
-        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50D BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50D</button></a></div>"""
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50E BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50E 仅隔离已确认卡死的 PRSO cache；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50C</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850-home-card-real' not in body:
