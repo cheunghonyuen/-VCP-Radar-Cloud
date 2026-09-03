@@ -72937,3 +72937,154 @@ if _v850k_home_base is not None:
         return card+str(resp)
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v850k_home_base:APP.view_functions[_ep]=_v850k_home_wrap
+
+# =============================================================================
+# V8.50L — ALL-ISOLATED INVENTORY-FIRST BATCH PRICE STORE
+# Final engineering closeout for the K prefix stall.
+# No parent-process pickle.load of SAFE/legacy price shards anywhere in this loader.
+# Inventory is metadata-only; shard reads/builds happen only inside hard-timeout workers.
+# =============================================================================
+V850_BUILD_ID='v850l-all-isolated-inventory-first-batch-price-store-20260903'
+V850L_SHARD_BATCH_SIZE=max(16,min(128,int(os.environ.get('V850L_SHARD_BATCH_SIZE','64'))))
+V850L_SOURCE_BATCH_SIZE=max(4,min(24,int(os.environ.get('V850L_SOURCE_BATCH_SIZE','10'))))
+V850L_SHARD_TIMEOUT=max(10,min(90,int(os.environ.get('V850L_SHARD_TIMEOUT','20'))))
+V850L_SOURCE_TIMEOUT=max(20,min(180,int(os.environ.get('V850L_SOURCE_TIMEOUT','60'))))
+V850L_WORKERS=max(2,min(6,int(os.environ.get('V850L_WORKERS','4'))))
+
+
+def _v850l_asset_for(lid):
+    """Metadata-only routing. Never opens/pickles a shard in the parent process."""
+    sp=_v850h_safe_path(lid)
+    try:
+        if sp.exists() and 0 < sp.stat().st_size <= 25*1024*1024:
+            return {'lid':str(lid),'kind':'shard','path':str(sp),'route':'safe'}
+    except Exception:
+        pass
+    lp=_v850_shard_path(lid)
+    try:
+        if lp.exists() and 0 < lp.stat().st_size <= 25*1024*1024:
+            return {'lid':str(lid),'kind':'shard','path':str(lp),'route':'legacy'}
+    except Exception:
+        pass
+    pth=_v617o_existing_price_path(lid)
+    try:
+        if pth and pth.exists() and pth.stat().st_size > 0:
+            return {'lid':str(lid),'kind':'source','path':str(pth),'route':'source'}
+    except Exception:
+        pass
+    return None
+
+
+def _v850l_run_items(items,batch_size,timeout_sec,label,total,out,dates,errs,done_counter):
+    """Parallel hard-timeout batches. Bad batches recursively split in _v850k_run_batch."""
+    import concurrent.futures
+    chunks=[items[i:i+batch_size] for i in range(0,len(items),batch_size)]
+    if not chunks:return []
+    failed=[]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=V850L_WORKERS) as ex:
+        futs={ex.submit(_v850k_run_batch,ch,timeout_sec):ch for ch in chunks}
+        for fut in concurrent.futures.as_completed(futs):
+            ch=futs[fut]
+            try:
+                maps,ee=fut.result()
+            except Exception as exx:
+                maps={};ee=[{'listing_id':str(x['lid']),'error':f'{label}_parent_exception:{type(exx).__name__}:{str(exx)[:160]}'} for x in ch]
+            for lid,mp in maps.items():
+                out[str(lid)]=mp;dates.update(mp.keys())
+            got=set(map(str,maps.keys()))
+            failed.extend([x for x in ch if str(x['lid']) not in got])
+            errs.extend(ee)
+            done_counter[0]+=len(ch)
+            cov=100*len(out)/max(1,total)
+            _v850_write(status='running',phase='batch_prices',
+                        message=f'V8.50L {label} batches {done_counter[0]} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
+                        processed=min(total,done_counter[0]),total=total,errors=len(errs),current_listing='',
+                        price_coverage_pct=cov,error=None)
+    return failed
+
+
+def _v850_prices_progress(lids):
+    ids=sorted(set(map(str,lids)));total=len(ids);out={};dates=set();errs=[]
+    routes={'safe':0,'legacy':0,'source':0,'missing':0}
+    primary=[];missing=[]
+    # Phase 1: metadata-only inventory. No pickle.load and no CSV parsing here.
+    for i,lid in enumerate(ids,1):
+        a=_v850l_asset_for(lid)
+        if a is None:
+            routes['missing']+=1;missing.append(lid)
+        else:
+            routes[a['route']]+=1;primary.append(a)
+        if i==1 or i%500==0:
+            _v850_write(status='running',phase='inventory',
+                        message=f'V8.50L inventory {i}/{total} · safe {routes["safe"]} · legacy {routes["legacy"]} · source {routes["source"]} · missing {routes["missing"]}',
+                        processed=i,total=total,errors=0,current_listing='',inventory=routes,error=None)
+    projected=100*(total-len(missing))/max(1,total)
+    _v850_write(status='running',phase='inventory_done',
+                message=f'V8.50L INVENTORY DONE · safe {routes["safe"]} · legacy {routes["legacy"]} · source {routes["source"]} · missing {routes["missing"]} · projected {projected:.2f}%',
+                processed=0,total=total,errors=len(missing),current_listing='',inventory=routes,projected_coverage_pct=projected,error=None)
+    errs.extend({'listing_id':x,'error':'inventory_missing_no_asset'} for x in missing)
+    if projected < 95:
+        raise RuntimeError(f'Inventory projected price coverage below 95%: {projected:.2f}%')
+
+    # Phase 2: shard assets first (cheap). Every shard read is in a helper subprocess.
+    shard_items=[x for x in primary if x['kind']=='shard']
+    source_items=[x for x in primary if x['kind']=='source']
+    done_counter=[0]
+    shard_failed=_v850l_run_items(shard_items,V850L_SHARD_BATCH_SIZE,V850L_SHARD_TIMEOUT,'SHARD',total,out,dates,errs,done_counter)
+
+    # Phase 3: source-only routes.
+    source_failed=_v850l_run_items(source_items,V850L_SOURCE_BATCH_SIZE,V850L_SOURCE_TIMEOUT,'SOURCE',total,out,dates,errs,done_counter)
+
+    # Phase 4: one fallback only for shard failures -> source, if source exists.
+    # This is not a serial 3-layer fallback; it is a single parallel repair pass after isolated shard failure.
+    repair=[];repair_no_source=[]
+    for x in shard_failed:
+        lid=str(x['lid']);pth=_v617o_existing_price_path(lid)
+        try:
+            if pth and pth.exists() and pth.stat().st_size>0:
+                repair.append({'lid':lid,'kind':'source','path':str(pth),'route':'repair_source'})
+            else:
+                repair_no_source.append(lid)
+        except Exception:
+            repair_no_source.append(lid)
+    if repair:
+        _v850_write(status='running',phase='repair',message=f'V8.50L one-pass source repair for {len(repair)} shard failures',processed=done_counter[0],total=total,errors=len(errs),current_listing='',error=None)
+        repair_failed=_v850l_run_items(repair,V850L_SOURCE_BATCH_SIZE,V850L_SOURCE_TIMEOUT,'REPAIR',total,out,dates,errs,done_counter)
+    else:
+        repair_failed=[]
+    for lid in repair_no_source:
+        errs.append({'listing_id':lid,'error':'shard_failed_and_no_source_fallback'})
+
+    cov=100*len(out)/max(1,total)
+    # Error list can include recovered first-pass shard errors; coverage + parity are the authority.
+    _v850_write(status='running',phase='prices_done',
+                message=f'V8.50L PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · proceeding to CONTROL parity',
+                processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=routes,error=None)
+    if cov < 95:
+        raise RuntimeError(f'Price store coverage below 95% after isolated batch build: {cov:.2f}%')
+    return out,sorted(dates),errs
+
+
+_v850l_preflight_base=_v850_preflight
+def _v850_preflight():
+    o=_v850l_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50L'
+    o['engineering']='Metadata-only full inventory; zero parent shard pickle loads; isolated parallel shard batches; isolated source batches; one parallel source repair pass; >=95% coverage + frozen CONTROL parity.'
+    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    except Exception:pass
+    return o
+
+
+_v850l_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850l_home_base is not None:
+    def _v850l_home_wrap(*args,**kwargs):
+        resp=_v850l_home_base(*args,**kwargs)
+        card="""<div id='v850l-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚙️ V8.50L All-Isolated Price Store</h2><p>不再有 FAST prefix 父进程 pickle.load。全 4,431 只先做 metadata inventory；SAFE/legacy shard 全部 subprocess 批量读取，source 批量重建；坏 shard 只做一次并行 source repair。≥95% coverage + CONTROL parity 才运行 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50L</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v850l-home-card' not in body:
+                p=body.lower().find('<body');gt=body.find('>',p) if p>=0 else -1
+                body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v850l_home_base:APP.view_functions[_ep]=_v850l_home_wrap
