@@ -69782,7 +69782,7 @@ V843_RESULT = V843_DIR / 'result.json'
 V843_DETAIL = V843_DIR / 'detail.csv.gz'
 V843_SOURCE = V842_DETAIL
 V843_PARENT_RESULT = V842_RESULT
-V843_BUILD_ID = 'v843-vcp-component-attrition-audit-20260903'
+V843_BUILD_ID = 'v843A-vcp-component-attrition-audit-hotfix-20260903'
 V843_GATES = ['trend_template','contraction_sequence','tight_pivot','volume_dry']
 v843_thread = None
 
@@ -69798,6 +69798,9 @@ def _v843_status():
 def _v843_write(**kw):
     V843_DIR.mkdir(parents=True,exist_ok=True);x=_v843_status();x.update(kw)
     V843_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v843_alive():
+    return v843_thread is not None and v843_thread.is_alive()
 
 
 def _v843_bool(s):
@@ -69833,11 +69836,11 @@ def _v843_preflight():
         need=['listing_id','entry_date','control_ret','control_reason','audit_ok']+V843_GATES
         miss=[c for c in need if c not in S.columns]
         if miss:raise RuntimeError('V8.42 detail schema missing '+str(miss))
-        out={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'PASS','error':None,
+        out={'version':'V8.43A','build_id':V843_BUILD_ID,'verdict':'PASS','error':None,
              'source':'V8.42 detail.csv.gz only','frozen_contract':'Recovered V6.44 HIGH-breakout trigger + volume context + next-open; CONTROL outcomes unchanged.',
              'analysis_contract':['standalone gate discrimination','winner-vs-STOP pass rates','all 15 non-empty fixed gate combinations','leave-one-out attribution','NO threshold tuning','NO rescan','NO Tiingo'],
              'elapsed_sec':round(time.time()-t0,2)}
-    except Exception as ex:out={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:out={'version':'V8.43A','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
     V843_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
 
 
@@ -69892,7 +69895,7 @@ def _v843_run():
         verdict='ATTRITION_ROOT_CAUSE_LOCALIZED__GATES_FAIL_WINNER_VS_STOP_DISCRIMINATION__DO_NOT_TUNE'
     else:
         verdict='ATTRITION_DISTRIBUTED__NO_SINGLE_BAD_GATE_PROVEN__DO_NOT_TUNE'
-    R={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':verdict,'base':base,'four_gate_core':{**core_st,**core_rr},'standalone_gate_attribution':standalone,
+    R={'version':'V8.43A','build_id':V843_BUILD_ID,'verdict':verdict,'base':base,'four_gate_core':{**core_st,**core_rr},'standalone_gate_attribution':standalone,
        'all_fixed_combinations':combos,'leave_one_out':loo,'best_fixed_combinations_for_diagnosis_only':best,'suspect_gates':bad,'positive_gates':good,
        'hard_exclusions':['NO threshold search','NO new gate definition','NO trigger change','NO entry/STOP/exit change','0 Tiingo','0 historical rescan'],
        'interpretation':'This is an attribution audit only. It asks whether each already-defined V8.42 structural gate discriminates +20/+30 winners from STOPs. A gate that passes STOPs as often or more often than winners is not a useful hard qualifier in its present definition.',
@@ -69913,7 +69916,7 @@ def _v843_worker():
     try:_v843_run()
     except Exception as ex:
         tb=traceback.format_exc();V843_DIR.mkdir(parents=True,exist_ok=True)
-        V843_RESULT.write_text(json.dumps({'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
+        V843_RESULT.write_text(json.dumps({'version':'V8.43A','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
         _v843_write(status='error',phase='failed',message='V8.43 failed',error=f'{type(ex).__name__}: {ex}',errors=1)
     finally:v843_thread=None
 
@@ -69958,7 +69961,7 @@ def v843_page():
     lr=''.join(f"<tr><td>{e(x.get('omitted_gate'))}</td><td>{e(x.get('n'))}</td><td>{n(x.get('winner20_retention_pct'))}%</td><td>{n(x.get('winner20_recovered_pp'))} pp</td><td>{n(x.get('pf'),3)}</td><td>{n(x.get('pf_delta_vs_core'),3)}</td></tr>" for x in L)
     br=''.join(f"<tr><td>{e(x.get('gates'))}</td><td>{e(x.get('n'))}</td><td>{n(x.get('winner20_retention_pct'))}%</td><td>{n(x.get('stop_rejection_pct'))}%</td><td>{n(x.get('pf'),3)}</td></tr>" for x in B)
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1100px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>V8.43 VCP Component Attrition Audit</h1><div class='warn'><b>不调任何阈值。</b> V8.42 的四个 TRUE-VCP gates 只做归因：谁更常保留 Winner，谁反而更常保留 STOP。Trigger / Entry / STOP / Exit 全冻结。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h1>V8.43A VCP Component Attrition Audit</h1><div class='warn'><b>不调任何阈值。</b> V8.42 的四个 TRUE-VCP gates 只做归因：谁更常保留 Winner，谁反而更常保留 STOP。Trigger / Entry / STOP / Exit 全冻结。0 Tiingo / 0 rescan.</div></div>
 <div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V843_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><form method='post' action='/v843/preflight'><button>A. Run V8.43 Preflight</button></form><br><form method='post' action='/v843/run'><button>B. Run Component Attrition Audit</button></form></div>
 <div class='c'><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Runtime Error: {e(S.get('error') or 'None')}</p></div>
 <div class='c'><h2>Verdict</h2><div class='ok'>{e(R.get('verdict','—'))}</div><p><b>Suspect gates:</b> {e(', '.join(R.get('suspect_gates',[])) or '—')} · <b>Positive gates:</b> {e(', '.join(R.get('positive_gates',[])) or '—')}</p></div>
@@ -69973,7 +69976,7 @@ _v843_home_base = APP.view_functions.get('home') or APP.view_functions.get('inde
 if _v843_home_base is not None:
     def _v843_home_wrap(*args,**kwargs):
         resp=_v843_home_base(*args,**kwargs)
-        card="""<div id='v843-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'><h2>🔬 V8.43 VCP Component Attrition Audit</h2><p>解释 V8.42 为什么丢掉 96% Winners：四个现有 gate 做 Winner-vs-STOP 归因。0 threshold tuning / 0 Tiingo / 0 rescan。</p><a href='/v843'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.43</button></a></div>"""
+        card="""<div id='v843-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'><h2>🔬 V8.43A VCP Component Attrition Audit</h2><p>解释 V8.42 为什么丢掉 96% Winners：四个现有 gate 做 Winner-vs-STOP 归因。0 threshold tuning / 0 Tiingo / 0 rescan。</p><a href='/v843'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.43</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v843-home-card-real' not in body:
