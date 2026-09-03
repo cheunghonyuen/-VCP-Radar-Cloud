@@ -72770,3 +72770,170 @@ if _v850j_home_base is not None:
         return card+str(resp)
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v850j_home_base:APP.view_functions[_ep]=_v850j_home_wrap
+
+# =============================================================================
+# V8.50K — COVERAGE-FIRST BATCH PRICE STORE (ARCHITECTURE CLOSEOUT)
+# Engineering-only replacement for the serial per-listing tail loader.
+# =============================================================================
+V850_BUILD_ID='v850k-coverage-first-batch-price-store-20260903'
+V850K_BATCH_HELPER=V850_DIR/'v850k_batch_price_worker.py'
+V850K_TMP_DIR=V850_DIR/'k_batch_transport'
+V850K_PREFIX_DONE=3260
+V850K_WORKERS=max(2,min(6,int(os.environ.get('V850K_WORKERS','4'))))
+V850K_BATCH_SIZE=max(8,min(48,int(os.environ.get('V850K_BATCH_SIZE','24'))))
+V850K_BATCH_TIMEOUT=max(30,min(180,int(os.environ.get('V850K_BATCH_TIMEOUT','75'))))
+
+_V850K_BATCH_HELPER_CODE=r'''import sys,os,json,pickle
+from pathlib import Path
+import pandas as pd, numpy as np
+manifest=Path(sys.argv[1]); outp=Path(sys.argv[2]); start=pd.Timestamp(sys.argv[3]); end=pd.Timestamp(sys.argv[4])
+items=json.loads(manifest.read_text(encoding='utf-8'))
+def round_factor_score(r):
+    if not np.isfinite(r) or r<=0:return (False,None,None)
+    cands=[2,3,4,5,10,20,25,50,100,200,250,500,1000]; vals=cands+[1/x for x in cands]
+    best=min(vals,key=lambda x:abs(np.log(r/x))); rel=abs(np.log(r/best)); return (bool(rel<=0.04),float(best),float(rel))
+def parse_source(p):
+    d=pd.read_csv(p)
+    lc={str(c).lower():c for c in d.columns}; need=['date','open','high','low','close','volume']
+    if not all(k in lc for k in need):raise RuntimeError('missing exact OHLCV schema')
+    q=pd.DataFrame({'date':pd.to_datetime(d[lc['date']],errors='coerce',utc=True).dt.tz_convert(None).dt.normalize(),'open':pd.to_numeric(d[lc['open']],errors='coerce'),'high':pd.to_numeric(d[lc['high']],errors='coerce'),'low':pd.to_numeric(d[lc['low']],errors='coerce'),'close':pd.to_numeric(d[lc['close']],errors='coerce'),'volume':pd.to_numeric(d[lc['volume']],errors='coerce')}).dropna(subset=['date','open','high','low','close','volume']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    if len(q)<320:raise RuntimeError('price history <320')
+    prev=q.close.shift(1); orat=q.open/prev; crat=q.close/prev; intr=(q.close/q.open-1).abs(); events=[]
+    for i in range(1,len(q)):
+        a=float(orat.iloc[i]) if pd.notna(orat.iloc[i]) else np.nan; b=float(crat.iloc[i]) if pd.notna(crat.iloc[i]) else np.nan
+        if not np.isfinite(a) or not np.isfinite(b) or not ((a>=3 or a<=1/3) and (b>=3 or b<=1/3)):continue
+        agreement=abs(np.log(max(1e-12,a/b)))<=0.10; iv=float(intr.iloc[i]) if pd.notna(intr.iloc[i]) else np.nan; calm=bool(np.isfinite(iv) and iv<=0.25); okround,_,_=round_factor_score(b)
+        if agreement and calm and okround:events.append((pd.Timestamp(q.date.iloc[i]).normalize(),float(b)))
+    if events:
+        for col in ['open','high','low','close']:
+            vals=[]
+            for vv,dd in zip(q[col],q.date):
+                f=1.0; nd=pd.Timestamp(dd).normalize()
+                for ed,r in events:
+                    if nd<ed:f*=r
+                vals.append(float(vv)*f)
+            q[col]=vals
+    q=q[(q.date>=start)&(q.date<=end)]; m={}
+    for _,r in q.iterrows():
+        op=float(r.open);cl=float(r.close)
+        if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:m[str(pd.Timestamp(r.date).date())]={'open':op,'close':cl}
+    if not m:raise RuntimeError('no valid open/close in replay window')
+    return m
+def parse_shard(p,lid):
+    with open(p,'rb') as f:x=pickle.load(f)
+    if not isinstance(x,dict) or str(x.get('listing_id',''))!=str(lid) or not isinstance(x.get('map'),dict):raise RuntimeError('invalid shard')
+    m={}
+    for k,v in x['map'].items():
+        try:
+            ks=str(k.date()) if hasattr(k,'date') else str(k)[:10];op=float(v['open']);cl=float(v['close'])
+            if op>0 and cl>0:m[ks]={'open':op,'close':cl}
+        except Exception:pass
+    if not m:raise RuntimeError('empty shard')
+    return m
+maps={}; errors=[]
+for it in items:
+    lid=str(it['lid']);kind=str(it['kind']);p=Path(it['path'])
+    try:
+        if not p.exists():raise RuntimeError('asset_missing_at_worker')
+        maps[lid]=parse_source(p) if kind=='source' else parse_shard(p,lid)
+    except BaseException as ex:errors.append({'listing_id':lid,'error':f'{kind}:{type(ex).__name__}:{str(ex)[:180]}'})
+outp.parent.mkdir(parents=True,exist_ok=True);tmp=outp.with_suffix('.tmp')
+with open(tmp,'wb') as f:pickle.dump({'maps':maps,'errors':errors},f,protocol=pickle.HIGHEST_PROTOCOL);f.flush();os.fsync(f.fileno())
+os.replace(tmp,outp)
+'''
+
+def _v850k_write_helper():
+    V850_DIR.mkdir(parents=True,exist_ok=True);V850K_BATCH_HELPER.write_text(_V850K_BATCH_HELPER_CODE,encoding='utf-8')
+
+def _v850k_normalize_map(raw):
+    import pandas as pd,numpy as np
+    out={}
+    for k,v in (raw or {}).items():
+        try:
+            dt=pd.Timestamp(k).normalize();op=float(v['open']);cl=float(v['close'])
+            if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:out[dt]={'open':op,'close':cl}
+        except Exception:pass
+    return out or None
+
+def _v850k_run_batch(items, timeout_sec=None):
+    import subprocess,sys,pickle,hashlib,time
+    timeout_sec=int(timeout_sec or V850K_BATCH_TIMEOUT)
+    if not items:return {},[]
+    V850K_TMP_DIR.mkdir(parents=True,exist_ok=True);_v850k_write_helper()
+    token=hashlib.sha1(('|'.join(str(x['lid']) for x in items)+f'|{time.time_ns()}').encode()).hexdigest();mf=V850K_TMP_DIR/f'{token}.json';op=V850K_TMP_DIR/f'{token}.pkl';mf.write_text(json.dumps(items,ensure_ascii=False),encoding='utf-8')
+    try:
+        try:cp=subprocess.run([sys.executable,str(V850K_BATCH_HELPER),str(mf),str(op),str(V624_START.date()),str(V624_END.date())],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            if len(items)==1:return {},[{'listing_id':str(items[0]['lid']),'error':f'batch_single_timeout_after_{timeout_sec}s'}]
+            mid=len(items)//2;a,e1=_v850k_run_batch(items[:mid],max(25,timeout_sec//2));b,e2=_v850k_run_batch(items[mid:],max(25,timeout_sec//2));a.update(b);return a,e1+e2
+        if cp.returncode!=0 or not op.exists():
+            msg=(cp.stderr.decode('utf-8','ignore')[-220:] if cp.stderr else f'exit_{cp.returncode}')
+            if len(items)==1:return {},[{'listing_id':str(items[0]['lid']),'error':'batch_worker_error:'+msg.replace('\n',' ')[:180]}]
+            mid=len(items)//2;a,e1=_v850k_run_batch(items[:mid],max(25,timeout_sec//2));b,e2=_v850k_run_batch(items[mid:],max(25,timeout_sec//2));a.update(b);return a,e1+e2
+        with open(op,'rb') as f:x=pickle.load(f)
+        maps={}
+        for lid,m in (x.get('maps') or {}).items():
+            nm=_v850k_normalize_map(m)
+            if nm:maps[str(lid)]=nm
+        return maps,list(x.get('errors') or [])
+    finally:
+        for p in (mf,op):
+            try:p.unlink()
+            except Exception:pass
+
+def _v850_prices_progress(lids):
+    import concurrent.futures
+    ids=sorted(set(map(str,lids)));total=len(ids);trusted=min(V850K_PREFIX_DONE,total);out={};dates=set();errs=[];resumed=0;repair=[]
+    for n,lid in enumerate(ids[:trusted],1):
+        if n==1 or n%500==0:_v850_write(status='running',phase='prices',message=f'V8.50K FAST prefix {n-1}/{trusted} · reused {resumed}',processed=n-1,total=total,errors=len(errs),current_listing=lid,error=None)
+        mp=_v850h_safe_load(lid)
+        if not mp:mp=_v850_shard_load(lid)
+        if mp:out[lid]=mp;dates.update(mp.keys());resumed+=1
+        else:repair.append(lid)
+    unresolved=repair+ids[trusted:];work=[];missing=[];counts={'source':0,'safe_shard':0,'legacy_shard':0,'missing':0}
+    for lid in unresolved:
+        pth=_v617o_existing_price_path(lid)
+        if pth and pth.exists():work.append({'lid':lid,'kind':'source','path':str(pth)});counts['source']+=1;continue
+        sp=_v850h_safe_path(lid)
+        if sp.exists() and 0<sp.stat().st_size<=25*1024*1024:work.append({'lid':lid,'kind':'shard','path':str(sp)});counts['safe_shard']+=1;continue
+        lp=_v850_shard_path(lid)
+        if lp.exists() and 0<lp.stat().st_size<=25*1024*1024:work.append({'lid':lid,'kind':'shard','path':str(lp)});counts['legacy_shard']+=1;continue
+        missing.append(lid);counts['missing']+=1
+    errs.extend({'listing_id':x,'error':'inventory_missing_no_source_or_shard'} for x in missing);projected=(len(out)+len(work))/max(1,total)*100
+    _v850_write(status='running',phase='inventory',message=f"V8.50K inventory · prefix {len(out)} · source {counts['source']} · safe {counts['safe_shard']} · legacy {counts['legacy_shard']} · missing {counts['missing']} · projected {projected:.2f}%",processed=len(out),total=total,errors=len(errs),current_listing='',inventory=counts,projected_coverage_pct=projected,error=None)
+    if projected<95:raise RuntimeError(f'Inventory projected price coverage below 95%: {projected:.2f}%')
+    chunks=[work[i:i+V850K_BATCH_SIZE] for i in range(0,len(work),V850K_BATCH_SIZE)];done_items=0
+    if chunks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=V850K_WORKERS) as ex:
+            futs={ex.submit(_v850k_run_batch,ch,V850K_BATCH_TIMEOUT):ch for ch in chunks}
+            for fut in concurrent.futures.as_completed(futs):
+                ch=futs[fut]
+                try:maps,ee=fut.result()
+                except Exception as exx:maps={};ee=[{'listing_id':str(x['lid']),'error':f'parent_batch_exception:{type(exx).__name__}:{exx}'} for x in ch]
+                for lid,mp in maps.items():out[lid]=mp;dates.update(mp.keys())
+                errs.extend(ee);done_items+=len(ch);cov=100*len(out)/max(1,total)
+                _v850_write(status='running',phase='batch_prices',message=f'V8.50K batch store {done_items}/{len(work)} unresolved · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,trusted+done_items),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=counts,error=None)
+    cov=100*len(out)/max(1,total)
+    if cov<95:raise RuntimeError(f'Price store coverage below 95% after build: {cov:.2f}%')
+    _v850_write(status='running',phase='prices_done',message=f'V8.50K PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · proceeding to CONTROL parity',processed=total,total=total,errors=len(errs),price_coverage_pct=cov,inventory=counts,error=None)
+    return out,sorted(dates),errs
+
+_v850k_preflight_base=_v850_preflight
+def _v850_preflight():
+    o=_v850k_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50K';o['engineering']='Coverage-first inventory + one-route batch build + recursive hard-timeout split; no serial three-layer fallback.'
+    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    except Exception:pass
+    return o
+
+_v850k_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850k_home_base is not None:
+    def _v850k_home_wrap(*args,**kwargs):
+        resp=_v850k_home_base(*args,**kwargs);card="""<div id='v850k-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50K Coverage-First Batch Price Store</h2><p>先 inventory 全 4,431 listings；前 3,260 observed-good prefix 快速复用；其余每只只走一个已知数据源，4 个 batch workers 并行；卡批次自动二分隔离坏票。≥95% coverage + Control parity 才允许解释 BLACK→NORMAL re-entry。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50K</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v850k-home-card' not in body:
+                p=body.lower().find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v850k_home_base:APP.view_functions[_ep]=_v850k_home_wrap
