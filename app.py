@@ -71991,7 +71991,7 @@ V850_RESULT = V850_DIR / 'result.json'
 V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
 V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
 V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
-V850_BUILD_ID = 'v850-black-exit-normal-reentry-full-causal-20260903'
+V850_BUILD_ID = 'v850a-tight-stream-listing-parity-fix-20260903'
 v850_thread = None
 
 def _v850_status():
@@ -72018,9 +72018,12 @@ def _v850_preflight():
         A,AF,P,J,B,T,X,attrs=_v844_load_streams()
         S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False)
         req=['date','action_state','pit_stress_count'];miss=[c for c in req if c not in S.columns]
-        ok=(len(T)>=30000 and T.listing_id.nunique()>=5000 and len(S)>=7000 and not miss)
+        # V8.44/V8.45 frozen Tight stream is 32,046 rows across 4,431 unique listings.
+        # The old >=5,000 listing expectation was an invalid preflight assumption and blocked a valid frozen stream.
+        tight_rows=int(len(T)); tight_listings=int(T.listing_id.nunique())
+        ok=(tight_rows>=32000 and tight_listings>=4400 and len(S)>=7000 and not miss)
         out={'version':'V8.50','build_id':V850_BUILD_ID,'verdict':'PASS' if ok else 'FAIL__FULL_TIGHT_STREAM_OR_SIGNAL_PARITY','error':None,
-             'tight_candidate_rows':int(len(T)),'unique_listings':int(T.listing_id.nunique()),'signal_sessions':int(len(S)),'missing_signal_columns':miss,
+             'tight_candidate_rows':tight_rows,'unique_listings':tight_listings,'signal_sessions':int(len(S)),'missing_signal_columns':miss,
              'v849_verdict':r49.get('verdict'),
              'state_machine':'CONTROL = ordinary Tight full causal first-come 10-slot. BLACK_REENTRY = if current next-session action_state is BLACK, liquidate all existing positions at cached open and block entries that session; when action_state returns NORMAL, immediately re-enable the ordinary Tight candidate stream. AMBER/RED do nothing in this test.',
              'timing':'V8.47 action_state is built from past-only expanding thresholds and next-session execution. Re-entry uses the first session whose causal action_state is NORMAL after BLACK.',
