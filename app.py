@@ -70273,3 +70273,94 @@ if _v844_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v844_home_base:APP.view_functions[ep]=_v844_home_wrap
+
+# =============================================================================
+# V8.44A HOTFIX — REAL V844 HEARTBEAT + RESUMABLE PRICE-CACHE BUILD
+# Engineering-only repair. Strategy semantics/economics remain EXACTLY V8.44.
+# Root cause: V8.44 delegated to _v838_price_maps(), which writes progress into
+# V838_STATUS, leaving V844_STATUS frozen at 0/N. This override writes to V844,
+# persists safe checkpoints, and resumes after Railway restart/redeploy.
+# =============================================================================
+V844_BUILD_ID = 'v844A-tight-pivot-progress-resume-hotfix-20260903'
+V844_PRICE_CKPT = V844_DIR / 'price_map_checkpoint.pkl'
+V844_PRICE_CKPT_META = V844_DIR / 'price_map_checkpoint_meta.json'
+
+
+def _v844_save_price_ckpt(out, date_set, errs, done, total, elapsed):
+    import pickle, os
+    V844_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = V844_PRICE_CKPT.with_suffix('.pkl.tmp')
+    with open(tmp, 'wb') as f:
+        pickle.dump({'out':out,'date_set':date_set,'errs':errs,'done':done,'total':total}, f, protocol=pickle.HIGHEST_PROTOCOL)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, V844_PRICE_CKPT)
+    V844_PRICE_CKPT_META.write_text(json.dumps({
+        'build_id':V844_BUILD_ID,'done':int(done),'total':int(total),'errors':int(len(errs)),
+        'elapsed_sec':round(float(elapsed),1),'saved_at':datetime.now(timezone.utc).isoformat()
+    },ensure_ascii=False,indent=2),encoding='utf-8')
+
+
+def _v844_load_price_ckpt(lids):
+    import pickle
+    if not V844_PRICE_CKPT.exists(): return {}, set(), [], 0
+    try:
+        with open(V844_PRICE_CKPT,'rb') as f: x=pickle.load(f)
+        done=int(x.get('done',0)); total=int(x.get('total',0))
+        # Resume only when checkpoint belongs to the same requested population size.
+        if total != len(lids) or done < 0 or done > len(lids): return {}, set(), [], 0
+        return x.get('out',{}) or {}, set(x.get('date_set',set()) or set()), list(x.get('errs',[]) or []), done
+    except Exception:
+        return {}, set(), [], 0
+
+
+def _v844_price_maps(listing_ids):
+    """Exact V8.38 price semantics; only progress/checkpoint plumbing is repaired."""
+    import pandas as pd, numpy as np, time
+    M,lidcol=_v826a_manifest()
+    # Build manifest lookup once. This is semantically identical to V8.38.
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    lids=sorted(set(map(str,listing_ids)))
+    out,date_set,errs,done=_v844_load_price_ckpt(lids)
+    t0=time.time()
+    if done:
+        _v844_write(status='running',phase='prices',
+                    message=f'Resumed cached daily MTM price build at {done}/{len(lids)}',
+                    processed=done,total=len(lids),errors=len(errs),error=None,
+                    elapsed_sec=0,last_heartbeat=datetime.now(timezone.utc).isoformat())
+    for n,lid in enumerate(lids[done:],done+1):
+        mr=mmap.get(lid)
+        if mr is None:
+            errs.append(lid)
+        else:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception:q=None
+            if q is None or q.empty:
+                errs.append(lid)
+            else:
+                z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+                if z.empty:
+                    errs.append(lid)
+                else:
+                    out[lid]={pd.Timestamp(d).normalize():float(c) for d,c in zip(z.date,z.close)
+                              if pd.notna(d) and pd.notna(c) and np.isfinite(c)}
+                    date_set.update(out[lid].keys())
+        # Real V8.44 heartbeat every 25 listings; checkpoint every 250.
+        if n==1 or n%25==0 or n==len(lids):
+            _v844_write(status='running',phase='prices',
+                        message=f'Loading cached daily MTM prices {n}/{len(lids)} · current {lid}',
+                        processed=n,total=len(lids),errors=len(errs),error=None,
+                        elapsed_sec=round(time.time()-t0,1),last_heartbeat=datetime.now(timezone.utc).isoformat())
+        if n%250==0 or n==len(lids):
+            _v844_save_price_ckpt(out,date_set,errs,n,len(lids),time.time()-t0)
+    return out,sorted(date_set),errs
+
+
+# Override preflight so build ID exposes V8.44A while preserving all V8.44 checks.
+_v844_preflight_v844a_base = _v844_preflight
+def _v844_preflight():
+    o=_v844_preflight_v844a_base()
+    o['version']='V8.44A'
+    o['build_id']=V844_BUILD_ID
+    o['engineering_hotfix']='V844-native heartbeat every 25 listings + resumable checkpoint every 250; strategy semantics unchanged.'
+    V844_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return o
