@@ -73088,3 +73088,121 @@ if _v850l_home_base is not None:
         return card+str(resp)
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v850l_home_base:APP.view_functions[_ep]=_v850l_home_wrap
+
+
+# =============================================================================
+# V8.50M — NON-RECURSIVE PER-ASSET HARD-TIMEOUT PRICE STORE
+# Removes the remaining recursive batch-split path from V8.50L.
+# Every asset is handled exactly once in its own helper subprocess with a hard
+# timeout; no bad shard can hold an entire batch or trigger exponential splits.
+# =============================================================================
+V850_BUILD_ID='v850m-nonrecursive-per-asset-hard-timeout-price-store-20260903'
+V850M_SHARD_WORKERS=max(4,min(16,int(os.environ.get('V850M_SHARD_WORKERS','12'))))
+V850M_SOURCE_WORKERS=max(2,min(10,int(os.environ.get('V850M_SOURCE_WORKERS','6'))))
+V850M_SHARD_TIMEOUT=max(3,min(15,int(os.environ.get('V850M_SHARD_TIMEOUT','6'))))
+V850M_SOURCE_TIMEOUT=max(8,min(40,int(os.environ.get('V850M_SOURCE_TIMEOUT','15'))))
+
+
+def _v850m_one(item,timeout_sec):
+    """Exactly one asset -> one isolated helper subprocess -> hard timeout."""
+    maps,ee=_v850k_run_batch([item],timeout_sec)
+    lid=str(item['lid'])
+    mp=maps.get(lid)
+    if mp:return lid,mp,None
+    er=(ee[0].get('error') if ee else 'no_valid_open_close')
+    return lid,None,str(er)
+
+
+def _v850m_parallel(items,workers,timeout_sec,label,total,out,dates,errs,done_base=0):
+    import concurrent.futures
+    if not items:return []
+    failed=[];done=0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers,thread_name_prefix=f'v850m_{label.lower()}') as ex:
+        futs={ex.submit(_v850m_one,it,timeout_sec):it for it in items}
+        for fut in concurrent.futures.as_completed(futs):
+            it=futs[fut];lid=str(it['lid'])
+            try:lid2,mp,er=fut.result()
+            except BaseException as exx:lid2,mp,er=lid,None,f'{label}_parent:{type(exx).__name__}:{str(exx)[:120]}'
+            if mp:
+                out[str(lid2)]=mp;dates.update(mp.keys())
+            else:
+                failed.append(it);errs.append({'listing_id':lid,'error':er or f'{label}_failed'})
+            done+=1
+            if done==1 or done%25==0 or done==len(items):
+                cov=100*len(out)/max(1,total)
+                _v850_write(status='running',phase='batch_prices',
+                    message=f'V8.50M {label} {done}/{len(items)} · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
+                    processed=min(total,done_base+done),total=total,errors=len(errs),current_listing=lid,
+                    price_coverage_pct=cov,error=None)
+    return failed
+
+
+def _v850_prices_progress(lids):
+    ids=sorted(set(map(str,lids)));total=len(ids);out={};dates=set();errs=[]
+    routes={'safe':0,'legacy':0,'source':0,'missing':0};shards=[];sources=[];missing=[]
+    # Metadata-only inventory: never open a pickle/CSV in parent.
+    for i,lid in enumerate(ids,1):
+        a=_v850l_asset_for(lid)
+        if a is None:
+            routes['missing']+=1;missing.append(lid)
+        elif a['kind']=='shard':
+            routes[a['route']]+=1;shards.append(a)
+        else:
+            routes['source']+=1;sources.append(a)
+        if i==1 or i%500==0 or i==total:
+            _v850_write(status='running',phase='inventory',
+                message=f'V8.50M inventory {i}/{total} · shard {len(shards)} · source {len(sources)} · missing {len(missing)}',
+                processed=i,total=total,errors=len(missing),current_listing='',inventory=routes,error=None)
+    projected=100*(len(shards)+len(sources))/max(1,total)
+    errs.extend({'listing_id':x,'error':'inventory_missing_no_asset'} for x in missing)
+    if projected<95:raise RuntimeError(f'Inventory projected price coverage below 95%: {projected:.2f}%')
+
+    # Pass 1: all existing shards, each independently hard-isolated. No recursive splitting.
+    shard_failed=_v850m_parallel(shards,V850M_SHARD_WORKERS,V850M_SHARD_TIMEOUT,'SHARD',total,out,dates,errs,0)
+
+    # Convert failed shard routes to SOURCE only once when a real source exists.
+    repair=[]
+    for it in shard_failed:
+        lid=str(it['lid']);pth=_v617o_existing_price_path(lid)
+        try:
+            if pth and pth.exists() and pth.stat().st_size>0:
+                repair.append({'lid':lid,'kind':'source','path':str(pth),'route':'repair_source'})
+        except Exception:pass
+
+    # Pass 2: source-only plus repair, each independently hard-isolated.
+    # De-duplicate by listing id so no asset is rebuilt twice.
+    sm={str(x['lid']):x for x in sources}
+    for x in repair:sm[str(x['lid'])]=x
+    source_work=list(sm.values())
+    _v850m_parallel(source_work,V850M_SOURCE_WORKERS,V850M_SOURCE_TIMEOUT,'SOURCE',total,out,dates,errs,len(shards))
+
+    cov=100*len(out)/max(1,total)
+    _v850_write(status='running',phase='prices_done',
+        message=f'V8.50M PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · proceeding to CONTROL parity',
+        processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=routes,error=None)
+    if cov<95:raise RuntimeError(f'Price store coverage below 95% after per-asset isolated build: {cov:.2f}%')
+    return out,sorted(dates),errs
+
+
+_v850m_preflight_base=_v850_preflight
+def _v850_preflight():
+    o=_v850m_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50M'
+    o['engineering']='Non-recursive per-asset hard-timeout store; 12 shard workers / 6 source workers; metadata-only inventory; >=95% coverage + frozen CONTROL parity.'
+    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    except Exception:pass
+    return o
+
+_v850m_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850m_home_base is not None:
+    def _v850m_home_wrap(*args,**kwargs):
+        resp=_v850m_home_base(*args,**kwargs)
+        card="""<div id='v850m-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>✅ V8.50M Non-Recursive Price Store</h2><p>每个 listing 独立 hard-timeout；不再 recursive batch split，不会因一个坏 shard 拖住整批。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50M</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v850m-home-card' not in body:
+                pos=body.lower().find('<body');gt=body.find('>',pos) if pos>=0 else -1
+                body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v850m_home_base:APP.view_functions[_ep]=_v850m_home_wrap
