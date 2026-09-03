@@ -25337,7 +25337,7 @@ def _v644_build(t0):
                              'trigger_anchor':str(se.get('trigger_anchor','')),
                              # V8.16 forward-only lineage: never infer this later from trigger date.
                              'parent_opportunity_id':str(r.parent_opportunity_id),
-                             'stage2_row_id':int(r.stage2_row_id),
+                             'stage2_row_id':int(r['stage2_row_id']),
                              'parent_entry_date':pd.Timestamp(r.parent_entry_date).normalize(),
                              'source_generator_id':str(r.source_generator_id)})
 
@@ -34325,7 +34325,7 @@ def _v677_run():
             lo=q.low.to_numpy(dtype=float)/ep-1.0
             cl=q.close.to_numpy(dtype=float)/ep-1.0
 
-            tr={'listing_id':str(r.listing_id),'entry_date':r.entry_date}
+            tr={'listing_id':str(r.listing_id),'entry_date':r['entry_date']}
             for h in horizons:
                 m=min(h,len(q))
                 if m<=0:continue
@@ -34595,7 +34595,7 @@ def _v678_run():
             days_to_stop=int((stop_date-pd.Timestamp(r.entry_date).normalize()).days)
 
             # What happened AFTER stop, measured vs original entry.
-            rec={'listing_id':str(r.listing_id),'entry_date':r.entry_date,'stop_date':stop_date,
+            rec={'listing_id':str(r.listing_id),'entry_date':r['entry_date'],'stop_date':stop_date,
                  'pre_stop_mfe':pre_mfe,'pre_stop_mae':pre_mae,'stop_gap':stop_gap,'days_to_stop_calendar':days_to_stop}
             if len(post):
                 ph=post.high.to_numpy(dtype=float)/ep-1.0
@@ -35128,7 +35128,7 @@ def _v679_run():
             if d is None:continue
 
             control_rows.append({
-                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r['entry_date'],'entry_px':float(r.entry_px),
                 'exit_date':r.control_exit_date,'exit_px':float(r.control_exit_px),'exit_reason':str(r.control_reason)
             })
 
@@ -35139,7 +35139,7 @@ def _v679_run():
             if pd.Timestamp(xd).normalize()!=pd.Timestamp(r.control_exit_date).normalize() or abs(float(xp)-float(r.control_exit_px))>1e-8:
                 changed_n+=1
             chall_rows.append({
-                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                'trade_id':r.trade_id,'listing_id':lid,'entry_date':r['entry_date'],'entry_px':float(r.entry_px),
                 'exit_date':xd,'exit_px':float(xp),'exit_reason':reason,'proof':bool(proof),'hold_sessions':int(hold)
             })
             paired.append({
@@ -35606,7 +35606,7 @@ def _v679f_run():
             proofn+=int(proof)
             changed+=int(pd.Timestamp(xd).normalize()!=pd.Timestamp(r.exit_date).normalize() or abs(float(xp)-float(r.exit_px))>1e-8)
             H.append({'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
-                      'entry_date':r.entry_date,'entry_px':float(r.entry_px),
+                      'entry_date':r['entry_date'],'entry_px':float(r.entry_px),
                       'exit_date':xd,'exit_px':float(xp),'exit_reason':reason})
             pair.append({'schedule_id':str(r.schedule_id),'proof':bool(proof),
                          'control_ret':float(r.exit_px)/float(r.entry_px)-1.,
@@ -35908,7 +35908,7 @@ def _v679g_run():
             hr=float(xp)/float(r.entry_px)-1.0
             rows.append({
                 'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
-                'entry_date':r.entry_date,'proof':bool(proof),
+                'entry_date':r['entry_date'],'proof':bool(proof),
                 'control_ret':cr,'challenger_ret':hr,'delta_ret':hr-cr,
                 'control_exit_date':r.exit_date,'challenger_exit_date':xd,
                 'control_reason':str(r.exit_reason),'challenger_reason':reason,
@@ -36177,7 +36177,7 @@ def _v680_run():
                 ep=np.nan
                 # lazy exact lookup from V6.69 cache added below via entry map
                 rows.append({
-                    'listing_id':lid,'entry_date':r.entry_date,'stop_date':sd,'q_index':j,
+                    'listing_id':lid,'entry_date':r['entry_date'],'stop_date':sd,'q_index':j,
                     'open':float(q.open.iloc[j]),'high':float(q.high.iloc[j]),'low':float(q.low.iloc[j]),'close':float(q.close.iloc[j]),
                     'prev_close':float(q.close.iloc[j-1]),
                     'ret1_before':float(q.close.iloc[j-1]/q.close.iloc[j-2]-1) if j>=2 and q.close.iloc[j-2]>0 else np.nan,
@@ -36890,7 +36890,7 @@ def _v682_run():
             future100=bool(np.isfinite(future_mfe) and future_mfe>=1.00)
 
             rec={'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
-                 'entry_date':r.entry_date,'orig_entry_px':float(r.entry_px),
+                 'entry_date':r['entry_date'],'orig_entry_px':float(r.entry_px),
                  'orig_ret':orig_ret,'orig_stop':orig_stop,
                  'future_mfe':future_mfe,'future20':future20,'future50':future50,'future100':future100}
 
@@ -37241,7 +37241,7 @@ def _v683_run():
 
             rec={
                 'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
-                'entry_date':r.entry_date,'stop_date':r.exit_date,
+                'entry_date':r['entry_date'],'stop_date':r.exit_date,
                 'entry_px':ep,'stop_px':xp,'control_reason':str(r.exit_reason),
                 'orig_stop':bool('STOP' in str(r.exit_reason).upper()),
                 'pre_stop_completed_mfe':pre_mfe,
@@ -38236,7 +38236,7 @@ def _v686_run():
 
             rows.append({
                 'schedule_id':str(r.schedule_id),'listing_id':str(r.listing_id),
-                'entry_date':r.entry_date,'entry_px':ep,
+                'entry_date':r['entry_date'],'entry_px':ep,
                 'regime':str(r.regime),
                 'orig_stop':orig_stop,'orig_ret':orig_ret,
                 'future_mfe':mfe,'future_mae':mae,
@@ -50676,7 +50676,7 @@ def _v715_run():
             if d is None or len(d)==0:pm+=1;continue
             f=_v715_path(d,r.entry_date,r.exit_date)
             if f is None:em+=1;continue
-            z={'v704_row_id':int(r.v704_row_id),'listing_id':lid,'entry_date':r.entry_date,'exit_date':r.exit_date,'ret':float(r.ret) if np.isfinite(r.ret) else np.nan,'is_stop':bool(r.is_stop),'is_50':bool(np.isfinite(r.ret) and r.ret>=.50),'is_100':bool(np.isfinite(r.ret) and r.ret>=1.0)};z.update(f);rows.append(z)
+            z={'v704_row_id':int(r.v704_row_id),'listing_id':lid,'entry_date':r['entry_date'],'exit_date':r.exit_date,'ret':float(r.ret) if np.isfinite(r.ret) else np.nan,'is_stop':bool(r.is_stop),'is_50':bool(np.isfinite(r.ret) and r.ret>=.50),'is_100':bool(np.isfinite(r.ret) and r.ret>=1.0)};z.update(f);rows.append(z)
         P=pd.DataFrame(rows);cov=float(len(P)/291)
         if cov<.95:raise RuntimeError(f'Early-path coverage too low {cov:.1%}; manifest_miss={mm}, price_miss={pm}, entry_day_miss={em}')
         if not P.v704_row_id.is_unique:raise RuntimeError('V7.15 duplicate v704_row_id')
@@ -67696,10 +67696,10 @@ def _v835_run():
             except Exception:q=None
         if q is None:
             errs+=len(g)
-            for _,r in g.iterrows():rows.append({'listing_id':lid,'entry_date':r.entry_date,'entry_px':r.entry_px,'control_reason':r.control_reason,'control_ret':r.control_ret,'audit_ok':False,'audit_error':'price_cache_unavailable'})
+            for _,r in g.iterrows():rows.append({'listing_id':lid,'entry_date':r['entry_date'],'entry_px':r.entry_px,'control_reason':r['control_reason'],'control_ret':r['control_ret'],'audit_ok':False,'audit_error':'price_cache_unavailable'})
         else:
             for _,r in g.iterrows():
-                a=_v835_eval_entry(eng,q,r.entry_date,r.entry_px);a.update({'listing_id':lid,'entry_date':r.entry_date,'entry_px':float(r.entry_px),'control_reason':r.control_reason,'control_ret':float(r.control_ret)})
+                a=_v835_eval_entry(eng,q,r.entry_date,r.entry_px);a.update({'listing_id':lid,'entry_date':r['entry_date'],'entry_px':float(r.entry_px),'control_reason':r['control_reason'],'control_ret':float(r.control_ret)})
                 if not a.get('audit_ok'):errs+=1
                 rows.append(a)
         if n==1 or n%25==0 or n==total:
@@ -69151,9 +69151,9 @@ if _v840_home_base is not None:
 
 
 # ================= V8.41 PIVOT-CROSS / SIGNAL-DATE TIME-SEMANTICS AUDIT =================
-V841_DIR=DATA_DIR/'v841b_exact_v644_generator_provenance'
+V841_DIR=DATA_DIR/'v841c_self_contained_exact_trigger_runtime_fix'
 V841_PREFLIGHT=V841_DIR/'preflight.json';V841_RESULT=V841_DIR/'result.json';V841_DETAIL=V841_DIR/'detail.csv.gz'
-V841_BUILD_ID='v841b-exact-v644-generator-provenance-20260903'
+V841_BUILD_ID='v841c-self-contained-trigger-fix-20260903'
 V841_S2=V834_V617;V841_V644=V644_TRADE_CACHE;V841_V669=V669_TRADES;V841_V835=V835_DETAIL
 
 def _v841_bool(s):
@@ -69175,6 +69175,30 @@ def _v841_stats(D,c):
       'stop_rejection_pct':100*int((~m&st).sum())/max(1,int(st.sum())),
       'pass_stop_rate_pct':100*float(st[m].mean()) if m.any() else None,'pass_pf':_v841_pf(D,m)}
 
+def _v841_exact_v644_tight_trigger(r,d):
+    ed=pd.Timestamp(r['entry_date']).normalize();xd=pd.Timestamp(r['exit_date']).normalize()
+    pre=d[d['date']<ed].tail(60).copy();post=d[(d['date']>=ed)&(d['date']<=xd)].copy()
+    x=pd.concat([pre,post],ignore_index=True).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+    if len(post)<3 or x.empty:return None
+    x['vavg50']=pd.to_numeric(x['volume'],errors='coerce').rolling(50,min_periods=20).mean()
+    idxs=x.index[x['date'].eq(ed)].tolist()
+    if not idxs:return None
+    start_i=int(idxs[0]);pivot=float(r['entry_px'])
+    for j in range(start_i,len(x)-1):
+        rr=x.iloc[j]
+        h=float(rr['high']);v=float(rr['volume']);va=float(rr['vavg50']) if pd.notna(rr['vavg50']) else np.nan
+        broke=np.isfinite(h) and h>pivot
+        vol_ok=(not np.isfinite(va)) or (np.isfinite(v) and v>va)
+        if broke and vol_ok:
+            nxt=x.iloc[j+1];entry=float(nxt['open'])
+            if not np.isfinite(entry) or entry<=0:return None
+            return {'entry_date':pd.Timestamp(nxt['date']).normalize(),'entry_px':entry,
+                    'signal_date':pd.Timestamp(rr['date']).normalize(),
+                    'delay_sessions':int(j+1-start_i),'supports':'PIVOT',
+                    'trigger_anchor':'PIVOT_BREAKOUT+VOLUME_CONTEXT',
+                    'trigger_mode':'TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT'}
+    return None
+
 def _v841_preflight():
     V841_DIR.mkdir(parents=True,exist_ok=True);err=None
     try:
@@ -69194,15 +69218,14 @@ def _v841_preflight():
               'v669':[c for c in reqP if c not in P.columns],
               'v835':[c for c in reqF if c not in F.columns]}
         if any(miss.values()):raise RuntimeError('Schema missing '+str(miss))
-        if '_v644_tight_breakout_volume' not in globals():raise RuntimeError('Exact deployed V6.44 trigger function missing')
         verdict='PASS'
         schema_note={'v644_has_stage2_row_id':bool('stage2_row_id' in T.columns),
                      'v644_has_parent_entry_date':bool('parent_entry_date' in T.columns),
                      'fallback':'RECONSTRUCT_FROM_EXACT_V644_GENERATOR_INPUT__V622_STAGE2_FROZEN'}
     except Exception as ex:
         verdict='ERROR';err=f'{type(ex).__name__}: {ex}';schema_note={}
-    o={'version':'V8.41B','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
-       'contract':'Old deployed V6.44 cache may lack stage2_row_id/parent_entry_date. V8.41B reconstructs provenance from the exact source used inside the historical V6.44 builder itself: _v622_load_trades(), filtered by V624_START/V624_END, then the deployed _v644_tight_breakout_volume(). No proxy Stage-2 file.'}
+    o={'version':'V8.41C','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
+       'contract':'V8.41C uses exact V6.44 generator input (_v622_load_trades + original V624 date filter) and a self-contained semantic clone of the historical TIGHT trigger. Key-based Series access removes runtime attribute/method collisions; no threshold changes.'}
     V841_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2),encoding='utf-8');return o
 
 V841_STATUS=V841_DIR/'status.json'
@@ -69264,12 +69287,12 @@ def _v841_run():
             d[c]=pd.to_numeric(d[c],errors='coerce')
         d=d.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last')
         for _,r in g.iterrows():
-            try:se=_v644_tight_breakout_volume(r,d)
+            try:se=_v841_exact_v644_tight_trigger(r,d)
             except Exception:se=None
             if se is None:continue
-            rec.append({'stage2_row_id':int(r.stage2_row_id),'listing_id':lid,
-                        'parent_entry_date':pd.Timestamp(r.entry_date).normalize(),
-                        'legacy_pivot':float(r.entry_px),
+            rec.append({'stage2_row_id':int(r['stage2_row_id']),'listing_id':lid,
+                        'parent_entry_date':pd.Timestamp(r['entry_date']).normalize(),
+                        'legacy_pivot':float(r['entry_px']),
                         'reconstructed_entry_date':pd.Timestamp(se['entry_date']).normalize(),
                         'reconstructed_entry_px':float(se['entry_px']),
                         'reconstructed_signal_date':pd.Timestamp(se['signal_date']).normalize()})
@@ -69323,21 +69346,21 @@ def _v841_run():
         q['vavg50']=q.volume.rolling(50,min_periods=20).mean()
         qidx={pd.Timestamp(x).normalize():i for i,x in enumerate(q.date)}
         for _,r in g.iterrows():
-            sd=pd.Timestamp(r.reconstructed_signal_date).normalize();i=qidx.get(sd)
+            sd=pd.Timestamp(r['reconstructed_signal_date']).normalize();i=qidx.get(sd)
             if i is None or i<1:continue
             sig=q.iloc[i];prev=q.iloc[i-1]
-            lp=float(r.legacy_pivot);cp=float(r.current_pivot) if pd.notna(r.current_pivot) else np.nan
-            pc=float(prev.close);cl=float(sig.close);hi=float(sig.high);vo=float(sig.volume);va=float(sig.vavg50) if pd.notna(sig.vavg50) else np.nan
+            lp=float(r['legacy_pivot']);cp=float(r['current_pivot']) if pd.notna(r['current_pivot']) else np.nan
+            pc=float(prev['close']);cl=float(sig['close']);hi=float(sig['high']);vo=float(sig['volume']);va=float(sig['vavg50']) if pd.notna(sig['vavg50']) else np.nan
             volok=bool((not np.isfinite(va)) or (np.isfinite(vo) and vo>va))
             lhigh=bool(np.isfinite(lp) and hi>lp);lclose=bool(np.isfinite(lp) and pc<=lp and cl>lp)
             chigh=bool(np.isfinite(cp) and hi>cp);cclose=bool(np.isfinite(cp) and pc<=cp and cl>cp)
-            rows.append({'listing_id':lid,'entry_date':r.entry_date,'signal_date_recovered':sd,'v835_signal_date':r.v835_signal_date,
-                         'control_ret':r.control_ret,'control_reason':r.control_reason,'legacy_pivot':lp,'current_pivot':cp,
+            rows.append({'listing_id':lid,'entry_date':r['entry_date'],'signal_date_recovered':sd,'v835_signal_date':r['v835_signal_date'],
+                         'control_ret':r['control_ret'],'control_reason':r['control_reason'],'legacy_pivot':lp,'current_pivot':cp,
                          'pivot_anchor_rel_diff':abs(cp/lp-1) if np.isfinite(cp) and lp>0 else np.nan,
                          'recovered_v644_exact_trigger':bool(lhigh and volok),'recovered_v644_high_cross':lhigh,
                          'legacy_pivot_close_cross':lclose,'current_pivot_high_cross':chigh,'current_pivot_close_cross':cclose,
-                         'v835_pivot_cross':bool(r.v835_pivot_cross) if pd.notna(r.v835_pivot_cross) else False,
-                         'signal_date_matches_v835':bool(pd.notna(r.v835_signal_date) and sd==r.v835_signal_date)})
+                         'v835_pivot_cross':bool(r['v835_pivot_cross']) if pd.notna(r['v835_pivot_cross']) else False,
+                         'signal_date_matches_v835':bool(pd.notna(r['v835_signal_date']) and sd==r['v835_signal_date'])})
     X=pd.DataFrame(rows)
     if X.empty:raise RuntimeError('No signal rows reconstructed')
     X.to_csv(V841_DETAIL,index=False,compression='gzip')
@@ -69354,7 +69377,7 @@ def _v841_run():
     else:diag='PIVOT_CROSS_SEMANTICS_NOT_YET_EXPLAINED__DO_NOT_CHANGE_TRIGGER'
 
     sem=['recovered_v644_exact_trigger','recovered_v644_high_cross','legacy_pivot_close_cross','current_pivot_high_cross','current_pivot_close_cross','v835_pivot_cross']
-    R={'version':'V8.41B','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
+    R={'version':'V8.41C','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
        'source_parity':{'v644_provenance_reconstruction_coverage_pct':recon_cov,
                         'v644_entry_date_reconstruction_coverage_pct':date_cov,
                         'v644_entry_price_median_rel_diff_pct':(100*px_med if px_med is not None else None),
@@ -69374,9 +69397,12 @@ def _v841_worker():
     global v841_thread
     try:_v841_run()
     except Exception as ex:
+        import traceback
+        tb=traceback.format_exc()
         V841_DIR.mkdir(parents=True,exist_ok=True)
-        V841_RESULT.write_text(json.dumps({'version':'V8.41B','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}'},ensure_ascii=False,indent=2),encoding='utf-8')
-        _v841_write(status='error',phase='failed',message='Failed',error=f'{type(ex).__name__}: {ex}',errors=1)
+        V841_RESULT.write_text(json.dumps({'version':'V8.41C','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
+        _v841_write(status='error',phase='failed',message='Failed',error=f'{type(ex).__name__}: {ex}',traceback=tb[-2400:],errors=1)
+
 @APP.route('/v841/preflight',methods=['GET','POST'])
 def v841_preflight_route():
     _v841_preflight();return redirect('/v841')
@@ -69411,9 +69437,9 @@ def v841_page():
         except:return '—'
     rows=''.join(f"<tr><td>{e(z.get('semantic'))}</td><td>{e(z.get('pass_n'))}</td><td>{n(z.get('pass_pct'))}%</td><td>{n(z.get('winner20_retention_pct'))}%</td><td>{n(z.get('winner30_retention_pct'))}%</td><td>{n(z.get('stop_rejection_pct'))}%</td><td>{n(z.get('pass_pf'),3)}</td></tr>" for z in T)
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>V8.41B Exact V6.44 Generator Provenance Audit</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h1>V8.41C Exact V6.44 Trigger Runtime Fix</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
 <div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V841_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v841/preflight'><button>A. Run Signal-Semantics Preflight</button></form><br><form method='post' action='/v841/run'><button>B. Run Exact Pivot-Cross Audit</button></form></div>
-<div class='c'><h2>Status</h2><p>{e(_v841_status().get('status'))} · {e(_v841_status().get('phase'))} · {e(_v841_status().get('message'))}</p><p><b>Runtime Error:</b> {e(_v841_status().get('error') or 'None')}</p><p><small>运行中请手动刷新本页查看进度；不会自动无限刷新。</small></p></div>
+<div class='c'><h2>Status</h2><p>{e(_v841_status().get('status'))} · {e(_v841_status().get('phase'))} · {e(_v841_status().get('message'))}</p><p><b>Runtime Error:</b> {e(_v841_status().get('error') or 'None')}</p><pre style='white-space:pre-wrap;font-size:11px'>{e(_v841_status().get('traceback') or '')}</pre><p><small>运行中请手动刷新本页查看进度；不会自动无限刷新。</small></p></div>
 <div class='c'><h2>Diagnosis</h2><div class='ok'>{e(R.get('diagnosis','—'))}</div></div>
 <div class='c'><h2>Source Parity</h2><table><tr><td>V6.44 exact provenance reconstruction</td><td>{n(S.get('v644_provenance_reconstruction_coverage_pct'))}%</td></tr><tr><td>V6.44 entry-date reconstruction</td><td>{n(S.get('v644_entry_date_reconstruction_coverage_pct'))}%</td></tr><tr><td>Median entry-price relative diff</td><td>{n(S.get('v644_entry_price_median_rel_diff_pct'),4)}%</td></tr><tr><td>Recovered signal date ↔ V8.35</td><td>{n(S.get('recovered_signal_date_vs_v835_pct'))}%</td></tr><tr><td>Recovered exact trigger reconstructed</td><td>{n(S.get('recovered_exact_trigger_reconstruction_pct'))}%</td></tr></table></div>
 <div class='c'><h2>Semantic Decomposition</h2><table><tr><td>V8.35 current-pivot CLOSE cross</td><td>{n(D.get('v835_pivot_cross_pass_pct'))}%</td></tr><tr><td>Legacy pivot + CLOSE cross</td><td>{n(D.get('legacy_pivot_close_cross_pct'))}%</td></tr><tr><td>Current pivot + HIGH cross</td><td>{n(D.get('current_pivot_high_cross_pct'))}%</td></tr><tr><td>Current pivot + CLOSE cross recompute</td><td>{n(D.get('current_pivot_close_cross_pct'))}%</td></tr><tr><td>Median current-vs-legacy pivot diff</td><td>{n(D.get('median_current_vs_legacy_pivot_abs_rel_diff_pct'))}%</td></tr><tr><td>HIGH→CLOSE penalty</td><td>{n(D.get('estimated_high_to_close_penalty_pp'))} pp</td></tr><tr><td>Pivot-anchor penalty</td><td>{n(D.get('estimated_pivot_anchor_penalty_pp'))} pp</td></tr></table></div>
@@ -69424,7 +69450,7 @@ _v841_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v841_home_base is not None:
     def _v841_home_wrap(*args,**kwargs):
         resp=_v841_home_base(*args,**kwargs)
-        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41B Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
+        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41C Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
             body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
