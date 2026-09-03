@@ -72355,7 +72355,7 @@ def v850_page():
 _v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
 if _v850_home_base is not None:
     def _v850_home_wrap(*args,**kwargs):
-        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50H BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50H 复用 F 的逐-listing shard，并把每只未缓存 listing 放入独立子进程；20秒硬超时直接 kill + quarantine + continue；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50H</button></a></div>"""
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50I BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50I 直接信任并秒级复用 F 已完成的前 3260 个 shard；只从上次真实卡点以后启用独立 subprocess 超时保护。不会再为前 3000+ 个成功 shard 启动转换子进程；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50I</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850-home-card-real' not in body:
@@ -72371,7 +72371,7 @@ if _v850_home_base is not None:
 # 1) legacy shard pickle reads are no longer touched in the Flask background thread;
 # 2) uncached source price work uses subprocess.run(timeout=20), not multiprocessing fork.
 # =============================================================================
-V850_BUILD_ID='v850h-subprocess-safe-shard-and-price-loader-20260903'
+V850_BUILD_ID='v850i-fast-trusted-prefix-resume-20260903'
 V850_SAFE_SHARD_DIR=V850_DIR/'price_shards_v2_safe'
 V850_PRICE_HELPER=V850_DIR/'v850h_price_worker.py'
 V850_SHARD_HELPER=V850_DIR/'v850h_shard_worker.py'
@@ -72520,4 +72520,100 @@ def _v850_prices_progress(lids):
             continue
         out[lid]=mp;dates.update(mp.keys())
         _v850_write(status='running',phase='prices',message=f'Loaded SAFE {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+    return out,sorted(dates),errs
+
+
+# =============================================================================
+# V8.50I ENGINEERING OVERRIDE — FAST TRUSTED-PREFIX RESUME
+# Evidence from the actual V8.50F run: it advanced to 3261/4431 with current
+# PWOD__19960530__20250728. Therefore indices 1..3260 completed the F loop.
+# Re-spawning one conversion subprocess for every one of those already-successful
+# shards (V8.50H) was safe but unnecessarily slow. V8.50I directly reuses only
+# that observed-complete prefix, then retains H's subprocess-isolated read/build
+# for everything after the boundary. Strategy/economics are unchanged.
+# =============================================================================
+V850_BUILD_ID='v850i-fast-trusted-prefix-resume-20260903'
+V850_TRUSTED_PREFIX_DONE=3260
+
+
+def _v850_prices_progress(lids):
+    import time
+    ids=sorted(set(map(str,lids)));V850_SAFE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
+    qset=_v850_qload();errs=[];out={};dates=set();resumed=0;timeouts=0
+    trusted=min(V850_TRUSTED_PREFIX_DONE,len(ids))
+
+    # FAST PATH: the first 3260 positions are an observed-complete F prefix.
+    # No per-shard subprocess conversion here. Existing SAFE shards take priority;
+    # otherwise load the completed F shard directly. If one is absent/unreadable,
+    # fall through to the protected H path rather than pretending it succeeded.
+    for n,lid in enumerate(ids[:trusted],1):
+        if n==1 or n%250==0:
+            _v850_write(status='running',phase='prices',
+                        message=f'FAST resume trusted F prefix {n-1}/{trusted} · cached {resumed}',
+                        processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,
+                        resumed_shards=resumed,timeout_count=timeouts,error=None)
+        mp=_v850h_safe_load(lid)
+        if not mp:
+            mp=_v850_shard_load(lid)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            continue
+        # A missing prefix shard is not silently accepted. It will be rebuilt under
+        # subprocess protection below by adding it to a small repair queue.
+        errs.append({'listing_id':lid,'error':'trusted_prefix_shard_missing_repair_required'})
+
+    _v850_write(status='running',phase='prices',
+                message=f'FAST prefix complete · reused {resumed}/{trusted}; continuing from {trusted+1}/{len(ids)}',
+                processed=trusted,total=len(ids),errors=len(errs),current_listing=(ids[trusted] if trusted<len(ids) else ''),
+                resumed_shards=resumed,timeout_count=timeouts,error=None)
+
+    # Protected tail. This is where the actual stalls were observed. Every unresolved
+    # listing is handled with H's subprocess-safe shard conversion / source build.
+    for n,lid in enumerate(ids[trusted:],trusted+1):
+        _v850_write(status='running',phase='prices',message=f'V8.50I protected tail {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+        mp=_v850h_safe_load(lid)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            continue
+        if lid in qset:
+            errs.append({'listing_id':lid,'error':'quarantined_stall'})
+            _v850_write(status='running',phase='prices',message=f'QUARANTINE {lid} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason='quarantined_stall',resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        mp,serr=_v850h_convert_legacy_shard(lid,6)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            continue
+        if serr:
+            try:
+                old=_v850_shard_path(lid)
+                if old.exists():old.unlink()
+            except Exception:pass
+            qset.add(lid);_v850_qsave(qset,reason=f'{lid}: {serr}')
+            errs.append({'listing_id':lid,'error':serr})
+            _v850_write(status='running',phase='prices',message=f'SKIP bad legacy shard {lid} · {serr} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=serr,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        mp,err=_v850h_build_one(lid,20)
+        if err or not mp:
+            reason=err or 'no_valid_open_close';errs.append({'listing_id':lid,'error':reason})
+            if str(reason).startswith('timeout_after_'):
+                timeouts+=1;qset.add(lid);_v850_qsave(qset,reason=f'{lid}: {reason}')
+            _v850_write(status='running',phase='prices',message=f'SKIP {lid} · {reason} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=reason,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        out[lid]=mp;dates.update(mp.keys())
+        _v850_write(status='running',phase='prices',message=f'Loaded SAFE {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+
+    # Repair any rare missing shard inside the trusted prefix, also with subprocess protection.
+    missing=[x['listing_id'] for x in errs if x.get('error')=='trusted_prefix_shard_missing_repair_required']
+    if missing:
+        errs=[x for x in errs if x.get('error')!='trusted_prefix_shard_missing_repair_required']
+        for lid in missing:
+            if lid in qset:
+                errs.append({'listing_id':lid,'error':'quarantined_stall'});continue
+            mp,serr=_v850h_convert_legacy_shard(lid,6)
+            if not mp and not serr: mp,serr=_v850h_build_one(lid,20)
+            if mp:
+                out[lid]=mp;dates.update(mp.keys());resumed+=1
+            else:
+                errs.append({'listing_id':lid,'error':serr or 'repair_failed'})
+
     return out,sorted(dates),errs
