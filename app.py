@@ -71056,7 +71056,7 @@ V846B_STATUS = V846B_DIR / 'status.json'
 V846B_RESULT = V846B_DIR / 'result.json'
 V846B_DAILY = V846B_DIR / 'daily_systemic_risk_panel.csv.gz'
 V846B_EVENTS = V846B_DIR / 'stress_concurrence_events.csv'
-V846B_BUILD_ID = 'v846b-systemic-risk-emergency-brake-signal-audit-20260903'
+V846B_BUILD_ID = 'v846b1-maxdd-window-schema-fix-20260903'
 v846b_thread = None
 
 
@@ -71215,7 +71215,14 @@ def _v846b_run():
     if cov<95:raise RuntimeError(f'cached CLOSE coverage too low: {cov:.2f}%')
     D=_v846b_stress_panel(L,price,cal);D,scols=_v846b_rank_stress(D);E=_v846b_event_table(D)
     # Exact Tight MaxDD window comes from V8.45 result, otherwise recover directly from panel.
-    win={x.get('strategy'):x for x in R45.get('maxdd_windows',[])}.get('TIGHT_PIVOT_SHADOW',{})
+    # V8.45 stores maxdd_windows as a dict keyed by strategy; accept legacy list form defensively.
+    wins=R45.get('maxdd_windows',{})
+    if isinstance(wins,dict):
+        win=wins.get('TIGHT_PIVOT_SHADOW',{})
+    elif isinstance(wins,list):
+        win=next((x for x in wins if isinstance(x,dict) and x.get('strategy')=='TIGHT_PIVOT_SHADOW'),{})
+    else:
+        win={}
     peak=pd.to_datetime(win.get('peak'),errors='coerce')
     trough=pd.to_datetime(win.get('trough'),errors='coerce')
     if pd.isna(peak):
