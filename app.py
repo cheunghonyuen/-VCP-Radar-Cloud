@@ -69457,3 +69457,314 @@ if _v841_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v841_home_base:APP.view_functions[ep]=_v841_home_wrap
+
+
+# ================= V8.42 TRUE VCP PRE-TRIGGER QUALIFICATION =================
+# Contract locked by V8.41D:
+#   1) Trigger semantics are immutable lineage truth:
+#      HIGH > recovered Stage-2 pivot + volume context, then NEXT-OPEN entry.
+#   2) TRUE VCP is a qualification layer BEFORE that trigger.
+#   3) Never add a second pivot-cross/close-cross hard gate.
+#   4) 0 Tiingo / 0 universe rescan / no threshold search.
+# V8.42 therefore reconstructs only PRE-TRIGGER structure using completed bars
+# strictly BEFORE recovered_signal_date. Numeric structure thresholds are inherited
+# from the already deployed V6.1 source-anchored engine used by V8.35.
+V842_DIR = DATA_DIR / 'v842_true_vcp_pretrigger_qualification'
+V842_PREFLIGHT = V842_DIR / 'preflight.json'
+V842_STATUS = V842_DIR / 'status.json'
+V842_RESULT = V842_DIR / 'result.json'
+V842_DETAIL = V842_DIR / 'detail.csv.gz'
+V842_SOURCE = V841_DETAIL
+V842_TRIGGER_RESULT = V841_RESULT
+V842_ENGINE = V835_ENGINE
+V842_BUILD_ID = 'v842-true-vcp-pretrigger-qualification-20260903'
+v842_thread = None
+
+
+def _v842_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,
+       'errors':0,'current_listing':None,'elapsed_sec':0,'error':None,'last_heartbeat':None}
+    if V842_STATUS.exists():
+        try:x.update(json.loads(V842_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v842_write(**kw):
+    V842_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v842_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V842_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return x
+
+
+def _v842_alive():
+    return v842_thread is not None and v842_thread.is_alive()
+
+
+def _v842_metrics(df,mask=None):
+    import pandas as pd, numpy as np
+    if df is None or df.empty:
+        return {'n':0,'pass_pct':0.0,'pf':None,'win_rate_pct':None,'avg_ret_pct':None,
+                'stop_rate_pct':None,'winner20_n':0,'winner30_n':0}
+    if mask is None: mask=pd.Series(True,index=df.index)
+    mask=mask.fillna(False).astype(bool)
+    z=df.loc[mask].copy(); r=pd.to_numeric(z['control_ret'],errors='coerce')
+    valid=r.notna();z=z.loc[valid].copy();r=r.loc[valid]
+    if not len(r):
+        return {'n':0,'pass_pct':100*float(mask.mean()),'pf':None,'win_rate_pct':None,'avg_ret_pct':None,
+                'stop_rate_pct':None,'winner20_n':0,'winner30_n':0}
+    stop=z['control_reason'].astype(str).str.upper().str.contains('STOP7',regex=False)
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum())
+    pf=(gp/gl) if gl>1e-12 else (999.0 if gp>0 else 0.0)
+    return {'n':int(len(r)),'pass_pct':100*float(mask.mean()),'pf':pf,
+            'win_rate_pct':100*float((r>0).mean()),'avg_ret_pct':100*float(r.mean()),
+            'stop_rate_pct':100*float(stop.mean()),'winner20_n':int((r>=.20).sum()),
+            'winner30_n':int((r>=.30).sum())}
+
+
+def _v842_retention_rejection(df,mask):
+    import pandas as pd
+    m=mask.fillna(False).astype(bool);r=pd.to_numeric(df['control_ret'],errors='coerce')
+    w20=r>=.20;w30=r>=.30;stop=df['control_reason'].astype(str).str.upper().str.contains('STOP7',regex=False)
+    return {'winner20_retention_pct':100*int((m&w20).sum())/max(1,int(w20.sum())),
+            'winner30_retention_pct':100*int((m&w30).sum())/max(1,int(w30.sum())),
+            'stop_rejection_pct':100*int((~m&stop).sum())/max(1,int(stop.sum()))}
+
+
+def _v842_preflight():
+    import pandas as pd,time
+    t0=time.time();V842_DIR.mkdir(parents=True,exist_ok=True);err=None
+    try:
+        for p in [V842_SOURCE,V842_TRIGGER_RESULT,V842_ENGINE]:
+            if not p.exists():raise RuntimeError('Missing '+str(p))
+        R=json.loads(V842_TRIGGER_RESULT.read_text(encoding='utf-8'))
+        parity=R.get('source_parity',{})
+        recon=float(parity.get('recovered_exact_trigger_reconstruction_pct') or 0)
+        prov=float(parity.get('v644_provenance_reconstruction_coverage_pct') or 0)
+        if recon<98 or prov<98:
+            raise RuntimeError(f'V8.41D trigger lineage not frozen enough: trigger={recon:.3f}% provenance={prov:.3f}%')
+        S=pd.read_csv(V842_SOURCE,compression='gzip',nrows=100,low_memory=False)
+        need=['listing_id','entry_date','signal_date_recovered','control_ret','control_reason',
+              'recovered_v644_exact_trigger','legacy_pivot']
+        miss=[c for c in need if c not in S.columns]
+        if miss:raise RuntimeError('V8.41D detail schema missing '+str(miss))
+        M,lidcol=_v826a_manifest()
+        if M is None or M.empty:raise RuntimeError('Historical listing manifest missing')
+        if str(lidcol) not in M.columns:raise RuntimeError('Manifest listing-id column missing')
+        eng=_v835_engine()
+        funcs={n:hasattr(eng,n) for n in ['ind','stage2','supply']}
+        if not all(funcs.values()):raise RuntimeError('V6.1 structural engine incomplete')
+        out={'version':'V8.42','build_id':V842_BUILD_ID,'verdict':'PASS','error':None,
+             'trigger_lineage':{'recovered_trigger_pct':recon,'provenance_pct':prov,
+               'frozen_semantics':'HIGH > recovered Stage-2 pivot + volume context -> next-open'},
+             'qualification_contract':{
+               'time_boundary':'completed bars strictly BEFORE recovered trigger signal date',
+               'core_gate':'trend_template AND contraction_sequence AND tight_pivot AND volume_dry',
+               'trend_template':'exact deployed V6.1 stage2()',
+               'contraction_sequence':'3 finite contractions with c1 > c2 > c3',
+               'tight_pivot':'pivot_tight <= 0.10',
+               'volume_dry':'dry < 0.85',
+               'explicit_exclusions':['NO close-cross','NO second pivot-cross','NO breakout-volume gate inside qualification','NO threshold search']},
+             'engine_functions':funcs,'source_columns_ok':True,'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.42','build_id':V842_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V842_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return out
+
+
+def _v842_eval_pretrigger(eng,q,signal_date):
+    import pandas as pd,numpy as np
+    sd=pd.Timestamp(signal_date).normalize()
+    x=q[q['date']<sd].copy().reset_index(drop=True)  # hard PIT boundary: trigger day excluded
+    if len(x)<260:return {'audit_ok':False,'audit_error':'insufficient_pretrigger_history'}
+    try:
+        d=eng.ind(x[['date','open','high','low','close','volume']].copy())
+        if d is None or len(d)<250:return {'audit_ok':False,'audit_error':'engine_ind_short'}
+        trend=bool(eng.stage2(d))
+        ss,piv,tight,vr,c1,c2,c3,dry=eng.supply(d)
+        vals=[c1,c2,c3]
+        three=all(np.isfinite(float(v)) for v in vals)
+        contraction=bool(three and float(c1)>float(c2)>float(c3))
+        tight_ok=bool(np.isfinite(tight) and float(tight)<=.10)
+        dry_ok=bool(np.isfinite(dry) and float(dry)<.85)
+        core=bool(trend and contraction and tight_ok and dry_ok)
+        snap_date=pd.Timestamp(d['date'].iloc[-1]).normalize() if 'date' in d.columns else pd.Timestamp(x['date'].iloc[-1]).normalize()
+        return {'audit_ok':True,'audit_error':None,'pretrigger_snapshot_date':snap_date,
+                'trend_template':trend,'contraction_sequence':contraction,'tight_pivot':tight_ok,
+                'volume_dry':dry_ok,'true_vcp_core_pass':core,
+                'supply_score':float(ss) if np.isfinite(ss) else np.nan,
+                'structure_pivot':float(piv) if np.isfinite(piv) else np.nan,
+                'pivot_tight':float(tight) if np.isfinite(tight) else np.nan,
+                'pretrigger_volratio':float(vr) if np.isfinite(vr) else np.nan,
+                'c1':float(c1) if np.isfinite(c1) else np.nan,'c2':float(c2) if np.isfinite(c2) else np.nan,
+                'c3':float(c3) if np.isfinite(c3) else np.nan,'dry':float(dry) if np.isfinite(dry) else np.nan}
+    except Exception as ex:
+        return {'audit_ok':False,'audit_error':f'{type(ex).__name__}: {str(ex)[:160]}'}
+
+
+def _v842_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v842_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first: '+str(pf.get('error')))
+    _v842_write(status='running',phase='load',message='Loading frozen V8.41D recovered-trigger stream',processed=0,total=0,errors=0,error=None)
+    S=pd.read_csv(V842_SOURCE,compression='gzip',low_memory=False)
+    S['listing_id']=S['listing_id'].astype(str)
+    S['entry_date']=pd.to_datetime(S['entry_date'],errors='coerce').dt.normalize()
+    S['signal_date_recovered']=pd.to_datetime(S['signal_date_recovered'],errors='coerce').dt.normalize()
+    S['control_ret']=pd.to_numeric(S['control_ret'],errors='coerce')
+    S['legacy_pivot']=pd.to_numeric(S['legacy_pivot'],errors='coerce')
+    S=S[_v841_bool(S['recovered_v644_exact_trigger'])].copy()
+    S=S.dropna(subset=['listing_id','entry_date','signal_date_recovered','control_ret','legacy_pivot'])
+    if S.empty:raise RuntimeError('No frozen recovered-trigger rows')
+
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    eng=_v835_engine();groups=list(S.groupby('listing_id',sort=True));total=len(groups);rows=[];errs=0
+    _v842_write(status='running',phase='reconstruct',message=f'Pre-trigger TRUE VCP reconstruction on {total} listings',processed=0,total=total,errors=0)
+    for n,(lid,g) in enumerate(groups,1):
+        mr=mmap.get(str(lid));q=None
+        if mr is not None:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception:q=None
+        if q is not None and not q.empty:
+            q=q.copy();q['date']=pd.to_datetime(q['date'],errors='coerce').dt.normalize()
+            for c in ['open','high','low','close','volume']:
+                if c not in q.columns:q[c]=np.nan
+                q[c]=pd.to_numeric(q[c],errors='coerce')
+            q=q.dropna(subset=['date','open','high','low','close']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+        for _,r in g.iterrows():
+            if q is None or q.empty:
+                a={'audit_ok':False,'audit_error':'price_cache_unavailable'};errs+=1
+            else:
+                a=_v842_eval_pretrigger(eng,q,r['signal_date_recovered'])
+                if not a.get('audit_ok'):errs+=1
+            a.update({'listing_id':str(lid),'entry_date':r['entry_date'],
+                      'signal_date_recovered':r['signal_date_recovered'],'legacy_pivot':float(r['legacy_pivot']),
+                      'control_ret':float(r['control_ret']),'control_reason':r['control_reason'],
+                      'recovered_v644_exact_trigger':True})
+            rows.append(a)
+        if n==1 or n%25==0 or n==total:
+            _v842_write(status='running',phase='reconstruct',message=f'Pre-trigger structure {n}/{total} listings',
+                        processed=n,total=total,errors=errs,current_listing=str(lid),elapsed_sec=round(time.time()-t0,1))
+
+    D=pd.DataFrame(rows);V842_DIR.mkdir(parents=True,exist_ok=True);D.to_csv(V842_DETAIL,index=False,compression='gzip')
+    A=D[_v841_bool(D['audit_ok'])].copy()
+    if A.empty:raise RuntimeError('No auditable pre-trigger rows')
+    core=_v841_bool(A['true_vcp_core_pass'])
+    base=_v842_metrics(A);qualified=_v842_metrics(A,core);rr=_v842_retention_rejection(A,core)
+    gates=[];alive=pd.Series(True,index=A.index)
+    for c in ['trend_template','contraction_sequence','tight_pivot','volume_dry']:
+        m=_v841_bool(A[c]);alive=alive&m
+        st=_v842_metrics(A,alive);x=_v842_retention_rejection(A,alive)
+        gates.append({'gate':c,'standalone_pass_pct':100*float(m.mean()),'cumulative_n':int(alive.sum()),
+                      'cumulative_pass_pct':100*float(alive.mean()),'cumulative_pf':st.get('pf'),
+                      'cumulative_stop_rate_pct':st.get('stop_rate_pct'),**x})
+
+    pf_delta=(qualified.get('pf')-base.get('pf')) if qualified.get('pf') is not None and base.get('pf') is not None else None
+    stop_drop=(base.get('stop_rate_pct')-qualified.get('stop_rate_pct')) if base.get('stop_rate_pct') is not None and qualified.get('stop_rate_pct') is not None else None
+    coverage=100*len(A)/max(1,len(D))
+    # Classification only; this does NOT alter thresholds or production logic.
+    if qualified.get('n',0)>=200 and pf_delta is not None and pf_delta>0 and stop_drop is not None and stop_drop>0 and rr['winner20_retention_pct']>=25:
+        verdict='TRUE_VCP_PRETRIGGER_CORE_SHOWS_POSITIVE_EDGE__KEEP_AS_SHADOW_QUALIFIER'
+    elif qualified.get('n',0)<100:
+        verdict='TRUE_VCP_PRETRIGGER_CORE_TOO_SPARSE__INSPECT_COMPONENT_ATTRITION__DO_NOT_TUNE'
+    else:
+        verdict='TRUE_VCP_PRETRIGGER_CORE_NOT_YET_PROVEN__INSPECT_GATE_ATTRITION__DO_NOT_TUNE'
+    R={'version':'V8.42','build_id':V842_BUILD_ID,'verdict':verdict,'audit_coverage_pct':coverage,
+       'frozen_trigger':'HIGH > recovered Stage-2 pivot + volume context -> next-open; unchanged from V8.41D',
+       'qualification_timing':'all VCP structure features computed strictly before recovered trigger day',
+       'base_recovered_trigger_stream':base,'true_vcp_core':qualified,**rr,
+       'pf_delta':pf_delta,'stop_rate_drop_pp':stop_drop,'gate_funnel':gates,
+       'hard_exclusions':['no CLOSE cross','no second pivot-cross gate','no breakout-volume gate duplicated in VCP qualification','no threshold search','0 Tiingo','0 universe rescan'],
+       'interpretation':'V8.42 tests whether genuine pre-trigger VCP structure improves the already-recovered V6.44 trigger stream. It does not redefine the trigger. The core structural gate is Trend Template + descending contraction sequence + tight pivot + supply dry-up, all observed before trigger day.',
+       'next':'If edge is positive, keep TRUE VCP as SHADOW qualifier first and run causal 10-slot portfolio replay with trigger/entry/STOP/exit frozen. If edge is weak, inspect component attrition by winners vs STOP before changing any threshold.',
+       'errors':int(errs),'elapsed_sec':round(time.time()-t0,1)}
+    V842_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    _v842_write(status='done',phase='complete',message='Done · '+verdict,processed=total,total=total,errors=errs,elapsed_sec=R['elapsed_sec'])
+    return R
+
+
+def _v842_worker():
+    global v842_thread
+    import traceback
+    try:_v842_run()
+    except Exception as ex:
+        tb=traceback.format_exc();V842_DIR.mkdir(parents=True,exist_ok=True)
+        V842_RESULT.write_text(json.dumps({'version':'V8.42','build_id':V842_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
+        _v842_write(status='error',phase='failed',message='V8.42 failed',error=f'{type(ex).__name__}: {ex}',errors=1)
+    finally:v842_thread=None
+
+
+@APP.route('/v842/preflight',methods=['GET','POST'])
+def v842_preflight_route():
+    _v842_preflight();return redirect('/v842')
+
+
+@APP.route('/v842/run',methods=['GET','POST'])
+def v842_run_route():
+    global v842_thread
+    if not _v842_alive():
+        pf=_v842_preflight()
+        if pf.get('verdict')!='PASS':return redirect('/v842')
+        _v842_write(status='starting',phase='queued',message='Run accepted; using cached PIT history only',processed=0,total=0,errors=0,error=None)
+        v842_thread=threading.Thread(target=_v842_worker,daemon=True);v842_thread.start()
+    return redirect('/v842')
+
+
+@APP.get('/api/v842/status')
+def v842_status_api():return jsonify(_v842_status())
+
+
+@APP.get('/v842/export')
+def v842_export():
+    if not V842_DETAIL.exists():return ('not ready',404)
+    return send_file(V842_DETAIL,as_attachment=True,download_name='v842_true_vcp_pretrigger_detail.csv.gz')
+
+
+@APP.get('/v842')
+def v842_page():
+    import html
+    def e(x):return html.escape(str(x))
+    def num(x,d=2):
+        try:return f'{float(x):.{d}f}'
+        except:return '—'
+    P={};R={}
+    if V842_PREFLIGHT.exists():
+        try:P=json.loads(V842_PREFLIGHT.read_text(encoding='utf-8'))
+        except Exception:pass
+    if V842_RESULT.exists():
+        try:R=json.loads(V842_RESULT.read_text(encoding='utf-8'))
+        except Exception:pass
+    S=_v842_status();B=R.get('base_recovered_trigger_stream',{});Q=R.get('true_vcp_core',{});G=R.get('gate_funnel',[])
+    rows=''.join(f"<tr><td>{e(g.get('gate'))}</td><td>{num(g.get('standalone_pass_pct'))}%</td><td>{e(g.get('cumulative_n'))}</td><td>{num(g.get('cumulative_pass_pct'))}%</td><td>{num(g.get('winner20_retention_pct'))}%</td><td>{num(g.get('winner30_retention_pct'))}%</td><td>{num(g.get('stop_rejection_pct'))}%</td><td>{num(g.get('cumulative_pf'),3)}</td></tr>" for g in G)
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px;overflow-wrap:anywhere}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>V8.42 TRUE VCP Pre-Trigger Qualification</h1><div class='warn'><b>Trigger 已冻结，不再改。</b> HIGH &gt; recovered Stage-2 pivot + volume context → next-open。V8.42 只在 trigger 前重建 TRUE VCP：Trend Template + 收缩序列 + tight pivot + supply dry-up。<b>没有第二个 pivot-cross / CLOSE-cross。</b> 0 Tiingo / 0 rescan / 0 threshold search.</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V842_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v842/preflight'><button>A. Run V8.42 Preflight</button></form><br><form method='post' action='/v842/run'><button>B. Run TRUE VCP Pre-Trigger Audit</button></form></div>
+<div class='c'><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p><b>Progress:</b> {e(S.get('processed'))}/{e(S.get('total'))} · <b>Errors:</b> {e(S.get('errors'))} · <b>Runtime Error:</b> {e(S.get('error') or 'None')}</p><p><small>运行时手动刷新查看进度；不会自动无限刷新。</small></p></div>
+<div class='c'><h2>Verdict</h2><div class='ok'>{e(R.get('verdict','—'))}</div></div>
+<div class='c'><h2>Recovered Trigger vs TRUE VCP Qualified</h2><table><tr><th>Metric</th><th>All recovered triggers</th><th>TRUE VCP core</th></tr>
+<tr><td>N</td><td>{e(B.get('n','—'))}</td><td>{e(Q.get('n','—'))}</td></tr><tr><td>Pass %</td><td>{num(B.get('pass_pct'))}%</td><td>{num(Q.get('pass_pct'))}%</td></tr>
+<tr><td>PF</td><td>{num(B.get('pf'),3)}</td><td>{num(Q.get('pf'),3)}</td></tr><tr><td>Win rate</td><td>{num(B.get('win_rate_pct'))}%</td><td>{num(Q.get('win_rate_pct'))}%</td></tr>
+<tr><td>Avg return</td><td>{num(B.get('avg_ret_pct'))}%</td><td>{num(Q.get('avg_ret_pct'))}%</td></tr><tr><td>STOP rate</td><td>{num(B.get('stop_rate_pct'))}%</td><td>{num(Q.get('stop_rate_pct'))}%</td></tr>
+<tr><td>+20 winners</td><td>{e(B.get('winner20_n','—'))}</td><td>{e(Q.get('winner20_n','—'))}</td></tr><tr><td>+30 winners</td><td>{e(B.get('winner30_n','—'))}</td><td>{e(Q.get('winner30_n','—'))}</td></tr></table>
+<p><b>Winner +20 retain:</b> {num(R.get('winner20_retention_pct'))}% · <b>+30 retain:</b> {num(R.get('winner30_retention_pct'))}% · <b>STOP reject:</b> {num(R.get('stop_rejection_pct'))}% · <b>PF Δ:</b> {num(R.get('pf_delta'),3)} · <b>STOP Δ:</b> {num(R.get('stop_rate_drop_pp'))} pp</p></div>
+<div class='c'><h2>Gate Funnel</h2><table><tr><th>Pre-trigger gate</th><th>Standalone pass</th><th>Cum N</th><th>Cum pass</th><th>+20 retain</th><th>+30 retain</th><th>STOP reject</th><th>Cum PF</th></tr>{rows or '<tr><td colspan=8>Run audit first.</td></tr>'}</table></div>
+<div class='c'><div class='warn'><b>Hard exclusions:</b> {e(' · '.join(R.get('hard_exclusions',[])) or 'NO CLOSE cross · NO second pivot-cross · NO threshold tuning')}<br><br><b>Next:</b> {e(R.get('next','先运行 V8.42。'))}</div>{"<p><a href='/v842/export'>Export detail CSV.GZ</a></p>" if V842_DETAIL.exists() else ''}</div>
+</div></body></html>"""
+
+
+# Mandatory homepage dashboard card for every delivered version.
+_v842_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v842_home_base is not None:
+    def _v842_home_wrap(*args,**kwargs):
+        resp=_v842_home_base(*args,**kwargs)
+        card="""<div id='v842-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🧬 V8.42 TRUE VCP Pre-Trigger Qualification</h2><p>冻结 V6.44 recovered HIGH-breakout trigger；只在 trigger 前重建 TRUE VCP structure。0 Tiingo / 0 rescan / 不加第二个 pivot-cross。</p><a href='/v842'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.42</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v842-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
+                body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v842_home_base:APP.view_functions[ep]=_v842_home_wrap
