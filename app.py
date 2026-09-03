@@ -71991,7 +71991,7 @@ V850_RESULT = V850_DIR / 'result.json'
 V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
 V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
 V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
-V850_BUILD_ID = 'v850f-resumable-sharded-price-cache-auto-quarantine-20260903'
+V850_BUILD_ID = 'v850g-process-isolated-resumable-price-loader-20260903'
 v850_thread = None
 
 def _v850_status():
@@ -72145,59 +72145,119 @@ def _v850_shard_save(lid,mp):
     os.replace(tmp,p)
 
 
+def _v850_prepare_price_child(mr_dict,tmp_path):
+    """Child-process boundary for ONE listing. Writes a compact OPEN+CLOSE map atomically.
+    Any pathological parser/read can be hard-killed by the parent without blocking the batch.
+    """
+    import os,pickle,pandas as pd,numpy as np
+    tmp_out=str(tmp_path)+'.childtmp'
+    try:
+        mr=pd.Series(mr_dict)
+        q,hi,amb=_v826a_prepare_price(mr)
+        if q is None or q.empty:
+            payload={'ok':False,'error':'price_empty'}
+        else:
+            z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+            if z.empty:
+                payload={'ok':False,'error':'date_window_empty'}
+            else:
+                mp={}
+                for _,r in z.iterrows():
+                    try:
+                        dt=pd.Timestamp(r['date']).normalize();op=float(r['open']);cl=float(r['close'])
+                        if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:
+                            mp[dt]={'open':op,'close':cl}
+                    except Exception:
+                        continue
+                payload={'ok':bool(mp),'map':mp,'error':None if mp else 'no_valid_open_close'}
+    except BaseException as ex:
+        payload={'ok':False,'error':f'{type(ex).__name__}: {ex}'}
+    try:
+        with open(tmp_out,'wb') as f:
+            pickle.dump(payload,f,protocol=pickle.HIGHEST_PROTOCOL);f.flush();os.fsync(f.fileno())
+        os.replace(tmp_out,tmp_path)
+    except BaseException:
+        try:
+            if os.path.exists(tmp_out):os.unlink(tmp_out)
+        except Exception:pass
+
+
+def _v850_prepare_one_isolated(mr,lid,timeout_sec=20):
+    """Return (map,error). Linux/fork only by design: hard timeout truly kills the stuck listing."""
+    import multiprocessing as mp, tempfile, pickle, os, time
+    ctx=mp.get_context('fork')
+    V850_PRICE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
+    tmp=V850_PRICE_SHARD_DIR / ('.worker_'+__import__('hashlib').sha1(str(lid).encode()).hexdigest()+'.pkl')
+    try:
+        if tmp.exists():tmp.unlink()
+    except Exception:pass
+    p=ctx.Process(target=_v850_prepare_price_child,args=(mr.to_dict() if hasattr(mr,'to_dict') else dict(mr),str(tmp)))
+    p.daemon=False;p.start();p.join(timeout_sec)
+    if p.is_alive():
+        p.terminate();p.join(3)
+        if p.is_alive():
+            try:p.kill();p.join(2)
+            except Exception:pass
+        try:
+            if tmp.exists():tmp.unlink()
+        except Exception:pass
+        return None,f'timeout_after_{timeout_sec}s'
+    if not tmp.exists():
+        return None,f'child_exit_{p.exitcode}_no_result'
+    try:
+        with open(tmp,'rb') as f:payload=pickle.load(f)
+    except Exception as ex:
+        payload={'ok':False,'error':f'child_result_read_{type(ex).__name__}: {ex}'}
+    finally:
+        try:tmp.unlink()
+        except Exception:pass
+    if not payload.get('ok'):
+        return None,str(payload.get('error') or f'child_exit_{p.exitcode}')
+    return payload.get('map') or None,None
+
+
 def _v850_prices_progress(lids):
-    """V8.50F fault-contained loader.
-    - exact same _v826a_prepare_price semantics for non-quarantined listings
-    - one small atomic shard per completed listing; restart resumes without rereading successes
-    - status is written BEFORE every listing, so a killed/redeployed run identifies the true blocker
-    - if the previous run died while reading one unsharded listing, that listing is auto-quarantined on restart
-    No download/universe scan/strategy/threshold change; final >=95% coverage + Control parity remain mandatory.
+    """V8.50G process-isolated resumable loader.
+    * Reuses every V8.50F completed per-listing shard; no reread of successes.
+    * Writes true current_listing BEFORE every uncached listing.
+    * Each uncached listing is executed in its own forked child process.
+    * >20s hard timeout => terminate/kill child, quarantine+log, continue next listing.
+    * One bad cache can no longer freeze the parent batch.
+    Strategy, price semantics for successful listings, and final >=95%/Control-parity gates are unchanged.
     """
     import pandas as pd,numpy as np,time
     M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()};ids=sorted(set(map(str,lids)))
     V850_PRICE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
     qset=_v850_qload();prev=_v850_status();prev_lid=str(prev.get('current_listing') or '')
-    # Auto-quarantine ONLY a true prior in-flight listing: previous status was running/prices,
-    # it has no completed shard, and it wasn't already a declared quarantine.
+    # If F/E died on an unsharded listing, quarantine it immediately on G restart.
     if prev.get('status')=='running' and prev.get('phase')=='prices' and prev_lid in set(ids) and _v850_shard_load(prev_lid) is None:
         if prev_lid not in qset:
             qset.add(prev_lid);_v850_qsave(qset,reason=f'auto quarantine prior stalled current_listing {prev_lid}')
-    out={};dates=set();errs=[];t0=time.time();resumed=0
+    out={};dates=set();errs=[];t0=time.time();resumed=0;timeouts=0
     for n,lid in enumerate(ids,1):
-        mp=_v850_shard_load(lid)
-        if mp:
-            out[lid]=mp;dates.update(mp.keys());resumed+=1
+        mp0=_v850_shard_load(lid)
+        if mp0:
+            out[lid]=mp0;dates.update(mp0.keys());resumed+=1
             if n==1 or n%100==0:
-                _v850_write(status='running',phase='prices',message=f'Resume shards {n}/{len(ids)} · cached {resumed} · current {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,error=None)
+                _v850_write(status='running',phase='prices',message=f'Resume shards {n}/{len(ids)} · cached {resumed} · current {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
             continue
-        _v850_write(status='running',phase='prices',message=f'Loading cached OPEN+CLOSE {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,error=None)
+        _v850_write(status='running',phase='prices',message=f'Isolated load {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
         if lid in qset:
             errs.append({'listing_id':lid,'error':'quarantined_stall'})
-            _v850_write(status='running',phase='prices',message=f'QUARANTINE {lid} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason='quarantined_stall',resumed_shards=resumed,error=None)
+            _v850_write(status='running',phase='prices',message=f'QUARANTINE {lid} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason='quarantined_stall',resumed_shards=resumed,timeout_count=timeouts,error=None)
             continue
         mr=mmap.get(lid)
         if mr is None:
             errs.append({'listing_id':lid,'error':'manifest_missing'});continue
-        try:q,hi,amb=_v826a_prepare_price(mr)
-        except Exception as ex:
-            q=None;errs.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
-        if q is None or q.empty:
-            if not any(x.get('listing_id')==lid for x in errs):errs.append({'listing_id':lid,'error':'price_empty'})
+        mp1,err=_v850_prepare_one_isolated(mr,lid,timeout_sec=20)
+        if err or not mp1:
+            reason=err or 'no_valid_open_close';errs.append({'listing_id':lid,'error':reason})
+            if str(reason).startswith('timeout_after_'):
+                timeouts+=1;qset.add(lid);_v850_qsave(qset,reason=f'process timeout {lid}: {reason}')
+            _v850_write(status='running',phase='prices',message=f'SKIP {lid} · {reason} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=reason,resumed_shards=resumed,timeout_count=timeouts,error=None)
             continue
-        z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
-        if z.empty:
-            errs.append({'listing_id':lid,'error':'date_window_empty'});continue
-        mp={}
-        for _,r in z.iterrows():
-            try:
-                dt=pd.Timestamp(r['date']).normalize();op=float(r['open']);cl=float(r['close'])
-                if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:mp[dt]={'open':op,'close':cl}
-            except Exception:continue
-        if not mp:
-            errs.append({'listing_id':lid,'error':'no_valid_open_close'});continue
-        _v850_shard_save(lid,mp)
-        out[lid]=mp;dates.update(mp.keys())
-        _v850_write(status='running',phase='prices',message=f'Loaded+checkpointed {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,error=None)
+        _v850_shard_save(lid,mp1);out[lid]=mp1;dates.update(mp1.keys())
+        _v850_write(status='running',phase='prices',message=f'Loaded+checkpointed {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
     return out,sorted(dates),errs
 
 def _v850_run():
@@ -72295,7 +72355,7 @@ def v850_page():
 _v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
 if _v850_home_base is not None:
     def _v850_home_wrap(*args,**kwargs):
-        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50F BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50F 使用逐-listing原子 checkpoint/resume + prior-stall 自动 quarantine；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50F</button></a></div>"""
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50G BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50G 复用 F 的逐-listing shard，并把每只未缓存 listing 放入独立子进程；20秒硬超时直接 kill + quarantine + continue；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50G</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850-home-card-real' not in body:
