@@ -71991,7 +71991,7 @@ V850_RESULT = V850_DIR / 'result.json'
 V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
 V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
 V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
-V850_BUILD_ID = 'v850g-process-isolated-resumable-price-loader-20260903'
+V850_BUILD_ID = 'v850h-subprocess-safe-shard-and-price-loader-20260903'
 v850_thread = None
 
 def _v850_status():
@@ -72217,7 +72217,7 @@ def _v850_prepare_one_isolated(mr,lid,timeout_sec=20):
 
 
 def _v850_prices_progress(lids):
-    """V8.50G process-isolated resumable loader.
+    """V8.50H subprocess-safe resumable loader.
     * Reuses every V8.50F completed per-listing shard; no reread of successes.
     * Writes true current_listing BEFORE every uncached listing.
     * Each uncached listing is executed in its own forked child process.
@@ -72355,7 +72355,7 @@ def v850_page():
 _v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
 if _v850_home_base is not None:
     def _v850_home_wrap(*args,**kwargs):
-        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50G BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50G 复用 F 的逐-listing shard，并把每只未缓存 listing 放入独立子进程；20秒硬超时直接 kill + quarantine + continue；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50G</button></a></div>"""
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50H BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。V8.50H 复用 F 的逐-listing shard，并把每只未缓存 listing 放入独立子进程；20秒硬超时直接 kill + quarantine + continue；Control parity 仍为硬门槛。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50H</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850-home-card-real' not in body:
@@ -72364,3 +72364,160 @@ if _v850_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v850_home_base:APP.view_functions[ep]=_v850_home_wrap
+
+# =============================================================================
+# V8.50H ENGINEERING OVERRIDE — SUBPROCESS-SAFE SHARD READ + PRICE READ
+# Strategy semantics unchanged. This override removes the last two unguarded stalls:
+# 1) legacy shard pickle reads are no longer touched in the Flask background thread;
+# 2) uncached source price work uses subprocess.run(timeout=20), not multiprocessing fork.
+# =============================================================================
+V850_BUILD_ID='v850h-subprocess-safe-shard-and-price-loader-20260903'
+V850_SAFE_SHARD_DIR=V850_DIR/'price_shards_v2_safe'
+V850_PRICE_HELPER=V850_DIR/'v850h_price_worker.py'
+V850_SHARD_HELPER=V850_DIR/'v850h_shard_worker.py'
+
+_V850H_SHARD_HELPER_CODE = '''import sys,pickle,os
+from pathlib import Path
+src=Path(sys.argv[1]); out=Path(sys.argv[2]); lid=sys.argv[3]
+with open(src,'rb') as f:x=pickle.load(f)
+if not isinstance(x,dict) or str(x.get("listing_id",""))!=str(lid) or not isinstance(x.get("map"),dict): raise RuntimeError("invalid shard")
+m={}
+for k,v in x["map"].items():
+    try:
+        ks=str(k.date()) if hasattr(k,"date") else str(k)[:10]
+        op=float(v["open"]); cl=float(v["close"])
+        if op>0 and cl>0:m[ks]={"open":op,"close":cl}
+    except Exception: pass
+if not m: raise RuntimeError("empty shard")
+tmp=out.with_suffix(".tmp");out.parent.mkdir(parents=True,exist_ok=True)
+with open(tmp,"wb") as f:pickle.dump({"listing_id":lid,"map":m},f,protocol=pickle.HIGHEST_PROTOCOL);f.flush();os.fsync(f.fileno())
+os.replace(tmp,out)
+'''
+
+_V850H_PRICE_HELPER_CODE = '''import sys,os,pickle,time
+import pandas as pd, numpy as np
+from pathlib import Path
+lid=sys.argv[1]; p=Path(sys.argv[2]); out=Path(sys.argv[3]); start=pd.Timestamp(sys.argv[4]); end=pd.Timestamp(sys.argv[5])
+if os.environ.get("V850H_TEST_SLEEP")=="1":time.sleep(60)
+def first(cols,names):return next((c for c in names if c in cols),None)
+d=pd.read_csv(p)
+date_col=first(d.columns,["Date","date","DATE"]);close_col=first(d.columns,["Close","close","adjClose","Adj Close","adj_close"])
+open_col=first(d.columns,["Open","open","adjOpen","Adj Open","adj_open"]);high_col=first(d.columns,["High","high","adjHigh","adj_high"]);low_col=first(d.columns,["Low","low","adjLow","adj_low"]);vol_col=first(d.columns,["Volume","volume","adjVolume","adj_volume"])
+if date_col is None or close_col is None:raise RuntimeError("missing date/close")
+dt=pd.to_datetime(d[date_col],errors="coerce",utc=True).dt.tz_convert(None);c=pd.to_numeric(d[close_col],errors="coerce")
+o=pd.to_numeric(d[open_col],errors="coerce") if open_col else c.copy();h=pd.to_numeric(d[high_col],errors="coerce") if high_col else c.copy();l=pd.to_numeric(d[low_col],errors="coerce") if low_col else c.copy();v=pd.to_numeric(d[vol_col],errors="coerce") if vol_col else pd.Series(np.nan,index=d.index)
+q=pd.DataFrame({"date":dt,"open":o,"high":h,"low":l,"close":c,"volume":v}).dropna(subset=["date","open","high","low","close","volume"]).sort_values("date").drop_duplicates("date",keep="last").reset_index(drop=True)
+if len(q)<320:raise RuntimeError("price history <320")
+prev=q.close.shift(1);orat=q.open/prev;crat=q.close/prev;intr=(q.close/q.open-1).abs();events=[]
+cands=[2,3,4,5,10,20,25,50,100,200,250,500,1000];vals=cands+[1/x for x in cands]
+for i in range(1,len(q)):
+    a=float(orat.iloc[i]) if pd.notna(orat.iloc[i]) else np.nan;b=float(crat.iloc[i]) if pd.notna(crat.iloc[i]) else np.nan
+    if not np.isfinite(a) or not np.isfinite(b) or not ((a>=3 or a<=1/3) and (b>=3 or b<=1/3)):continue
+    agreement=abs(np.log(max(1e-12,a/b)))<=0.10;iv=float(intr.iloc[i]) if pd.notna(intr.iloc[i]) else np.nan;calm=bool(np.isfinite(iv) and iv<=0.25)
+    best=min(vals,key=lambda x:abs(np.log(b/x)));okround=abs(np.log(b/best))<=0.04
+    if agreement and calm and okround:events.append((pd.Timestamp(q.date.iloc[i]).normalize(),b))
+def fac(x):
+    f=1.0;x=pd.Timestamp(x).normalize()
+    for ed,r in events:
+        if x<ed:f*=float(r)
+    return f
+for cc in ["open","high","low","close"]:q[cc]=[float(vv)*fac(dd) for vv,dd in zip(q[cc],q.date)]
+q=q[(q.date>=start)&(q.date<=end)]
+m={}
+for _,r in q.iterrows():
+    op=float(r.open);cl=float(r.close)
+    if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:m[str(pd.Timestamp(r.date).date())]={"open":op,"close":cl}
+if not m:raise RuntimeError("no valid open/close")
+tmp=out.with_suffix(".tmp");out.parent.mkdir(parents=True,exist_ok=True)
+with open(tmp,"wb") as f:pickle.dump({"listing_id":lid,"map":m},f,protocol=pickle.HIGHEST_PROTOCOL);f.flush();os.fsync(f.fileno())
+os.replace(tmp,out)
+'''
+
+def _v850h_write_helpers():
+    V850_DIR.mkdir(parents=True,exist_ok=True)
+    V850_SHARD_HELPER.write_text(_V850H_SHARD_HELPER_CODE,encoding='utf-8')
+    V850_PRICE_HELPER.write_text(_V850H_PRICE_HELPER_CODE,encoding='utf-8')
+
+def _v850h_safe_path(lid):
+    import hashlib
+    return V850_SAFE_SHARD_DIR/(hashlib.sha1(str(lid).encode('utf-8')).hexdigest()+'.pkl')
+
+def _v850h_safe_load(lid):
+    import pickle,pandas as pd
+    p=_v850h_safe_path(lid)
+    if not p.exists() or p.stat().st_size<=0 or p.stat().st_size>25*1024*1024:return None
+    try:
+        with open(p,'rb') as f:x=pickle.load(f)
+        if str(x.get('listing_id'))!=str(lid) or not isinstance(x.get('map'),dict):return None
+        return {pd.Timestamp(k).normalize():{'open':float(v['open']),'close':float(v['close'])} for k,v in x['map'].items()} or None
+    except Exception:return None
+
+def _v850h_convert_legacy_shard(lid,timeout_sec=6):
+    import subprocess,sys,os
+    _v850h_write_helpers();src=_v850_shard_path(lid);dst=_v850h_safe_path(lid)
+    if not src.exists():return None,None
+    if src.stat().st_size<=0 or src.stat().st_size>25*1024*1024:return None,'legacy_shard_invalid_size'
+    try:
+        cp=subprocess.run([sys.executable,str(V850_SHARD_HELPER),str(src),str(dst),str(lid)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        return None,f'legacy_shard_timeout_after_{timeout_sec}s'
+    if cp.returncode!=0:
+        return None,'legacy_shard_worker_error'
+    return _v850h_safe_load(lid),None
+
+def _v850h_build_one(lid,timeout_sec=20):
+    import subprocess,sys,os
+    _v850h_write_helpers();out=_v850h_safe_path(lid);out.parent.mkdir(parents=True,exist_ok=True)
+    pth=_v617o_existing_price_path(lid)
+    if not pth or not pth.exists():return None,'source_price_missing'
+    env=os.environ.copy();env.pop('V850H_TEST_SLEEP',None)
+    try:
+        cp=subprocess.run([sys.executable,str(V850_PRICE_HELPER),str(lid),str(pth),str(out),str(V624_START.date()),str(V624_END.date())],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=timeout_sec,env=env)
+    except subprocess.TimeoutExpired:
+        return None,f'timeout_after_{timeout_sec}s'
+    if cp.returncode!=0:
+        msg=(cp.stderr.decode('utf-8','ignore')[-180:] if cp.stderr else f'worker_exit_{cp.returncode}')
+        return None,'worker_error:'+msg.replace('\n',' ')[:160]
+    return _v850h_safe_load(lid),None
+
+def _v850_prices_progress(lids):
+    import time
+    ids=sorted(set(map(str,lids)));V850_SAFE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
+    qset=_v850_qload();errs=[];out={};dates=set();resumed=0;timeouts=0
+    for n,lid in enumerate(ids,1):
+        # IMPORTANT: status + quarantine happen BEFORE any legacy shard read.
+        _v850_write(status='running',phase='prices',message=f'V8.50H check {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+        mp=_v850h_safe_load(lid)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            if n%100==0:_v850_write(status='running',phase='prices',message=f'Resume SAFE {n}/{len(ids)} · cached {resumed}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        if lid in qset:
+            errs.append({'listing_id':lid,'error':'quarantined_stall'})
+            _v850_write(status='running',phase='prices',message=f'QUARANTINE {lid} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason='quarantined_stall',resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        # Convert existing F/G shard only inside a hard-timeout subprocess.
+        mp,serr=_v850h_convert_legacy_shard(lid,6)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            continue
+        if serr:
+            try:
+                old=_v850_shard_path(lid)
+                if old.exists():old.unlink()
+            except Exception:pass
+            qset.add(lid);_v850_qsave(qset,reason=f'{lid}: {serr}')
+            errs.append({'listing_id':lid,'error':serr})
+            _v850_write(status='running',phase='prices',message=f'SKIP bad legacy shard {lid} · {serr} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=serr,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        _v850_write(status='running',phase='prices',message=f'SUBPROCESS source {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+        mp,err=_v850h_build_one(lid,20)
+        if err or not mp:
+            reason=err or 'no_valid_open_close';errs.append({'listing_id':lid,'error':reason})
+            if str(reason).startswith('timeout_after_'):
+                timeouts+=1;qset.add(lid);_v850_qsave(qset,reason=f'{lid}: {reason}')
+            _v850_write(status='running',phase='prices',message=f'SKIP {lid} · {reason} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=reason,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        out[lid]=mp;dates.update(mp.keys())
+        _v850_write(status='running',phase='prices',message=f'Loaded SAFE {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+    return out,sorted(dates),errs
