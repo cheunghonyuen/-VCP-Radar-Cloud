@@ -72155,7 +72155,7 @@ def _v850_run():
     if pf.get('verdict')!='PASS':raise RuntimeError('V8.50 preflight must PASS: '+str(pf.get('verdict')))
     A,AF,P,J,B,T,X,attrs=_v844_load_streams();S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False);S['date']=pd.to_datetime(S.date,errors='coerce').dt.normalize()
     ids=T.listing_id.unique();_v850_write(status='running',phase='prices',message=f'Loading cached OPEN+CLOSE for full Tight stream 0/{len(ids)}',processed=0,total=len(ids),errors=0,error=None)
-    price,cal,errs=_v846a_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    price,cal,errs=_v850_prices_progress(ids);cov=100*len(price)/max(1,len(set(ids)))
     if cov<95:raise RuntimeError(f'cached OPEN+CLOSE coverage too low: {cov:.2f}%')
     out=[];led=[];curves=[];events=[]
     for n,mode in enumerate(['CONTROL','BLACK_REENTRY'],1):
