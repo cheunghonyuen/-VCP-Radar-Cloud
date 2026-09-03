@@ -71975,3 +71975,224 @@ if _v849_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v849_home_base:APP.view_functions[ep]=_v849_home_wrap
+
+# =============================================================================
+# V8.50 BLACK EXIT -> NORMAL RE-ENTRY FULL CAUSAL 10-SLOT CONFIRMATION
+# One predeclared state machine only. Full Tight candidate stream; first-come 10-slot;
+# equity/10 sizing. BLACK exits all at next-session open (action_state already lagged/PIT
+# by V8.47); while BLACK, new entries are blocked; once state returns NORMAL, the
+# ordinary Tight candidate stream is immediately eligible again. AMBER/RED actions are
+# NOT applied here. No partial profit, shorting, trailing-stop or threshold changes.
+# =============================================================================
+V850_DIR = DATA_DIR / 'v850_black_exit_normal_reentry_full_causal'
+V850_PREFLIGHT = V850_DIR / 'preflight.json'
+V850_STATUS = V850_DIR / 'status.json'
+V850_RESULT = V850_DIR / 'result.json'
+V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
+V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
+V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
+V850_BUILD_ID = 'v850-black-exit-normal-reentry-full-causal-20260903'
+v850_thread = None
+
+def _v850_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V850_STATUS.exists():
+        try:x.update(json.loads(V850_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v850_write(**kw):
+    V850_DIR.mkdir(parents=True,exist_ok=True);x=_v850_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V850_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v850_alive():return v850_thread is not None and v850_thread.is_alive()
+
+def _v850_preflight():
+    import pandas as pd,time
+    t0=time.time();V850_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V849_RESULT.exists() or not V847_SIGNALS.exists():raise RuntimeError('V8.49 result or V8.47 causal signals missing')
+        r49=json.loads(V849_RESULT.read_text(encoding='utf-8'))
+        if r49.get('verdict')!='BLACK_EXIT_REENTRY_ARCHITECTURE_READY__TEST_ONE_CAUSAL_REENTRY_STATE_MACHINE':
+            raise RuntimeError('V8.49 re-entry architecture-ready verdict missing')
+        A,AF,P,J,B,T,X,attrs=_v844_load_streams()
+        S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False)
+        req=['date','action_state','pit_stress_count'];miss=[c for c in req if c not in S.columns]
+        ok=(len(T)>=30000 and T.listing_id.nunique()>=5000 and len(S)>=7000 and not miss)
+        out={'version':'V8.50','build_id':V850_BUILD_ID,'verdict':'PASS' if ok else 'FAIL__FULL_TIGHT_STREAM_OR_SIGNAL_PARITY','error':None,
+             'tight_candidate_rows':int(len(T)),'unique_listings':int(T.listing_id.nunique()),'signal_sessions':int(len(S)),'missing_signal_columns':miss,
+             'v849_verdict':r49.get('verdict'),
+             'state_machine':'CONTROL = ordinary Tight full causal first-come 10-slot. BLACK_REENTRY = if current next-session action_state is BLACK, liquidate all existing positions at cached open and block entries that session; when action_state returns NORMAL, immediately re-enable the ordinary Tight candidate stream. AMBER/RED do nothing in this test.',
+             'timing':'V8.47 action_state is built from past-only expanding thresholds and next-session execution. Re-entry uses the first session whose causal action_state is NORMAL after BLACK.',
+             'frozen':'Exact V8.42 tight_pivot membership + recovered V6.44/V6.69 entry/exit lineage; full candidate stream; first-come max10; current-equity/10 sizing; cached daily OPEN+CLOSE MTM.',
+             'hard_exclusions':['NO stress threshold tuning','NO lookback tuning','NO RED trim in challenger','NO AMBER pause in challenger','NO partial profit','NO shorting','NO trailing-stop mutation','NO rank mutation','0 Tiingo','0 universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:out={'version':'V8.50','build_id':V850_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V850_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v850_simulate(T,price,cal,S,mode,t0,vi,vn):
+    import pandas as pd,numpy as np
+    Q=T.sort_values(['entry_date','listing_id','candidate_order'],kind='stable').reset_index(drop=True).copy();rec=Q.to_dict('index');entries={};exits={}
+    for i,r in rec.items():
+        entries.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);exits.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    sm={pd.Timestamp(r.date).normalize():str(r.action_state) for _,r in S.iterrows()};sc={pd.Timestamp(r.date).normalize():int(r.pit_stress_count) for _,r in S.iterrows()}
+    cash=1.0;pos={};last={};ledger=[];eqrows=[];skipped_capacity=0;blocked_black=0;black_liqs=0;reentry_sessions=0;was_black=False;event_rows=[];step=max(1,len(cal)//24)
+    def barpx(lid,dt,field,fallback):
+        b=price.get(str(lid),{}).get(dt);v=(b or {}).get(field) if b else None
+        try:v=float(v)
+        except Exception:v=np.nan
+        return v if np.isfinite(v) and v>0 else fallback
+    for di,dt in enumerate(cal,1):
+        dt=pd.Timestamp(dt).normalize();state=sm.get(dt,'NORMAL');cnt=sc.get(dt,0)
+        if mode=='BLACK_REENTRY' and state=='NORMAL' and was_black:
+            reentry_sessions+=1;event_rows.append({'date':str(dt.date()),'event':'REENTRY_NORMAL','stress_count':cnt,'equity_before':None,'open_positions_before':len(pos)})
+        if mode=='BLACK_REENTRY' and state=='BLACK' and pos:
+            black_liqs+=1;eq_before=cash+sum(p['shares']*barpx(p['listing_id'],dt,'open',last.get(i,p['entry_px'])) for i,p in pos.items())
+            event_rows.append({'date':str(dt.date()),'event':'BLACK_LIQUIDATE','stress_count':cnt,'equity_before':eq_before,'open_positions_before':len(pos)})
+            for i in list(pos.keys()):
+                p=pos.pop(i);op=barpx(p['listing_id'],dt,'open',last.get(i,p['entry_px']));pro=p['shares']*op;cash+=pro;rr=op/p['entry_px']-1.0
+                ledger.append({'variant':mode,'listing_id':p['listing_id'],'entry_date':p['entry_date'],'exit_date':dt,'entry_px':p['entry_px'],'exit_px':op,'ret':rr,'pnl':pro-p['cost'],'reason':'BLACK_EXIT','capital':p['cost']});last.pop(i,None)
+        # Original exits for still-open positions.
+        for i in exits.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);pro=p['shares']*xp;cash+=pro;rr=xp/p['entry_px']-1.0
+            ledger.append({'variant':mode,'listing_id':p['listing_id'],'entry_date':p['entry_date'],'exit_date':dt,'entry_px':p['entry_px'],'exit_px':xp,'ret':rr,'pnl':pro-p['cost'],'reason':str(rec[i]['exit_reason']),'capital':p['cost']});last.pop(i,None)
+        # MTM before entries, then current-equity/10 sizing exactly as the validated causal engine.
+        hv=0.0
+        for i,p in pos.items():
+            cp=barpx(p['listing_id'],dt,'close',last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        eq_now=cash+hv
+        for i in entries.get(dt,[]):
+            if mode=='BLACK_REENTRY' and state=='BLACK':blocked_black+=1;continue
+            if len(pos)>=10:skipped_capacity+=1;continue
+            r=rec[i];ep=float(r['entry_px']);target=eq_now/10.0
+            if ep<=0 or cash+1e-12<target:skipped_capacity+=1;continue
+            cash-=target;sh=target/ep;pos[i]={'listing_id':str(r['listing_id']),'shares':sh,'entry_px':ep,'cost':target,'entry_date':dt};last[i]=ep
+        hv=0.0
+        for i,p in pos.items():
+            cp=barpx(p['listing_id'],dt,'close',last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;eqrows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos),cash,state,cnt))
+        was_black=(state=='BLACK')
+        if di%step==0 or di==len(cal):_v850_write(status='running',phase='account_replay',message=f'Full causal replay {mode} {int(round(di/len(cal)*100))}%',processed=vi,total=vn,errors=0,elapsed_sec=round(time.time()-t0,1),error=None)
+    C=pd.DataFrame(eqrows,columns=['date','equity','exposure','open_n','cash','action_state','stress_count']);C['variant']=mode;C['running_peak']=C.equity.cummax();C['drawdown']=C.equity/C.running_peak-1
+    L=pd.DataFrame(ledger);E=pd.DataFrame(event_rows)
+    # Metrics, matched to V8.38 semantics.
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0;maxdd=float(C.drawdown.min())
+    if len(L):
+        gp=float(L.loc[L.pnl>0,'pnl'].sum());gl=float(-L.loc[L.pnl<=0,'pnl'].sum());pf=gp/gl if gl>0 else np.inf;wr=float((L.ret>0).mean());avg=float(L.ret.mean());w20=int((L.ret>=.20).sum());w30=int((L.ret>=.30).sum());w100=int((L.ret>=1).sum())
+    else:pf=wr=avg=np.nan;w20=w30=w100=0
+    met={'strategy':mode,'cagr':float(cagr),'maxdd':maxdd,'calmar':float(cagr/abs(maxdd)) if maxdd<0 else None,'pf':float(pf),'win_rate':wr,'avg_trade':avg,'winner20':w20,'winner30':w30,'winner100':w100,'trade_count':int(len(L)),'avg_exposure':float(C.exposure.mean()),'avg_open_positions':float(C.open_n.mean()),'final_multiple':float(end/start),'skipped_capacity_or_cash':int(skipped_capacity),'blocked_black_entries':int(blocked_black),'black_liquidation_events':int(black_liqs),'reentry_normal_events':int(reentry_sessions)}
+    return met,L,C,E
+
+def _v850_period(C,start,end):
+    import pandas as pd
+    z=C[(C.date>=pd.Timestamp(start))&(C.date<=pd.Timestamp(end))].copy()
+    if len(z)<2:return {'return':None,'maxdd':None}
+    ret=float(z.equity.iloc[-1]/z.equity.iloc[0]-1);dd=float((z.equity/z.equity.cummax()-1).min());return {'return':ret,'maxdd':dd}
+
+def _v850_run():
+    import pandas as pd,time
+    t0=time.time();pf=_v850_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.50 preflight must PASS: '+str(pf.get('verdict')))
+    A,AF,P,J,B,T,X,attrs=_v844_load_streams();S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False);S['date']=pd.to_datetime(S.date,errors='coerce').dt.normalize()
+    ids=T.listing_id.unique();_v850_write(status='running',phase='prices',message=f'Loading cached OPEN+CLOSE for full Tight stream 0/{len(ids)}',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v846a_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'cached OPEN+CLOSE coverage too low: {cov:.2f}%')
+    out=[];led=[];curves=[];events=[]
+    for n,mode in enumerate(['CONTROL','BLACK_REENTRY'],1):
+        m,L,C,E=_v850_simulate(T,price,cal,S,mode,t0,n,2);out.append(m);curves.append(C)
+        if len(L):led.append(L)
+        if len(E):events.append(E.assign(variant=mode))
+    M={x['strategy']:x for x in out};c=M['CONTROL'];b=M['BLACK_REENTRY']
+    # Full-stream control must reproduce V8.44 Tight economics before interpreting the challenger.
+    R44=json.loads(V844_RESULT.read_text(encoding='utf-8'));ref=next((x for x in R44.get('portfolio',[]) if x.get('strategy')=='TIGHT_PIVOT_SHADOW'),{})
+    parity={'cagr_abs_diff_pp':100*abs(c['cagr']-float(ref.get('cagr',c['cagr']))),'maxdd_abs_diff_pp':100*abs(c['maxdd']-float(ref.get('maxdd',c['maxdd'])))};parity_ok=parity['cagr_abs_diff_pp']<=.10 and parity['maxdd_abs_diff_pp']<=.10
+    delta={'cagr_pp':100*(b['cagr']-c['cagr']),'maxdd_pp':100*(b['maxdd']-c['maxdd']),'calmar':b['calmar']-c['calmar'],'avg_trade_pp':100*(b['avg_trade']-c['avg_trade']),'winner100_delta':b['winner100']-c['winner100'],'avg_exposure_pp':100*(b['avg_exposure']-c['avg_exposure'])}
+    # Economic bar: drawdown materially better, CAGR not destroyed, Calmar better.
+    passes=bool(parity_ok and delta['maxdd_pp']>=10.0 and b['cagr']>=c['cagr']-.05 and b['calmar']>c['calmar'])
+    verdict='BLACK_EXIT_NORMAL_REENTRY_FULL_CAUSAL_PASSES__KEEP_AS_RISK_SHADOW' if passes else ('CONTROL_PARITY_FAIL__DO_NOT_INTERPRET_REENTRY' if not parity_ok else 'BLACK_EXIT_NORMAL_REENTRY_FULL_CAUSAL_FAILS__KEEP_RED_TRIM_BENCHMARK')
+    # Stress-period checks on actual full causal paths.
+    cb=curves[1]
+    periods={'2008':_v850_period(cb,'2008-06-01','2009-06-30'),'2020':_v850_period(cb,'2020-02-01','2020-08-31')}
+    result={'version':'V8.50','build_id':V850_BUILD_ID,'verdict':verdict,'parity_ok':parity_ok,'control_parity':parity,'price_coverage_pct':cov,'price_errors':errs[:100],
+            'control':c,'black_reentry':b,'delta_vs_control':delta,'stress_periods':periods,
+            'state_machine':pf.get('state_machine'),'timing':pf.get('timing'),'frozen':pf.get('frozen'),'hard_exclusions':pf.get('hard_exclusions'),
+            'interpretation':'This is the first full-candidate-stream causal test of BLACK exit as an intermediate Risk-Off state rather than a terminal action. The candidate stream is reopened immediately on the first causal NORMAL session; subsequent admissions are first-come under the same 10-slot/equity-10 policy.',
+            'next':('If PASS, compare this BLACK→NORMAL re-entry risk shadow directly against the already-validated RED_TRIM_ONLY benchmark before any combination. If FAIL, do not tune BLACK/re-entry thresholds; keep RED_TRIM as the defensive benchmark.'),
+            'elapsed_sec':round(time.time()-t0,1)}
+    V850_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');pd.concat(curves,ignore_index=True).to_csv(V850_CURVES,index=False,compression='gzip')
+    if led:pd.concat(led,ignore_index=True).to_csv(V850_TRADES,index=False,compression='gzip')
+    if events:pd.concat(events,ignore_index=True).to_csv(V850_EVENTS,index=False)
+    _v850_write(status='done',phase='complete',message='Done · '+verdict,processed=2,total=2,errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+def _v850_worker():
+    global v850_thread
+    import time
+    t0=time.time()
+    try:_v850_run()
+    except Exception as ex:_v850_write(status='error',phase='failed',message='V8.50 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v850_thread=None
+
+@APP.route('/v850/preflight',methods=['GET','POST'])
+def v850_preflight_route():_v850_preflight();return redirect('/v850')
+
+@APP.route('/v850/run',methods=['GET','POST'])
+def v850_run_route():
+    global v850_thread
+    if not _v850_alive():
+        p=_v850_preflight()
+        if p.get('verdict')=='PASS':
+            _v850_write(status='starting',phase='queued',message='BLACK→NORMAL full causal re-entry accepted',processed=0,total=2,errors=0,error=None);v850_thread=threading.Thread(target=_v850_worker,daemon=True);v850_thread.start()
+    return redirect('/v850')
+
+@APP.get('/api/v850/status')
+def v850_status_api():return jsonify(_v850_status())
+
+@APP.get('/v850/export/<name>')
+def v850_export(name):
+    mp={'curves':V850_CURVES,'trades':V850_TRADES,'events':V850_EVENTS};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+@APP.get('/v850')
+def v850_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v850_status()
+    try:
+        if V850_PREFLIGHT.exists():P=json.loads(V850_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V850_RESULT.exists():R=json.loads(V850_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    c=R.get('control',{});b=R.get('black_reentry',{});d=R.get('delta_vs_control',{});sp=R.get('stress_periods',{})
+    def row(name,x):
+        return f"<tr><td><b>{e(name)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('trade_count',0))}</td><td>{e(x.get('winner100',0))}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.50 BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V850_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight candidates {e(P.get('tight_candidate_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v850/preflight"><button>A. Run V8.50 Preflight</button></form><br><form method="post" action="/v850/run"><button>B. Run BLACK→NORMAL Full Causal A/B</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>Control Parity</h2><p>CAGR diff {n(R.get('control_parity',{}).get('cagr_abs_diff_pp'),3)} pp · MaxDD diff {n(R.get('control_parity',{}).get('maxdd_abs_diff_pp'),3)} pp</p></div>
+<div class="c"><h2>Full Causal Account Economics</h2><div style="overflow:auto"><table><tr><th>Variant</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Avg trade</th><th>Win</th><th>Avg exposure</th><th>Trades</th><th>+100</th></tr>{row('CONTROL',c) if c else ''}{row('BLACK_REENTRY',b) if b else ''}</table></div><p><b>Δ:</b> CAGR {n(d.get('cagr_pp'))} pp · MaxDD {n(d.get('maxdd_pp'))} pp · Calmar {n(d.get('calmar'),3)} · +100 {e(d.get('winner100_delta','—'))}</p></div>
+<div class="c"><h2>State-Machine Activity</h2><p>BLACK liquidations: <b>{e(b.get('black_liquidation_events','—'))}</b> · NORMAL re-entry sessions after BLACK: <b>{e(b.get('reentry_normal_events','—'))}</b> · Entries blocked only on BLACK sessions: <b>{e(b.get('blocked_black_entries','—'))}</b></p></div>
+<div class="c"><h2>2008 / 2020 Check</h2><p>2008 return {n(100*((sp.get('2008',{}).get('return') or 0)))}% · MaxDD {n(100*((sp.get('2008',{}).get('maxdd') or 0)))}%</p><p>2020 return {n(100*((sp.get('2020',{}).get('return') or 0)))}% · MaxDD {n(100*((sp.get('2020',{}).get('maxdd') or 0)))}%</p></div>
+<div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','先跑 V8.50。'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v850/export/curves'>Equity curves CSV.GZ</a> · <a href='/v850/export/trades'>Trade ledger CSV.GZ</a> · <a href='/v850/export/events'>BLACK/Re-entry events CSV</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+_v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850_home_base is not None:
+    def _v850_home_wrap(*args,**kwargs):
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50 BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v850-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v850_home_base:APP.view_functions[ep]=_v850_home_wrap
