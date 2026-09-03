@@ -71799,3 +71799,179 @@ if _v848_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v848_home_base:APP.view_functions[ep]=_v848_home_wrap
+
+# =============================================================================
+# V8.49 BLACK EXIT + RE-ENTRY ARCHITECTURE AUDIT — DIAGNOSTIC ONLY
+# =============================================================================
+V849_DIR = DATA_DIR / 'v849_black_exit_reentry_architecture_audit'
+V849_PREFLIGHT = V849_DIR / 'preflight.json'
+V849_STATUS = V849_DIR / 'status.json'
+V849_RESULT = V849_DIR / 'result.json'
+V849_EVENTS = V849_DIR / 'black_reentry_events.csv'
+V849_BUILD_ID = 'v849-black-exit-reentry-architecture-audit-20260903'
+v849_thread = None
+
+def _v849_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V849_STATUS.exists():
+        try:x.update(json.loads(V849_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v849_write(**kw):
+    V849_DIR.mkdir(parents=True,exist_ok=True);x=_v849_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V849_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v849_alive():return v849_thread is not None and v849_thread.is_alive()
+
+def _v849_preflight():
+    import pandas as pd,time
+    t0=time.time();V849_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V848_RESULT.exists() or not V847_SIGNALS.exists():raise RuntimeError('V8.48 result or V8.47 causal signals missing')
+        r48=json.loads(V848_RESULT.read_text(encoding='utf-8'))
+        if not str(r48.get('verdict','')).startswith('ACTION_ATTRIBUTION_COMPLETE__'):
+            raise RuntimeError('V8.48 action attribution completion verdict not present')
+        _,L=_v845_load();T=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].copy();S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False)
+        req=['date','action_state','pit_stress_count'];miss=[c for c in req if c not in S.columns]
+        out={'version':'V8.49','build_id':V849_BUILD_ID,'verdict':'PASS' if len(T)==198 and len(S)>=7000 and not miss else 'FAIL__REENTRY_SOURCE_PARITY',
+             'error':None,'tight_rows':int(len(T)),'signal_sessions':int(len(S)),'missing_signal_columns':miss,
+             'purpose':'Diagnose whether BLACK exit failure is primarily missing re-entry participation after stress clears. No economic re-entry rule is executed in this version.',
+             'fixed_sources':'Exact V8.47 point-in-time action_state + exact V8.44/V8.45 Tight frozen admitted ledger. No threshold or action changes.',
+             'recovery_markers':['first NORMAL action_state after BLACK episode','first action_state with stress_count<=2 after BLACK','first scheduled Tight entry after BLACK','first +20/+30/+100 scheduled Tight winner after BLACK'],
+             'hard_exclusions':['NO re-entry threshold tuning','NO economic re-entry replay','NO RED mutation','NO BLACK threshold mutation','NO partial profit','NO shorting','NO trailing-stop change','NO candidate-stream rerun','0 Tiingo','0 universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:out={'version':'V8.49','build_id':V849_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V849_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v849_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v849_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.49 preflight must PASS: '+str(pf.get('verdict')))
+    _,L=_v845_load();T=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['ret_num']=pd.to_numeric(T.get('ret'),errors='coerce')
+    S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False);S['date']=pd.to_datetime(S.date,errors='coerce').dt.normalize();S=S.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+    S['is_black']=S.action_state.astype(str).eq('BLACK');S['black_start']=S.is_black & ~S.is_black.shift(1,fill_value=False)
+    starts=list(S.index[S.black_start]);events=[]
+    _v849_write(status='running',phase='episodes',message=f'Analyzing {len(starts)} BLACK episodes and recovery participation',processed=0,total=len(starts),errors=0,error=None)
+    for j,ix in enumerate(starts,1):
+        k=ix
+        while k+1<len(S) and bool(S.loc[k+1,'is_black']):k+=1
+        bstart=pd.Timestamp(S.loc[ix,'date']);bend=pd.Timestamp(S.loc[k,'date'])
+        after=S.loc[k+1:].copy()
+        normal=after[after.action_state.astype(str).eq('NORMAL')]
+        low=after[pd.to_numeric(after.pit_stress_count,errors='coerce')<=2]
+        normal_dt=pd.Timestamp(normal.iloc[0].date) if len(normal) else pd.NaT
+        low_dt=pd.Timestamp(low.iloc[0].date) if len(low) else pd.NaT
+        fut=T[T.entry_date>bend].sort_values('entry_date')
+        def first_trade(mask):
+            z=fut[mask(fut)]
+            return (pd.Timestamp(z.iloc[0].entry_date),str(z.iloc[0].listing_id),float(z.iloc[0].ret_num)) if len(z) else (pd.NaT,None,None)
+        anydt,anylid,anyret=first_trade(lambda z:pd.Series(True,index=z.index))
+        p20,p20lid,p20ret=first_trade(lambda z:z.ret_num>=.20)
+        p30,p30lid,p30ret=first_trade(lambda z:z.ret_num>=.30)
+        p100,p100lid,p100ret=first_trade(lambda z:z.ret_num>=1.0)
+        # winner opportunities between BLACK start and first NORMAL re-entry permission proxy
+        cutoff=normal_dt if pd.notna(normal_dt) else S.date.max()
+        window=T[(T.entry_date>bstart)&(T.entry_date<=cutoff)]
+        events.append({'black_start':str(bstart.date()),'black_end':str(bend.date()),'black_days':int((S.loc[ix:k,'is_black']).sum()),
+                       'stress_count_at_start':int(pd.to_numeric(S.loc[ix,'pit_stress_count'],errors='coerce')),
+                       'first_normal_date':str(normal_dt.date()) if pd.notna(normal_dt) else None,'days_to_normal':int((normal_dt-bend).days) if pd.notna(normal_dt) else None,
+                       'first_le2_date':str(low_dt.date()) if pd.notna(low_dt) else None,'days_to_le2':int((low_dt-bend).days) if pd.notna(low_dt) else None,
+                       'first_scheduled_entry_date':str(anydt.date()) if pd.notna(anydt) else None,'days_to_next_entry':int((anydt-bend).days) if pd.notna(anydt) else None,'next_entry_listing':anylid,'next_entry_ret':anyret,
+                       'first_plus20_date':str(p20.date()) if pd.notna(p20) else None,'days_to_plus20':int((p20-bend).days) if pd.notna(p20) else None,'plus20_listing':p20lid,
+                       'first_plus30_date':str(p30.date()) if pd.notna(p30) else None,'days_to_plus30':int((p30-bend).days) if pd.notna(p30) else None,'plus30_listing':p30lid,
+                       'first_plus100_date':str(p100.date()) if pd.notna(p100) else None,'days_to_plus100':int((p100-bend).days) if pd.notna(p100) else None,'plus100_listing':p100lid,
+                       'scheduled_entries_before_normal':int(len(window)),'plus20_before_normal':int((window.ret_num>=.20).sum()),'plus30_before_normal':int((window.ret_num>=.30).sum()),'plus100_before_normal':int((window.ret_num>=1.0).sum())})
+        _v849_write(status='running',phase='episodes',message=f'BLACK recovery audit {j}/{len(starts)} · {bstart.date()}',processed=j,total=len(starts),errors=0,error=None)
+    E=pd.DataFrame(events)
+    if len(E):E.to_csv(V849_EVENTS,index=False)
+    def med(col):
+        x=pd.to_numeric(E.get(col),errors='coerce').dropna() if len(E) else pd.Series(dtype=float)
+        return float(x.median()) if len(x) else None
+    summary={'black_episodes':int(len(E)),'median_days_to_normal':med('days_to_normal'),'median_days_to_stress_le2':med('days_to_le2'),'median_days_to_next_scheduled_entry':med('days_to_next_entry'),'median_days_to_plus20':med('days_to_plus20'),'median_days_to_plus30':med('days_to_plus30'),'median_days_to_plus100':med('days_to_plus100'),
+             'total_entries_before_normal':int(pd.to_numeric(E.get('scheduled_entries_before_normal'),errors='coerce').fillna(0).sum()) if len(E) else 0,'plus20_before_normal':int(pd.to_numeric(E.get('plus20_before_normal'),errors='coerce').fillna(0).sum()) if len(E) else 0,'plus30_before_normal':int(pd.to_numeric(E.get('plus30_before_normal'),errors='coerce').fillna(0).sum()) if len(E) else 0,'plus100_before_normal':int(pd.to_numeric(E.get('plus100_before_normal'),errors='coerce').fillna(0).sum()) if len(E) else 0}
+    # Focus rows nearest 2008 and 2020 crises.
+    focus=[]
+    if len(E):
+        tmp=E.copy();tmp['_d']=pd.to_datetime(tmp.black_start,errors='coerce')
+        for target,label in [(pd.Timestamp('2008-09-15'),'2008'),(pd.Timestamp('2020-03-16'),'2020')]:
+            z=tmp.iloc[(tmp['_d']-target).abs().argsort()[:1]]
+            if len(z):
+                r=z.iloc[0].drop(labels=['_d']).to_dict();r['focus']=label;focus.append(r)
+    # Promotion is architectural, not economic: if normal/stress-clear arrives materially sooner than next big winners, a re-entry state exists to test.
+    mnorm=summary['median_days_to_normal'];m100=summary['median_days_to_plus100']
+    architecture_ready=bool(mnorm is not None and m100 is not None and mnorm < m100)
+    verdict='BLACK_EXIT_REENTRY_ARCHITECTURE_READY__TEST_ONE_CAUSAL_REENTRY_STATE_MACHINE' if architecture_ready else 'BLACK_EXIT_REENTRY_TIMING_NOT_YET_ACTIONABLE__DO_NOT_INVENT_RULE'
+    result={'version':'V8.49','build_id':V849_BUILD_ID,'verdict':verdict,'summary':summary,'focus_events':focus,'events':events,
+            'interpretation':'BLACK exit cannot be judged as a complete strategy without measuring when point-in-time stress clears and when valid long opportunities return. This audit measures that recovery gap only; it does not execute a re-entry rule.',
+            'next':('V8.50 should test exactly ONE causal BLACK→REENTRY state machine using the existing V8.47 signal, next-session execution, and no threshold sweep. RED_TRIM remains the validated defensive benchmark.' if architecture_ready else 'Do not build BLACK re-entry economics yet. Keep RED_TRIM as the defensive benchmark.'),
+            'hard_exclusions':pf.get('hard_exclusions'),'elapsed_sec':round(time.time()-t0,2)}
+    V849_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    _v849_write(status='done',phase='complete',message='Done · '+verdict,processed=len(starts),total=len(starts),errors=0,error=None,elapsed_sec=result['elapsed_sec']);return result
+
+def _v849_worker():
+    global v849_thread
+    import time
+    t0=time.time()
+    try:_v849_run()
+    except Exception as ex:_v849_write(status='error',phase='failed',message='V8.49 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v849_thread=None
+
+@APP.route('/v849/preflight',methods=['GET','POST'])
+def v849_preflight_route():_v849_preflight();return redirect('/v849')
+
+@APP.route('/v849/run',methods=['GET','POST'])
+def v849_run_route():
+    global v849_thread
+    if not _v849_alive():
+        p=_v849_preflight()
+        if p.get('verdict')=='PASS':
+            _v849_write(status='starting',phase='queued',message='BLACK Exit + Re-entry Architecture Audit accepted',processed=0,total=1,errors=0,error=None);v849_thread=threading.Thread(target=_v849_worker,daemon=True);v849_thread.start()
+    return redirect('/v849')
+
+@APP.get('/api/v849/status')
+def v849_status_api():return jsonify(_v849_status())
+
+@APP.get('/v849/export/events')
+def v849_export_events():
+    if not V849_EVENTS.exists():return ('not ready',404)
+    return send_file(V849_EVENTS,as_attachment=True,download_name=V849_EVENTS.name)
+
+@APP.get('/v849')
+def v849_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v849_status()
+    try:
+        if V849_PREFLIGHT.exists():P=json.loads(V849_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V849_RESULT.exists():R=json.loads(V849_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    sm=R.get('summary',{});focus=R.get('focus_events',[])
+    def n(v,d=1):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    frows=''.join(f"<tr><td><b>{e(x.get('focus'))}</b></td><td>{e(x.get('black_start'))}</td><td>{e(x.get('black_end'))}</td><td>{e(x.get('days_to_normal'))}</td><td>{e(x.get('days_to_next_entry'))}</td><td>{e(x.get('days_to_plus100'))}</td><td>{e(x.get('plus100_before_normal'))}</td></tr>" for x in focus)
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.49 BLACK Exit + Re-entry Architecture Audit</h1><div class="o"><b>清仓不是终点：</b>本版只查 BLACK 后何时 stress 恢复、何时新的 Tight 入场/大赢家重新出现。只诊断 re-entry 架构，不执行新买回规则、不调 threshold。RED_TRIM 继续作为已验证防线。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V849_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight ledger {e(P.get('tight_rows','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v849/preflight"><button>A. Run V8.49 Preflight</button></form><br><form method="post" action="/v849/run"><button>B. Run BLACK→Re-entry Architecture Audit</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>Recovery Timing</h2><p>BLACK episodes: <b>{e(sm.get('black_episodes','—'))}</b></p><p>Median days BLACK end → NORMAL: <b>{n(sm.get('median_days_to_normal'))}</b> · stress≤2: <b>{n(sm.get('median_days_to_stress_le2'))}</b> · next Tight entry: <b>{n(sm.get('median_days_to_next_scheduled_entry'))}</b></p><p>Median days → +20 winner: <b>{n(sm.get('median_days_to_plus20'))}</b> · +30: <b>{n(sm.get('median_days_to_plus30'))}</b> · +100: <b>{n(sm.get('median_days_to_plus100'))}</b></p></div>
+<div class="c"><h2>Opportunity Cost Before NORMAL</h2><p>Scheduled entries before NORMAL: <b>{e(sm.get('total_entries_before_normal','—'))}</b> · +20: <b>{e(sm.get('plus20_before_normal','—'))}</b> · +30: <b>{e(sm.get('plus30_before_normal','—'))}</b> · +100: <b>{e(sm.get('plus100_before_normal','—'))}</b></p></div>
+<div class="c"><h2>2008 / 2020 Focus</h2><div style="overflow:auto"><table><tr><th>Focus</th><th>BLACK start</th><th>BLACK end</th><th>Days→NORMAL</th><th>Days→next entry</th><th>Days→+100</th><th>+100 before NORMAL</th></tr>{frows or '<tr><td colspan=7>Run first.</td></tr>'}</table></div></div>
+<div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','先跑 V8.49。'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v849/export/events'>BLACK→Re-entry events CSV</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+_v849_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v849_home_base is not None:
+    def _v849_home_wrap(*args,**kwargs):
+        resp=_v849_home_base(*args,**kwargs);card="""<div id='v849-home-card-real' style='background:#f0fdf4;border:7px solid #16a34a;border-radius:26px;padding:26px;margin:20px 0'><h2>🔄 V8.49 BLACK Exit + Re-entry Architecture Audit</h2><p>V8.48 证明 BLACK 清仓若不重入会毁 CAGR；本版只查 BLACK 后的 point-in-time 恢复时点与新 Tight/+100 winner 回归速度，不执行买回规则、不调 threshold。</p><a href='/v849'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.49</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v849-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v849_home_base:APP.view_functions[ep]=_v849_home_wrap
