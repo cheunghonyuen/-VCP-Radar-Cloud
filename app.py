@@ -70364,3 +70364,76 @@ def _v844_preflight():
     o['engineering_hotfix']='V844-native heartbeat every 25 listings + resumable checkpoint every 250; strategy semantics unchanged.'
     V844_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     return o
+
+# =============================================================================
+# V8.44B HOTFIX — REMOVE GIANT PRICE-MAP CHECKPOINT WRITE STALL
+# Engineering-only repair. Strategy semantics/economics remain EXACTLY V8.44/V8.44A.
+# Diagnosis: V8.44A heartbeat is emitted BEFORE each 250-row pickle checkpoint.
+# A persistent freeze exactly at 4000/5354 therefore localizes to checkpoint serialization/fsync,
+# not the displayed RDS-A listing. V8.44B may load the last completed V8.44A checkpoint once,
+# then keeps subsequent price maps in memory and writes only tiny metadata heartbeats.
+# =============================================================================
+V844_BUILD_ID = 'v844B-tight-pivot-checkpoint-stall-hotfix-20260903'
+V844_LIGHT_CKPT_META = V844_DIR / 'price_map_light_progress.json'
+
+
+def _v844_light_progress(done,total,errs,elapsed,current=None):
+    V844_DIR.mkdir(parents=True,exist_ok=True)
+    V844_LIGHT_CKPT_META.write_text(json.dumps({
+        'build_id':V844_BUILD_ID,'done':int(done),'total':int(total),'errors':int(len(errs)),
+        'elapsed_sec':round(float(elapsed),1),'current':current,
+        'saved_at':datetime.now(timezone.utc).isoformat(),
+        'note':'metadata only; no giant nested price-map pickle writes during run'
+    },ensure_ascii=False,indent=2),encoding='utf-8')
+
+
+def _v844_price_maps(listing_ids):
+    """Exact price semantics; resume once from last completed V8.44A pickle, then memory-only."""
+    import pandas as pd, numpy as np, time
+    M,lidcol=_v826a_manifest()
+    mmap={str(r[lidcol]):r for _,r in M.iterrows()}
+    lids=sorted(set(map(str,listing_ids)))
+    out,date_set,errs,done=_v844_load_price_ckpt(lids)
+    # The last atomically replaced checkpoint is safe. Ignore any .tmp left by the stalled 4000 write.
+    t0=time.time()
+    if done:
+        _v844_write(status='running',phase='prices',
+                    message=f'V8.44B resumed last COMPLETE checkpoint at {done}/{len(lids)}; giant checkpoints disabled',
+                    processed=done,total=len(lids),errors=len(errs),error=None,
+                    elapsed_sec=0,last_heartbeat=datetime.now(timezone.utc).isoformat())
+    for n,lid in enumerate(lids[done:],done+1):
+        mr=mmap.get(lid)
+        if mr is None:
+            errs.append(lid)
+        else:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception:q=None
+            if q is None or q.empty:
+                errs.append(lid)
+            else:
+                z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+                if z.empty:
+                    errs.append(lid)
+                else:
+                    out[lid]={pd.Timestamp(d).normalize():float(c) for d,c in zip(z.date,z.close)
+                              if pd.notna(d) and pd.notna(c) and np.isfinite(c)}
+                    date_set.update(out[lid].keys())
+        if n==done+1 or n%25==0 or n==len(lids):
+            elapsed=time.time()-t0
+            _v844_write(status='running',phase='prices',
+                        message=f'Loading cached daily MTM prices {n}/{len(lids)} · current {lid} · MEMORY-ONLY checkpoint mode',
+                        processed=n,total=len(lids),errors=len(errs),error=None,
+                        elapsed_sec=round(elapsed,1),last_heartbeat=datetime.now(timezone.utc).isoformat())
+            _v844_light_progress(n,len(lids),errs,elapsed,lid)
+    return out,sorted(date_set),errs
+
+
+# Override preflight a second time so deployed page exposes V8.44B and the exact engineering diagnosis.
+_v844_preflight_v844b_base = _v844_preflight
+def _v844_preflight():
+    o=_v844_preflight_v844b_base()
+    o['version']='V8.44B'
+    o['build_id']=V844_BUILD_ID
+    o['engineering_hotfix']='Load last completed V8.44A price checkpoint once; disable giant nested price-map pickle/fsync writes that stalled exactly on checkpoint boundaries. Heartbeat every 25 remains. Strategy semantics unchanged.'
+    V844_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    return o
