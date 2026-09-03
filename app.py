@@ -71619,3 +71619,183 @@ if _v847_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v847_home_base:APP.view_functions[ep]=_v847_home_wrap
+
+# =============================================================================
+# V8.48 EMERGENCY-BRAKE ACTION ATTRIBUTION — NO THRESHOLD TUNING
+# =============================================================================
+V848_DIR = DATA_DIR / 'v848_emergency_brake_action_attribution'
+V848_PREFLIGHT = V848_DIR / 'preflight.json'
+V848_STATUS = V848_DIR / 'status.json'
+V848_RESULT = V848_DIR / 'result.json'
+V848_CURVES = V848_DIR / 'equity_curves.csv.gz'
+V848_TRADES = V848_DIR / 'trade_overlay.csv.gz'
+V848_BLOCKED = V848_DIR / 'blocked_entries.csv.gz'
+V848_BUILD_ID = 'v848-emergency-brake-action-attribution-20260903'
+v848_thread = None
+
+def _v848_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V848_STATUS.exists():
+        try:x.update(json.loads(V848_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+def _v848_write(**kw):
+    V848_DIR.mkdir(parents=True,exist_ok=True);x=_v848_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V848_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+def _v848_alive():return v848_thread is not None and v848_thread.is_alive()
+
+def _v848_preflight():
+    import pandas as pd,time
+    t0=time.time();V848_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V847_RESULT.exists() or not V847_SIGNALS.exists():raise RuntimeError('V8.47 result/signals missing; run V8.47 first')
+        r47=json.loads(V847_RESULT.read_text(encoding='utf-8'))
+        if r47.get('verdict')!='EMERGENCY_BRAKE_DOES_NOT_CLEAR_FROZEN_LEDGER_ECONOMIC_BAR':raise RuntimeError('V8.47 failed-economic-bar verdict not present')
+        _,L=_v845_load();T=L[L.variant.eq('TIGHT_PIVOT_SHADOW')];S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False)
+        req=['date','action_state','pit_stress_count'];miss=[c for c in req if c not in S.columns]
+        ok=(len(T)==198 and len(S)>=7000 and not miss)
+        out={'version':'V8.48','build_id':V848_BUILD_ID,'verdict':'PASS' if ok else 'FAIL__FROZEN_LEDGER_OR_SIGNAL_PARITY','error':None,
+             'tight_rows':int(len(T)),'signal_sessions':int(len(S)),'missing_signal_columns':miss,'v847_verdict':r47.get('verdict'),
+             'fixed_signal':'Exact V8.47 expanding past-only PIT thresholds and next-session action_state; zero threshold changes.',
+             'variants':['CONTROL','AMBER_PAUSE_ONLY','RED_TRIM_ONLY','BLACK_EXIT_ONLY'],
+             'hard_exclusions':['NO threshold tuning','NO lookback tuning','NO combined ladder mutation','NO partial profit','NO shorting','NO trailing-stop change','NO full candidate-stream rerun','NO Tiingo','NO universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:out={'version':'V8.48','build_id':V848_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V848_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+def _v848_simulate(L,price,cal,signal,mode):
+    import pandas as pd,numpy as np
+    A=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].sort_values(['entry_date','listing_id'],kind='stable').reset_index(drop=True).copy();rec=A.to_dict('index');ent={};ext={}
+    for i,r in rec.items():ent.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);ext.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    sm={pd.Timestamp(r.date).normalize():str(r.action_state) for _,r in signal.iterrows()};sc={pd.Timestamp(r.date).normalize():int(r.pit_stress_count) for _,r in signal.iterrows()}
+    cash=1.0;pos={};last={};rows=[];trade_rows=[];blocked=[];trim_events=0;black_events=0
+    def px(lid,dt,field,fallback):
+        b=price.get(lid,{}).get(dt);v=(b or {}).get(field) if b else None
+        try:v=float(v)
+        except Exception:v=np.nan
+        return v if np.isfinite(v) and v>0 else fallback
+    for dt in cal:
+        dt=pd.Timestamp(dt).normalize();state=sm.get(dt,'NORMAL');cnt=sc.get(dt,0)
+        open_val=sum(p['shares']*px(p['listing_id'],dt,'open',last.get(i,p['entry_px'])) for i,p in pos.items());eq_open=cash+open_val
+        if mode=='BLACK_EXIT_ONLY' and state=='BLACK' and pos:
+            black_events+=1
+            for i in list(pos.keys()):
+                p=pos.pop(i);op=px(p['listing_id'],dt,'open',last.get(i,p['entry_px']));pro=p['shares']*op;cash+=pro;p['proceeds']+=pro;ov=p['proceeds']/p['capital']-1
+                trade_rows.append({'overlay':mode,'listing_id':p['listing_id'],'entry_date':str(p['entry_date'].date()),'exit_date':str(dt.date()),'capital':p['capital'],'original_ret':p['original_ret'],'overlay_ret':ov,'overlay_reason':'BLACK_EXIT'});last.pop(i,None)
+        elif mode=='RED_TRIM_ONLY' and state=='RED' and pos and eq_open>0 and open_val/eq_open>0.50+1e-12:
+            keep=max(0.0,min(1.0,(0.50*eq_open)/open_val));sell=1.0-keep
+            if sell>1e-12:
+                trim_events+=1
+                for i,p in pos.items():
+                    op=px(p['listing_id'],dt,'open',last.get(i,p['entry_px']));sh=p['shares']*sell;pro=sh*op;cash+=pro;p['shares']-=sh;p['proceeds']+=pro
+        for i in ext.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);pro=p['shares']*xp;cash+=pro;p['proceeds']+=pro;ov=p['proceeds']/p['capital']-1
+            trade_rows.append({'overlay':mode,'listing_id':p['listing_id'],'entry_date':str(p['entry_date'].date()),'exit_date':str(dt.date()),'capital':p['capital'],'original_ret':p['original_ret'],'overlay_ret':ov,'overlay_reason':'ORIGINAL_EXIT'});last.pop(i,None)
+        for i in ent.get(dt,[]):
+            r=rec[i];block=(mode=='AMBER_PAUSE_ONLY' and state=='AMBER') or (mode=='BLACK_EXIT_ONLY' and state=='BLACK')
+            if block:
+                blocked.append({'overlay':mode,'listing_id':str(r['listing_id']),'entry_date':str(dt.date()),'state':state,'stress_count':cnt,'original_ret':float(r['ret']),'original_reason':str(r['reason'])});continue
+            cap=float(r['capital']);ep=float(r['entry_px'])
+            if cash+1e-12<cap:
+                blocked.append({'overlay':mode,'listing_id':str(r['listing_id']),'entry_date':str(dt.date()),'state':'CASH_SHORT','stress_count':cnt,'original_ret':float(r['ret']),'original_reason':str(r['reason'])});continue
+            sh=cap/ep;cash-=cap;pos[i]={'listing_id':str(r['listing_id']),'entry_date':dt,'entry_px':ep,'shares':sh,'capital':cap,'proceeds':0.0,'original_ret':float(r['ret'])};last[i]=ep
+        hv=0.0
+        for i,p in pos.items():
+            cp=px(p['listing_id'],dt,'close',last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;rows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos),cash,state))
+    C=pd.DataFrame(rows,columns=['date','equity','exposure','open_n','cash','action_state']);C['overlay']=mode;C['running_peak']=C.equity.cummax();C['drawdown']=C.equity/C.running_peak-1
+    return C,pd.DataFrame(trade_rows),pd.DataFrame(blocked),{'red_trim_events':trim_events,'black_liquidation_events':black_events,'blocked_entries':len(blocked)}
+
+def _v848_run():
+    import pandas as pd,time
+    t0=time.time();pf=_v848_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.48 preflight must PASS: '+str(pf.get('verdict')))
+    R44,L=_v845_load();S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False);S['date']=pd.to_datetime(S.date,errors='coerce').dt.normalize()
+    ids=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].listing_id.unique();_v848_write(status='running',phase='prices',message='Loading admitted-only cached OPEN+CLOSE',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v846a_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'cached OPEN+CLOSE coverage too low: {cov:.2f}%')
+    variants=['CONTROL','AMBER_PAUSE_ONLY','RED_TRIM_ONLY','BLACK_EXIT_ONLY'];curves=[];trades=[];blocks=[];metrics={}
+    for n,mode in enumerate(variants,1):
+        _v848_write(status='running',phase='simulate',message=f'Action attribution {mode} ({n}/4)',processed=n-1,total=4,errors=len(errs),error=None)
+        C,T,B,st=_v848_simulate(L,price,cal,S,mode);metrics[mode]=_v847_metrics(C,T,B,st);curves.append(C)
+        if len(T):trades.append(T)
+        if len(B):blocks.append(B)
+    c=metrics['CONTROL'];ref=next((x for x in R44.get('portfolio',[]) if x.get('strategy')=='TIGHT_PIVOT_SHADOW'),{})
+    parity={'cagr_abs_diff_pp':100*abs(c['cagr']-float(ref.get('cagr',c['cagr']))),'maxdd_abs_diff_pp':100*abs(c['maxdd']-float(ref.get('maxdd',c['maxdd'])))};parity_ok=parity['cagr_abs_diff_pp']<=.10 and parity['maxdd_abs_diff_pp']<=.10
+    delta={k:{'cagr_pp':100*(metrics[k]['cagr']-c['cagr']),'maxdd_pp':100*(metrics[k]['maxdd']-c['maxdd']),'calmar':metrics[k]['calmar']-c['calmar'],'avg_trade_pp':100*(metrics[k]['avg_trade']-c['avg_trade']),'blocked_winner100':metrics[k].get('blocked_winner100',0)} for k in variants[1:]}
+    drag=min(delta,key=lambda k:delta[k]['cagr_pp'])
+    def eff(k):return delta[k]['maxdd_pp']/max(.25,-delta[k]['cagr_pp'])
+    efficient=max(delta,key=eff)
+    verdict='CONTROL_PARITY_FAIL__DO_NOT_INTERPRET_ACTIONS' if not parity_ok else f'ACTION_ATTRIBUTION_COMPLETE__PRIMARY_CAGR_DRAG_{drag}__BEST_DD_PER_CAGR_{efficient}'
+    r47=json.loads(V847_RESULT.read_text(encoding='utf-8'))
+    result={'version':'V8.48','build_id':V848_BUILD_ID,'verdict':verdict,'parity_ok':parity_ok,'control_parity':parity,'price_coverage_pct':cov,'price_errors':errs[:100],'fixed_signal':pf.get('fixed_signal'),'metrics':metrics,'delta_vs_control':delta,'primary_cagr_drag':drag,'best_dd_per_cagr_action':efficient,'v847_full_ladder_reference':{'cagr':r47.get('emergency_brake',{}).get('cagr'),'maxdd':r47.get('emergency_brake',{}).get('maxdd'),'calmar':r47.get('emergency_brake',{}).get('calmar')},'interpretation':'Action attribution only; signal thresholds/lookbacks/PIT timing are unchanged from V8.47.','next':'Do not tune thresholds. Keep only action(s) with favorable drawdown relief versus CAGR cost for one subsequent predeclared mechanism test. Partial profit and shorting remain separate.','hard_exclusions':pf.get('hard_exclusions'),'elapsed_sec':round(time.time()-t0,1)}
+    V848_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');pd.concat(curves,ignore_index=True).to_csv(V848_CURVES,index=False,compression='gzip')
+    if trades:pd.concat(trades,ignore_index=True).to_csv(V848_TRADES,index=False,compression='gzip')
+    if blocks:pd.concat(blocks,ignore_index=True).to_csv(V848_BLOCKED,index=False,compression='gzip')
+    _v848_write(status='done',phase='complete',message='Done · '+verdict,processed=4,total=4,errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+def _v848_worker():
+    global v848_thread
+    import time
+    t0=time.time()
+    try:_v848_run()
+    except Exception as ex:_v848_write(status='error',phase='failed',message='V8.48 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v848_thread=None
+
+@APP.route('/v848/preflight',methods=['GET','POST'])
+def v848_preflight_route():_v848_preflight();return redirect('/v848')
+
+@APP.route('/v848/run',methods=['GET','POST'])
+def v848_run_route():
+    global v848_thread
+    if not _v848_alive():
+        p=_v848_preflight()
+        if p.get('verdict')=='PASS':
+            _v848_write(status='starting',phase='queued',message='Emergency-Brake Action Attribution accepted',processed=0,total=4,errors=0,error=None);v848_thread=threading.Thread(target=_v848_worker,daemon=True);v848_thread.start()
+    return redirect('/v848')
+
+@APP.get('/api/v848/status')
+def v848_status_api():return jsonify(_v848_status())
+
+@APP.get('/v848/export/<name>')
+def v848_export(name):
+    mp={'curves':V848_CURVES,'trades':V848_TRADES,'blocked':V848_BLOCKED};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+@APP.get('/v848')
+def v848_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v848_status()
+    try:
+        if V848_PREFLIGHT.exists():P=json.loads(V848_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V848_RESULT.exists():R=json.loads(V848_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    M=R.get('metrics',{});D=R.get('delta_vs_control',{});rows=''
+    for k in ['CONTROL','AMBER_PAUSE_ONLY','RED_TRIM_ONLY','BLACK_EXIT_ONLY']:
+        x=M.get(k,{})
+        if x:rows+=f"<tr><td><b>{e(k)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('blocked_entries',0))}</td><td>{e(x.get('red_trim_events',0))}</td><td>{e(x.get('black_liquidation_events',0))}</td></tr>"
+    dr=''.join(f"<tr><td><b>{e(k)}</b></td><td>{n(v.get('cagr_pp'))} pp</td><td>{n(v.get('maxdd_pp'))} pp</td><td>{n(v.get('calmar'),3)}</td><td>{e(v.get('blocked_winner100',0))}</td></tr>" for k,v in D.items())
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a><div class="c"><h1>V8.48 Emergency-Brake Action Attribution</h1><div class="o"><b>不调任何 stress threshold：</b>只拆 V8.47 动作：AMBER 暂停新仓 / RED 减仓 / BLACK 清仓。不开 partial profit、不做空。</div></div><div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V848_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight ledger {e(P.get('tight_rows','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v848/preflight"><button>A. Run V8.48 Preflight</button></form><br><form method="post" action="/v848/run"><button>B. Run Action Attribution</button></form></div><div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div><div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div><div class="c"><h2>Control Parity</h2><p>CAGR diff {n(R.get('control_parity',{}).get('cagr_abs_diff_pp'),3)} pp · MaxDD diff {n(R.get('control_parity',{}).get('maxdd_abs_diff_pp'),3)} pp</p></div><div class="c"><h2>Isolated Action Economics</h2><div style="overflow:auto"><table><tr><th>Variant</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>Avg trade</th><th>Avg exposure</th><th>Blocked</th><th>RED trims</th><th>BLACK exits</th></tr>{rows or '<tr><td colspan=9>Run first.</td></tr>'}</table></div></div><div class="c"><h2>Δ vs Control</h2><table><tr><th>Action</th><th>Δ CAGR</th><th>Δ MaxDD</th><th>Δ Calmar</th><th>Blocked +100</th></tr>{dr or '<tr><td colspan=5>Run first.</td></tr>'}</table><p><b>Primary CAGR drag:</b> {e(R.get('primary_cagr_drag','—'))}<br><b>Best DD relief / CAGR cost:</b> {e(R.get('best_dd_per_cagr_action','—'))}</p></div><div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','先跑 V8.48。'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v848/export/curves'>Equity curves CSV.GZ</a> · <a href='/v848/export/trades'>Trade overlay CSV.GZ</a> · <a href='/v848/export/blocked'>Blocked entries CSV.GZ</a></p>" if R else ''}</div></div></body></html>'''
+
+_v848_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v848_home_base is not None:
+    def _v848_home_wrap(*args,**kwargs):
+        resp=_v848_home_base(*args,**kwargs);card="""<div id='v848-home-card-real' style='background:#eef2ff;border:7px solid #4f46e5;border-radius:26px;padding:26px;margin:20px 0'><h2>🔬 V8.48 Emergency-Brake Action Attribution</h2><p>V8.47 全梯级救回撤但摧毁 CAGR；本版不调 threshold，只拆 AMBER暂停新仓 / RED减仓 / BLACK清仓。</p><a href='/v848'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.48</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v848-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v848_home_base:APP.view_functions[ep]=_v848_home_wrap
