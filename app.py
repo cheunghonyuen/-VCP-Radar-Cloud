@@ -18503,7 +18503,7 @@ def _v618_enrich_trades(t0):
         raise RuntimeError('缺少 V6.17 Stage 2 trades cache；先完成 Stage 2')
     T=pd.read_csv(V617FV2_TRADES,compression='gzip')
     if T.empty:raise RuntimeError('Stage 2 trades cache 为空')
-    T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+    T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
     T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
 
     M=_v615b_read_manifest()
@@ -18884,8 +18884,8 @@ def _v619_load_base(t0):
     req=['listing_id','ticker','entry_date','exit_date','entry_px','exit_px']
     miss=[c for c in req if c not in T.columns]
     if miss:raise RuntimeError('Stage 2 trades 缺字段: '+','.join(miss))
-    T=T.copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
-    T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T=T.copy();T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
+    T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
     T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']).copy();T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
     if T.empty:raise RuntimeError('Stage 2 trades 没有可用交易')
     if 'dna' not in T.columns:T['dna']=''
@@ -19042,7 +19042,7 @@ def _v620_load(t0):
     req=['listing_id','ticker','entry_date','exit_date','entry_px','exit_px']
     miss=[c for c in req if c not in T.columns]
     if miss:raise RuntimeError('Stage 2 trades 缺字段: '+','.join(miss))
-    T=T.copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize();T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T=T.copy();T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize();T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
     T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']);T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
     if 'dna' not in T.columns:T['dna']=''
     if 'exit_reason' not in T.columns:T['exit_reason']=''
@@ -19214,7 +19214,7 @@ def _v621_load(t0):
     req=['listing_id','ticker','entry_date','exit_date','entry_px','exit_px']
     miss=[c for c in req if c not in T.columns]
     if miss:raise RuntimeError('Stage 2 trades 缺字段: '+','.join(miss))
-    T=T.copy();T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize();T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T=T.copy();T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize();T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
     T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']);T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
     if 'dna' not in T.columns:T['dna']=''
     if 'exit_reason' not in T.columns:T['exit_reason']=''
@@ -19619,8 +19619,8 @@ def _v622_load_trades():
     miss=[c for c in req if c not in T.columns]
     if miss:raise RuntimeError('Stage-2 trades 缺字段: '+','.join(miss))
     T=T.copy();T['ticker']=T.ticker.astype(str).str.upper().str.strip()
-    T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
-    T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
+    T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
+    T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce');T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
     T=T.dropna(subset=['entry_date','exit_date','entry_px','exit_px']);T=T[(T.entry_px>0)&(T.exit_px>0)].copy()
     if 'dna' not in T.columns:T['dna']=''
     if 'exit_reason' not in T.columns:T['exit_reason']=''
@@ -22279,7 +22279,7 @@ def _v632_run():
         p=V630_DIR/'base_trade_path_reconciliation.csv.gz'
         if not p.exists():raise RuntimeError('找不到 V6.30 base_trade_path_reconciliation.csv.gz')
         P=pd.read_csv(p,compression='gzip')
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         P['exit_date']=pd.to_datetime(P.exit_date,errors='coerce').dt.normalize()
         P['mfe']=pd.to_numeric(P.mfe,errors='coerce')
         if 'admitted' in P.columns:P=P[P.admitted.astype(bool)]
@@ -30605,12 +30605,12 @@ def _v665_run():
         if not V644_TRADE_CACHE.exists():
             raise RuntimeError('V6.44 Trigger Cache 不存在；本轮禁止重跑历史扫描')
         T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
         if T.empty:raise RuntimeError('V6.44 Trigger Cache 没有冻结 Breakout variant')
 
-        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+        T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
         T['exit_date']=pd.to_datetime(T.exit_date,errors='coerce').dt.normalize()
-        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
         T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
         T['_ret']=T.exit_px/T.entry_px-1
         T['_reason']=T.exit_reason.astype(str)
@@ -30996,10 +30996,10 @@ def _v667_run():
         if not V644_TRADE_CACHE.exists():
             raise RuntimeError('V6.44 Trigger Cache 不存在；本轮禁止重建历史扫描')
         T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
         if T.empty:raise RuntimeError('V6.44 cache 没有冻结 Breakout variant')
-        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
-        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
         T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
         T['_ret']=T.exit_px/T.entry_px-1
         T['_reason']=T.exit_reason.astype(str)
@@ -31229,9 +31229,9 @@ def _v668_run():
         if not V644_TRADE_CACHE.exists():
             raise RuntimeError('V6.44 Trigger Cache 不存在')
         T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
-        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
-        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
         T['exit_px']=pd.to_numeric(T.exit_px,errors='coerce')
         T['_ret']=T.exit_px/T.entry_px-1
         T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
@@ -31519,9 +31519,9 @@ def _v669_run():
 
         if not V644_TRADE_CACHE.exists():raise RuntimeError('V6.44 Trigger Cache 不存在')
         T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
-        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
-        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
         T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
 
         M=_v615b_read_manifest()
@@ -32051,9 +32051,9 @@ def _v670b_run():
 
         if not V644_TRADE_CACHE.exists():raise RuntimeError('V6.44 Trigger Cache 不存在')
         T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-        T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
-        T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
-        T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+        T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+        T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+        T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
         T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
 
         M=_v615b_read_manifest()
@@ -33115,8 +33115,8 @@ def _v672_run():
         try:
             if V644_TRADE_CACHE.exists():
                 T=pd.read_csv(V644_TRADE_CACHE,compression='gzip')
-                T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
-                T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
+                T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+                T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
                 mfe_col=next((c for c in ['mfe','MFE','mfe_pct','max_favorable_excursion'] if c in T.columns),None)
                 if mfe_col:
                     J=T[['listing_id','entry_date',mfe_col]].copy()
@@ -34060,9 +34060,9 @@ def _v676_run():
         need=['listing_id','entry_date','entry_px','control_reason','control_ret']
         miss=[c for c in need if c not in P.columns]
         if miss: raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
-        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
         P=P.dropna(subset=['entry_date','entry_px']).copy()
 
         # Use the same V6.17 manifest + per-listing cached-price reader already proven by V6.67/V6.70F.
@@ -34267,9 +34267,9 @@ def _v677_run():
         miss=[c for c in need if c not in P.columns]
         if miss: raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         P=P.copy()
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
-        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
         P=P.dropna(subset=['listing_id','entry_date','entry_px']).reset_index(drop=True)
 
         M=_v615b_read_manifest()
@@ -34530,10 +34530,10 @@ def _v678_run():
         miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         P=P.copy()
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
-        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
         P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce')
         P=P.dropna(subset=['entry_date','control_exit_date','entry_px']).copy()
         P=P[P.control_reason.astype(str).str.contains('STOP7',case=False,regex=False)].copy()
@@ -35072,12 +35072,12 @@ def _v679_run():
         miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 paired cache 缺字段: '+','.join(miss))
         P=P[need].copy()
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
-        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
         P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce')
-        P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+        P['control_ret']=pd.to_numeric(P['control_ret'],errors='coerce')
         P=P.dropna(subset=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px']).copy()
         P=P.sort_values(['entry_date','listing_id']).reset_index(drop=True)
         P['trade_id']=[f'{i}|{r.listing_id}|{pd.Timestamp(r.entry_date).date()}' for i,r in P.iterrows()]
@@ -36203,9 +36203,9 @@ def _v680_run():
 
         # exact entry price map from V6.69 cache, point-in-time safe
         P=pd.read_csv(V669_TRADES,compression='gzip')
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
-        P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+        P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
         emap={(str(r.listing_id),pd.Timestamp(r.entry_date).normalize()):float(r.entry_px)
               for r in P.dropna(subset=['listing_id','entry_date','entry_px']).itertuples(index=False)}
         F['entry_px']=[emap.get((str(a),pd.Timestamp(b).normalize()),np.nan) for a,b in zip(F.listing_id,F.entry_date)]
@@ -39654,8 +39654,8 @@ def _v6892_run():
         miss=[c for c in need if c not in S.columns]
         if miss:raise RuntimeError('V6.89 frozen trade file 缺字段: '+','.join(miss))
         S['ret']=pd.to_numeric(S.ret,errors='coerce')
-        S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
-        S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
+        S['entry_date']=pd.to_datetime(S['entry_date'],errors='coerce').dt.normalize()
+        S['exit_date']=pd.to_datetime(S['exit_date'],errors='coerce').dt.normalize()
         S=S.dropna(subset=['ret','entry_date','exit_date']).sort_values('ret',ascending=False).reset_index(drop=True)
         top=S.iloc[0].copy()
 
@@ -39906,9 +39906,9 @@ def _v6893_run():
         need=['listing_id','entry_date','entry_px','exit_date','exit_px','ret']
         miss=[c for c in need if c not in S.columns]
         if miss:raise RuntimeError('V6.89 frozen trade file 缺字段: '+','.join(miss))
-        S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
-        S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
-        S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce')
+        S['entry_date']=pd.to_datetime(S['entry_date'],errors='coerce').dt.normalize()
+        S['exit_date']=pd.to_datetime(S['exit_date'],errors='coerce').dt.normalize()
+        S['entry_px']=pd.to_numeric(S['entry_px'],errors='coerce')
         S['exit_px']=pd.to_numeric(S.exit_px,errors='coerce')
         S['ret']=pd.to_numeric(S.ret,errors='coerce')
         S=S.dropna(subset=['entry_date','exit_date','entry_px','exit_px','ret']).copy()
@@ -43976,8 +43976,8 @@ def _v697_run():
 
         if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
         P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
-        P['listing_id']=P.listing_id.astype(str)
-        P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str)
+        P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
 
         order_map=P[['listing_id','entry_date','candidate_order']].drop_duplicates(
             ['listing_id','entry_date'],keep='first'
@@ -44357,7 +44357,7 @@ def _v698_run():
 
         if not V669_TRADES.exists():raise RuntimeError('V6.69 paired cache 不存在')
         P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
-        P['listing_id']=P.listing_id.astype(str); P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str); P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         om=P[['listing_id','entry_date','candidate_order']].drop_duplicates(['listing_id','entry_date'],keep='first')
         F=F.merge(om,on=['listing_id','entry_date'],how='left')
         F['candidate_order']=pd.to_numeric(F.candidate_order,errors='coerce')
@@ -46023,7 +46023,7 @@ def _v704_run():
         if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
         F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
@@ -47125,7 +47125,7 @@ def _v706_run():
         if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
         F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
@@ -47801,7 +47801,7 @@ def _v708_run():
         if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
         F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
@@ -48462,7 +48462,7 @@ def _v710_run():
         if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
         F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
@@ -48904,7 +48904,7 @@ def _v711_run():
         if not ffp.exists() or not V669_TRADES.exists():raise RuntimeError('缺 V6.94/V6.69 candidate cache')
         F=pd.read_csv(ffp,compression='gzip');P=pd.read_csv(V669_TRADES,compression='gzip').reset_index(drop=False).rename(columns={'index':'candidate_order'})
         F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize();F['exit_date']=pd.to_datetime(F.exit_date,errors='coerce').dt.normalize();F['ret']=pd.to_numeric(F.ret,errors='coerce')
-        P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+        P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
         need=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','candidate_order'];miss=[c for c in need if c not in P.columns]
         if miss:raise RuntimeError('V6.69 cache 缺字段: '+','.join(miss))
         meta=P[need].copy();meta['control_exit_date']=pd.to_datetime(meta.control_exit_date,errors='coerce').dt.normalize();meta=meta.drop_duplicates(['listing_id','entry_date'],keep='first')
@@ -67684,7 +67684,7 @@ def _v835_run():
     if pf.get('verdict')!='PASS':raise RuntimeError('Preflight must PASS first')
     _v835_write(status='running',phase='load',message='Loading recovered V6.69 CONTROL stream + historical listing manifest',processed=0,total=0,errors=0)
     S=pd.read_csv(V835_SOURCE,compression='gzip',low_memory=False)
-    S['listing_id']=S.listing_id.astype(str);S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize();S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce');S['control_ret']=pd.to_numeric(S.control_ret,errors='coerce')
+    S['listing_id']=S['listing_id'].astype(str);S['entry_date']=pd.to_datetime(S['entry_date'],errors='coerce').dt.normalize();S['entry_px']=pd.to_numeric(S['entry_px'],errors='coerce');S['control_ret']=pd.to_numeric(S.control_ret,errors='coerce')
     S=S.dropna(subset=['listing_id','entry_date','entry_px','control_ret']).copy()
     M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()}
     eng=_v835_engine();groups=list(S.groupby('listing_id',sort=True));total=len(groups);rows=[];errs=0
@@ -68219,8 +68219,8 @@ def _v838_load_streams():
     need_p=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_reason','control_ret','candidate_order']
     miss=[c for c in need_p if c not in P.columns]
     if miss:raise RuntimeError('V6.69 lineage schema missing: '+','.join(miss))
-    P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize();P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce')
-    P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize();P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce');P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+    P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize();P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce')
+    P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize();P['control_exit_px']=pd.to_numeric(P.control_exit_px,errors='coerce');P['control_ret']=pd.to_numeric(P['control_ret'],errors='coerce')
     P=P.dropna(subset=['listing_id','entry_date','entry_px','control_exit_date','control_exit_px','control_ret']).copy()
     # V8.35 is trade-level and can contain repeated recovered-lineage rows for
     # the same listing/date. PIT membership is listing/date-level, so reconcile
@@ -68860,8 +68860,8 @@ def _v840_preflight():
 def _v840_load():
     import pandas as pd, numpy as np
     P=pd.read_csv(V840_LINEAGE,compression='gzip',low_memory=False).reset_index(drop=False).rename(columns={'index':'candidate_order'})
-    P['listing_id']=P.listing_id.astype(str)
-    P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
+    P['listing_id']=P['listing_id'].astype(str)
+    P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
     P['control_exit_date']=pd.to_datetime(P.control_exit_date,errors='coerce').dt.normalize()
     for c in ['entry_px','control_exit_px','control_ret']:P[c]=pd.to_numeric(P[c],errors='coerce')
     P=P.dropna(subset=['listing_id','entry_date','control_exit_date','entry_px','control_exit_px','control_ret']).copy()
@@ -69151,9 +69151,9 @@ if _v840_home_base is not None:
 
 
 # ================= V8.41 PIVOT-CROSS / SIGNAL-DATE TIME-SEMANTICS AUDIT =================
-V841_DIR=DATA_DIR/'v841c_self_contained_exact_trigger_runtime_fix'
+V841_DIR=DATA_DIR/'v841d_pandas_pivot_method_collision_fix'
 V841_PREFLIGHT=V841_DIR/'preflight.json';V841_RESULT=V841_DIR/'result.json';V841_DETAIL=V841_DIR/'detail.csv.gz'
-V841_BUILD_ID='v841c-self-contained-trigger-fix-20260903'
+V841_BUILD_ID='v841d-pandas-pivot-method-collision-fix-20260903'
 V841_S2=V834_V617;V841_V644=V644_TRADE_CACHE;V841_V669=V669_TRADES;V841_V835=V835_DETAIL
 
 def _v841_bool(s):
@@ -69167,8 +69167,8 @@ def _v841_pf(df,m):
     return gp/gl if gl>1e-12 else None
 
 def _v841_stats(D,c):
-    m=D[c].fillna(False).astype(bool);r=pd.to_numeric(D.control_ret,errors='coerce')
-    w20=r>=.20;w30=r>=.30;st=D.control_reason.astype(str).str.contains('STOP7',regex=False)
+    m=D[c].fillna(False).astype(bool);r=pd.to_numeric(D['control_ret'],errors='coerce')
+    w20=r>=.20;w30=r>=.30;st=D['control_reason'].astype(str).str.contains('STOP7',regex=False)
     return {'semantic':c,'pass_n':int(m.sum()),'pass_pct':100*float(m.mean()),
       'winner20_retention_pct':100*int((m&w20).sum())/max(1,int(w20.sum())),
       'winner30_retention_pct':100*int((m&w30).sum())/max(1,int(w30.sum())),
@@ -69224,8 +69224,8 @@ def _v841_preflight():
                      'fallback':'RECONSTRUCT_FROM_EXACT_V644_GENERATOR_INPUT__V622_STAGE2_FROZEN'}
     except Exception as ex:
         verdict='ERROR';err=f'{type(ex).__name__}: {ex}';schema_note={}
-    o={'version':'V8.41C','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
-       'contract':'V8.41C uses exact V6.44 generator input (_v622_load_trades + original V624 date filter) and a self-contained semantic clone of the historical TIGHT trigger. Key-based Series access removes runtime attribute/method collisions; no threshold changes.'}
+    o={'version':'V8.41D','build_id':V841_BUILD_ID,'verdict':verdict,'error':err,'schema_note':schema_note,
+       'contract':"V8.41D fixes the exact pandas collision proven by traceback: DataFrame.pivot is a method, so F.pivot was wrong. All V8.41 dataframe columns now use bracket access, including pivot, pivot_cross and signal_date. No threshold changes."}
     V841_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2),encoding='utf-8');return o
 
 V841_STATUS=V841_DIR/'status.json'
@@ -69253,18 +69253,18 @@ def _v841_run():
     # EXACT historical V6.44 source contract copied from _v644_build:
     # T=_v622_load_trades(); filter V624_START..V624_END; reset index; THEN assign stage2_row_id.
     S=_v622_load_trades().copy()
-    S['listing_id']=S.listing_id.astype(str)
-    S['entry_date']=pd.to_datetime(S.entry_date,errors='coerce').dt.normalize()
-    S['exit_date']=pd.to_datetime(S.exit_date,errors='coerce').dt.normalize()
-    S['entry_px']=pd.to_numeric(S.entry_px,errors='coerce')
+    S['listing_id']=S['listing_id'].astype(str)
+    S['entry_date']=pd.to_datetime(S['entry_date'],errors='coerce').dt.normalize()
+    S['exit_date']=pd.to_datetime(S['exit_date'],errors='coerce').dt.normalize()
+    S['entry_px']=pd.to_numeric(S['entry_px'],errors='coerce')
     S=S[(S.entry_date>=V624_START)&(S.entry_date<=V624_END)].copy()
     S=S.dropna(subset=['listing_id','entry_date','exit_date','entry_px']).reset_index(drop=True)
     S['stage2_row_id']=np.arange(len(S),dtype=int)
 
     T=pd.read_csv(V841_V644,compression='gzip',low_memory=False)
-    T=T[T.variant.astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
-    T['listing_id']=T.listing_id.astype(str);T['entry_date']=pd.to_datetime(T.entry_date,errors='coerce').dt.normalize()
-    T['entry_px']=pd.to_numeric(T.entry_px,errors='coerce')
+    T=T[T['variant'].astype(str).eq('TIGHT_BREAKOUT_WITH_VOLUME_CONTEXT')].copy()
+    T['listing_id']=T['listing_id'].astype(str);T['entry_date']=pd.to_datetime(T['entry_date'],errors='coerce').dt.normalize()
+    T['entry_px']=pd.to_numeric(T['entry_px'],errors='coerce')
     T=T.dropna(subset=['listing_id','entry_date','entry_px']).copy()
 
     _v841_write(status='running',phase='reconstruct',message='Reconstructing exact V6.44 provenance from frozen Stage-2',processed=1,total=4,errors=0)
@@ -69315,8 +69315,8 @@ def _v841_run():
     if recon_cov<95:raise RuntimeError(f'Exact V6.44 provenance reconstruction coverage too low: exact={recon_cov:.2f}% date={date_cov:.2f}% median_px_rel={px_med}')
 
     P=pd.read_csv(V841_V669,compression='gzip',low_memory=False)
-    P['listing_id']=P.listing_id.astype(str);P['entry_date']=pd.to_datetime(P.entry_date,errors='coerce').dt.normalize()
-    P['entry_px']=pd.to_numeric(P.entry_px,errors='coerce');P['control_ret']=pd.to_numeric(P.control_ret,errors='coerce')
+    P['listing_id']=P['listing_id'].astype(str);P['entry_date']=pd.to_datetime(P['entry_date'],errors='coerce').dt.normalize()
+    P['entry_px']=pd.to_numeric(P['entry_px'],errors='coerce');P['control_ret']=pd.to_numeric(P['control_ret'],errors='coerce')
     JJ=J[['listing_id','entry_date','entry_px','legacy_pivot','parent_entry_date','reconstructed_signal_date']].copy()
     JJ=JJ.dropna(subset=['legacy_pivot']).drop_duplicates(['listing_id','entry_date','entry_px'],keep='first')
     P['_pxk']=P.entry_px.round(6);JJ['_pxk']=JJ.entry_px.round(6)
@@ -69324,9 +69324,9 @@ def _v841_run():
 
     F=pd.read_csv(V841_V835,compression='gzip',low_memory=False)
     F['listing_id']=F.listing_id.astype(str);F['entry_date']=pd.to_datetime(F.entry_date,errors='coerce').dt.normalize()
-    F=F[_v841_bool(F.audit_ok)].copy()
-    F['current_pivot']=pd.to_numeric(F.pivot,errors='coerce');F['v835_pivot_cross']=_v841_bool(F.pivot_cross)
-    F['v835_signal_date']=pd.to_datetime(F.signal_date,errors='coerce').dt.normalize()
+    F=F[_v841_bool(F['audit_ok'])].copy()
+    F['current_pivot']=pd.to_numeric(F['pivot'],errors='coerce');F['v835_pivot_cross']=_v841_bool(F['pivot_cross'])
+    F['v835_signal_date']=pd.to_datetime(F['signal_date'],errors='coerce').dt.normalize()
     FF=F[['listing_id','entry_date','current_pivot','v835_pivot_cross','v835_signal_date']].sort_values(['listing_id','entry_date']).drop_duplicates(['listing_id','entry_date'])
     D=D.merge(FF,on=['listing_id','entry_date'],how='left',validate='many_to_one')
 
@@ -69377,7 +69377,7 @@ def _v841_run():
     else:diag='PIVOT_CROSS_SEMANTICS_NOT_YET_EXPLAINED__DO_NOT_CHANGE_TRIGGER'
 
     sem=['recovered_v644_exact_trigger','recovered_v644_high_cross','legacy_pivot_close_cross','current_pivot_high_cross','current_pivot_close_cross','v835_pivot_cross']
-    R={'version':'V8.41C','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
+    R={'version':'V8.41D','build_id':V841_BUILD_ID,'diagnosis':diag,'rows':int(len(X)),
        'source_parity':{'v644_provenance_reconstruction_coverage_pct':recon_cov,
                         'v644_entry_date_reconstruction_coverage_pct':date_cov,
                         'v644_entry_price_median_rel_diff_pct':(100*px_med if px_med is not None else None),
@@ -69400,7 +69400,7 @@ def _v841_worker():
         import traceback
         tb=traceback.format_exc()
         V841_DIR.mkdir(parents=True,exist_ok=True)
-        V841_RESULT.write_text(json.dumps({'version':'V8.41C','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
+        V841_RESULT.write_text(json.dumps({'version':'V8.41D','build_id':V841_BUILD_ID,'diagnosis':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
         _v841_write(status='error',phase='failed',message='Failed',error=f'{type(ex).__name__}: {ex}',traceback=tb[-2400:],errors=1)
 
 @APP.route('/v841/preflight',methods=['GET','POST'])
@@ -69437,7 +69437,7 @@ def v841_page():
         except:return '—'
     rows=''.join(f"<tr><td>{e(z.get('semantic'))}</td><td>{e(z.get('pass_n'))}</td><td>{n(z.get('pass_pct'))}%</td><td>{n(z.get('winner20_retention_pct'))}%</td><td>{n(z.get('winner30_retention_pct'))}%</td><td>{n(z.get('stop_rejection_pct'))}%</td><td>{n(z.get('pass_pf'),3)}</td></tr>" for z in T)
     return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1000px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:13px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
-<div class='c'><h1>V8.41C Exact V6.44 Trigger Runtime Fix</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h1>V8.41D Pandas Pivot-Method Collision Fix</h1><div class='warn'><b>只查 Trigger 语义，不调阈值。</b> Recovered V6.44: Stage-2 pivot + HIGH breakout + volume context + next-open. 对比 V8.35 current supply pivot + CLOSE cross。0 Tiingo / 0 rescan.</div></div>
 <div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V841_BUILD_ID))}</p><p><b>Error:</b> {e(P.get('error','—'))}</p><form method='post' action='/v841/preflight'><button>A. Run Signal-Semantics Preflight</button></form><br><form method='post' action='/v841/run'><button>B. Run Exact Pivot-Cross Audit</button></form></div>
 <div class='c'><h2>Status</h2><p>{e(_v841_status().get('status'))} · {e(_v841_status().get('phase'))} · {e(_v841_status().get('message'))}</p><p><b>Runtime Error:</b> {e(_v841_status().get('error') or 'None')}</p><pre style='white-space:pre-wrap;font-size:11px'>{e(_v841_status().get('traceback') or '')}</pre><p><small>运行中请手动刷新本页查看进度；不会自动无限刷新。</small></p></div>
 <div class='c'><h2>Diagnosis</h2><div class='ok'>{e(R.get('diagnosis','—'))}</div></div>
@@ -69450,7 +69450,7 @@ _v841_home_base=APP.view_functions.get('home') or APP.view_functions.get('index'
 if _v841_home_base is not None:
     def _v841_home_wrap(*args,**kwargs):
         resp=_v841_home_base(*args,**kwargs)
-        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41C Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
+        card="""<div id='v841-home-card-real' style='background:#fff7ed;border:6px solid #f59e0b;border-radius:24px;padding:26px;margin:20px 0'><h2>V8.41D Pivot-Cross / Signal-Date Semantics</h2><p>不调参数。拆开 recovered V6.44 的 Stage-2 pivot + HIGH breakout 与 V8.35 current supply pivot + CLOSE cross。</p><a href='/v841'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.41</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True);p=body.find('<body');gt=body.find('>',p) if p>=0 else -1
             body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body);return resp
