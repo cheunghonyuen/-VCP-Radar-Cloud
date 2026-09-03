@@ -72341,7 +72341,7 @@ def v850_page():
     def row(name,x):
         return f"<tr><td><b>{e(name)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('trade_count',0))}</td><td>{e(x.get('winner100',0))}</td></tr>"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>V8.50E BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
+<div class="c"><h1>V8.50S BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
 <div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V850_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight candidates {e(P.get('tight_candidate_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v850/preflight"><button>A. Run V8.50 Preflight</button></form><br><form method="post" action="/v850/run"><button>B. Run BLACK→NORMAL Full Causal A/B</button></form></div>
 <div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
 <div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
@@ -73273,7 +73273,7 @@ _v850o_home_base=APP.view_functions.get('home') or APP.view_functions.get('index
 if _v850o_home_base is not None:
     def _v850o_home_wrap(*args,**kwargs):
         resp=_v850o_home_base(*args,**kwargs)
-        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50R Trusted Prefix Batch Reuse</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50O</button></a></div>"""
+        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50S Direct Batch Subprocess Pool</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50S</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850o-home-card' not in body:
@@ -73283,3 +73283,166 @@ if _v850o_home_base is not None:
         return card+str(resp)
     for _ep,_vf in list(APP.view_functions.items()):
         if _vf is _v850o_home_base:APP.view_functions[_ep]=_v850o_home_wrap
+
+
+# =============================================================================
+# V8.50S — DIRECT BATCH SUBPROCESS POOL (NO FLASK FORK, NO RECURSIVE SPLIT)
+# Architecture fix after V8.50R: never multiprocessing.Process/fork the large
+# Flask+pandas parent. A small ThreadPool only supervises short-lived standalone
+# batch helper subprocesses. A timed-out batch is retried once at item granularity
+# through the same direct subprocess helper; there is no recursive batch splitting.
+# Strategy/economics remain frozen.
+# =============================================================================
+V850_BUILD_ID='v850s-direct-batch-subprocess-pool-20260903'
+V850S_WORKERS=max(1,min(3,int(os.environ.get('V850S_WORKERS','2'))))
+V850S_BATCH_SIZE=max(4,min(32,int(os.environ.get('V850S_BATCH_SIZE','16'))))
+V850S_BATCH_TIMEOUT=max(20,min(120,int(os.environ.get('V850S_BATCH_TIMEOUT','45'))))
+V850S_ITEM_TIMEOUT=max(12,min(60,int(os.environ.get('V850S_ITEM_TIMEOUT','25'))))
+
+
+def _v850_status():
+    base={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None,'build_id':V850_BUILD_ID,'run_id':None}
+    if V850_STATUS.exists():
+        try:
+            old=json.loads(V850_STATUS.read_text(encoding='utf-8'))
+            # Never surface a stale O/Q/R status under S.
+            if old.get('build_id')==V850_BUILD_ID: base.update(old)
+        except Exception:pass
+    return base
+
+
+def _v850_write(**kw):
+    import os as _os, time as _time
+    V850_DIR.mkdir(parents=True,exist_ok=True)
+    x=_v850_status()
+    if kw.get('status')=='starting' or not x.get('run_id'):
+        x['run_id']=f"{int(_time.time())}-{_os.getpid()}"
+    x.update(kw);x['build_id']=V850_BUILD_ID;x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    tmp=V850_STATUS.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    os.replace(tmp,V850_STATUS)
+    return x
+
+
+def _v850s_run_batch_once(items, timeout_sec):
+    """One direct helper subprocess. No multiprocessing fork and no recursion."""
+    import subprocess,sys,pickle,hashlib,time
+    if not items:return {},[]
+    V850K_TMP_DIR.mkdir(parents=True,exist_ok=True);_v850k_write_helper()
+    token=hashlib.sha1(('|'.join(str(x['lid']) for x in items)+f'|S|{time.time_ns()}').encode()).hexdigest()
+    mf=V850K_TMP_DIR/f'{token}.json';op=V850K_TMP_DIR/f'{token}.pkl'
+    mf.write_text(json.dumps(items,ensure_ascii=False),encoding='utf-8')
+    try:
+        try:
+            cp=subprocess.run([sys.executable,str(V850K_BATCH_HELPER),str(mf),str(op),str(V624_START.date()),str(V624_END.date())],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=int(timeout_sec))
+        except subprocess.TimeoutExpired:
+            return {},[{'listing_id':str(x['lid']),'error':f'direct_batch_timeout_{int(timeout_sec)}s'} for x in items]
+        if cp.returncode!=0 or not op.exists():
+            msg=(cp.stderr.decode('utf-8','ignore')[-220:] if cp.stderr else f'exit_{cp.returncode}').replace('\n',' ')[:180]
+            return {},[{'listing_id':str(x['lid']),'error':'direct_batch_worker_error:'+msg} for x in items]
+        with open(op,'rb') as f:payload=pickle.load(f)
+        maps={}
+        for lid,m in (payload.get('maps') or {}).items():
+            nm=_v850k_normalize_map(m)
+            if nm:maps[str(lid)]=nm
+        ee=list(payload.get('errors') or [])
+        # Any item omitted by helper without an explicit error is still a failure.
+        em={str(e.get('listing_id')) for e in ee}
+        for it in items:
+            lid=str(it['lid'])
+            if lid not in maps and lid not in em:ee.append({'listing_id':lid,'error':'direct_batch_no_result'})
+        return maps,ee
+    finally:
+        for p in (mf,op):
+            try:p.unlink()
+            except Exception:pass
+
+
+def _v850s_parallel_pass(items,batch_size,timeout_sec,label,total,out,dates,errs,counter):
+    import concurrent.futures
+    if not items:return []
+    chunks=[items[i:i+batch_size] for i in range(0,len(items),batch_size)]
+    failed=[]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=V850S_WORKERS,thread_name_prefix='v850s-helper') as ex:
+        futs={ex.submit(_v850s_run_batch_once,ch,timeout_sec):ch for ch in chunks}
+        for fut in concurrent.futures.as_completed(futs):
+            ch=futs[fut]
+            try:maps,ee=fut.result()
+            except BaseException as exx:
+                maps={};ee=[{'listing_id':str(x['lid']),'error':f'{label}_supervisor:{type(exx).__name__}:{str(exx)[:160]}'} for x in ch]
+            for lid,mp in maps.items():out[lid]=mp;dates.update(mp.keys())
+            bad_ids={str(e.get('listing_id')) for e in ee}
+            failed.extend([x for x in ch if str(x['lid']) not in maps])
+            errs.extend(ee)
+            counter[0]+=len(ch);cov=100*len(out)/max(1,total)
+            _v850_write(status='running',phase='batch_prices',message=f'V8.50S {label} {counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)} · workers {V850S_WORKERS}',processed=min(total,counter[0]),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,error=None)
+    return failed
+
+
+def _v850_prices_progress(lids):
+    import time
+    t0=time.time();ids,trusted,prefix,tail,missing,counts=_v850o_inventory(lids);total=len(ids)
+    out={};dates=set();errs=[]
+    trusted_set=set(ids[:trusted])
+    errs.extend({'listing_id':x,'error':'trusted_prefix_asset_missing'} for x in missing if x in trusted_set)
+    projected=100*len(prefix+tail)/max(1,total)
+    _v850_write(status='running',phase='inventory_done',message=f'V8.50S inventory done · prefix {len(prefix)}/{trusted} · tail {len(tail)} · missing {len(missing)} · projected {projected:.2f}%',processed=0,total=total,errors=len(errs),current_listing='',inventory=counts,projected_coverage_pct=projected,error=None)
+    if projected<95:raise RuntimeError(f'Projected price coverage below 95%: {projected:.2f}%')
+
+    counter=[0]
+    # One direct, non-forking batch pass over all known assets.
+    primary=list(prefix)+list(tail)
+    failed=_v850s_parallel_pass(primary,V850S_BATCH_SIZE,V850S_BATCH_TIMEOUT,'DIRECT_BATCH',total,out,dates,errs,counter)
+
+    # Retry only failed assets, once, one item per standalone helper subprocess.
+    if failed:
+        # Remove first-pass errors for retry candidates from the headline count; final failures are appended below.
+        retry_ids={str(x['lid']) for x in failed}
+        errs=[e for e in errs if str(e.get('listing_id')) not in retry_ids]
+        _v850_write(status='running',phase='repair',message=f'V8.50S one-pass isolated retry · {len(failed)} assets only',processed=counter[0],total=total,errors=len(errs),current_listing='',price_coverage_pct=100*len(out)/max(1,total),error=None)
+        # Counter should not exceed total on retries, so use a private retry counter and status still reports coverage.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=V850S_WORKERS,thread_name_prefix='v850s-retry') as ex:
+            futs={ex.submit(_v850s_run_batch_once,[it],V850S_ITEM_TIMEOUT):it for it in failed}
+            done=0
+            for fut in concurrent.futures.as_completed(futs):
+                it=futs[fut];lid=str(it['lid']);done+=1
+                try:maps,ee=fut.result()
+                except BaseException as exx:maps={};ee=[{'listing_id':lid,'error':f'RETRY_supervisor:{type(exx).__name__}:{str(exx)[:160]}'}]
+                if lid in maps:
+                    out[lid]=maps[lid];dates.update(maps[lid].keys())
+                else:
+                    errs.extend(ee or [{'listing_id':lid,'error':'retry_no_result'}])
+                if done==1 or done%25==0 or done==len(failed):
+                    cov=100*len(out)/max(1,total)
+                    _v850_write(status='running',phase='repair',message=f'V8.50S retry {done}/{len(failed)} · ready {len(out)}/{total} ({cov:.2f}%) · final errors {len(errs)}',processed=min(total,len(primary)),total=total,errors=len(errs),current_listing=lid,price_coverage_pct=cov,error=None)
+
+    cov=100*len(out)/max(1,total)
+    _v850_write(status='running',phase='prices_done',message=f'V8.50S PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · elapsed {time.time()-t0:.1f}s · proceeding to CONTROL parity',processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=counts,error=None)
+    if cov<95:raise RuntimeError(f'Price store coverage below 95%: {cov:.2f}%')
+    return out,sorted(dates),errs
+
+
+_v850s_preflight_base=_v850_preflight
+def _v850_preflight():
+    """Schema/lineage preflight PLUS a real direct-loader smoke test."""
+    import time
+    t0=time.time();o=_v850s_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50S'
+    o['engineering']='No multiprocessing/fork of Flask. Fixed small supervisor pool calls standalone batch helper subprocesses directly; no recursive split. Failed batches retry once item-by-item. Status is build-isolated and atomic.'
+    try:
+        if o.get('verdict')=='PASS':
+            A,AF,P,J,B,T,X,attrs=_v844_load_streams();ids=sorted(set(map(str,T.listing_id.astype(str).tolist())))
+            _,trusted,prefix,tail,missing,counts=_v850o_inventory(ids)
+            sample=prefix[:8]
+            smaps,serrs=_v850s_run_batch_once(sample,min(30,V850S_BATCH_TIMEOUT)) if sample else ({},[{'error':'no_prefix_sample'}])
+            ratio=len(smaps)/max(1,len(sample))
+            o['loader_smoke']={'sample_n':len(sample),'maps_n':len(smaps),'success_pct':round(100*ratio,2),'errors':serrs[:8],'mode':'direct subprocess batch; no Flask fork'}
+            if len(sample)<4 or ratio<0.75:
+                o['verdict']='FAIL__PRICE_LOADER_SMOKE'
+                o['error']=f'Price loader smoke failed: {len(smaps)}/{len(sample)} maps'
+        o['elapsed_sec']=round(time.time()-t0,2)
+    except Exception as ex:
+        o['verdict']='ERROR';o['error']=f'{type(ex).__name__}: {ex}';o['elapsed_sec']=round(time.time()-t0,2)
+    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    except Exception:pass
+    return o
