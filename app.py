@@ -69768,3 +69768,217 @@ if _v842_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v842_home_base:APP.view_functions[ep]=_v842_home_wrap
+
+# =============================================================================
+# V8.43 VCP COMPONENT ATTRITION AUDIT
+# Purpose: explain WHY the V8.42 four-gate TRUE-VCP core destroyed winner retention.
+# Frozen: recovered V6.44 trigger / entry / STOP / exit. No thresholds are tuned.
+# Source: V8.42 detail only. 0 Tiingo / 0 price-history rescan.
+# =============================================================================
+V843_DIR = DATA_DIR / 'v843_vcp_component_attrition_audit'
+V843_PREFLIGHT = V843_DIR / 'preflight.json'
+V843_STATUS = V843_DIR / 'status.json'
+V843_RESULT = V843_DIR / 'result.json'
+V843_DETAIL = V843_DIR / 'detail.csv.gz'
+V843_SOURCE = V842_DETAIL
+V843_PARENT_RESULT = V842_RESULT
+V843_BUILD_ID = 'v843-vcp-component-attrition-audit-20260903'
+V843_GATES = ['trend_template','contraction_sequence','tight_pivot','volume_dry']
+v843_thread = None
+
+
+def _v843_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0}
+    if V843_STATUS.exists():
+        try:x.update(json.loads(V843_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v843_write(**kw):
+    V843_DIR.mkdir(parents=True,exist_ok=True);x=_v843_status();x.update(kw)
+    V843_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v843_bool(s):
+    import pandas as pd
+    if s.dtype==bool:return s.fillna(False)
+    return s.astype(str).str.strip().str.lower().isin(['true','1','yes','y','t'])
+
+
+def _v843_metrics(D,m):
+    import pandas as pd,numpy as np
+    m=m.fillna(False).astype(bool);z=D.loc[m].copy();r=pd.to_numeric(z.control_ret,errors='coerce');z=z.loc[r.notna()];r=r.loc[r.notna()]
+    if len(r)==0:return {'n':0,'pass_pct':100*float(m.mean()),'pf':None,'win_rate_pct':None,'avg_ret_pct':None,'stop_rate_pct':None,'winner20_n':0,'winner30_n':0}
+    stop=z.control_reason.astype(str).str.upper().str.contains('STOP7',regex=False)
+    gp=float(r[r>0].sum());gl=float(-r[r<0].sum());pf=gp/gl if gl>1e-12 else (999.0 if gp>0 else 0.0)
+    return {'n':int(len(r)),'pass_pct':100*float(m.mean()),'pf':pf,'win_rate_pct':100*float((r>0).mean()),'avg_ret_pct':100*float(r.mean()),'stop_rate_pct':100*float(stop.mean()),'winner20_n':int((r>=.20).sum()),'winner30_n':int((r>=.30).sum())}
+
+
+def _v843_ret(D,m):
+    import pandas as pd
+    m=m.fillna(False).astype(bool);r=pd.to_numeric(D.control_ret,errors='coerce');w20=r>=.20;w30=r>=.30;stop=D.control_reason.astype(str).str.upper().str.contains('STOP7',regex=False)
+    return {'winner20_retention_pct':100*int((m&w20).sum())/max(1,int(w20.sum())),'winner30_retention_pct':100*int((m&w30).sum())/max(1,int(w30.sum())),'stop_rejection_pct':100*int((~m&stop).sum())/max(1,int(stop.sum()))}
+
+
+def _v843_preflight():
+    import pandas as pd,time
+    t0=time.time();V843_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V843_SOURCE.exists():raise RuntimeError('Missing V8.42 detail: '+str(V843_SOURCE))
+        if not V843_PARENT_RESULT.exists():raise RuntimeError('Missing V8.42 result: '+str(V843_PARENT_RESULT))
+        R=json.loads(V843_PARENT_RESULT.read_text(encoding='utf-8'))
+        if str(R.get('verdict','')).startswith('ERROR'):raise RuntimeError('V8.42 parent result is ERROR')
+        S=pd.read_csv(V843_SOURCE,compression='gzip',nrows=100,low_memory=False)
+        need=['listing_id','entry_date','control_ret','control_reason','audit_ok']+V843_GATES
+        miss=[c for c in need if c not in S.columns]
+        if miss:raise RuntimeError('V8.42 detail schema missing '+str(miss))
+        out={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'PASS','error':None,
+             'source':'V8.42 detail.csv.gz only','frozen_contract':'Recovered V6.44 HIGH-breakout trigger + volume context + next-open; CONTROL outcomes unchanged.',
+             'analysis_contract':['standalone gate discrimination','winner-vs-STOP pass rates','all 15 non-empty fixed gate combinations','leave-one-out attribution','NO threshold tuning','NO rescan','NO Tiingo'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:out={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V843_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v843_run():
+    import pandas as pd,numpy as np,time,itertools
+    t0=time.time();pf=_v843_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError(pf.get('error'))
+    _v843_write(status='running',phase='load',message='Loading V8.42 cached audit detail only',processed=0,total=4,errors=0,error=None)
+    D=pd.read_csv(V843_SOURCE,compression='gzip',low_memory=False)
+    D=D[_v843_bool(D.audit_ok)].copy();D['control_ret']=pd.to_numeric(D.control_ret,errors='coerce');D=D[D.control_ret.notna()].copy()
+    for g in V843_GATES:D[g]=_v843_bool(D[g])
+    base=_v843_metrics(D,pd.Series(True,index=D.index))
+    r=D.control_ret;w20=r>=.20;w30=r>=.30;stop=D.control_reason.astype(str).str.upper().str.contains('STOP7',regex=False)
+    _v843_write(status='running',phase='standalone',message='Measuring gate discrimination on winners vs STOP',processed=1,total=4,errors=0)
+    standalone=[]
+    for g in V843_GATES:
+        m=D[g];st=_v843_metrics(D,m);rr=_v843_ret(D,m)
+        w20p=100*float(m[w20].mean()) if int(w20.sum()) else None;w30p=100*float(m[w30].mean()) if int(w30.sum()) else None;sp=100*float(m[stop].mean()) if int(stop.sum()) else None
+        lift20=(w20p/sp) if sp and w20p is not None else None
+        lift30=(w30p/sp) if sp and w30p is not None else None
+        standalone.append({'gate':g,**st,**rr,'winner20_gate_pass_pct':w20p,'winner30_gate_pass_pct':w30p,'stop_gate_pass_pct':sp,'winner20_vs_stop_lift':lift20,'winner30_vs_stop_lift':lift30,'pf_delta_vs_base':(st['pf']-base['pf']) if st['pf'] is not None and base['pf'] is not None else None})
+    _v843_write(status='running',phase='combinations',message='Testing all fixed gate combinations; thresholds remain frozen',processed=2,total=4,errors=0)
+    combos=[]
+    for k in range(1,len(V843_GATES)+1):
+        for gs in itertools.combinations(V843_GATES,k):
+            m=pd.Series(True,index=D.index)
+            for g in gs:m&=D[g]
+            st=_v843_metrics(D,m);rr=_v843_ret(D,m)
+            combos.append({'gates':' + '.join(gs),'k':k,**st,**rr,'pf_delta_vs_base':(st['pf']-base['pf']) if st['pf'] is not None and base['pf'] is not None else None})
+    _v843_write(status='running',phase='leave_one_out',message='Attributing four-gate core damage without threshold changes',processed=3,total=4,errors=0)
+    core=pd.Series(True,index=D.index)
+    for g in V843_GATES:core&=D[g]
+    core_st=_v843_metrics(D,core);core_rr=_v843_ret(D,core)
+    loo=[]
+    for omitted in V843_GATES:
+        m=pd.Series(True,index=D.index)
+        kept=[g for g in V843_GATES if g!=omitted]
+        for g in kept:m&=D[g]
+        st=_v843_metrics(D,m);rr=_v843_ret(D,m)
+        loo.append({'omitted_gate':omitted,'kept_gates':' + '.join(kept),**st,**rr,
+                    'winner20_recovered_pp':rr['winner20_retention_pct']-core_rr['winner20_retention_pct'],
+                    'winner30_recovered_pp':rr['winner30_retention_pct']-core_rr['winner30_retention_pct'],
+                    'pf_delta_vs_core':(st['pf']-core_st['pf']) if st['pf'] is not None and core_st['pf'] is not None else None})
+    # Rank evidence, not a new trading rule. A useful gate should pass winners more often than STOPs and not lower PF.
+    bad=[];good=[]
+    for x in standalone:
+        lift=x.get('winner20_vs_stop_lift');pdlt=x.get('pf_delta_vs_base')
+        if lift is not None and (lift<1.0 or (pdlt is not None and pdlt<0)):bad.append(x['gate'])
+        if lift is not None and lift>1.05 and pdlt is not None and pdlt>0:good.append(x['gate'])
+    best=sorted([x for x in combos if x['n']>=500],key=lambda x:((x['pf'] if x['pf'] is not None else -999),x['winner20_retention_pct']),reverse=True)[:8]
+    if bad:
+        verdict='ATTRITION_ROOT_CAUSE_LOCALIZED__GATES_FAIL_WINNER_VS_STOP_DISCRIMINATION__DO_NOT_TUNE'
+    else:
+        verdict='ATTRITION_DISTRIBUTED__NO_SINGLE_BAD_GATE_PROVEN__DO_NOT_TUNE'
+    R={'version':'V8.43','build_id':V843_BUILD_ID,'verdict':verdict,'base':base,'four_gate_core':{**core_st,**core_rr},'standalone_gate_attribution':standalone,
+       'all_fixed_combinations':combos,'leave_one_out':loo,'best_fixed_combinations_for_diagnosis_only':best,'suspect_gates':bad,'positive_gates':good,
+       'hard_exclusions':['NO threshold search','NO new gate definition','NO trigger change','NO entry/STOP/exit change','0 Tiingo','0 historical rescan'],
+       'interpretation':'This is an attribution audit only. It asks whether each already-defined V8.42 structural gate discriminates +20/+30 winners from STOPs. A gate that passes STOPs as often or more often than winners is not a useful hard qualifier in its present definition.',
+       'next':'Use the attribution evidence to decide which VCP primitive deserves semantic reconstruction. Do not optimize numeric thresholds from this table. Any candidate must first run as SHADOW and then causal 10-slot replay with frozen execution.',
+       'elapsed_sec':round(time.time()-t0,2)}
+    V843_RESULT.write_text(json.dumps(R,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    # Compact diagnostic export.
+    pd.DataFrame(standalone).to_csv(V843_DIR/'standalone.csv',index=False)
+    pd.DataFrame(combos).to_csv(V843_DIR/'combinations.csv',index=False)
+    pd.DataFrame(loo).to_csv(V843_DIR/'leave_one_out.csv',index=False)
+    D.to_csv(V843_DETAIL,index=False,compression='gzip')
+    _v843_write(status='done',phase='complete',message='Done · '+verdict,processed=4,total=4,errors=0,elapsed_sec=R['elapsed_sec']);return R
+
+
+def _v843_worker():
+    global v843_thread
+    import traceback
+    try:_v843_run()
+    except Exception as ex:
+        tb=traceback.format_exc();V843_DIR.mkdir(parents=True,exist_ok=True)
+        V843_RESULT.write_text(json.dumps({'version':'V8.43','build_id':V843_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','traceback':tb},ensure_ascii=False,indent=2),encoding='utf-8')
+        _v843_write(status='error',phase='failed',message='V8.43 failed',error=f'{type(ex).__name__}: {ex}',errors=1)
+    finally:v843_thread=None
+
+
+@APP.route('/v843/preflight',methods=['GET','POST'])
+def v843_preflight_route():_v843_preflight();return redirect('/v843')
+
+@APP.route('/v843/run',methods=['GET','POST'])
+def v843_run_route():
+    global v843_thread
+    if not _v843_alive():
+        p=_v843_preflight()
+        if p.get('verdict')=='PASS':
+            _v843_write(status='starting',phase='queued',message='Cached attribution audit accepted',processed=0,total=4,errors=0,error=None)
+            v843_thread=threading.Thread(target=_v843_worker,daemon=True);v843_thread.start()
+    return redirect('/v843')
+
+@APP.get('/v843/export/<name>')
+def v843_export(name):
+    mp={'standalone':'standalone.csv','combinations':'combinations.csv','leave-one-out':'leave_one_out.csv'};fn=mp.get(name)
+    if not fn:return ('unknown export',404)
+    p=V843_DIR/fn
+    if not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name='v843_'+fn)
+
+@APP.get('/v843')
+def v843_page():
+    import html
+    def e(x):return html.escape(str(x))
+    def n(x,d=2):
+        try:return f'{float(x):.{d}f}'
+        except:return '—'
+    P={};R={}
+    if V843_PREFLIGHT.exists():
+        try:P=json.loads(V843_PREFLIGHT.read_text(encoding='utf-8'))
+        except:pass
+    if V843_RESULT.exists():
+        try:R=json.loads(V843_RESULT.read_text(encoding='utf-8'))
+        except:pass
+    S=_v843_status();A=R.get('standalone_gate_attribution',[]);L=R.get('leave_one_out',[]);B=R.get('best_fixed_combinations_for_diagnosis_only',[])
+    ar=''.join(f"<tr><td>{e(x.get('gate'))}</td><td>{n(x.get('pass_pct'))}%</td><td>{n(x.get('winner20_gate_pass_pct'))}%</td><td>{n(x.get('winner30_gate_pass_pct'))}%</td><td>{n(x.get('stop_gate_pass_pct'))}%</td><td>{n(x.get('winner20_vs_stop_lift'),3)}x</td><td>{n(x.get('pf'),3)}</td><td>{n(x.get('pf_delta_vs_base'),3)}</td></tr>" for x in A)
+    lr=''.join(f"<tr><td>{e(x.get('omitted_gate'))}</td><td>{e(x.get('n'))}</td><td>{n(x.get('winner20_retention_pct'))}%</td><td>{n(x.get('winner20_recovered_pp'))} pp</td><td>{n(x.get('pf'),3)}</td><td>{n(x.get('pf_delta_vs_core'),3)}</td></tr>" for x in L)
+    br=''.join(f"<tr><td>{e(x.get('gates'))}</td><td>{e(x.get('n'))}</td><td>{n(x.get('winner20_retention_pct'))}%</td><td>{n(x.get('stop_rejection_pct'))}%</td><td>{n(x.get('pf'),3)}</td></tr>" for x in B)
+    return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{font-family:-apple-system,BlinkMacSystemFont,Arial;background:#f4f7fb;color:#0f172a}}.w{{max-width:1100px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}button{{background:#0f172a;color:white;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}.ok{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}.warn{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}</style></head><body><div class='w'><a href='/'>← 首页</a>
+<div class='c'><h1>V8.43 VCP Component Attrition Audit</h1><div class='warn'><b>不调任何阈值。</b> V8.42 的四个 TRUE-VCP gates 只做归因：谁更常保留 Winner，谁反而更常保留 STOP。Trigger / Entry / STOP / Exit 全冻结。0 Tiingo / 0 rescan.</div></div>
+<div class='c'><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V843_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><form method='post' action='/v843/preflight'><button>A. Run V8.43 Preflight</button></form><br><form method='post' action='/v843/run'><button>B. Run Component Attrition Audit</button></form></div>
+<div class='c'><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Runtime Error: {e(S.get('error') or 'None')}</p></div>
+<div class='c'><h2>Verdict</h2><div class='ok'>{e(R.get('verdict','—'))}</div><p><b>Suspect gates:</b> {e(', '.join(R.get('suspect_gates',[])) or '—')} · <b>Positive gates:</b> {e(', '.join(R.get('positive_gates',[])) or '—')}</p></div>
+<div class='c'><h2>Standalone Winner-vs-STOP Discrimination</h2><table><tr><th>Gate</th><th>Pass</th><th>+20 pass</th><th>+30 pass</th><th>STOP pass</th><th>+20/STOP lift</th><th>PF</th><th>PF Δ</th></tr>{ar or '<tr><td colspan=8>Run audit first.</td></tr>'}</table></div>
+<div class='c'><h2>Leave-One-Out: Which Gate Causes Attrition?</h2><table><tr><th>Omit gate</th><th>N</th><th>+20 retain</th><th>+20 recovered</th><th>PF</th><th>PF Δ vs core</th></tr>{lr or '<tr><td colspan=6>Run audit first.</td></tr>'}</table></div>
+<div class='c'><h2>Best Fixed Combinations — Diagnosis Only</h2><table><tr><th>Existing gates only</th><th>N</th><th>+20 retain</th><th>STOP reject</th><th>PF</th></tr>{br or '<tr><td colspan=5>Run audit first.</td></tr>'}</table><p><small>这不是参数优化，也不是生产规则选择；只用来定位哪一类 VCP primitive 值得下一步做语义重建。</small></p></div>
+<div class='c'><div class='warn'><b>Hard exclusions:</b> {e(' · '.join(R.get('hard_exclusions',[])) or 'NO threshold tuning')}<br><br><b>Next:</b> {e(R.get('next','先跑 V8.43。'))}</div>{"<p><a href='/v843/export/standalone'>Standalone CSV</a> · <a href='/v843/export/combinations'>Combinations CSV</a> · <a href='/v843/export/leave-one-out'>Leave-one-out CSV</a></p>" if R else ''}</div>
+</div></body></html>"""
+
+# Mandatory homepage card.
+_v843_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v843_home_base is not None:
+    def _v843_home_wrap(*args,**kwargs):
+        resp=_v843_home_base(*args,**kwargs)
+        card="""<div id='v843-home-card-real' style='background:#fff7ed;border:7px solid #f59e0b;border-radius:26px;padding:26px;margin:20px 0'><h2>🔬 V8.43 VCP Component Attrition Audit</h2><p>解释 V8.42 为什么丢掉 96% Winners：四个现有 gate 做 Winner-vs-STOP 归因。0 threshold tuning / 0 Tiingo / 0 rescan。</p><a href='/v843'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.43</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v843-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v843_home_base:APP.view_functions[ep]=_v843_home_wrap
