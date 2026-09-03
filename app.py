@@ -70751,3 +70751,295 @@ if _v845_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v845_home_base:APP.view_functions[ep]=_v845_home_wrap
+
+# =============================================================================
+# V8.46A PARTIAL PROFIT — FIRST MECHANISM ONLY
+# User-requested first step only: when a frozen admitted position first closes at
+# >= +100% from entry (2x), sell 50% of shares at NEXT session open; keep the
+# remaining 50% runner on the ORIGINAL frozen exit. No trailing-stop change,
+# no Emergency Brake, no short overlay, no new admission/ranking, no threshold grid.
+# This intentionally isolates partial profit-taking before combining mechanisms.
+# =============================================================================
+V846A_DIR = DATA_DIR / 'v846a_partial_profit_50_at_2x_runner_shadow'
+V846A_PREFLIGHT = V846A_DIR / 'preflight.json'
+V846A_STATUS = V846A_DIR / 'status.json'
+V846A_RESULT = V846A_DIR / 'result.json'
+V846A_TRADES = V846A_DIR / 'trade_level_overlay.csv.gz'
+V846A_CURVES = V846A_DIR / 'equity_curves.csv.gz'
+V846A_BUILD_ID = 'v846a-partial-profit-50-at-2x-runner-first-step-20260903'
+V846A_TRIGGER_MULT = 2.0
+V846A_SELL_FRACTION = 0.50
+v846a_thread = None
+
+
+def _v846a_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V846A_STATUS.exists():
+        try:x.update(json.loads(V846A_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v846a_write(**kw):
+    V846A_DIR.mkdir(parents=True,exist_ok=True);x=_v846a_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V846A_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v846a_alive():return v846a_thread is not None and v846a_thread.is_alive()
+
+
+def _v846a_load():
+    # Exact same frozen V8.44 admitted ledger already proven by V8.45 parity.
+    R44,L=_v845_load()
+    return R44,L
+
+
+def _v846a_preflight():
+    import time
+    t0=time.time();V846A_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        R44,L=_v846a_load(); P={x.get('strategy'):x for x in R44.get('portfolio',[])}
+        b=L[L.variant.eq('BASE')];t=L[L.variant.eq('TIGHT_PIVOT_SHADOW')]
+        parity=(len(b)==int(P.get('BASE',{}).get('admitted_positions',-1)) and len(t)==int(P.get('TIGHT_PIVOT_SHADOW',{}).get('admitted_positions',-1)))
+        out={'version':'V8.46A','build_id':V846A_BUILD_ID,'verdict':'PASS' if parity and len(t)>=150 else 'FAIL__FROZEN_LEDGER_PARITY',
+             'error':None,'base_rows':int(len(b)),'tight_rows':int(len(t)),'unique_listings':int(L.listing_id.nunique()),'ledger_count_parity':bool(parity),
+             'fixed_rule':{'trigger':'FIRST daily CLOSE >= 2.0 x entry price','execution':'SELL 50% at NEXT session OPEN','runner':'remaining 50% follows ORIGINAL frozen exit','same_day_bias':'forbidden; trigger becomes actionable next session only'},
+             'history_dedup':'Existing V6.31/V8.26E tested ratchet stops (BE / 1R / ladders). V8.46A does NOT repeat those. It tests only the separate user-requested partial-sale mechanism.',
+             'hard_exclusions':['NO trailing-stop mutation','NO Emergency Brake','NO short overlay','NO admission/ranking change','NO threshold/grid search','NO Tiingo','NO universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.46A','build_id':V846A_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V846A_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v846a_prices(lids):
+    """Admitted-only cached OPEN+CLOSE. No price download, no candidate scan."""
+    import pandas as pd,numpy as np,time
+    M,lidcol=_v826a_manifest(); mmap={str(r[lidcol]):r for _,r in M.iterrows()}; ids=sorted(set(map(str,lids)))
+    out={};dates=set();errs=[];t0=time.time()
+    for n,lid in enumerate(ids,1):
+        mr=mmap.get(lid)
+        if mr is None:errs.append({'listing_id':lid,'error':'manifest_missing'})
+        else:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception as ex:q=None;errs.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
+            if q is None or q.empty:
+                if not any(x.get('listing_id')==lid for x in errs):errs.append({'listing_id':lid,'error':'price_empty'})
+            else:
+                z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+                if z.empty:errs.append({'listing_id':lid,'error':'date_window_empty'})
+                else:
+                    mp={}
+                    for _,r in z.iterrows():
+                        try:
+                            dt=pd.Timestamp(r['date']).normalize();op=float(r['open']);cl=float(r['close'])
+                            if np.isfinite(op) and op>0 and np.isfinite(cl) and cl>0:mp[dt]={'open':op,'close':cl}
+                        except Exception:continue
+                    if mp:out[lid]=mp;dates.update(mp.keys())
+                    else:errs.append({'listing_id':lid,'error':'no_valid_open_close'})
+        if n==1 or n%20==0 or n==len(ids):
+            _v846a_write(status='running',phase='prices',message=f'Loading admitted-only OPEN+CLOSE {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),elapsed_sec=round(time.time()-t0,1),error=None)
+    return out,sorted(dates),errs
+
+
+def _v846a_simulate(L,price,cal,label,partial=False):
+    """Frozen-ledger shadow: admission dates/capital and original final exit are unchanged.
+    Partial rule can only monetize half the existing position; it never creates a new slot.
+    """
+    import pandas as pd,numpy as np
+    A=L[L.variant.eq(label)].sort_values(['entry_date','listing_id'],kind='stable').reset_index(drop=True).copy()
+    rec=A.to_dict('index');ent={};ext={}
+    for i,r in rec.items():
+        ent.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i)
+        ext.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};rows=[];trade_rows=[];pending=set()
+    for dt in cal:
+        dt=pd.Timestamp(dt).normalize()
+        # Original full exits have priority. If the frozen exit is today, do not also partial-sell today.
+        for i in ext.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            pending.discard(i)
+            exit_px=float(rec[i]['exit_px']); proceeds=p['shares']*exit_px;cash+=proceeds
+            total_proceeds=p['partial_proceeds']+proceeds
+            overlay_ret=total_proceeds/p['capital']-1 if p['capital']>0 else np.nan
+            trade_rows.append({'strategy':label,'overlay':'PARTIAL_50_AT_2X' if partial else 'CONTROL','listing_id':p['listing_id'],
+                               'entry_date':str(pd.Timestamp(rec[i]['entry_date']).date()),'exit_date':str(dt.date()),'entry_px':p['entry_px'],
+                               'original_ret':float(rec[i]['ret']),'original_reason':str(rec[i]['reason']),'capital':p['capital'],
+                               'partial_triggered':bool(p['partial_triggered']),'partial_trigger_date':str(p['partial_trigger_date'].date()) if p['partial_trigger_date'] is not None else None,
+                               'partial_exec_date':str(p['partial_exec_date'].date()) if p['partial_exec_date'] is not None else None,
+                               'partial_exec_px':p['partial_exec_px'],'partial_fraction':p['partial_fraction'],
+                               'overlay_ret':float(overlay_ret),'runner_exit_px':exit_px,'runner_fraction_final':p['shares']/p['initial_shares'] if p['initial_shares'] else np.nan})
+            last.pop(i,None)
+        # Pending partial sale executes only on a later session, at that session OPEN.
+        if partial and pending:
+            for i in list(pending):
+                p=pos.get(i)
+                if p is None:pending.discard(i);continue
+                if p['partial_trigger_date'] is None or dt<=p['partial_trigger_date']:continue
+                bar=price.get(p['listing_id'],{}).get(dt)
+                if not bar:continue
+                op=float(bar.get('open',np.nan))
+                if not np.isfinite(op) or op<=0:continue
+                sell_sh=p['shares']*V846A_SELL_FRACTION
+                proceeds=sell_sh*op;cash+=proceeds;p['shares']-=sell_sh;p['partial_proceeds']+=proceeds
+                p['partial_exec_date']=dt;p['partial_exec_px']=op;p['partial_fraction']=V846A_SELL_FRACTION
+                pending.discard(i)
+        # Frozen entries; do NOT let the overlay change admission order or capital sizing in this first mechanism audit.
+        for i in ent.get(dt,[]):
+            r=rec[i];cap=float(r['capital']);ep=float(r['entry_px']);sh=cap/ep;cash-=cap
+            pos[i]={'listing_id':str(r['listing_id']),'entry_px':ep,'shares':sh,'initial_shares':sh,'capital':cap,
+                    'partial_triggered':False,'partial_trigger_date':None,'partial_exec_date':None,'partial_exec_px':None,
+                    'partial_fraction':0.0,'partial_proceeds':0.0}
+            last[i]=ep
+        # End-of-session marks + first trigger observation. Newly earned trigger cannot execute until later session.
+        hv=0.0
+        for i,p in pos.items():
+            bar=price.get(p['listing_id'],{}).get(dt)
+            cp=float(bar.get('close')) if bar and bar.get('close') is not None else last.get(i,p['entry_px'])
+            if not np.isfinite(cp) or cp<=0:cp=last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+            if partial and (not p['partial_triggered']) and cp>=V846A_TRIGGER_MULT*p['entry_px']:
+                p['partial_triggered']=True;p['partial_trigger_date']=dt;pending.add(i)
+        eq=cash+hv;rows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos),cash))
+    C=pd.DataFrame(rows,columns=['date','equity','exposure','open_n','cash']);C['strategy']=label;C['overlay']='PARTIAL_50_AT_2X' if partial else 'CONTROL'
+    C['running_peak']=C.equity.cummax();C['drawdown']=C.equity/C.running_peak-1
+    T=pd.DataFrame(trade_rows)
+    return C,T
+
+
+def _v846a_metrics(C,T):
+    import pandas as pd,numpy as np
+    if C.empty:return {}
+    st=float(C.equity.iloc[0]);en=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(en/st)**(1/yrs)-1 if st>0 and en>0 else -1
+    maxdd=float(C.drawdown.min());calmar=(cagr/abs(maxdd)) if maxdd<0 else np.nan
+    if T is None or T.empty:return {'ending_equity':en,'cagr':cagr,'maxdd':maxdd,'calmar':calmar}
+    r=pd.to_numeric(T.overlay_ret,errors='coerce')
+    return {'ending_equity':en,'cagr':cagr,'maxdd':maxdd,'calmar':calmar,'trades':int(len(T)),
+            'avg_trade':float(r.mean()),'median_trade':float(r.median()),'win_rate':float((r>0).mean()),
+            'partial_triggered_n':int(T.partial_triggered.sum()),'partial_executed_n':int(T.partial_exec_date.notna().sum()),
+            'winner20_n':int((r>=.20).sum()),'winner30_n':int((r>=.30).sum()),'winner50_n':int((r>=.50).sum()),'winner100_n':int((r>=1.0).sum()),
+            'avg_exposure':float(C.exposure.mean()),'avg_open':float(C.open_n.mean())}
+
+
+def _v846a_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v846a_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.46A preflight must PASS: '+str(pf.get('verdict')))
+    R44,L=_v846a_load();ids=L.listing_id.unique();_v846a_write(status='running',phase='prices',message='Loading admitted-only OPEN+CLOSE for first partial-profit test',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v846a_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'OPEN+CLOSE coverage too low: {cov:.2f}%')
+    results=[];curves=[];trades=[];k=0
+    for label in ['BASE','TIGHT_PIVOT_SHADOW']:
+        for partial in [False,True]:
+            k+=1;nm='PARTIAL_50_AT_2X' if partial else 'CONTROL'
+            _v846a_write(status='running',phase='overlay',message=f'{label} · {nm}',processed=k,total=4,errors=len(errs),error=None)
+            C,T=_v846a_simulate(L,price,cal,label,partial=partial);m=_v846a_metrics(C,T);m.update({'strategy':label,'overlay':nm});results.append(m);curves.append(C);trades.append(T)
+    # Control parity against V8.44 / V8.45 is mandatory before interpreting the overlay.
+    ref={x['strategy']:x for x in R44.get('portfolio',[])};parity={}
+    for label in ['BASE','TIGHT_PIVOT_SHADOW']:
+        cm=next(x for x in results if x['strategy']==label and x['overlay']=='CONTROL');rr=ref.get(label,{})
+        parity[label]={'cagr_abs_diff_pp':100*abs(float(cm.get('cagr',np.nan))-float(rr.get('cagr',np.nan))),
+                       'maxdd_abs_diff_pp':100*abs(float(cm.get('maxdd',np.nan))-float(rr.get('maxdd',np.nan))),
+                       'control_cagr_pct':100*float(cm.get('cagr',np.nan)),'v844_cagr_pct':100*float(rr.get('cagr',np.nan)),
+                       'control_maxdd_pct':100*float(cm.get('maxdd',np.nan)),'v844_maxdd_pct':100*float(rr.get('maxdd',np.nan))}
+    parity_ok=all(v['cagr_abs_diff_pp']<=0.10 and v['maxdd_abs_diff_pp']<=0.10 for v in parity.values())
+    comp={}
+    for label in ['BASE','TIGHT_PIVOT_SHADOW']:
+        a=next(x for x in results if x['strategy']==label and x['overlay']=='CONTROL');b=next(x for x in results if x['strategy']==label and x['overlay']=='PARTIAL_50_AT_2X')
+        comp[label]={'delta_cagr_pp':100*(b['cagr']-a['cagr']),'delta_maxdd_pp':100*(b['maxdd']-a['maxdd']),
+                     'delta_calmar':b['calmar']-a['calmar'],'delta_avg_trade_pp':100*(b['avg_trade']-a['avg_trade']),
+                     'partial_executed_n':b['partial_executed_n'],'winner100_control':a['winner100_n'],'winner100_partial':b['winner100_n']}
+    # This is a mechanism audit, not a promotion gate. We only name direction.
+    tight=comp['TIGHT_PIVOT_SHADOW']
+    if not parity_ok:verdict='CONTROL_PARITY_FAIL__DO_NOT_INTERPRET'
+    elif tight['delta_maxdd_pp']>5 and tight['delta_cagr_pp']>=-1:verdict='PARTIAL_PROFIT_50_AT_2X_SHOWS_DRAWDOWN_RESCUE_SIGNAL__DIAGNOSTIC_ONLY'
+    elif tight['delta_cagr_pp']>1 and tight['delta_maxdd_pp']>=-2:verdict='PARTIAL_PROFIT_50_AT_2X_SHOWS_ECONOMIC_SIGNAL__DIAGNOSTIC_ONLY'
+    else:verdict='PARTIAL_PROFIT_50_AT_2X_DOES_NOT_CLEAR_FIRST_MECHANISM_BAR'
+    result={'version':'V8.46A','build_id':V846A_BUILD_ID,'verdict':verdict,'control_parity':parity,'parity_ok':bool(parity_ok),
+            'fixed_rule':pf.get('fixed_rule'),'portfolio_metrics':results,'delta_vs_control':comp,'price_coverage_pct':cov,'price_errors':errs[:100],
+            'important':'FIRST PART ONLY. This does not test trailing stops, Emergency Brake, crisis deleveraging, or shorting. It isolates one user-proposed scale-out: first close at 2x -> sell 50% next open -> let remaining 50% follow original exit.',
+            'interpretation':'A partial sale can bank profits without forcing the runner out. But it can also reduce exposure to the rare huge winners that drive CAGR. Read CAGR, MaxDD, Calmar and +100 winner counts together; do not judge from drawdown alone.',
+            'next':'If this first mechanism is favorable, only then compare it with the already-existing winner-ratchet evidence before any combination. Emergency Brake remains a separate later step.',
+            'hard_exclusions':pf.get('hard_exclusions'),'elapsed_sec':round(time.time()-t0,1)}
+    V846A_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    pd.concat([x for x in trades if x is not None and len(x)],ignore_index=True).to_csv(V846A_TRADES,index=False,compression='gzip')
+    pd.concat(curves,ignore_index=True).to_csv(V846A_CURVES,index=False,compression='gzip')
+    _v846a_write(status='done',phase='complete',message='Done · '+verdict,processed=4,total=4,errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+
+def _v846a_worker():
+    global v846a_thread
+    import time,traceback
+    t0=time.time()
+    try:_v846a_run()
+    except Exception as ex:_v846a_write(status='error',phase='failed',message='V8.46A failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v846a_thread=None
+
+
+@APP.route('/v846a/preflight',methods=['GET','POST'])
+def v846a_preflight_route():_v846a_preflight();return redirect('/v846a')
+
+@APP.route('/v846a/run',methods=['GET','POST'])
+def v846a_run_route():
+    global v846a_thread
+    if not _v846a_alive():
+        p=_v846a_preflight()
+        if p.get('verdict')=='PASS':
+            _v846a_write(status='starting',phase='queued',message='First partial-profit mechanism accepted',processed=0,total=4,errors=0,error=None)
+            v846a_thread=threading.Thread(target=_v846a_worker,daemon=True);v846a_thread.start()
+    return redirect('/v846a')
+
+@APP.get('/api/v846a/status')
+def v846a_status_api():return jsonify(_v846a_status())
+
+@APP.get('/v846a/export/<name>')
+def v846a_export(name):
+    mp={'trades':V846A_TRADES,'curves':V846A_CURVES};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+@APP.get('/v846a')
+def v846a_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v846a_status()
+    try:
+        if V846A_PREFLIGHT.exists():P=json.loads(V846A_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V846A_RESULT.exists():R=json.loads(V846A_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    mets=R.get('portfolio_metrics',[]);rows=''
+    for x in mets:
+        rows+=f"<tr><td>{e(x.get('strategy'))}</td><td>{e(x.get('overlay'))}</td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{e(x.get('partial_executed_n',0))}</td><td>{e(x.get('winner100_n','—'))}</td></tr>"
+    ds=R.get('delta_vs_control',{});dr=''.join(f"<tr><td>{e(k)}</td><td>{n(v.get('delta_cagr_pp'))} pp</td><td>{n(v.get('delta_maxdd_pp'))} pp</td><td>{n(v.get('delta_calmar'),3)}</td><td>{n(v.get('delta_avg_trade_pp'))} pp</td><td>{e(v.get('partial_executed_n'))}</td></tr>" for k,v in ds.items())
+    par=R.get('control_parity',{});pr=''.join(f"<tr><td>{e(k)}</td><td>{n(v.get('cagr_abs_diff_pp'),3)} pp</td><td>{n(v.get('maxdd_abs_diff_pp'),3)} pp</td></tr>" for k,v in par.items())
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.46A Partial Profit 50%@2x + Runner</h1><div class="o"><b>只做第一步。</b> 固定规则：首次日收盘达到入场价 2 倍（+100%）后，<b>下一交易日开盘卖 50%</b>；剩余 50% runner 完全沿用原冻结 exit。不开 Emergency Brake、不做空、不改 trailing stop、不重排 admission。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V846A_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>BASE {e(P.get('base_rows','—'))} · Tight {e(P.get('tight_rows','—'))} · Listings {e(P.get('unique_listings','—'))}</p><form method="post" action="/v846a/preflight"><button>A. Run V8.46A Preflight</button></form><br><form method="post" action="/v846a/run"><button>B. Run First Partial-Profit Shadow</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Errors {e(S.get('errors'))} · Runtime Error {e(S.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>Control Parity</h2><table><tr><th>Strategy</th><th>CAGR diff</th><th>MaxDD diff</th></tr>{pr or '<tr><td colspan=3>Run first.</td></tr>'}</table></div>
+<div class="c"><h2>Frozen-Ledger Economics</h2><div style="overflow:auto"><table><tr><th>Strategy</th><th>Overlay</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>Avg trade</th><th>Win rate</th><th>Partial exec</th><th>+100 final trades</th></tr>{rows or '<tr><td colspan=9>Run first.</td></tr>'}</table></div></div>
+<div class="c"><h2>Partial vs Control</h2><table><tr><th>Strategy</th><th>Δ CAGR</th><th>Δ MaxDD</th><th>Δ Calmar</th><th>Δ Avg trade</th><th>Partial exec</th></tr>{dr or '<tr><td colspan=6>Run first.</td></tr>'}</table></div>
+<div class="c"><div class="o"><b>Important:</b> {e(R.get('important','第一步只测 partial profit。'))}<br><br><b>Interpretation:</b> {e(R.get('interpretation','—'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v846a/export/trades'>Trade overlay CSV.GZ</a> · <a href='/v846a/export/curves'>Equity curves CSV.GZ</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+# Mandatory homepage card for every delivered version.
+_v846a_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v846a_home_base is not None:
+    def _v846a_home_wrap(*args,**kwargs):
+        resp=_v846a_home_base(*args,**kwargs)
+        card="""<div id='v846a-home-card-real' style='background:#eff6ff;border:7px solid #2563eb;border-radius:26px;padding:26px;margin:20px 0'><h2>💰 V8.46A Partial Profit 50%@2x + Runner</h2><p>只做第一步：+100% 后下一交易日开盘卖 50%，余下 50% 沿用原 exit。不开 Emergency Brake、不做空、不改 trailing stop。</p><a href='/v846a'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.46A</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v846a-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v846a_home_base:APP.view_functions[ep]=_v846a_home_wrap
