@@ -73091,243 +73091,152 @@ if _v850l_home_base is not None:
 
 
 # =============================================================================
-# V8.50M — NON-RECURSIVE PER-ASSET HARD-TIMEOUT PRICE STORE
-# Removes the remaining recursive batch-split path from V8.50L.
-# Every asset is handled exactly once in its own helper subprocess with a hard
-# timeout; no bad shard can hold an entire batch or trigger exponential splits.
+# V8.50O — TRUSTED PREFIX BATCH REUSE (NO SERIAL 3260 LOOP)
+# Fix: V8.50N still walked the trusted 3260 assets one-by-one. That is reuse,
+# but operationally it still costs thousands of sequential reads. This version
+# keeps the 3260 boundary frozen and reads existing shards in parallel batches.
+# It NEVER rebuilds the trusted prefix from source. Missing/corrupt prefix assets
+# are logged and excluded from the trusted fast path; only the untrusted tail may
+# use source build/repair. All shard parsing remains subprocess-isolated.
+# Strategy/economics are unchanged.
 # =============================================================================
-V850_BUILD_ID='v850m-nonrecursive-per-asset-hard-timeout-price-store-20260903'
-V850M_SHARD_WORKERS=max(4,min(16,int(os.environ.get('V850M_SHARD_WORKERS','12'))))
-V850M_SOURCE_WORKERS=max(2,min(10,int(os.environ.get('V850M_SOURCE_WORKERS','6'))))
-V850M_SHARD_TIMEOUT=max(3,min(15,int(os.environ.get('V850M_SHARD_TIMEOUT','6'))))
-V850M_SOURCE_TIMEOUT=max(8,min(40,int(os.environ.get('V850M_SOURCE_TIMEOUT','15'))))
+V850_BUILD_ID='v850o-trusted-prefix-batch-reuse-20260903'
+V850O_TRUSTED_PREFIX_DONE=3260
+V850O_PREFIX_BATCH_SIZE=max(32,min(256,int(os.environ.get('V850O_PREFIX_BATCH_SIZE','128'))))
+V850O_TAIL_SHARD_BATCH_SIZE=max(16,min(128,int(os.environ.get('V850O_TAIL_SHARD_BATCH_SIZE','64'))))
+V850O_TAIL_SOURCE_BATCH_SIZE=max(4,min(24,int(os.environ.get('V850O_TAIL_SOURCE_BATCH_SIZE','10'))))
+V850O_WORKERS=max(2,min(6,int(os.environ.get('V850O_WORKERS','4'))))
+V850O_BATCH_TIMEOUT=max(20,min(120,int(os.environ.get('V850O_BATCH_TIMEOUT','30'))))
 
 
-def _v850m_one(item,timeout_sec):
-    """Exactly one asset -> one isolated helper subprocess -> hard timeout."""
-    maps,ee=_v850k_run_batch([item],timeout_sec)
-    lid=str(item['lid'])
-    mp=maps.get(lid)
-    if mp:return lid,mp,None
-    er=(ee[0].get('error') if ee else 'no_valid_open_close')
-    return lid,None,str(er)
-
-
-def _v850m_parallel(items,workers,timeout_sec,label,total,out,dates,errs,done_base=0):
+def _v850o_run_batches(items,batch_size,timeout_sec,label,total,out,dates,errs,processed_counter):
     import concurrent.futures
     if not items:return []
-    failed=[];done=0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers,thread_name_prefix=f'v850m_{label.lower()}') as ex:
-        futs={ex.submit(_v850m_one,it,timeout_sec):it for it in items}
+    chunks=[items[i:i+batch_size] for i in range(0,len(items),batch_size)]
+    failed=[]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=V850O_WORKERS) as ex:
+        futs={ex.submit(_v850k_run_batch,ch,timeout_sec):ch for ch in chunks}
         for fut in concurrent.futures.as_completed(futs):
-            it=futs[fut];lid=str(it['lid'])
-            try:lid2,mp,er=fut.result()
-            except BaseException as exx:lid2,mp,er=lid,None,f'{label}_parent:{type(exx).__name__}:{str(exx)[:120]}'
-            if mp:
-                out[str(lid2)]=mp;dates.update(mp.keys())
-            else:
-                failed.append(it);errs.append({'listing_id':lid,'error':er or f'{label}_failed'})
-            done+=1
-            if done==1 or done%25==0 or done==len(items):
-                cov=100*len(out)/max(1,total)
-                _v850_write(status='running',phase='batch_prices',
-                    message=f'V8.50M {label} {done}/{len(items)} · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
-                    processed=min(total,done_base+done),total=total,errors=len(errs),current_listing=lid,
-                    price_coverage_pct=cov,error=None)
+            ch=futs[fut]
+            try:
+                maps,ee=fut.result()
+            except Exception as exx:
+                maps={};ee=[{'listing_id':str(x['lid']),'error':f'{label}_parent_exception:{type(exx).__name__}:{str(exx)[:160]}'} for x in ch]
+            for lid,mp in maps.items():
+                out[str(lid)]=mp;dates.update(mp.keys())
+            got=set(map(str,maps.keys()))
+            failed.extend([x for x in ch if str(x['lid']) not in got])
+            errs.extend(ee)
+            processed_counter[0]+=len(ch)
+            cov=100*len(out)/max(1,total)
+            _v850_write(status='running',phase='batch_prices',
+                        message=f'V8.50O {label} {processed_counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
+                        processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',
+                        price_coverage_pct=cov,error=None)
     return failed
 
 
-def _v850_prices_progress(lids):
-    ids=sorted(set(map(str,lids)));total=len(ids);out={};dates=set();errs=[]
-    routes={'safe':0,'legacy':0,'source':0,'missing':0};shards=[];sources=[];missing=[]
-    # Metadata-only inventory: never open a pickle/CSV in parent.
-    for i,lid in enumerate(ids,1):
-        a=_v850l_asset_for(lid)
-        if a is None:
-            routes['missing']+=1;missing.append(lid)
-        elif a['kind']=='shard':
-            routes[a['route']]+=1;shards.append(a)
+def _v850o_inventory(lids):
+    ids=sorted(set(map(str,lids)));total=len(ids);trusted=min(V850O_TRUSTED_PREFIX_DONE,total)
+    prefix=[];tail=[];missing=[];counts={'trusted_safe':0,'trusted_legacy':0,'trusted_missing':0,'tail_safe':0,'tail_legacy':0,'tail_source':0,'tail_missing':0}
+    # Metadata only: stat/exists, never open pickle or CSV in parent process.
+    for i,lid in enumerate(ids):
+        is_trusted=i<trusted
+        sp=_v850h_safe_path(lid)
+        try:
+            if sp.exists() and 0<sp.stat().st_size<=25*1024*1024:
+                item={'lid':lid,'kind':'shard','path':str(sp),'route':'safe'}
+                (prefix if is_trusted else tail).append(item)
+                counts['trusted_safe' if is_trusted else 'tail_safe']+=1
+                continue
+        except Exception:pass
+        lp=_v850_shard_path(lid)
+        try:
+            if lp.exists() and 0<lp.stat().st_size<=25*1024*1024:
+                item={'lid':lid,'kind':'shard','path':str(lp),'route':'legacy'}
+                (prefix if is_trusted else tail).append(item)
+                counts['trusted_legacy' if is_trusted else 'tail_legacy']+=1
+                continue
+        except Exception:pass
+        if is_trusted:
+            missing.append(lid);counts['trusted_missing']+=1
         else:
-            routes['source']+=1;sources.append(a)
-        if i==1 or i%500==0 or i==total:
-            _v850_write(status='running',phase='inventory',
-                message=f'V8.50M inventory {i}/{total} · shard {len(shards)} · source {len(sources)} · missing {len(missing)}',
-                processed=i,total=total,errors=len(missing),current_listing='',inventory=routes,error=None)
-    projected=100*(len(shards)+len(sources))/max(1,total)
-    errs.extend({'listing_id':x,'error':'inventory_missing_no_asset'} for x in missing)
-    if projected<95:raise RuntimeError(f'Inventory projected price coverage below 95%: {projected:.2f}%')
+            pth=_v617o_existing_price_path(lid)
+            try:
+                if pth and pth.exists() and pth.stat().st_size>0:
+                    tail.append({'lid':lid,'kind':'source','path':str(pth),'route':'source'});counts['tail_source']+=1
+                else:
+                    missing.append(lid);counts['tail_missing']+=1
+            except Exception:
+                missing.append(lid);counts['tail_missing']+=1
+        if i==0 or (i+1)%500==0:
+            _v850_write(status='running',phase='inventory',message=f'V8.50O inventory {i+1}/{total} · trusted assets {len(prefix)}/{trusted} · tail assets {len(tail)} · missing {len(missing)}',processed=i+1,total=total,errors=len(missing),current_listing='',inventory=counts,error=None)
+    return ids,trusted,prefix,tail,missing,counts
 
-    # Pass 1: all existing shards, each independently hard-isolated. No recursive splitting.
-    shard_failed=_v850m_parallel(shards,V850M_SHARD_WORKERS,V850M_SHARD_TIMEOUT,'SHARD',total,out,dates,errs,0)
 
-    # Convert failed shard routes to SOURCE only once when a real source exists.
+def _v850_prices_progress(lids):
+    import time
+    t0=time.time();ids,trusted,prefix,tail,missing,counts=_v850o_inventory(lids);total=len(ids)
+    out={};dates=set();errs=[]
+    # IMPORTANT: trusted prefix is REUSE ONLY. No source rebuild and no serial loop.
+    errs.extend({'listing_id':x,'error':'trusted_prefix_asset_missing'} for x in missing if ids.index(x)<trusted)
+    _v850_write(status='running',phase='inventory_done',
+                message=f'V8.50O inventory done · TRUSTED prefix {len(prefix)}/{trusted} assets · tail {len(tail)} · missing {len(missing)} · parallel prefix read next',
+                processed=0,total=total,errors=len(errs),current_listing='',inventory=counts,
+                projected_coverage_pct=100*len(prefix+tail)/max(1,total),error=None)
+    if 100*len(prefix+tail)/max(1,total)<95:
+        raise RuntimeError('Projected price coverage below 95%')
+
+    counter=[0]
+    # Phase A: all observed-good prefix shards, batched + parallel. No rebuild.
+    _v850_write(status='running',phase='trusted_prefix',message=f'V8.50O TRUSTED PREFIX BATCH REUSE starting {len(prefix)}/{trusted} · batch {V850O_PREFIX_BATCH_SIZE} · workers {V850O_WORKERS}',processed=0,total=total,errors=len(errs),current_listing='',error=None)
+    prefix_failed=_v850o_run_batches(prefix,V850O_PREFIX_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TRUSTED_PREFIX',total,out,dates,errs,counter)
+
+    # Phase B: untrusted tail uses the already-proven isolated batch route.
+    shard_tail=[x for x in tail if x['kind']=='shard'];source_tail=[x for x in tail if x['kind']=='source']
+    shard_failed=_v850o_run_batches(shard_tail,V850O_TAIL_SHARD_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TAIL_SHARD',total,out,dates,errs,counter)
+    source_failed=_v850o_run_batches(source_tail,V850O_TAIL_SOURCE_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TAIL_SOURCE',total,out,dates,errs,counter)
+
+    # One parallel source repair pass for tail shard failures only.
     repair=[]
-    for it in shard_failed:
-        lid=str(it['lid']);pth=_v617o_existing_price_path(lid)
+    for x in shard_failed:
+        lid=str(x['lid']);pth=_v617o_existing_price_path(lid)
         try:
             if pth and pth.exists() and pth.stat().st_size>0:
                 repair.append({'lid':lid,'kind':'source','path':str(pth),'route':'repair_source'})
-        except Exception:pass
-
-    # Pass 2: source-only plus repair, each independently hard-isolated.
-    # De-duplicate by listing id so no asset is rebuilt twice.
-    sm={str(x['lid']):x for x in sources}
-    for x in repair:sm[str(x['lid'])]=x
-    source_work=list(sm.values())
-    _v850m_parallel(source_work,V850M_SOURCE_WORKERS,V850M_SOURCE_TIMEOUT,'SOURCE',total,out,dates,errs,len(shards))
+            else:errs.append({'listing_id':lid,'error':'tail_shard_failed_no_source'})
+        except Exception:errs.append({'listing_id':lid,'error':'tail_shard_failed_no_source'})
+    if repair:
+        _v850_write(status='running',phase='repair',message=f'V8.50O one-pass tail source repair {len(repair)}',processed=counter[0],total=total,errors=len(errs),current_listing='',error=None)
+        _v850o_run_batches(repair,V850O_TAIL_SOURCE_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TAIL_REPAIR',total,out,dates,errs,counter)
 
     cov=100*len(out)/max(1,total)
-    _v850_write(status='running',phase='prices_done',
-        message=f'V8.50M PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · proceeding to CONTROL parity',
-        processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=routes,error=None)
-    if cov<95:raise RuntimeError(f'Price store coverage below 95% after per-asset isolated build: {cov:.2f}%')
+    # Trusted prefix failures are explicit; coverage is the gate. Do not pretend
+    # missing prefix data was rebuilt.
+    _v850_write(status='running',phase='prices_done',message=f'V8.50O PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · elapsed {time.time()-t0:.1f}s · proceeding to CONTROL parity',processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=counts,error=None)
+    if cov<95:raise RuntimeError(f'Price store coverage below 95%: {cov:.2f}%')
     return out,sorted(dates),errs
 
 
-_v850m_preflight_base=_v850_preflight
+_v850o_preflight_base=_v850_preflight
 def _v850_preflight():
-    o=_v850m_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50M'
-    o['engineering']='Non-recursive per-asset hard-timeout store; 12 shard workers / 6 source workers; metadata-only inventory; >=95% coverage + frozen CONTROL parity.'
+    o=_v850o_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50O'
+    o['engineering']='Trusted 3260 prefix is never rebuilt and never walked serially; existing shards are batch-read in parallel subprocesses. Tail uses isolated batch shard/source route plus one repair pass. Frozen economics and trigger/entry/STOP/exit.'
     try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     except Exception:pass
     return o
 
-_v850m_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
-if _v850m_home_base is not None:
-    def _v850m_home_wrap(*args,**kwargs):
-        resp=_v850m_home_base(*args,**kwargs)
-        card="""<div id='v850m-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>✅ V8.50M Non-Recursive Price Store</h2><p>每个 listing 独立 hard-timeout；不再 recursive batch split，不会因一个坏 shard 拖住整批。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50M</button></a></div>"""
+_v850o_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850o_home_base is not None:
+    def _v850o_home_wrap(*args,**kwargs):
+        resp=_v850o_home_base(*args,**kwargs)
+        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50O Trusted Prefix Batch Reuse</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50O</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
-            if 'v850m-home-card' not in body:
-                pos=body.lower().find('<body');gt=body.find('>',pos) if pos>=0 else -1
+            if 'v850o-home-card' not in body:
+                p=body.lower().find('<body');gt=body.find('>',p) if p>=0 else -1
                 body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
             return resp
         return card+str(resp)
     for _ep,_vf in list(APP.view_functions.items()):
-        if _vf is _v850m_home_base:APP.view_functions[_ep]=_v850m_home_wrap
-
-# =============================================================================
-# V8.50N — TRUSTED PREFIX REUSE + HARD-ISOLATED TAIL
-# FINAL ENGINEERING PATCH: never rebuild the observed-good 3260 prefix.
-# Only process the remaining tail. Tail reads/builds are isolated per listing,
-# with bounded subprocess timeouts and quarantine; no recursive splitting.
-# =============================================================================
-V850_BUILD_ID='v850n-trusted-prefix-reuse-hard-isolated-tail-20260903'
-V850N_TRUSTED_PREFIX_DONE=3260
-V850N_TAIL_WORKERS=max(4,min(10,int(os.environ.get('V850N_TAIL_WORKERS','8'))))
-V850N_SHARD_TIMEOUT=max(3,min(10,int(os.environ.get('V850N_SHARD_TIMEOUT','5'))))
-V850N_SOURCE_TIMEOUT=max(10,min(30,int(os.environ.get('V850N_SOURCE_TIMEOUT','18'))))
-
-
-def _v850n_tail_one(lid,qset):
-    """One tail listing: isolated SAFE -> isolated legacy -> isolated source."""
-    lid=str(lid)
-    if lid in qset:
-        return lid,None,'quarantined_stall'
-    sp=_v850h_safe_path(lid)
-    mp,err=_v850j_read_shard_isolated(sp,lid,V850N_SHARD_TIMEOUT)
-    if mp:
-        return lid,mp,None
-    lp=_v850_shard_path(lid)
-    mp2,err2=_v850j_read_shard_isolated(lp,lid,V850N_SHARD_TIMEOUT)
-    if mp2:
-        try:_v850_shard_save(lid,mp2)
-        except Exception:pass
-        return lid,mp2,None
-    pth=_v617o_existing_price_path(lid)
-    if pth and pth.exists():
-        mp3,err3=_v850j_build_source_isolated(lid,V850N_SOURCE_TIMEOUT)
-        if mp3:return lid,mp3,None
-        return lid,None,(err3 or err2 or err or 'source_build_failed')
-    return lid,None,(err2 or err or 'no_price_source')
-
-
-def _v850_prices_progress(lids):
-    import time,concurrent.futures
-    ids=sorted(set(map(str,lids)));total=len(ids)
-    V850_SAFE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
-    qset=_v850_qload();errs=[];out={};dates=set();resumed=0;timeouts=0
-    trusted=min(V850N_TRUSTED_PREFIX_DONE,total)
-
-    # FAST PATH: reuse the exact observed-good prefix. No subprocess rebuild.
-    for n,lid in enumerate(ids[:trusted],1):
-        if n==1 or n%500==0:
-            _v850_write(status='running',phase='prices',
-                message=f'V8.50N FAST REUSE {n-1}/{trusted} · reused {resumed}',
-                processed=n-1,total=total,errors=len(errs),current_listing=lid,
-                resumed_shards=resumed,timeout_count=timeouts,error=None)
-        mp=_v850h_safe_load(lid)
-        if not mp: mp=_v850_shard_load(lid)
-        if mp:
-            out[lid]=mp;dates.update(mp.keys());resumed+=1
-        else:
-            # Rare missing prefix item: send to tail repair, never silently count it.
-            errs.append({'listing_id':lid,'error':'trusted_prefix_missing'})
-
-    start=trusted
-    _v850_write(status='running',phase='prices',
-        message=f'V8.50N PREFIX DONE · reused {resumed}/{trusted} · HARD TAIL {start+1}/{total}',
-        processed=start,total=total,errors=len(errs),
-        current_listing=(ids[start] if start<total else ''),resumed_shards=resumed,
-        timeout_count=timeouts,error=None)
-
-    tail=ids[start:]
-    done=0
-    if tail:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=V850N_TAIL_WORKERS,thread_name_prefix='v850n') as ex:
-            futs={ex.submit(_v850n_tail_one,lid,qset):lid for lid in tail}
-            for fut in concurrent.futures.as_completed(futs):
-                lid=futs[fut]
-                try:lid2,mp,er=fut.result()
-                except BaseException as exx:lid2,mp,er=lid,None,f'tail_parent:{type(exx).__name__}:{str(exx)[:140]}'
-                if mp:
-                    out[str(lid2)]=mp;dates.update(mp.keys());resumed+=1
-                else:
-                    errs.append({'listing_id':str(lid2),'error':str(er or 'tail_failed')})
-                    if 'timeout' in str(er or '').lower():timeouts+=1
-                    if 'timeout' in str(er or '').lower() or 'worker_error' in str(er or '').lower():
-                        qset.add(str(lid2))
-                        try:_v850_qsave(qset,reason=f'{lid2}: {er}')
-                        except Exception:pass
-                done+=1
-                if done==1 or done%25==0 or done==len(tail):
-                    cov=100*len(out)/max(1,total)
-                    _v850_write(status='running',phase='prices',
-                        message=f'V8.50N HARD TAIL {done}/{len(tail)} · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
-                        processed=min(total,start+done),total=total,errors=len(errs),
-                        current_listing=str(lid2),resumed_shards=resumed,
-                        timeout_count=timeouts,last_skipped_listing=(str(lid2) if not mp else ''),
-                        last_skip_reason=(str(er)[:180] if not mp else ''),price_coverage_pct=cov,error=None)
-
-    cov=100*len(out)/max(1,total)
-    _v850_write(status='running',phase='prices_done',
-        message=f'V8.50N PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · proceeding to CONTROL parity',
-        processed=total,total=total,errors=len(errs),current_listing='',
-        resumed_shards=resumed,timeout_count=timeouts,price_coverage_pct=cov,error=None)
-    if cov<95:
-        raise RuntimeError(f'Price store coverage below 95% after trusted-prefix reuse: {cov:.2f}%')
-    return out,sorted(dates),errs
-
-_v850n_preflight_base=_v850_preflight
-def _v850_preflight():
-    o=_v850n_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50N'
-    o['engineering']='Reuse observed-good 3260 prefix; only hard-isolated tail; no recursive split; no full-stream rebuild.'
-    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-    except Exception:pass
-    return o
-
-_v850n_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
-if _v850n_home_base is not None:
-    def _v850n_home_wrap(*args,**kwargs):
-        resp=_v850n_home_base(*args,**kwargs)
-        card="""<div id='v850n-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🚀 V8.50N Trusted-Prefix Resume</h2><p>直接复用已确认完成的前 3260；只跑剩余 tail。tail 每只 listing 独立 hard-timeout，失败立即 quarantine，不会重跑 3000+。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50N</button></a></div>"""
-        if hasattr(resp,'get_data'):
-            body=resp.get_data(as_text=True)
-            if 'v850n-home-card' not in body:
-                pos=body.lower().find('<body');gt=body.find('>',pos) if pos>=0 else -1
-                body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
-            return resp
-        return card+str(resp)
-    for _ep,_vf in list(APP.view_functions.items()):
-        if _vf is _v850n_home_base:APP.view_functions[_ep]=_v850n_home_wrap
+        if _vf is _v850o_home_base:APP.view_functions[_ep]=_v850o_home_wrap
