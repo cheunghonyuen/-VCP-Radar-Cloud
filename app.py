@@ -71338,3 +71338,284 @@ if _v846b_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v846b_home_base:APP.view_functions[ep]=_v846b_home_wrap
+
+# =============================================================================
+# V8.47 FROZEN EMERGENCY-BRAKE CAUSAL OVERLAY — ONE PREDECLARED LADDER
+# Research order: V8.45 concentrated MaxDD -> V8.46B point-in-time systemic stress
+# visible -> now test exactly ONE action ladder. No partial-profit, no shorting,
+# no trailing-stop mutation, no threshold sweep.
+# IMPORTANT: this first economic brake test keeps the V8.44 admitted schedule/capital
+# frozen. A blocked scheduled admission is not replaced by a lower-ranked candidate.
+# Thus it isolates account-defense economics before any full candidate-stream rerun.
+# =============================================================================
+V847_DIR = DATA_DIR / 'v847_frozen_emergency_brake_causal_overlay'
+V847_PREFLIGHT = V847_DIR / 'preflight.json'
+V847_STATUS = V847_DIR / 'status.json'
+V847_RESULT = V847_DIR / 'result.json'
+V847_CURVES = V847_DIR / 'equity_curves.csv.gz'
+V847_TRADES = V847_DIR / 'trade_overlay.csv.gz'
+V847_SIGNALS = V847_DIR / 'causal_stress_signal.csv.gz'
+V847_BUILD_ID = 'v847-frozen-emergency-brake-causal-overlay-20260903'
+v847_thread = None
+
+
+def _v847_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V847_STATUS.exists():
+        try:x.update(json.loads(V847_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v847_write(**kw):
+    V847_DIR.mkdir(parents=True,exist_ok=True);x=_v847_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V847_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v847_alive():return v847_thread is not None and v847_thread.is_alive()
+
+
+def _v847_preflight():
+    import pandas as pd,time
+    t0=time.time();V847_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        if not V846B_RESULT.exists() or not V846B_DAILY.exists():raise RuntimeError('V8.46B completed result/daily panel missing')
+        r46=json.loads(V846B_RESULT.read_text(encoding='utf-8'))
+        if not str(r46.get('verdict','')).startswith('SYSTEMIC_STRESS_IS_VISIBLE_AROUND_2008_CLUSTER'):
+            raise RuntimeError('V8.46B systemic-stress promotion verdict not present')
+        R44,L=_v845_load();t=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].copy();D=pd.read_csv(V846B_DAILY,compression='gzip',low_memory=False)
+        need=['date','tight_neg_3d_pct','proxy_neg_3d_pct','stop_5d','tight_ew_ret_5d','proxy_ew_ret_5d']
+        miss=[c for c in need if c not in D.columns]
+        out={'version':'V8.47','build_id':V847_BUILD_ID,'verdict':'PASS' if len(t)==198 and not miss and len(D)>=5000 else 'FAIL__V846B_PANEL_OR_TIGHT_LEDGER_PARITY',
+             'error':None,'tight_rows':int(len(t)),'signal_sessions':int(len(D)),'missing_signal_columns':miss,
+             'fixed_ladder':{
+                 'signal':'At each close, compare 5 stress measures with EXPANDING PAST-ONLY 95th/5th percentiles; minimum 252 prior sessions. Action is NEXT session only.',
+                 'NORMAL':'0-2 stressed measures: frozen scheduled entries allowed; no forced deleveraging.',
+                 'AMBER':'3/5 stressed: pause scheduled new entries next session; keep existing positions.',
+                 'RED':'4/5 stressed: pause entries and pro-rata trim OPEN exposure at next open to <=50% of equity.',
+                 'BLACK':'5/5 stressed: pause entries and liquidate all OPEN positions at next open to cash.',
+                 'recovery':'No invented cooldown. Each next-session action is determined only by prior close stress count; liquidated/trimmed shares are never rebought.'},
+             'frozen_scope':'V8.44 Tight admitted schedule/capital is frozen. Blocked entries are NOT backfilled by other candidates. This isolates brake economics and avoids admission/ranking confounding.',
+             'hard_exclusions':['NO partial-profit combination','NO shorting','NO trailing-stop mutation','NO signal threshold/grid search','NO admission/ranking retune','0 Tiingo','0 universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.47','build_id':V847_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V847_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v847_causal_signal(D):
+    """Convert V8.46B raw stress telemetry into a point-in-time deployable shadow signal.
+    Thresholds use only PREVIOUS sessions; the current close never participates in its own threshold.
+    """
+    import pandas as pd,numpy as np
+    X=D.copy();X['date']=pd.to_datetime(X['date'],errors='coerce').dt.normalize();X=X.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+    hi=['tight_neg_3d_pct','proxy_neg_3d_pct','stop_5d'];lo=['tight_ew_ret_5d','proxy_ew_ret_5d']
+    flags=[]
+    for c in hi:
+        s=pd.to_numeric(X[c],errors='coerce');thr=s.shift(1).expanding(min_periods=252).quantile(.95);f=(s>=thr)&thr.notna();X[c+'_pit_thr']=thr;X[c+'_pit_stress']=f.astype(int);flags.append(c+'_pit_stress')
+    for c in lo:
+        s=pd.to_numeric(X[c],errors='coerce');thr=s.shift(1).expanding(min_periods=252).quantile(.05);f=(s<=thr)&thr.notna();X[c+'_pit_thr']=thr;X[c+'_pit_stress']=f.astype(int);flags.append(c+'_pit_stress')
+    X['pit_stress_count']=X[flags].sum(axis=1).astype(int)
+    X['close_state']=np.select([X.pit_stress_count==3,X.pit_stress_count==4,X.pit_stress_count>=5],['AMBER','RED','BLACK'],default='NORMAL')
+    # Action on date t is based on state observed at prior session close.
+    X['action_state']=X['close_state'].shift(1).fillna('NORMAL')
+    X['action_source_date']=X['date'].shift(1)
+    return X
+
+
+def _v847_simulate(L,price,cal,signal,brake=False):
+    """Frozen-admission-schedule account overlay. Uses next-session OPEN for brake actions.
+    Original exits remain for remaining shares. Skipped scheduled entries are not backfilled.
+    """
+    import pandas as pd,numpy as np
+    A=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].sort_values(['entry_date','listing_id'],kind='stable').reset_index(drop=True).copy()
+    rec=A.to_dict('index');ent={};ext={}
+    for i,r in rec.items():
+        ent.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);ext.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    sm={pd.Timestamp(r.date).normalize():str(r.action_state) for _,r in signal.iterrows()}
+    sc={pd.Timestamp(r.date).normalize():int(r.pit_stress_count) for _,r in signal.iterrows()}
+    cash=1.0;pos={};last={};rows=[];trade_rows=[];blocked=[];trim_events=0;black_events=0;amber_days=0;red_days=0;black_days=0
+    prev_action='NORMAL'
+    def barpx(lid,dt,field,fallback):
+        b=price.get(lid,{}).get(dt);v=(b or {}).get(field) if b else None
+        try:v=float(v)
+        except Exception:v=np.nan
+        return v if np.isfinite(v) and v>0 else fallback
+    for dt in cal:
+        dt=pd.Timestamp(dt).normalize();state=sm.get(dt,'NORMAL') if brake else 'NORMAL';cnt=sc.get(dt,0) if brake else 0
+        if state=='AMBER':amber_days+=1
+        elif state=='RED':red_days+=1
+        elif state=='BLACK':black_days+=1
+        # Mark/open valuation before emergency action.
+        open_val=0.0
+        for i,p in pos.items():
+            op=barpx(p['listing_id'],dt,'open',last.get(i,p['entry_px']));open_val+=p['shares']*op
+        eq_open=cash+open_val
+        # BLACK: full liquidation at next-session open.
+        if state=='BLACK' and pos:
+            black_events += 1 if prev_action!='BLACK' else 0
+            for i in list(pos.keys()):
+                p=pos.pop(i);op=barpx(p['listing_id'],dt,'open',last.get(i,p['entry_px']));pro=p['shares']*op;cash+=pro;p['proceeds']+=pro
+                ov=p['proceeds']/p['capital']-1 if p['capital']>0 else np.nan
+                trade_rows.append({'strategy':'TIGHT_PIVOT_SHADOW','overlay':'EMERGENCY_BRAKE','listing_id':p['listing_id'],'entry_date':str(p['entry_date'].date()),'exit_date':str(dt.date()),'capital':p['capital'],'original_ret':p['original_ret'],'original_reason':p['original_reason'],'overlay_ret':ov,'overlay_reason':'BRAKE_BLACK','red_trim_fraction_cum':p['trim_fraction_cum']})
+                last.pop(i,None)
+        # RED: pro-rata trim at open to <=50% gross exposure; do not rebuy trimmed shares.
+        elif state=='RED' and pos and eq_open>0 and open_val/eq_open>0.50+1e-12:
+            target=0.50*eq_open;keep_frac=max(0.0,min(1.0,target/open_val));sell_frac=1.0-keep_frac
+            if sell_frac>1e-12:
+                trim_events+=1
+                for i,p in pos.items():
+                    op=barpx(p['listing_id'],dt,'open',last.get(i,p['entry_px']));sell_sh=p['shares']*sell_frac;pro=sell_sh*op;cash+=pro;p['shares']-=sell_sh;p['proceeds']+=pro;p['trim_fraction_cum']=1.0-p['shares']/p['initial_shares']
+        # Original exits after brake action. BLACK-closed positions are already gone.
+        for i in ext.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            xp=float(rec[i]['exit_px']);pro=p['shares']*xp;cash+=pro;p['proceeds']+=pro
+            ov=p['proceeds']/p['capital']-1 if p['capital']>0 else np.nan
+            trade_rows.append({'strategy':'TIGHT_PIVOT_SHADOW','overlay':'EMERGENCY_BRAKE' if brake else 'CONTROL','listing_id':p['listing_id'],'entry_date':str(p['entry_date'].date()),'exit_date':str(dt.date()),'capital':p['capital'],'original_ret':p['original_ret'],'original_reason':p['original_reason'],'overlay_ret':ov,'overlay_reason':'ORIGINAL_EXIT','red_trim_fraction_cum':p['trim_fraction_cum']})
+            last.pop(i,None)
+        # Frozen scheduled entries. Any brake state blocks next-session admissions.
+        for i in ent.get(dt,[]):
+            r=rec[i]
+            if brake and state!='NORMAL':
+                blocked.append({'listing_id':str(r['listing_id']),'entry_date':str(dt.date()),'state':state,'stress_count':cnt,'original_ret':float(r['ret']),'original_reason':str(r['reason'])});continue
+            cap=float(r['capital']);ep=float(r['entry_px'])
+            if cash+1e-12<cap:
+                blocked.append({'listing_id':str(r['listing_id']),'entry_date':str(dt.date()),'state':'CASH_SHORT','stress_count':cnt,'original_ret':float(r['ret']),'original_reason':str(r['reason'])});continue
+            sh=cap/ep;cash-=cap;pos[i]={'listing_id':str(r['listing_id']),'entry_date':dt,'entry_px':ep,'shares':sh,'initial_shares':sh,'capital':cap,'proceeds':0.0,'trim_fraction_cum':0.0,'original_ret':float(r['ret']),'original_reason':str(r['reason'])};last[i]=ep
+        hv=0.0
+        for i,p in pos.items():
+            cp=barpx(p['listing_id'],dt,'close',last.get(i,p['entry_px']));last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;rows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos),cash,state,cnt));prev_action=state
+    C=pd.DataFrame(rows,columns=['date','equity','exposure','open_n','cash','action_state','stress_count']);C['overlay']='EMERGENCY_BRAKE' if brake else 'CONTROL';C['running_peak']=C.equity.cummax();C['drawdown']=C.equity/C.running_peak-1
+    T=pd.DataFrame(trade_rows);B=pd.DataFrame(blocked)
+    stats={'amber_days':amber_days,'red_days':red_days,'black_days':black_days,'red_trim_events':trim_events,'black_liquidation_events':black_events,'blocked_entries':int(len(B))}
+    return C,T,B,stats
+
+
+def _v847_metrics(C,T,B,stats):
+    import pandas as pd,numpy as np
+    if C.empty:return {}
+    start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25)
+    cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1.0;maxdd=float(C.drawdown.min());calmar=cagr/abs(maxdd) if maxdd<0 else np.nan
+    if len(T):
+        r=pd.to_numeric(T.overlay_ret,errors='coerce');cap=pd.to_numeric(T.capital,errors='coerce');pnl=cap*r;gp=float(pnl[pnl>0].sum());gl=float(-pnl[pnl<=0].sum());pf=gp/gl if gl>0 else np.inf;wr=float((r>0).mean());avg=float(r.mean());w20=int((r>=.20).sum());w30=int((r>=.30).sum());w100=int((r>=1.0).sum())
+    else:pf=wr=avg=np.nan;w20=w30=w100=0
+    blocked20=int((pd.to_numeric(B.original_ret,errors='coerce')>=.20).sum()) if len(B) else 0;blocked30=int((pd.to_numeric(B.original_ret,errors='coerce')>=.30).sum()) if len(B) else 0;blocked100=int((pd.to_numeric(B.original_ret,errors='coerce')>=1.0).sum()) if len(B) else 0
+    def period(a,b):
+        x=C[(C.date>=pd.Timestamp(a))&(C.date<=pd.Timestamp(b))]
+        if len(x)<2:return {'return':None,'maxdd':None}
+        return {'return':float(x.equity.iloc[-1]/x.equity.iloc[0]-1),'maxdd':float((x.equity/x.equity.cummax()-1).min())}
+    return {'cagr':float(cagr),'maxdd':maxdd,'calmar':float(calmar),'pf':float(pf),'win_rate':wr,'avg_trade':avg,'winner20':w20,'winner30':w30,'winner100':w100,'final_multiple':float(end/start),'avg_exposure':float(C.exposure.mean()),'avg_open_positions':float(C.open_n.mean()),
+            'blocked_winner20':blocked20,'blocked_winner30':blocked30,'blocked_winner100':blocked100,**stats,
+            'crisis_2008':period('2008-09-01','2009-03-31'),'covid_2020':period('2020-02-01','2020-06-30')}
+
+
+def _v847_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v847_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.47 preflight must PASS: '+str(pf.get('verdict')))
+    R44,L=_v845_load();D=pd.read_csv(V846B_DAILY,compression='gzip',low_memory=False);S=_v847_causal_signal(D)
+    ids=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].listing_id.unique();_v847_write(status='running',phase='prices',message='Loading admitted-only OPEN+CLOSE for frozen brake overlay',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v846a_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'cached OPEN+CLOSE coverage too low: {cov:.2f}%')
+    C0,T0,B0,s0=_v847_simulate(L,price,cal,S,brake=False);C1,T1,B1,s1=_v847_simulate(L,price,cal,S,brake=True)
+    m0=_v847_metrics(C0,T0,B0,s0);m1=_v847_metrics(C1,T1,B1,s1)
+    ref=next((x for x in R44.get('portfolio',[]) if x.get('strategy')=='TIGHT_PIVOT_SHADOW'),{})
+    parity={'cagr_abs_diff_pp':100*abs(m0['cagr']-float(ref.get('cagr',m0['cagr']))),'maxdd_abs_diff_pp':100*abs(m0['maxdd']-float(ref.get('maxdd',m0['maxdd'])))};parity_ok=parity['cagr_abs_diff_pp']<=.10 and parity['maxdd_abs_diff_pp']<=.10
+    delta={'cagr_pp':100*(m1['cagr']-m0['cagr']),'maxdd_pp':100*(m1['maxdd']-m0['maxdd']),'calmar':m1['calmar']-m0['calmar'],'pf':m1['pf']-m0['pf'],'avg_trade_pp':100*(m1['avg_trade']-m0['avg_trade'])}
+    if not parity_ok:verdict='CONTROL_PARITY_FAIL__DO_NOT_INTERPRET_BRAKE'
+    elif delta['maxdd_pp']>=20 and delta['cagr_pp']>=-5 and m1['calmar']>m0['calmar']:
+        verdict='EMERGENCY_BRAKE_STRONGLY_RESCUES_DRAWDOWN__PROMOTE_TO_FULL_CAUSAL_ADMISSION_TEST'
+    elif delta['maxdd_pp']>=10 and delta['cagr_pp']>=-5:
+        verdict='EMERGENCY_BRAKE_SHOWS_RISK_SIGNAL__KEEP_SHADOW__FULL_CAUSAL_TEST_NEXT'
+    else:verdict='EMERGENCY_BRAKE_DOES_NOT_CLEAR_FROZEN_LEDGER_ECONOMIC_BAR'
+    # Count distinct action episodes (state transitions from NORMAL into any brake state).
+    st=S.action_state.astype(str);episodes=int(((st!='NORMAL')&(st.shift(1).fillna('NORMAL')=='NORMAL')).sum())
+    result={'version':'V8.47','build_id':V847_BUILD_ID,'verdict':verdict,'parity_ok':bool(parity_ok),'control_parity':parity,'price_coverage_pct':cov,'price_errors':errs[:100],
+            'fixed_ladder':pf.get('fixed_ladder'),'control':m0,'emergency_brake':m1,'delta_vs_control':delta,'brake_episodes':episodes,
+            'signal_counts':{k:int((S.action_state==k).sum()) for k in ['NORMAL','AMBER','RED','BLACK']},
+            'interpretation':'This is the first economic action test after V8.46B. It uses expanding past-only thresholds and next-session actions, but freezes the already-admitted V8.44 Tight schedule. Therefore it measures account-defense economics without pretending that skipped entries were causally backfilled.',
+            'next':('If the frozen-ledger brake materially improves MaxDD/Calmar without destroying CAGR, the next version should rerun the SAME fixed ladder on the full Tight candidate stream with causal first-come 10-slot admission. Do not tune the ladder before that confirmation.' if parity_ok else 'Fix parity only; do not tune the brake.'),
+            'hard_exclusions':pf.get('hard_exclusions'),'elapsed_sec':round(time.time()-t0,1)}
+    V847_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');pd.concat([C0,C1],ignore_index=True).to_csv(V847_CURVES,index=False,compression='gzip');pd.concat([T0,T1],ignore_index=True).to_csv(V847_TRADES,index=False,compression='gzip');S.to_csv(V847_SIGNALS,index=False,compression='gzip')
+    _v847_write(status='done',phase='complete',message='Done · '+verdict,processed=2,total=2,errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+
+def _v847_worker():
+    global v847_thread
+    import time
+    t0=time.time()
+    try:_v847_run()
+    except Exception as ex:_v847_write(status='error',phase='failed',message='V8.47 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v847_thread=None
+
+
+@APP.route('/v847/preflight',methods=['GET','POST'])
+def v847_preflight_route():_v847_preflight();return redirect('/v847')
+
+
+@APP.route('/v847/run',methods=['GET','POST'])
+def v847_run_route():
+    global v847_thread
+    if not _v847_alive():
+        p=_v847_preflight()
+        if p.get('verdict')=='PASS':
+            _v847_write(status='starting',phase='queued',message='Frozen Emergency-Brake A/B accepted',processed=0,total=2,errors=0,error=None);v847_thread=threading.Thread(target=_v847_worker,daemon=True);v847_thread.start()
+    return redirect('/v847')
+
+
+@APP.get('/api/v847/status')
+def v847_status_api():return jsonify(_v847_status())
+
+
+@APP.get('/v847/export/<name>')
+def v847_export(name):
+    mp={'curves':V847_CURVES,'trades':V847_TRADES,'signals':V847_SIGNALS};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+
+@APP.get('/v847')
+def v847_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S0=_v847_status()
+    try:
+        if V847_PREFLIGHT.exists():P=json.loads(V847_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V847_RESULT.exists():R=json.loads(V847_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    c=R.get('control',{});b=R.get('emergency_brake',{});d=R.get('delta_vs_control',{});sg=R.get('signal_counts',{})
+    def row(name,x):
+        return f"<tr><td>{name}</td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('blocked_entries',0))}</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.47 Frozen Emergency-Brake Causal Overlay</h1><div class="o"><b>只测一个固定刹车梯级，不调参：</b>过去数据 expanding PIT threshold；前一日收盘 3/5=AMBER 停新仓，4/5=RED 次日开盘把 gross exposure 降至≤50%，5/5=BLACK 次日开盘清仓。<br><b>不组合 V8.46A partial profit，不做空。</b></div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V847_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight ledger {e(P.get('tight_rows','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v847/preflight"><button>A. Run V8.47 Preflight</button></form><br><form method="post" action="/v847/run"><button>B. Run Frozen Emergency-Brake A/B</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>Control Parity</h2><p>CAGR diff {n(R.get('control_parity',{}).get('cagr_abs_diff_pp'),3)} pp · MaxDD diff {n(R.get('control_parity',{}).get('maxdd_abs_diff_pp'),3)} pp</p></div>
+<div class="c"><h2>Tight Account Economics</h2><div style="overflow:auto"><table><tr><th>Overlay</th><th>CAGR</th><th>MaxDD</th><th>Calmar</th><th>PF</th><th>Avg trade</th><th>Win</th><th>Avg exposure</th><th>Blocked</th></tr>{row('CONTROL',c) if c else ''}{row('EMERGENCY_BRAKE',b) if b else ''}</table></div><p><b>Δ:</b> CAGR {n(d.get('cagr_pp'))} pp · MaxDD {n(d.get('maxdd_pp'))} pp · Calmar {n(d.get('calmar'),3)} · AvgTrade {n(d.get('avg_trade_pp'))} pp</p></div>
+<div class="c"><h2>Brake Activity</h2><p>Episodes {e(R.get('brake_episodes','—'))} · AMBER days {e(sg.get('AMBER','—'))} · RED days {e(sg.get('RED','—'))} · BLACK days {e(sg.get('BLACK','—'))}</p><p>RED trim events {e(b.get('red_trim_events','—'))} · BLACK liquidation events {e(b.get('black_liquidation_events','—'))}</p><p>Blocked +20 winners {e(b.get('blocked_winner20','—'))} · +30 {e(b.get('blocked_winner30','—'))} · +100 {e(b.get('blocked_winner100','—'))}</p></div>
+<div class="c"><h2>Stress Period Check</h2><p>2008 brake return {n(100*(b.get('crisis_2008',{}).get('return') or 0))}% · MaxDD {n(100*(b.get('crisis_2008',{}).get('maxdd') or 0))}%</p><p>2020 brake return {n(100*(b.get('covid_2020',{}).get('return') or 0))}% · MaxDD {n(100*(b.get('covid_2020',{}).get('maxdd') or 0))}%</p></div>
+<div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','先跑 V8.47。'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v847/export/curves'>Equity curves CSV.GZ</a> · <a href='/v847/export/trades'>Trade overlay CSV.GZ</a> · <a href='/v847/export/signals'>Causal signal CSV.GZ</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+
+# Mandatory homepage card for V8.47.
+_v847_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v847_home_base is not None:
+    def _v847_home_wrap(*args,**kwargs):
+        resp=_v847_home_base(*args,**kwargs)
+        card="""<div id='v847-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'><h2>🧯 V8.47 Frozen Emergency-Brake Causal Overlay</h2><p>V8.46B 已确认 2008 系统压力可见；现在只测试一个 frozen AMBER→RED→BLACK 风控梯级。过去数据阈值、次日开盘执行；不组合 partial profit、不做空、不调参。</p><a href='/v847'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.47</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v847-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v847_home_base:APP.view_functions[ep]=_v847_home_wrap
