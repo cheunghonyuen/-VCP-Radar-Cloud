@@ -72341,7 +72341,7 @@ def v850_page():
     def row(name,x):
         return f"<tr><td><b>{e(name)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('trade_count',0))}</td><td>{e(x.get('winner100',0))}</td></tr>"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>V8.50S BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
+<div class="c"><h1>V8.50T BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
 <div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V850_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight candidates {e(P.get('tight_candidate_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v850/preflight"><button>A. Run V8.50 Preflight</button></form><br><form method="post" action="/v850/run"><button>B. Run BLACK→NORMAL Full Causal A/B</button></form></div>
 <div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
 <div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
@@ -73273,7 +73273,7 @@ _v850o_home_base=APP.view_functions.get('home') or APP.view_functions.get('index
 if _v850o_home_base is not None:
     def _v850o_home_wrap(*args,**kwargs):
         resp=_v850o_home_base(*args,**kwargs)
-        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50S Direct Batch Subprocess Pool</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50S</button></a></div>"""
+        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50T Lazy Disk-Backed Price Store</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50T</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850o-home-card' not in body:
@@ -73446,3 +73446,120 @@ def _v850_preflight():
     try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     except Exception:pass
     return o
+
+
+# =============================================================================
+# V8.50T — LAZY DISK-BACKED PRICE STORE / RAM-BOUNDED REPLAY
+# Fixes the V8.50S failure mode where every successful full-history map was kept
+# in Flask RAM. T performs metadata-only inventory up front, then loads only the
+# listings actually needed by the 10-slot causal replay. A tiny LRU cache keeps
+# at most the active working set in memory; successful maps are checkpointed to
+# per-listing disk shards. Trigger/Entry/STOP/Exit/BLACK->NORMAL are unchanged.
+# =============================================================================
+V850_BUILD_ID='v850t-lazy-disk-backed-price-store-20260903'
+V850T_CACHE_MAX=max(12,min(32,int(os.environ.get('V850T_CACHE_MAX','16'))))
+V850T_LAZY_TIMEOUT=max(15,min(60,int(os.environ.get('V850T_LAZY_TIMEOUT','25'))))
+
+class _V850TLazyPriceStore:
+    def __init__(self, items, total, inventory_counts=None):
+        from collections import OrderedDict
+        self.items={str(x['lid']):dict(x) for x in items}
+        self.total=int(total);self.inventory_counts=inventory_counts or {}
+        self.cache=OrderedDict();self.ok=set();self.failed={};self.requests=0;self.loads=0
+    def __len__(self):
+        # Coverage is inventory-backed, not RAM-residency-backed.
+        return len(self.items)
+    def _put(self,lid,mp):
+        self.cache[lid]=mp;self.cache.move_to_end(lid)
+        while len(self.cache)>V850T_CACHE_MAX:self.cache.popitem(last=False)
+    def get(self,lid,default=None):
+        lid=str(lid);self.requests+=1
+        if lid in self.cache:
+            self.cache.move_to_end(lid);return self.cache[lid]
+        it=self.items.get(lid)
+        if it is None:return default
+        maps,ee=_v850s_run_batch_once([it],V850T_LAZY_TIMEOUT)
+        mp=maps.get(lid)
+        self.loads+=1
+        if not mp:
+            reason=(ee[0].get('error') if ee else 'lazy_no_result')
+            self.failed[lid]=reason
+            _v850_write(status='running',phase='lazy_price',message=f'V8.50T lazy price SKIP {lid} · {reason} · loaded {len(self.ok)} · RAM cache {len(self.cache)}/{V850T_CACHE_MAX}',errors=len(self.failed),current_listing=lid,error=None)
+            return default
+        self.ok.add(lid);self._put(lid,mp)
+        # Persist a canonical shard so a second strategy pass/restart reuses disk,
+        # never the full in-RAM universe.
+        try:
+            _v850_shard_save(lid,mp)
+            self.items[lid]={'lid':lid,'kind':'shard','path':str(_v850_shard_path(lid)),'route':'t_canonical'}
+        except Exception:pass
+        if self.loads==1 or self.loads%25==0:
+            _v850_write(status='running',phase='lazy_price',message=f'V8.50T lazy price loaded {len(self.ok)} unique · failed {len(self.failed)} · RAM cache {len(self.cache)}/{V850T_CACHE_MAX}',errors=len(self.failed),current_listing=lid,error=None)
+        return mp
+    def stats(self):
+        return {'inventory_assets':len(self.items),'total_assets':self.total,'unique_loaded_ok':len(self.ok),'unique_failed':len(self.failed),'requests':self.requests,'helper_loads':self.loads,'ram_cache_max':V850T_CACHE_MAX,'ram_cache_now':len(self.cache),'failures':list(self.failed.items())[:100]}
+
+
+def _v850t_inventory_store(lids):
+    ids,trusted,prefix,tail,missing,counts=_v850o_inventory(lids);total=len(ids)
+    items=list(prefix)+list(tail)
+    projected=100*len(items)/max(1,total)
+    _v850_write(status='running',phase='inventory_done',message=f'V8.50T RAM-BOUNDED inventory · available {len(items)}/{total} ({projected:.2f}%) · NO full-universe preload · lazy 10-slot replay next',processed=len(items),total=total,errors=len(missing),current_listing='',inventory=counts,projected_coverage_pct=projected,error=None)
+    if projected<95:raise RuntimeError(f'Projected price coverage below 95%: {projected:.2f}%')
+    return _V850TLazyPriceStore(items,total,counts),projected,missing,counts
+
+
+# Keep the same public helper name, but it now returns a disk-backed lazy store.
+def _v850_prices_progress(lids):
+    price,projected,missing,counts=_v850t_inventory_store(lids)
+    # Calendar is supplied by _v850_run from the frozen point-in-time signal
+    # sessions; no reason to open 4,431 histories merely to union dates.
+    return price,[],[{'listing_id':str(x),'error':'inventory_missing'} for x in missing]
+
+
+_v850t_preflight_base=_v850_preflight
+def _v850_preflight():
+    o=_v850t_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50T'
+    o['engineering']='RAM-bounded lazy disk-backed price store. Metadata-only >=95% inventory gate; no 4,431-map preload. Replay loads only actually admitted/open listings through hard-timeout helper subprocesses, keeps a 16-map LRU, and checkpoints successful maps to disk. Frozen trading semantics unchanged.'
+    try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    except Exception:pass
+    return o
+
+
+def _v850_run():
+    import pandas as pd,time
+    t0=time.time();pf=_v850_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.50 preflight must PASS: '+str(pf.get('verdict')))
+    A,AF,P,J,B,T,X,attrs=_v844_load_streams();S=pd.read_csv(V847_SIGNALS,compression='gzip',low_memory=False);S['date']=pd.to_datetime(S.date,errors='coerce').dt.normalize()
+    ids=T.listing_id.unique();price,projected,missing,counts=_v850t_inventory_store(ids)
+    # The frozen stress signal table is already a point-in-time market-session
+    # calendar. Add entry/exit dates defensively; this avoids a universe-wide
+    # price-history scan solely to construct the calendar.
+    cal=set(pd.to_datetime(S['date'],errors='coerce').dropna().dt.normalize().tolist())
+    cal.update(pd.to_datetime(T['entry_date'],errors='coerce').dropna().dt.normalize().tolist())
+    cal.update(pd.to_datetime(T['exit_date'],errors='coerce').dropna().dt.normalize().tolist())
+    cal=sorted(cal)
+    if len(cal)<500:raise RuntimeError(f'Lazy replay calendar unexpectedly short: {len(cal)} sessions')
+    _v850_write(status='running',phase='account_replay',message=f'V8.50T lazy replay starting · {len(cal)} sessions · projected coverage {projected:.2f}% · RAM cache max {V850T_CACHE_MAX}',processed=0,total=2,errors=len(missing),error=None)
+    out=[];led=[];curves=[];events=[]
+    for n,mode in enumerate(['CONTROL','BLACK_REENTRY'],1):
+        m,L,C,E=_v850_simulate(T,price,cal,S,mode,t0,n,2);out.append(m);curves.append(C)
+        if len(L):led.append(L)
+        if len(E):events.append(E.assign(variant=mode))
+    M={x['strategy']:x for x in out};c=M['CONTROL'];b=M['BLACK_REENTRY']
+    R44=json.loads(V844_RESULT.read_text(encoding='utf-8'));ref=next((x for x in R44.get('portfolio',[]) if x.get('strategy')=='TIGHT_PIVOT_SHADOW'),{})
+    parity={'cagr_abs_diff_pp':100*abs(c['cagr']-float(ref.get('cagr',c['cagr']))),'maxdd_abs_diff_pp':100*abs(c['maxdd']-float(ref.get('maxdd',c['maxdd'])))};parity_ok=parity['cagr_abs_diff_pp']<=.10 and parity['maxdd_abs_diff_pp']<=.10
+    delta={'cagr_pp':100*(b['cagr']-c['cagr']),'maxdd_pp':100*(b['maxdd']-c['maxdd']),'calmar':b['calmar']-c['calmar'],'avg_trade_pp':100*(b['avg_trade']-c['avg_trade']),'winner100_delta':b['winner100']-c['winner100'],'avg_exposure_pp':100*(b['avg_exposure']-c['avg_exposure'])}
+    passes=bool(parity_ok and delta['maxdd_pp']>=10.0 and b['cagr']>=c['cagr']-.05 and b['calmar']>c['calmar'])
+    verdict='BLACK_EXIT_NORMAL_REENTRY_FULL_CAUSAL_PASSES__KEEP_AS_RISK_SHADOW' if passes else ('CONTROL_PARITY_FAIL__DO_NOT_INTERPRET_REENTRY' if not parity_ok else 'BLACK_EXIT_NORMAL_REENTRY_FULL_CAUSAL_FAILS__KEEP_RED_TRIM_BENCHMARK')
+    cb=curves[1];periods={'2008':_v850_period(cb,'2008-06-01','2009-06-30'),'2020':_v850_period(cb,'2020-02-01','2020-08-31')}
+    pstats=price.stats()
+    result={'version':'V8.50T','build_id':V850_BUILD_ID,'verdict':verdict,'parity_ok':parity_ok,'control_parity':parity,'price_coverage_pct':projected,'price_inventory_missing_n':len(missing),'lazy_price_store':pstats,
+            'control':c,'black_reentry':b,'delta_vs_control':delta,'stress_periods':periods,
+            'state_machine':pf.get('state_machine'),'timing':pf.get('timing'),'frozen':pf.get('frozen'),'hard_exclusions':pf.get('hard_exclusions'),
+            'interpretation':'RAM-bounded full-candidate-stream causal test. CONTROL parity remains the hard validity gate. Price maps are fetched only when an admitted/open position actually needs MTM/BLACK-exit pricing; no full-universe map is retained in Flask RAM.',
+            'next':('If PASS, compare BLACK→NORMAL against RED_TRIM_ONLY. If CONTROL parity fails, do not interpret or tune; inspect only the lazy-price failure list/calendar parity.'),'elapsed_sec':round(time.time()-t0,1)}
+    V850_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8');pd.concat(curves,ignore_index=True).to_csv(V850_CURVES,index=False,compression='gzip')
+    if led:pd.concat(led,ignore_index=True).to_csv(V850_TRADES,index=False,compression='gzip')
+    if events:pd.concat(events,ignore_index=True).to_csv(V850_EVENTS,index=False)
+    _v850_write(status='done',phase='complete',message=f'Done · {verdict} · lazy loaded {pstats["unique_loaded_ok"]} unique / RAM {pstats["ram_cache_now"]}/{V850T_CACHE_MAX}',processed=2,total=2,errors=pstats['unique_failed'],elapsed_sec=result['elapsed_sec'],error=None);return result
