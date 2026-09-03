@@ -71991,7 +71991,7 @@ V850_RESULT = V850_DIR / 'result.json'
 V850_CURVES = V850_DIR / 'equity_curves.csv.gz'
 V850_TRADES = V850_DIR / 'trade_ledger.csv.gz'
 V850_EVENTS = V850_DIR / 'black_reentry_events.csv'
-V850_BUILD_ID = 'v850b-price-progress-own-status-fix-20260903'
+V850_BUILD_ID = 'v850c2-price-loader-callsite-and-home-card-fix-20260903'
 v850_thread = None
 
 def _v850_status():
@@ -72230,7 +72230,7 @@ def v850_page():
     def row(name,x):
         return f"<tr><td><b>{e(name)}</b></td><td>{n(100*x.get('cagr',0))}%</td><td>{n(100*x.get('maxdd',0))}%</td><td>{n(x.get('calmar'),3)}</td><td>{n(x.get('pf'),3)}</td><td>{n(100*x.get('avg_trade',0))}%</td><td>{n(100*x.get('win_rate',0))}%</td><td>{n(100*x.get('avg_exposure',0))}%</td><td>{e(x.get('trade_count',0))}</td><td>{e(x.get('winner100',0))}</td></tr>"
     return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:#fff;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
-<div class="c"><h1>V8.50B BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
+<div class="c"><h1>V8.50C BLACK Exit → NORMAL Re-entry Full Causal</h1><div class="o"><b>清仓不是终点：</b>这次真正放回完整 Tight candidate stream。BLACK 次日开盘清仓并只在 BLACK 当天禁止新仓；第一天 causal NORMAL 出现后，立刻重新开放原 Tight first-come 10-slot。<br><b>本版不使用 RED、不使用 AMBER、不组合 partial profit、不做空、不调 threshold。</b></div></div>
 <div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V850_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>Tight candidates {e(P.get('tight_candidate_rows','—'))} · Listings {e(P.get('unique_listings','—'))} · Signal sessions {e(P.get('signal_sessions','—'))}</p><form method="post" action="/v850/preflight"><button>A. Run V8.50 Preflight</button></form><br><form method="post" action="/v850/run"><button>B. Run BLACK→NORMAL Full Causal A/B</button></form></div>
 <div class="c"><h2>Status</h2><p>{e(S0.get('status'))} · {e(S0.get('phase'))} · {e(S0.get('message'))}</p><p>{e(S0.get('processed'))}/{e(S0.get('total'))} · Errors {e(S0.get('errors'))} · Runtime Error {e(S0.get('error') or 'None')}</p></div>
 <div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
@@ -72244,7 +72244,7 @@ def v850_page():
 _v850_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
 if _v850_home_base is not None:
     def _v850_home_wrap(*args,**kwargs):
-        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50B BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50</button></a></div>"""
+        resp=_v850_home_base(*args,**kwargs);card="""<div id='v850-home-card-real' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🔁 V8.50C BLACK Exit → NORMAL Re-entry Full Causal</h2><p>V8.49 已证明 BLACK 后恢复很快；本版把清仓后的重新入场真正放回完整 Tight candidate stream：BLACK 清仓，首个 causal NORMAL 即重新开放 first-come 10-slot。只测这一套状态机。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50C</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850-home-card-real' not in body:
