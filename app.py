@@ -73109,30 +73109,59 @@ V850O_WORKERS=max(2,min(6,int(os.environ.get('V850O_WORKERS','4'))))
 V850O_BATCH_TIMEOUT=max(20,min(120,int(os.environ.get('V850O_BATCH_TIMEOUT','30'))))
 
 
+def _v850p_run_one_batch_worker(chunk, timeout_sec, q):
+    # Child-only execution. Parent can terminate this process without waiting.
+    try:
+        maps, ee = _v850k_run_batch(chunk, timeout_sec)
+        q.put((maps, ee, None))
+    except Exception as e:
+        q.put(({}, [], f"child_exception:{type(e).__name__}:{str(e)[:200]}"))
+
 def _v850o_run_batches(items,batch_size,timeout_sec,label,total,out,dates,errs,processed_counter):
-    import concurrent.futures
+    import multiprocessing as mp, time
     if not items:return []
     chunks=[items[i:i+batch_size] for i in range(0,len(items),batch_size)]
     failed=[]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=V850O_WORKERS) as ex:
-        futs={ex.submit(_v850k_run_batch,ch,timeout_sec):ch for ch in chunks}
-        for fut in concurrent.futures.as_completed(futs):
-            ch=futs[fut]
-            try:
-                maps,ee=fut.result()
-            except Exception as exx:
-                maps={};ee=[{'listing_id':str(x['lid']),'error':f'{label}_parent_exception:{type(exx).__name__}:{str(exx)[:160]}'} for x in ch]
-            for lid,mp in maps.items():
-                out[str(lid)]=mp;dates.update(mp.keys())
-            got=set(map(str,maps.keys()))
-            failed.extend([x for x in ch if str(x['lid']) not in got])
-            errs.extend(ee)
-            processed_counter[0]+=len(ch)
-            cov=100*len(out)/max(1,total)
-            _v850_write(status='running',phase='batch_prices',
-                        message=f'V8.50O {label} {processed_counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',
-                        processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',
-                        price_coverage_pct=cov,error=None)
+    # Hard isolation: at most V8.50O_WORKERS child processes exist; each batch can be killed.
+    pending=list(chunks)
+    active=[]
+    while pending or active:
+        while pending and len(active)<V850O_WORKERS:
+            ch=pending.pop(0); q=mp.Queue(); p=mp.Process(target=_v850p_run_one_batch_worker,args=(ch,timeout_sec,q),daemon=True)
+            p.start(); active.append({'p':p,'q':q,'ch':ch,'t':time.time()})
+        progressed=False
+        for job in list(active):
+            p,q,ch,t0=job['p'],job['q'],job['ch'],job['t']
+            if not p.is_alive():
+                maps={}; ee=[]; child_err=None
+                try:
+                    if not q.empty(): maps,ee,child_err=q.get_nowait()
+                except Exception as e: child_err=f"result_read:{type(e).__name__}"
+                if child_err:
+                    ee=[{'listing_id':str(x['lid']),'error':f'{label}_{child_err}'} for x in ch]
+                for lid,mpx in maps.items(): out[str(lid)]=mpx; dates.update(mpx.keys())
+                got=set(map(str,maps.keys())); failed.extend([x for x in ch if str(x['lid']) not in got])
+                errs.extend(ee); processed_counter[0]+=len(ch)
+                cov=100*len(out)/max(1,total)
+                _v850_write(status='running',phase='batch_prices',message=f'V8.50O {label} {processed_counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,error=None)
+                try:q.close()
+                except Exception:pass
+                active.remove(job); progressed=True; continue
+            if time.time()-t0>timeout_sec:
+                try:p.terminate(); p.join(1)
+                except Exception:pass
+                if p.is_alive():
+                    try:p.kill(); p.join(1)
+                    except Exception:pass
+                ee=[{'listing_id':str(x['lid']),'error':f'{label}_hard_timeout_{timeout_sec}s'} for x in ch]
+                failed.extend(ch); errs.extend(ee); processed_counter[0]+=len(ch)
+                cov=100*len(out)/max(1,total)
+                _v850_write(status='running',phase='batch_prices',message=f'V8.50O {label} HARD TIMEOUT {processed_counter[0]}/{total} · skipped batch {len(ch)} · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,error=None)
+                try:q.close()
+                except Exception:pass
+                active.remove(job); progressed=True
+        if not progressed:
+            time.sleep(0.15)
     return failed
 
 
