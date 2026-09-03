@@ -72617,3 +72617,156 @@ def _v850_prices_progress(lids):
                 errs.append({'listing_id':lid,'error':serr or 'repair_failed'})
 
     return out,sorted(dates),errs
+
+# =============================================================================
+# V8.50J ENGINEERING OVERRIDE — HARD-ISOLATE *ALL* TAIL SHARD READS
+# Root cause proven by V8.50I runtime: tail status reached 3260/4431 at PWE, then
+# parent could still block inside direct _v850h_safe_load() BEFORE any timeout.
+# J removes every direct pickle load from the protected tail. Existing safe shards,
+# legacy F shards, and source-price builds are all touched only by subprocesses with
+# hard timeouts. Trusted prefix 1..3260 remains fast-path as already observed good.
+# Strategy/economics unchanged.
+# =============================================================================
+V850_BUILD_ID='v850j-hard-isolated-tail-shard-read-20260903'
+V850J_TMP_DIR=V850_DIR/'j_transport'
+
+
+def _v850j_read_shard_isolated(src,lid,timeout_sec=4):
+    """Read any shard ONLY in helper subprocess; return normalized map or timeout/error."""
+    import subprocess,sys,pickle,pandas as pd,hashlib,os
+    src=Path(src)
+    if not src.exists():return None,None
+    try:
+        sz=src.stat().st_size
+    except Exception as ex:
+        return None,f'shard_stat_{type(ex).__name__}'
+    if sz<=0 or sz>25*1024*1024:return None,'shard_invalid_size'
+    _v850h_write_helpers();V850J_TMP_DIR.mkdir(parents=True,exist_ok=True)
+    dst=V850J_TMP_DIR/(hashlib.sha1((str(lid)+'|'+str(src)).encode()).hexdigest()+'.pkl')
+    try:
+        if dst.exists():dst.unlink()
+    except Exception:pass
+    try:
+        cp=subprocess.run([sys.executable,str(V850_SHARD_HELPER),str(src),str(dst),str(lid)],
+                          stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            if dst.exists():dst.unlink()
+        except Exception:pass
+        return None,f'shard_read_timeout_after_{timeout_sec}s'
+    if cp.returncode!=0 or not dst.exists():
+        msg=(cp.stderr.decode('utf-8','ignore')[-160:] if cp.stderr else f'worker_exit_{cp.returncode}')
+        return None,'shard_worker_error:'+msg.replace('\n',' ')[:140]
+    # dst was freshly produced by our tiny helper, not user/cache input.
+    try:
+        with open(dst,'rb') as f:x=pickle.load(f)
+        if str(x.get('listing_id'))!=str(lid) or not isinstance(x.get('map'),dict):return None,'transport_invalid'
+        mp={pd.Timestamp(k).normalize():{'open':float(v['open']),'close':float(v['close'])} for k,v in x['map'].items()}
+        return (mp or None),None
+    except Exception as ex:
+        return None,f'transport_read_{type(ex).__name__}'
+    finally:
+        try:dst.unlink()
+        except Exception:pass
+
+
+def _v850j_build_source_isolated(lid,timeout_sec=20):
+    """Build SAFE shard from source CSV in subprocess, then read SAFE shard in another subprocess."""
+    import subprocess,sys,os
+    _v850h_write_helpers();out=_v850h_safe_path(lid);out.parent.mkdir(parents=True,exist_ok=True)
+    pth=_v617o_existing_price_path(lid)
+    if not pth or not pth.exists():return None,'source_price_missing'
+    env=os.environ.copy();env.pop('V850H_TEST_SLEEP',None)
+    try:
+        cp=subprocess.run([sys.executable,str(V850_PRICE_HELPER),str(lid),str(pth),str(out),str(V624_START.date()),str(V624_END.date())],
+                          stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=timeout_sec,env=env)
+    except subprocess.TimeoutExpired:
+        return None,f'price_build_timeout_after_{timeout_sec}s'
+    if cp.returncode!=0:
+        msg=(cp.stderr.decode('utf-8','ignore')[-160:] if cp.stderr else f'worker_exit_{cp.returncode}')
+        return None,'price_worker_error:'+msg.replace('\n',' ')[:140]
+    mp,err=_v850j_read_shard_isolated(out,lid,4)
+    return mp,err
+
+
+def _v850_prices_progress(lids):
+    import time
+    ids=sorted(set(map(str,lids)));V850_SAFE_SHARD_DIR.mkdir(parents=True,exist_ok=True)
+    qset=_v850_qload();errs=[];out={};dates=set();resumed=0;timeouts=0
+    trusted=min(V850_TRUSTED_PREFIX_DONE,len(ids))
+
+    # Trusted observed-good prefix: keep the fast reuse that already reached 3260.
+    for n,lid in enumerate(ids[:trusted],1):
+        if n==1 or n%500==0:
+            _v850_write(status='running',phase='prices',message=f'V8.50J FAST trusted prefix {n-1}/{trusted} · cached {resumed}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+        mp=_v850h_safe_load(lid)
+        if not mp:mp=_v850_shard_load(lid)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+        else:
+            errs.append({'listing_id':lid,'error':'trusted_prefix_missing'})
+
+    _v850_write(status='running',phase='prices',message=f'V8.50J FAST prefix done · reused {resumed}/{trusted} · HARD isolated tail starts {trusted+1}/{len(ids)}',processed=trusted,total=len(ids),errors=len(errs),current_listing=(ids[trusted] if trusted<len(ids) else ''),resumed_shards=resumed,timeout_count=timeouts,error=None)
+
+    # Tail: ZERO direct pickle loads. Every existing shard read is hard-isolated.
+    for n,lid in enumerate(ids[trusted:],trusted+1):
+        _v850_write(status='running',phase='prices',message=f'V8.50J HARD tail {n-1}/{len(ids)} · current {lid}',processed=n-1,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+        if lid in qset:
+            errs.append({'listing_id':lid,'error':'quarantined_stall'})
+            _v850_write(status='running',phase='prices',message=f'QUARANTINE {lid} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason='quarantined_stall',resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+
+        # 1) existing SAFE shard, isolated read
+        sp=_v850h_safe_path(lid)
+        mp,err=_v850j_read_shard_isolated(sp,lid,4)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys());resumed+=1
+            _v850_write(status='running',phase='prices',message=f'Resumed SAFE isolated {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        if err and ('timeout' in err or 'worker_error' in err or 'invalid' in err):
+            try:
+                if sp.exists():sp.unlink()
+            except Exception:pass
+
+        # 2) legacy F/G shard, isolated read directly (no parent pickle)
+        lp=_v850_shard_path(lid)
+        lmp,lerr=_v850j_read_shard_isolated(lp,lid,4)
+        if lmp:
+            out[lid]=lmp;dates.update(lmp.keys());resumed+=1
+            # Write normalized safe copy from trusted freshly-read map.
+            try:_v850_shard_save(lid,lmp)
+            except Exception:pass
+            _v850_write(status='running',phase='prices',message=f'Resumed LEGACY isolated {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        if lerr and ('timeout' in lerr or 'worker_error' in lerr or 'invalid' in lerr):
+            try:
+                if lp.exists():lp.unlink()
+            except Exception:pass
+
+        # 3) source CSV build, isolated, then isolated safe-shard read
+        mp,berr=_v850j_build_source_isolated(lid,20)
+        if mp:
+            out[lid]=mp;dates.update(mp.keys())
+            _v850_write(status='running',phase='prices',message=f'Built SAFE isolated {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,resumed_shards=resumed,timeout_count=timeouts,error=None)
+            continue
+        reason=berr or lerr or err or 'no_valid_open_close';errs.append({'listing_id':lid,'error':reason})
+        if 'timeout' in str(reason):
+            timeouts+=1;qset.add(lid);_v850_qsave(qset,reason=f'V8.50J {lid}: {reason}')
+        _v850_write(status='running',phase='prices',message=f'SKIP {lid} · {reason} · continuing {n}/{len(ids)}',processed=n,total=len(ids),errors=len(errs),current_listing=lid,last_skipped_listing=lid,last_skip_reason=reason,resumed_shards=resumed,timeout_count=timeouts,error=None)
+
+    return out,sorted(dates),errs
+
+# Latest home card label for delivery audit.
+_v850j_home_base=APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v850j_home_base is not None:
+    def _v850j_home_wrap(*args,**kwargs):
+        resp=_v850j_home_base(*args,**kwargs)
+        card="""<div id='v850j-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>🧱 V8.50J HARD-Isolated Tail Loader</h2><p>前 3260 observed-good shards 快速复用；3261+ 所有 SAFE/legacy shard 读取与 source build 全部 subprocess hard-timeout，父进程不再直接 pickle.load tail cache。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50J</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v850j-home-card' not in body:
+                p=body.lower().find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for _ep,_vf in list(APP.view_functions.items()):
+        if _vf is _v850j_home_base:APP.view_functions[_ep]=_v850j_home_wrap
