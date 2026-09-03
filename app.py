@@ -73091,7 +73091,7 @@ if _v850l_home_base is not None:
 
 
 # =============================================================================
-# V8.50O — TRUSTED PREFIX BATCH REUSE (NO SERIAL 3260 LOOP)
+# V8.50Q — TRUSTED PREFIX BATCH REUSE (NO SERIAL 3260 LOOP)
 # Fix: V8.50N still walked the trusted 3260 assets one-by-one. That is reuse,
 # but operationally it still costs thousands of sequential reads. This version
 # keeps the 3260 boundary frozen and reads existing shards in parallel batches.
@@ -73100,7 +73100,7 @@ if _v850l_home_base is not None:
 # use source build/repair. All shard parsing remains subprocess-isolated.
 # Strategy/economics are unchanged.
 # =============================================================================
-V850_BUILD_ID='v850o-trusted-prefix-batch-reuse-20260903'
+V850_BUILD_ID='v850q-item-isolated-price-loader-20260903'
 V850O_TRUSTED_PREFIX_DONE=3260
 V850O_PREFIX_BATCH_SIZE=max(32,min(256,int(os.environ.get('V850O_PREFIX_BATCH_SIZE','128'))))
 V850O_TAIL_SHARD_BATCH_SIZE=max(16,min(128,int(os.environ.get('V850O_TAIL_SHARD_BATCH_SIZE','64'))))
@@ -73109,59 +73109,72 @@ V850O_WORKERS=max(2,min(6,int(os.environ.get('V850O_WORKERS','4'))))
 V850O_BATCH_TIMEOUT=max(20,min(120,int(os.environ.get('V850O_BATCH_TIMEOUT','30'))))
 
 
-def _v850p_run_one_batch_worker(chunk, timeout_sec, q):
-    # Child-only execution. Parent can terminate this process without waiting.
+def _v850q_run_one_item_worker(item, q):
+    # One listing per hard-isolated child. A corrupt/hanging pickle can only
+    # consume this one slot; it can never poison a 128-listing batch.
     try:
-        maps, ee = _v850k_run_batch(chunk, timeout_sec)
-        q.put((maps, ee, None))
-    except Exception as e:
-        q.put(({}, [], f"child_exception:{type(e).__name__}:{str(e)[:200]}"))
+        lid=str(item['lid']); kind=str(item['kind']); p=Path(item['path'])
+        if not p.exists():
+            raise RuntimeError('asset_missing_at_worker')
+        raw = parse_source(p) if kind=='source' else parse_shard(p,lid)
+        nm = _v850k_normalize_map(raw)
+        if not nm:
+            raise RuntimeError('empty_or_invalid_map')
+        q.put((lid,nm,None))
+    except BaseException as e:
+        q.put((str(item.get('lid','')),None,f'{kind}:{type(e).__name__}:{str(e)[:180]}'))
 
 def _v850o_run_batches(items,batch_size,timeout_sec,label,total,out,dates,errs,processed_counter):
+    # V8.50Q: item-level process isolation. batch_size is intentionally ignored
+    # for execution granularity; it remains only as a compatibility argument.
     import multiprocessing as mp, time
     if not items:return []
-    chunks=[items[i:i+batch_size] for i in range(0,len(items),batch_size)]
     failed=[]
-    # Hard isolation: at most V8.50O_WORKERS child processes exist; each batch can be killed.
-    pending=list(chunks)
+    pending=list(items)
     active=[]
+    max_workers=max(2,min(8,int(os.environ.get('V850Q_WORKERS',str(V850O_WORKERS)))))
+    hard_timeout=max(5,int(timeout_sec))
     while pending or active:
-        while pending and len(active)<V850O_WORKERS:
-            ch=pending.pop(0); q=mp.Queue(); p=mp.Process(target=_v850p_run_one_batch_worker,args=(ch,timeout_sec,q),daemon=True)
-            p.start(); active.append({'p':p,'q':q,'ch':ch,'t':time.time()})
+        while pending and len(active)<max_workers:
+            item=pending.pop(0); q=mp.Queue(); p=mp.Process(target=_v850q_run_one_item_worker,args=(item,q),daemon=True)
+            p.start(); active.append({'p':p,'q':q,'item':item,'t':time.time()})
         progressed=False
         for job in list(active):
-            p,q,ch,t0=job['p'],job['q'],job['ch'],job['t']
+            p,q,item,t0=job['p'],job['q'],job['item'],job['t']; lid=str(item['lid'])
             if not p.is_alive():
-                maps={}; ee=[]; child_err=None
+                got=False; nm=None; child_err=None
                 try:
-                    if not q.empty(): maps,ee,child_err=q.get_nowait()
-                except Exception as e: child_err=f"result_read:{type(e).__name__}"
-                if child_err:
-                    ee=[{'listing_id':str(x['lid']),'error':f'{label}_{child_err}'} for x in ch]
-                for lid,mpx in maps.items(): out[str(lid)]=mpx; dates.update(mpx.keys())
-                got=set(map(str,maps.keys())); failed.extend([x for x in ch if str(x['lid']) not in got])
-                errs.extend(ee); processed_counter[0]+=len(ch)
+                    if not q.empty():
+                        rl,rm,re=q.get_nowait()
+                        if rm is not None and str(rl)==lid: nm=rm; got=True
+                        child_err=re
+                except Exception as e:
+                    child_err=f'result_read:{type(e).__name__}'
+                if got:
+                    out[lid]=nm; dates.update(nm.keys())
+                else:
+                    failed.append(item)
+                    errs.append({'listing_id':lid,'error':f'{label}_item_error:{child_err or "no_result"}'})
+                processed_counter[0]+=1
                 cov=100*len(out)/max(1,total)
-                _v850_write(status='running',phase='batch_prices',message=f'V8.50O {label} {processed_counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,error=None)
+                _v850_write(status='running',phase='batch_prices',message=f'V8.50Q {label} {processed_counter[0]}/{total} processed · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)} · isolated item',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing=lid,price_coverage_pct=cov,error=None)
                 try:q.close()
                 except Exception:pass
                 active.remove(job); progressed=True; continue
-            if time.time()-t0>timeout_sec:
-                try:p.terminate(); p.join(1)
+            if time.time()-t0>hard_timeout:
+                try:p.terminate();p.join(1)
                 except Exception:pass
                 if p.is_alive():
-                    try:p.kill(); p.join(1)
+                    try:p.kill();p.join(1)
                     except Exception:pass
-                ee=[{'listing_id':str(x['lid']),'error':f'{label}_hard_timeout_{timeout_sec}s'} for x in ch]
-                failed.extend(ch); errs.extend(ee); processed_counter[0]+=len(ch)
+                failed.append(item);errs.append({'listing_id':lid,'error':f'{label}_item_hard_timeout_{hard_timeout}s'})
+                processed_counter[0]+=1
                 cov=100*len(out)/max(1,total)
-                _v850_write(status='running',phase='batch_prices',message=f'V8.50O {label} HARD TIMEOUT {processed_counter[0]}/{total} · skipped batch {len(ch)} · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,error=None)
+                _v850_write(status='running',phase='batch_prices',message=f'V8.50Q {label} HARD TIMEOUT {processed_counter[0]}/{total} · skipped 1 item · ready {len(out)}/{total} ({cov:.2f}%) · errors {len(errs)}',processed=min(total,processed_counter[0]),total=total,errors=len(errs),current_listing=lid,price_coverage_pct=cov,error=None)
                 try:q.close()
                 except Exception:pass
-                active.remove(job); progressed=True
-        if not progressed:
-            time.sleep(0.15)
+                active.remove(job);progressed=True
+        if not progressed:time.sleep(0.05)
     return failed
 
 
@@ -73199,7 +73212,7 @@ def _v850o_inventory(lids):
             except Exception:
                 missing.append(lid);counts['tail_missing']+=1
         if i==0 or (i+1)%500==0:
-            _v850_write(status='running',phase='inventory',message=f'V8.50O inventory {i+1}/{total} · trusted assets {len(prefix)}/{trusted} · tail assets {len(tail)} · missing {len(missing)}',processed=i+1,total=total,errors=len(missing),current_listing='',inventory=counts,error=None)
+            _v850_write(status='running',phase='inventory',message=f'V8.50Q inventory {i+1}/{total} · trusted assets {len(prefix)}/{trusted} · tail assets {len(tail)} · missing {len(missing)}',processed=i+1,total=total,errors=len(missing),current_listing='',inventory=counts,error=None)
     return ids,trusted,prefix,tail,missing,counts
 
 
@@ -73210,7 +73223,7 @@ def _v850_prices_progress(lids):
     # IMPORTANT: trusted prefix is REUSE ONLY. No source rebuild and no serial loop.
     errs.extend({'listing_id':x,'error':'trusted_prefix_asset_missing'} for x in missing if ids.index(x)<trusted)
     _v850_write(status='running',phase='inventory_done',
-                message=f'V8.50O inventory done · TRUSTED prefix {len(prefix)}/{trusted} assets · tail {len(tail)} · missing {len(missing)} · parallel prefix read next',
+                message=f'V8.50Q inventory done · TRUSTED prefix {len(prefix)}/{trusted} assets · tail {len(tail)} · missing {len(missing)} · parallel prefix read next',
                 processed=0,total=total,errors=len(errs),current_listing='',inventory=counts,
                 projected_coverage_pct=100*len(prefix+tail)/max(1,total),error=None)
     if 100*len(prefix+tail)/max(1,total)<95:
@@ -73218,7 +73231,7 @@ def _v850_prices_progress(lids):
 
     counter=[0]
     # Phase A: all observed-good prefix shards, batched + parallel. No rebuild.
-    _v850_write(status='running',phase='trusted_prefix',message=f'V8.50O TRUSTED PREFIX BATCH REUSE starting {len(prefix)}/{trusted} · batch {V850O_PREFIX_BATCH_SIZE} · workers {V850O_WORKERS}',processed=0,total=total,errors=len(errs),current_listing='',error=None)
+    _v850_write(status='running',phase='trusted_prefix',message=f'V8.50Q ITEM-ISOLATED PRICE LOADER starting {len(prefix)}/{trusted} · batch {V850O_PREFIX_BATCH_SIZE} · workers {V850O_WORKERS}',processed=0,total=total,errors=len(errs),current_listing='',error=None)
     prefix_failed=_v850o_run_batches(prefix,V850O_PREFIX_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TRUSTED_PREFIX',total,out,dates,errs,counter)
 
     # Phase B: untrusted tail uses the already-proven isolated batch route.
@@ -73236,20 +73249,20 @@ def _v850_prices_progress(lids):
             else:errs.append({'listing_id':lid,'error':'tail_shard_failed_no_source'})
         except Exception:errs.append({'listing_id':lid,'error':'tail_shard_failed_no_source'})
     if repair:
-        _v850_write(status='running',phase='repair',message=f'V8.50O one-pass tail source repair {len(repair)}',processed=counter[0],total=total,errors=len(errs),current_listing='',error=None)
+        _v850_write(status='running',phase='repair',message=f'V8.50Q one-pass tail source repair {len(repair)}',processed=counter[0],total=total,errors=len(errs),current_listing='',error=None)
         _v850o_run_batches(repair,V850O_TAIL_SOURCE_BATCH_SIZE,V850O_BATCH_TIMEOUT,'TAIL_REPAIR',total,out,dates,errs,counter)
 
     cov=100*len(out)/max(1,total)
     # Trusted prefix failures are explicit; coverage is the gate. Do not pretend
     # missing prefix data was rebuilt.
-    _v850_write(status='running',phase='prices_done',message=f'V8.50O PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · elapsed {time.time()-t0:.1f}s · proceeding to CONTROL parity',processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=counts,error=None)
+    _v850_write(status='running',phase='prices_done',message=f'V8.50Q PRICE STORE READY · {len(out)}/{total} = {cov:.2f}% · elapsed {time.time()-t0:.1f}s · proceeding to CONTROL parity',processed=total,total=total,errors=len(errs),current_listing='',price_coverage_pct=cov,inventory=counts,error=None)
     if cov<95:raise RuntimeError(f'Price store coverage below 95%: {cov:.2f}%')
     return out,sorted(dates),errs
 
 
 _v850o_preflight_base=_v850_preflight
 def _v850_preflight():
-    o=_v850o_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50O'
+    o=_v850o_preflight_base();o['build_id']=V850_BUILD_ID;o['version']='V8.50Q'
     o['engineering']='Trusted 3260 prefix is never rebuilt and never walked serially; existing shards are batch-read in parallel subprocesses. Tail uses isolated batch shard/source route plus one repair pass. Frozen economics and trigger/entry/STOP/exit.'
     try:V850_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     except Exception:pass
@@ -73259,7 +73272,7 @@ _v850o_home_base=APP.view_functions.get('home') or APP.view_functions.get('index
 if _v850o_home_base is not None:
     def _v850o_home_wrap(*args,**kwargs):
         resp=_v850o_home_base(*args,**kwargs)
-        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50O Trusted Prefix Batch Reuse</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50O</button></a></div>"""
+        card="""<div id='v850o-home-card' style='background:#ecfdf5;border:7px solid #059669;border-radius:26px;padding:26px;margin:20px 0'><h2>⚡ V8.50Q Trusted Prefix Batch Reuse</h2><p>前 3,260 observed-good prefix 不重建、不逐只读取；改为并行 batch reuse。Tail 才做 isolated shard/source。≥95% coverage + frozen CONTROL parity 才进入 BLACK→NORMAL。</p><a href='/v850'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.50O</button></a></div>"""
         if hasattr(resp,'get_data'):
             body=resp.get_data(as_text=True)
             if 'v850o-home-card' not in body:
