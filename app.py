@@ -71043,3 +71043,291 @@ if _v846a_home_base is not None:
         return card+str(resp)
     for ep,vf in list(APP.view_functions.items()):
         if vf is _v846a_home_base:APP.view_functions[ep]=_v846a_home_wrap
+
+# =============================================================================
+# V8.46B SYSTEMIC-RISK / EMERGENCY-BRAKE SIGNAL AUDIT — DIAGNOSTIC ONLY
+# Correct research order after V8.45: diagnose whether the 2008-style portfolio
+# collapse was visible in point-in-time cross-sectional stress BEFORE inventing
+# any deleveraging/liquidation rule. No economic brake replay in this version.
+# =============================================================================
+V846B_DIR = DATA_DIR / 'v846b_systemic_risk_emergency_brake_signal_audit'
+V846B_PREFLIGHT = V846B_DIR / 'preflight.json'
+V846B_STATUS = V846B_DIR / 'status.json'
+V846B_RESULT = V846B_DIR / 'result.json'
+V846B_DAILY = V846B_DIR / 'daily_systemic_risk_panel.csv.gz'
+V846B_EVENTS = V846B_DIR / 'stress_concurrence_events.csv'
+V846B_BUILD_ID = 'v846b-systemic-risk-emergency-brake-signal-audit-20260903'
+v846b_thread = None
+
+
+def _v846b_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V846B_STATUS.exists():
+        try:x.update(json.loads(V846B_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v846b_write(**kw):
+    V846B_DIR.mkdir(parents=True,exist_ok=True);x=_v846b_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V846B_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v846b_alive():return v846b_thread is not None and v846b_thread.is_alive()
+
+
+def _v846b_preflight():
+    import time
+    t0=time.time();V846B_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        R44,L=_v845_load()
+        if not V845_RESULT.exists():raise RuntimeError('V8.45 result missing; run V8.45 first')
+        R45=json.loads(V845_RESULT.read_text(encoding='utf-8'))
+        if not str(R45.get('verdict','')).startswith('MAXDD_FORENSICS__CONCENTRATED'):
+            raise RuntimeError('V8.45 concentrated-crisis diagnosis not present')
+        b=L[L.variant.eq('BASE')];t=L[L.variant.eq('TIGHT_PIVOT_SHADOW')]
+        out={'version':'V8.46B','build_id':V846B_BUILD_ID,'verdict':'PASS' if len(b)==233 and len(t)==198 else 'FAIL__FROZEN_LEDGER_COUNT_PARITY',
+             'error':None,'base_rows':int(len(b)),'tight_rows':int(len(t)),'unique_listings':int(L.listing_id.nunique()),
+             'v845_verdict':R45.get('verdict'),
+             'purpose':'Point-in-time systemic-risk diagnosis before any Emergency Brake action rule.',
+             'signals':['Tight open-position 1d/3d/5d negative breadth','admitted-stock proxy 1d/3d/5d negative breadth','admitted-stock proxy EW 1d/3d/5d return','3d/5d STOP-exit cascade','5d new-entry flow','frozen Tight equity drawdown'],
+             'important':'Diagnostic only. Historical 95th-percentile stress concurrence is descriptive, not a production threshold and not an economic backtest.',
+             'hard_exclusions':['NO liquidation rule','NO exposure cut','NO shorting','NO partial-profit combination','NO stop mutation','NO admission/ranking change','NO threshold/grid search','NO Tiingo','NO universe rescan'],
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.46B','build_id':V846B_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V846B_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v846b_prices(lids):
+    import pandas as pd,numpy as np,time
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()};ids=sorted(set(map(str,lids)))
+    out={};dates=set();errs=[];t0=time.time()
+    for n,lid in enumerate(ids,1):
+        mr=mmap.get(lid)
+        if mr is None:errs.append({'listing_id':lid,'error':'manifest_missing'})
+        else:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception as ex:q=None;errs.append({'listing_id':lid,'error':f'{type(ex).__name__}: {ex}'})
+            if q is None or q.empty:
+                if not any(x.get('listing_id')==lid for x in errs):errs.append({'listing_id':lid,'error':'price_empty'})
+            else:
+                z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+                mp={}
+                for _,r in z.iterrows():
+                    try:
+                        dt=pd.Timestamp(r['date']).normalize();cl=float(r['close'])
+                        if np.isfinite(cl) and cl>0:mp[dt]=cl
+                    except Exception:continue
+                if mp:out[lid]=mp;dates.update(mp.keys())
+                else:errs.append({'listing_id':lid,'error':'no_valid_close'})
+        if n==1 or n%20==0 or n==len(ids):
+            _v846b_write(status='running',phase='prices',message=f'Loading admitted-stock cached CLOSE {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),elapsed_sec=round(time.time()-t0,1),error=None)
+    return out,sorted(dates),errs
+
+
+def _v846b_stress_panel(L,price,cal):
+    import pandas as pd,numpy as np
+    # Frozen Tight control curve: exact same ledger, no overlay.
+    # Reuse V8.46A simulator control only; no partial sale and no admission changes.
+    C,_=_v846a_simulate(L,{lid:{d:{'open':v,'close':v} for d,v in mp.items()} for lid,mp in price.items()},cal,'TIGHT_PIVOT_SHADOW',partial=False)
+    ceq={pd.Timestamp(r.date).normalize():r for _,r in C.iterrows()}
+    T=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].copy()
+    T['entry_date']=pd.to_datetime(T.entry_date).dt.normalize();T['exit_date']=pd.to_datetime(T.exit_date).dt.normalize()
+    stops=T[T.reason.astype(str).str.upper().str.contains('STOP',na=False)].copy()
+    rows=[];idx={d:i for i,d in enumerate(cal)}
+    def ret(lid,dt,k):
+        i=idx.get(dt)
+        if i is None or i<k:return np.nan
+        d0=cal[i-k];a=price.get(lid,{}).get(d0);b=price.get(lid,{}).get(dt)
+        return (b/a-1) if a and b and a>0 else np.nan
+    for j,dt in enumerate(cal):
+        dt=pd.Timestamp(dt).normalize()
+        open_ids=T[(T.entry_date<=dt)&(T.exit_date>=dt)].listing_id.astype(str).tolist()
+        all_ids=[lid for lid,mp in price.items() if dt in mp]
+        rec={'date':dt,'open_n':len(open_ids),'proxy_n':len(all_ids)}
+        for k in (1,3,5):
+            ro=np.array([ret(lid,dt,k) for lid in open_ids],dtype=float);ro=ro[np.isfinite(ro)]
+            rp=np.array([ret(lid,dt,k) for lid in all_ids],dtype=float);rp=rp[np.isfinite(rp)]
+            rec[f'tight_neg_{k}d_pct']=float((ro<0).mean()) if len(ro)>=2 else np.nan
+            rec[f'tight_ew_ret_{k}d']=float(ro.mean()) if len(ro)>=2 else np.nan
+            rec[f'proxy_neg_{k}d_pct']=float((rp<0).mean()) if len(rp)>=20 else np.nan
+            rec[f'proxy_ew_ret_{k}d']=float(rp.mean()) if len(rp)>=20 else np.nan
+        # STOP cascade and entry flow use only information known through this close.
+        rec['stop_3d']=int(((stops.exit_date<=dt)&(stops.exit_date>=dt-pd.Timedelta(days=4))).sum())
+        rec['stop_5d']=int(((stops.exit_date<=dt)&(stops.exit_date>=dt-pd.Timedelta(days=7))).sum())
+        rec['entries_5d']=int(((T.entry_date<=dt)&(T.entry_date>=dt-pd.Timedelta(days=7))).sum())
+        q=ceq.get(dt)
+        rec['equity']=float(q.equity) if q is not None else np.nan;rec['drawdown']=float(q.drawdown) if q is not None else np.nan
+        rows.append(rec)
+        if j==0 or (j+1)%500==0 or j+1==len(cal):
+            _v846b_write(status='running',phase='panel',message=f'Building point-in-time stress panel {j+1}/{len(cal)}',processed=j+1,total=len(cal),errors=0,error=None)
+    D=pd.DataFrame(rows)
+    return D
+
+
+def _v846b_rank_stress(D):
+    import pandas as pd,numpy as np
+    # Descriptive all-history percentiles only. This is explicitly NOT a deployable threshold.
+    hi=['tight_neg_3d_pct','proxy_neg_3d_pct','stop_5d']
+    lo=['tight_ew_ret_5d','proxy_ew_ret_5d']
+    for c in hi:
+        D[c+'_stress_pct']=D[c].rank(pct=True,method='average')
+    for c in lo:
+        D[c+'_stress_pct']=1-D[c].rank(pct=True,method='average')
+    scols=[c+'_stress_pct' for c in hi+lo]
+    D['stress95_count']=sum((D[c]>=.95).astype(int) for c in scols)
+    D['stress90_count']=sum((D[c]>=.90).astype(int) for c in scols)
+    return D,scols
+
+
+def _v846b_event_table(D):
+    import pandas as pd,numpy as np
+    # Descriptive concurrence: >=3 of 5 stress measures at >=95th historical percentile.
+    # Separate events by 20 sessions to avoid counting the same crash every day.
+    cand=D.index[D.stress95_count>=3].tolist();keep=[];last=-999
+    for i in cand:
+        if i-last>=20:keep.append(i);last=i
+    out=[]
+    for i in keep:
+        r=D.loc[i];e0=float(r.equity) if np.isfinite(r.equity) else np.nan
+        forw=D.iloc[i:min(len(D),i+61)].copy()
+        row={'date':str(pd.Timestamp(r.date).date()),'stress95_count':int(r.stress95_count),'open_n':int(r.open_n),
+             'proxy_neg_3d_pct':r.proxy_neg_3d_pct,'proxy_ew_ret_5d':r.proxy_ew_ret_5d,'tight_neg_3d_pct':r.tight_neg_3d_pct,
+             'tight_ew_ret_5d':r.tight_ew_ret_5d,'stop_5d':int(r.stop_5d)}
+        for h in (20,60):
+            x=D.iloc[i:min(len(D),i+h+1)].copy()
+            if e0>0 and len(x):
+                row[f'next_{h}d_return']=float(x.equity.iloc[-1]/e0-1)
+                row[f'next_{h}d_worst_dd_from_signal']=float((x.equity/e0-1).min())
+            else:row[f'next_{h}d_return']=np.nan;row[f'next_{h}d_worst_dd_from_signal']=np.nan
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+def _v846b_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v846b_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.46B preflight must PASS: '+str(pf.get('verdict')))
+    R44,L=_v845_load();R45=json.loads(V845_RESULT.read_text(encoding='utf-8'))
+    ids=L.listing_id.unique();_v846b_write(status='running',phase='prices',message='Loading point-in-time admitted-stock market proxy',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v846b_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'cached CLOSE coverage too low: {cov:.2f}%')
+    D=_v846b_stress_panel(L,price,cal);D,scols=_v846b_rank_stress(D);E=_v846b_event_table(D)
+    # Exact Tight MaxDD window comes from V8.45 result, otherwise recover directly from panel.
+    win={x.get('strategy'):x for x in R45.get('maxdd_windows',[])}.get('TIGHT_PIVOT_SHADOW',{})
+    peak=pd.to_datetime(win.get('peak'),errors='coerce')
+    trough=pd.to_datetime(win.get('trough'),errors='coerce')
+    if pd.isna(peak):
+        ti=int(D.drawdown.idxmin());trough=pd.Timestamp(D.loc[ti,'date']);peak=pd.Timestamp(D.loc[:ti].equity.idxmax()) if False else pd.Timestamp(D.loc[D.loc[:ti].equity.idxmax(),'date'])
+    # 20 sessions before peak through trough: where was first descriptive concurrence?
+    pidx=int((D.date-peak).abs().idxmin());tidx=int((D.date-trough).abs().idxmin())
+    a=max(0,pidx-20);b=min(len(D)-1,tidx);W=D.iloc[a:b+1].copy();hit=W[W.stress95_count>=3]
+    first_hit=None
+    if len(hit):
+        rr=hit.iloc[0];first_hit={'date':str(pd.Timestamp(rr.date).date()),'sessions_vs_peak':int(hit.index[0]-pidx),'stress95_count':int(rr.stress95_count),
+                                 'proxy_neg_3d_pct':float(rr.proxy_neg_3d_pct) if np.isfinite(rr.proxy_neg_3d_pct) else None,
+                                 'proxy_ew_ret_5d':float(rr.proxy_ew_ret_5d) if np.isfinite(rr.proxy_ew_ret_5d) else None,
+                                 'tight_neg_3d_pct':float(rr.tight_neg_3d_pct) if np.isfinite(rr.tight_neg_3d_pct) else None,
+                                 'stop_5d':int(rr.stop_5d)}
+    # Signal distribution inside crisis vs normal history.
+    crisis=D[(D.date>=peak)&(D.date<=trough)].copy();normal=D[(D.date<peak)|(D.date>trough)].copy()
+    summ={}
+    for c in ['tight_neg_3d_pct','proxy_neg_3d_pct','tight_ew_ret_5d','proxy_ew_ret_5d','stop_5d','stress95_count']:
+        summ[c]={'crisis_median':float(pd.to_numeric(crisis[c],errors='coerce').median()),'normal_median':float(pd.to_numeric(normal[c],errors='coerce').median()),
+                 'crisis_p90':float(pd.to_numeric(crisis[c],errors='coerce').quantile(.90)),'normal_p90':float(pd.to_numeric(normal[c],errors='coerce').quantile(.90))}
+    # Does 2008 register as one of the strongest concurrence events?
+    crisis_events=E[(pd.to_datetime(E.date)>=peak-pd.Timedelta(days=60))&(pd.to_datetime(E.date)<=trough)] if len(E) else E
+    if len(crisis_events) and first_hit:
+        verdict='SYSTEMIC_STRESS_IS_VISIBLE_AROUND_2008_CLUSTER__DESIGN_BRAKE_NEXT'
+    elif len(crisis_events):
+        verdict='SYSTEMIC_STRESS_VISIBLE_BUT_NOT_EARLY__DO_NOT_DEPLOY_BRAKE_YET'
+    else:
+        verdict='NO_ROBUST_SYSTEMIC_STRESS_CONCURRENCE__DO_NOT_INVENT_BRAKE'
+    result={'version':'V8.46B','build_id':V846B_BUILD_ID,'verdict':verdict,'price_coverage_pct':cov,'price_errors':errs[:100],
+            'maxdd_window':{'peak':str(pd.Timestamp(peak).date()),'trough':str(pd.Timestamp(trough).date())},'first_descriptive_stress_hit':first_hit,
+            'stress_percentile_columns':scols,'stress95_definition':'DESCRIPTIVE ONLY: >=3 of 5 point-in-time stress measures at >=95th percentile over the full historical panel; not a production threshold.',
+            'crisis_vs_normal':summ,'event_count':int(len(E)),'crisis_event_count':int(len(crisis_events)),
+            'top_events':E.sort_values(['stress95_count','next_20d_worst_dd_from_signal'],ascending=[False,True]).head(15).to_dict('records') if len(E) else [],
+            'interpretation':'This audit asks whether broad synchronous weakness, portfolio breadth deterioration and STOP clustering were already visible around the Tight 2008 MaxDD. It does not claim that the descriptive 95th-percentile concurrence is a tradable rule.',
+            'next':'If stress is visibly early/recurrent, V8.47 should predeclare ONE causal Emergency-Brake action ladder (pause new entries -> reduce exposure -> cash) and test false alarms / CAGR / MaxDD. Do not combine partial profit or shorting yet.',
+            'hard_exclusions':pf.get('hard_exclusions'),'elapsed_sec':round(time.time()-t0,1)}
+    V846B_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    D.to_csv(V846B_DAILY,index=False,compression='gzip');E.to_csv(V846B_EVENTS,index=False)
+    _v846b_write(status='done',phase='complete',message='Done · '+verdict,processed=len(D),total=len(D),errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+
+def _v846b_worker():
+    global v846b_thread
+    import time
+    t0=time.time()
+    try:_v846b_run()
+    except Exception as ex:_v846b_write(status='error',phase='failed',message='V8.46B failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v846b_thread=None
+
+
+@APP.route('/v846b/preflight',methods=['GET','POST'])
+def v846b_preflight_route():_v846b_preflight();return redirect('/v846b')
+
+@APP.route('/v846b/run',methods=['GET','POST'])
+def v846b_run_route():
+    global v846b_thread
+    if not _v846b_alive():
+        p=_v846b_preflight()
+        if p.get('verdict')=='PASS':
+            _v846b_write(status='starting',phase='queued',message='Systemic-risk diagnostic accepted',processed=0,total=0,errors=0,error=None)
+            v846b_thread=threading.Thread(target=_v846b_worker,daemon=True);v846b_thread.start()
+    return redirect('/v846b')
+
+@APP.get('/api/v846b/status')
+def v846b_status_api():return jsonify(_v846b_status())
+
+@APP.get('/v846b/export/<name>')
+def v846b_export(name):
+    mp={'daily':V846B_DAILY,'events':V846B_EVENTS};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+@APP.get('/v846b')
+def v846b_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v846b_status()
+    try:
+        if V846B_PREFLIGHT.exists():P=json.loads(V846B_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V846B_RESULT.exists():R=json.loads(V846B_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    fh=R.get('first_descriptive_stress_hit') or {};sm=R.get('crisis_vs_normal',{})
+    sr=''.join(f"<tr><td>{e(k)}</td><td>{n(v.get('crisis_median'),3)}</td><td>{n(v.get('normal_median'),3)}</td><td>{n(v.get('crisis_p90'),3)}</td><td>{n(v.get('normal_p90'),3)}</td></tr>" for k,v in sm.items())
+    er=''
+    for x in R.get('top_events',[]):
+        er+=f"<tr><td>{e(x.get('date'))}</td><td>{e(x.get('stress95_count'))}</td><td>{n(100*x.get('proxy_neg_3d_pct',0))}%</td><td>{n(100*x.get('proxy_ew_ret_5d',0))}%</td><td>{e(x.get('stop_5d'))}</td><td>{n(100*x.get('next_20d_worst_dd_from_signal',0))}%</td></tr>"
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1150px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.46B Systemic Risk / Emergency Brake Signal Audit</h1><div class="o"><b>顺序回到主线：先诊断，后设计刹车。</b> 只检查 2008 式系统性风险在当时是否已经从持仓同步下跌、admitted-stock 广度、5日市场代理回报和 STOP cascade 中显现。<b>本版不清仓、不减仓、不做空。</b></div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V846B_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>BASE {e(P.get('base_rows','—'))} · Tight {e(P.get('tight_rows','—'))} · Listings {e(P.get('unique_listings','—'))}</p><form method="post" action="/v846b/preflight"><button>A. Run V8.46B Preflight</button></form><br><form method="post" action="/v846b/run"><button>B. Run Systemic-Risk Diagnostic</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Errors {e(S.get('errors'))} · Runtime Error {e(S.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div></div>
+<div class="c"><h2>Tight MaxDD Window</h2><p>Peak: <b>{e((R.get('maxdd_window') or {}).get('peak','—'))}</b> · Trough: <b>{e((R.get('maxdd_window') or {}).get('trough','—'))}</b></p><p>First descriptive stress hit: <b>{e(fh.get('date','—'))}</b> · sessions vs peak: <b>{e(fh.get('sessions_vs_peak','—'))}</b> · stress measures ≥95th pct: <b>{e(fh.get('stress95_count','—'))}</b></p></div>
+<div class="c"><h2>Crisis vs Normal</h2><div style="overflow:auto"><table><tr><th>Signal</th><th>Crisis median</th><th>Normal median</th><th>Crisis p90</th><th>Normal p90</th></tr>{sr or '<tr><td colspan=5>Run first.</td></tr>'}</table></div></div>
+<div class="c"><h2>Historical Stress-Concurrence Events</h2><p>All events: {e(R.get('event_count','—'))} · Around 2008 MaxDD: {e(R.get('crisis_event_count','—'))}</p><div style="overflow:auto"><table><tr><th>Date</th><th>95% stress count</th><th>Proxy neg 3d</th><th>Proxy EW 5d</th><th>STOP 5d</th><th>Next 20d worst DD</th></tr>{er or '<tr><td colspan=6>Run first.</td></tr>'}</table></div></div>
+<div class="c"><div class="o"><b>Important:</b> {e(R.get('stress95_definition',P.get('important','Diagnostic only.')))}<br><br><b>Interpretation:</b> {e(R.get('interpretation','—'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v846b/export/daily'>Daily risk panel CSV.GZ</a> · <a href='/v846b/export/events'>Stress events CSV</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+# Mandatory homepage card for V8.46B.
+_v846b_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v846b_home_base is not None:
+    def _v846b_home_wrap(*args,**kwargs):
+        resp=_v846b_home_base(*args,**kwargs)
+        card="""<div id='v846b-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'><h2>🚨 V8.46B Systemic Risk / Emergency Brake Signal Audit</h2><p>回到正确主线：先检查 2008 式系统性风险能否从同步下跌、广度与 STOP cascade 提前看见；本版只诊断，不减仓、不清仓、不做空。</p><a href='/v846b'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.46B</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v846b-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v846b_home_base:APP.view_functions[ep]=_v846b_home_wrap
