@@ -70437,3 +70437,317 @@ def _v844_preflight():
     o['engineering_hotfix']='Load last completed V8.44A price checkpoint once; disable giant nested price-map pickle/fsync writes that stalled exactly on checkpoint boundaries. Heartbeat every 25 remains. Strategy semantics unchanged.'
     V844_PREFLIGHT.write_text(json.dumps(o,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     return o
+
+# =============================================================================
+# V8.45 TIGHT PIVOT MAXDD PATH FORENSICS
+# Purpose: explain whether V8.44B TIGHT_PIVOT_SHADOW's -92.78% MaxDD is a
+# concentrated episode / a few trade clusters, or a broad persistent path problem.
+# Diagnostic only: consumes the frozen V8.44 admitted ledger and cached daily prices.
+# NO candidate/gate/threshold changes, NO strategy replay / admission changes, 0 Tiingo.
+# =============================================================================
+V845_DIR = DATA_DIR / 'v845_tight_pivot_maxdd_path_forensics'
+V845_PREFLIGHT = V845_DIR / 'preflight.json'
+V845_STATUS = V845_DIR / 'status.json'
+V845_RESULT = V845_DIR / 'result.json'
+V845_TRADE_ATTR = V845_DIR / 'drawdown_trade_attribution.csv'
+V845_CURVES = V845_DIR / 'reconstructed_equity_curves.csv.gz'
+V845_BUILD_ID = 'v845-tight-pivot-maxdd-path-forensics-20260903'
+v845_thread = None
+
+
+def _v845_status():
+    x={'status':'idle','phase':'','message':'尚未开始','processed':0,'total':0,'errors':0,'error':None,'elapsed_sec':0,'last_heartbeat':None}
+    if V845_STATUS.exists():
+        try:x.update(json.loads(V845_STATUS.read_text(encoding='utf-8')))
+        except Exception:pass
+    return x
+
+
+def _v845_write(**kw):
+    V845_DIR.mkdir(parents=True,exist_ok=True);x=_v845_status();x.update(kw);x['last_heartbeat']=datetime.now(timezone.utc).isoformat()
+    V845_STATUS.write_text(json.dumps(x,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return x
+
+
+def _v845_alive():return v845_thread is not None and v845_thread.is_alive()
+
+
+def _v845_load():
+    import pandas as pd
+    if not V844_RESULT.exists():raise RuntimeError('V8.44 result missing')
+    if not V844_ADMITTED.exists():raise RuntimeError('V8.44 admitted ledger missing')
+    R=json.loads(V844_RESULT.read_text(encoding='utf-8'))
+    if not str(R.get('verdict','')).startswith('TIGHT_PIVOT_FAILS_RECOVERED_TRIGGER_CAUSAL_10_SLOT'):
+        raise RuntimeError('V8.44 frozen FAIL result not present / wrong lineage')
+    L=pd.read_csv(V844_ADMITTED,compression='gzip',low_memory=False)
+    req=['variant','listing_id','entry_date','exit_date','entry_px','exit_px','ret','pnl','reason','capital']
+    miss=[c for c in req if c not in L.columns]
+    if miss:raise RuntimeError('V8.44 admitted schema missing: '+','.join(miss))
+    for c in ['entry_date','exit_date']:L[c]=pd.to_datetime(L[c],errors='coerce').dt.normalize()
+    for c in ['entry_px','exit_px','ret','pnl','capital']:L[c]=pd.to_numeric(L[c],errors='coerce')
+    L['listing_id']=L['listing_id'].astype(str);L['variant']=L['variant'].astype(str)
+    L=L.dropna(subset=req[1:4]+['capital']).copy()
+    return R,L
+
+
+def _v845_preflight():
+    import time
+    t0=time.time();V845_DIR.mkdir(parents=True,exist_ok=True)
+    try:
+        R,L=_v845_load();P={x.get('strategy'):x for x in R.get('portfolio',[])}
+        b=L[L.variant.eq('BASE')];t=L[L.variant.eq('TIGHT_PIVOT_SHADOW')]
+        need_metrics=('BASE' in P and 'TIGHT_PIVOT_SHADOW' in P)
+        ledger_counts_ok=(len(b)==int(P.get('BASE',{}).get('admitted_positions',-1)) and len(t)==int(P.get('TIGHT_PIVOT_SHADOW',{}).get('admitted_positions',-1)))
+        verdict='PASS' if need_metrics and ledger_counts_ok and len(t)>=150 else 'FAIL__V844_LEDGER_OR_METRIC_PARITY'
+        out={'version':'V8.45','build_id':V845_BUILD_ID,'verdict':verdict,'error':None,
+             'v844_verdict':R.get('verdict'),'base_ledger_rows':int(len(b)),'tight_ledger_rows':int(len(t)),
+             'ledger_count_parity':bool(ledger_counts_ok),'unique_price_listings':int(L.listing_id.nunique()),
+             'purpose':'Determine whether Tight Pivot MaxDD failure is concentrated in a few trades/time clusters or persistent across the path.',
+             'frozen_contract':'Diagnostic only. Uses exact V8.44 admitted capital ledger + cached daily close MTM. No admission rerun, no threshold/gate/trigger/entry/STOP/exit/sizing change; 0 Tiingo; 0 universe rescan.',
+             'elapsed_sec':round(time.time()-t0,2)}
+    except Exception as ex:
+        out={'version':'V8.45','build_id':V845_BUILD_ID,'verdict':'ERROR','error':f'{type(ex).__name__}: {ex}','elapsed_sec':round(time.time()-t0,2)}
+    V845_PREFLIGHT.write_text(json.dumps(out,ensure_ascii=False,indent=2,default=str),encoding='utf-8');return out
+
+
+def _v845_prices(lids):
+    """Load only admitted-trade price histories. No V8.44 giant checkpoint and no candidate replay."""
+    import pandas as pd, numpy as np, time
+    M,lidcol=_v826a_manifest();mmap={str(r[lidcol]):r for _,r in M.iterrows()};ids=sorted(set(map(str,lids)))
+    out={};dates=set();errs=[];t0=time.time()
+    for n,lid in enumerate(ids,1):
+        mr=mmap.get(lid)
+        if mr is None:errs.append(lid)
+        else:
+            try:q,hi,amb=_v826a_prepare_price(mr)
+            except Exception:q=None
+            if q is None or q.empty:errs.append(lid)
+            else:
+                z=q[(q.date>=V624_START)&(q.date<=V624_END)].copy()
+                if z.empty:errs.append(lid)
+                else:
+                    out[lid]={pd.Timestamp(d).normalize():float(c) for d,c in zip(z.date,z.close) if pd.notna(d) and pd.notna(c) and np.isfinite(c)}
+                    dates.update(out[lid].keys())
+        if n==1 or n%20==0 or n==len(ids):
+            _v845_write(status='running',phase='prices',message=f'Loading admitted-only cached MTM {n}/{len(ids)} · {lid}',processed=n,total=len(ids),errors=len(errs),elapsed_sec=round(time.time()-t0,1),error=None)
+    return out,sorted(dates),errs
+
+
+def _v845_curve_from_ledger(L,price,cal,label):
+    """Reconstruct exact account path from frozen admitted capital amounts; no admission decisions are rerun."""
+    import pandas as pd,numpy as np
+    A=L[L.variant.eq(label)].sort_values(['entry_date','listing_id'],kind='stable').reset_index(drop=True)
+    rec=A.to_dict('index');ent={};ext={}
+    for i,r in rec.items():
+        ent.setdefault(pd.Timestamp(r['entry_date']).normalize(),[]).append(i);ext.setdefault(pd.Timestamp(r['exit_date']).normalize(),[]).append(i)
+    cash=1.0;pos={};last={};rows=[]
+    for dt in cal:
+        dt=pd.Timestamp(dt).normalize()
+        for i in ext.get(dt,[]):
+            p=pos.pop(i,None)
+            if p is None:continue
+            cash += p['capital'] + float(rec[i]['pnl']);last.pop(i,None)
+        for i in ent.get(dt,[]):
+            r=rec[i];cap=float(r['capital']);ep=float(r['entry_px']);cash-=cap
+            pos[i]={'listing_id':str(r['listing_id']),'entry_px':ep,'shares':cap/ep,'capital':cap,'entry_date':dt}
+            last[i]=ep
+        hv=0.0
+        for i,p in pos.items():
+            cp=price.get(p['listing_id'],{}).get(dt,last.get(i,p['entry_px']))
+            if not np.isfinite(cp) or cp<=0:cp=last.get(i,p['entry_px'])
+            last[i]=cp;hv+=p['shares']*cp
+        eq=cash+hv;rows.append((dt,eq,hv/eq if eq>0 else np.nan,len(pos)))
+    C=pd.DataFrame(rows,columns=['date','equity','exposure','open_n']);C['variant']=label
+    C['running_peak']=C.equity.cummax();C['drawdown']=C.equity/C.running_peak-1
+    return C
+
+
+def _v845_dd_window(C):
+    import pandas as pd,numpy as np
+    i=int(C.drawdown.idxmin());tr=C.loc[i];trough=pd.Timestamp(tr.date);peak_eq=float(tr.running_peak)
+    pre=C[C.date<=trough];pk=pre[pre.equity.eq(peak_eq)].iloc[-1];peak=pd.Timestamp(pk.date)
+    post=C[(C.date>trough)&(C.equity>=peak_eq-1e-12)]
+    recovery=pd.Timestamp(post.iloc[0].date) if len(post) else None
+    return {'peak_date':str(peak.date()),'trough_date':str(trough.date()),'recovery_date':str(recovery.date()) if recovery is not None else None,
+            'peak_equity':peak_eq,'trough_equity':float(tr.equity),'maxdd':float(tr.drawdown),
+            'peak_to_trough_days':int((trough-peak).days),'recovery_days':int((recovery-trough).days) if recovery is not None else None}
+
+
+def _v845_trade_contrib(L,price,dd,label):
+    import pandas as pd,numpy as np
+    A=L[L.variant.eq(label)].copy();pk=pd.Timestamp(dd['peak_date']);tr=pd.Timestamp(dd['trough_date']);peak_eq=float(dd['peak_equity']);rows=[]
+    for _,r in A.iterrows():
+        en=pd.Timestamp(r.entry_date);ex=pd.Timestamp(r.exit_date)
+        if ex < pk or en > tr:continue
+        s=max(en,pk);e=min(ex,tr);ep=float(r.entry_px);shares=float(r.capital)/ep
+        def mark(dt,is_end=False):
+            if dt==en:return ep
+            if dt==ex:return float(r.exit_px)
+            mp=price.get(str(r.listing_id),{});v=mp.get(pd.Timestamp(dt).normalize())
+            if v is None or not np.isfinite(v):
+                # use last available <= date; deterministic cache-only fallback
+                ks=[k for k in mp.keys() if k<=pd.Timestamp(dt).normalize()]
+                v=mp[max(ks)] if ks else ep
+            return float(v)
+        ps=mark(s);pe=mark(e,True);delta=shares*(pe-ps);contrib_pct=100*delta/peak_eq if peak_eq else np.nan
+        rows.append({'variant':label,'listing_id':str(r.listing_id),'entry_date':str(en.date()),'exit_date':str(ex.date()),'reason':str(r.reason),
+                     'trade_ret_pct':100*float(r.ret),'capital_pct_initial_equity':100*float(r.capital),'overlap_start':str(s.date()),'overlap_end':str(e.date()),
+                     'segment_start_px':ps,'segment_end_px':pe,'equity_contribution':delta,'peak_equity_contribution_pct':contrib_pct})
+    D=pd.DataFrame(rows)
+    if len(D):D=D.sort_values('equity_contribution',ascending=True,kind='stable').reset_index(drop=True)
+    return D
+
+
+def _v845_years(C):
+    import pandas as pd
+    Z=C.copy();Z['year']=pd.to_datetime(Z.date).dt.year;out=[]
+    for y,g in Z.groupby('year',sort=True):
+        if not len(g):continue
+        st=float(g.equity.iloc[0]);en=float(g.equity.iloc[-1]);dd=float((g.equity/g.equity.cummax()-1).min())
+        out.append({'year':int(y),'return_pct':100*(en/st-1) if st>0 else None,'within_year_maxdd_pct':100*dd,'avg_open':float(g.open_n.mean()),'avg_exposure_pct':100*float(g.exposure.mean())})
+    return out
+
+
+def _v845_path_classification(D,dd,years):
+    import numpy as np
+    if D is None or D.empty:return {'classification':'NO_OVERLAP_ATTRIBUTION','top1_loss_share_pct':None,'top5_loss_share_pct':None,'loss_contributor_n':0}
+    neg=D[D.equity_contribution<0].copy();total=float(-neg.equity_contribution.sum())
+    vals=(-neg.equity_contribution).sort_values(ascending=False).values
+    top1=100*float(vals[:1].sum()/total) if total>0 and len(vals) else 0.0;top5=100*float(vals[:5].sum()/total) if total>0 else 0.0
+    severe_years=sum(1 for x in years if x.get('within_year_maxdd_pct') is not None and x['within_year_maxdd_pct']<=-35)
+    if top5>=60 and len(neg)<=15:cls='CONCENTRATED_FEW_TRADES_OR_SINGLE_CLUSTER'
+    elif top5>=50:cls='CONCENTRATED_CLUSTER_DOMINATED'
+    elif severe_years>=3:cls='BROAD_PERSISTENT_PATH_PROBLEM'
+    else:cls='MIXED__NOT_A_SINGLE_OUTLIER_BUT_NOT_BROADLY_PERSISTENT'
+    return {'classification':cls,'top1_loss_share_pct':top1,'top5_loss_share_pct':top5,'loss_contributor_n':int(len(neg)),'severe_years_maxdd_le_35pct':int(severe_years)}
+
+
+def _v845_run():
+    import pandas as pd,numpy as np,time
+    t0=time.time();pf=_v845_preflight()
+    if pf.get('verdict')!='PASS':raise RuntimeError('V8.45 preflight must PASS: '+str(pf.get('verdict')))
+    R44,L=_v845_load();ids=L.listing_id.unique();_v845_write(status='running',phase='prices',message='Loading admitted-only cached prices',processed=0,total=len(ids),errors=0,error=None)
+    price,cal,errs=_v845_prices(ids);cov=100*len(price)/max(1,len(set(ids)))
+    if cov<95:raise RuntimeError(f'Admitted price coverage too low: {cov:.2f}%')
+    _v845_write(status='running',phase='reconstruct',message='Reconstructing exact frozen capital paths from admitted ledger',processed=1,total=4,errors=len(errs),error=None)
+    curves={};wins={};attrs=[];years={}
+    ref={x['strategy']:x for x in R44.get('portfolio',[])};parity={}
+    for j,label in enumerate(['BASE','TIGHT_PIVOT_SHADOW'],2):
+        C=_v845_curve_from_ledger(L,price,cal,label);curves[label]=C;dd=_v845_dd_window(C);wins[label]=dd;years[label]=_v845_years(C)
+        D=_v845_trade_contrib(L,price,dd,label);attrs.append(D)
+        maxdd=float(C.drawdown.min());start=float(C.equity.iloc[0]);end=float(C.equity.iloc[-1]);yrs=max((pd.Timestamp(C.date.iloc[-1])-pd.Timestamp(C.date.iloc[0])).days/365.25,1/365.25);cagr=(end/start)**(1/yrs)-1 if start>0 and end>0 else -1
+        rr=ref.get(label,{})
+        parity[label]={'reconstructed_maxdd_pct':100*maxdd,'v844_maxdd_pct':100*float(rr.get('maxdd',np.nan)),'maxdd_abs_diff_pp':100*abs(maxdd-float(rr.get('maxdd',maxdd))),
+                       'reconstructed_cagr_pct':100*cagr,'v844_cagr_pct':100*float(rr.get('cagr',np.nan)),'cagr_abs_diff_pp':100*abs(cagr-float(rr.get('cagr',cagr)))}
+        _v845_write(status='running',phase='attribution',message=f'Path attribution {label} complete',processed=j,total=4,errors=len(errs),error=None)
+    allD=pd.concat([x for x in attrs if x is not None and len(x)],ignore_index=True) if any(x is not None and len(x) for x in attrs) else pd.DataFrame()
+    tightD=next((x for x in attrs if x is not None and len(x) and x.variant.iloc[0]=='TIGHT_PIVOT_SHADOW'),pd.DataFrame())
+    cls=_v845_path_classification(tightD,wins['TIGHT_PIVOT_SHADOW'],years['TIGHT_PIVOT_SHADOW'])
+    # Admission-set displacement geometry.
+    B=L[L.variant.eq('BASE')].copy();T=L[L.variant.eq('TIGHT_PIVOT_SHADOW')].copy();K=['listing_id','entry_date']
+    bk=set(map(tuple,B[K].astype(str).values.tolist()));tk=set(map(tuple,T[K].astype(str).values.tolist()))
+    base_only=bk-tk;tight_only=tk-bk;common=bk&tk
+    def subset_stats(df,keys):
+        if not keys:return {'n':0,'avg_ret_pct':None,'stop_rate_pct':None,'winner20':0,'winner30':0}
+        m=df.apply(lambda r:(str(r.listing_id),str(r.entry_date)) in keys,axis=1);z=df[m]
+        return {'n':int(len(z)),'avg_ret_pct':100*float(z.ret.mean()) if len(z) else None,'stop_rate_pct':100*float(z.reason.astype(str).str.contains('STOP7',regex=False).mean()) if len(z) else None,
+                'winner20':int((z.ret>=.20).sum()),'winner30':int((z.ret>=.30).sum())}
+    displacement={'common_admitted':int(len(common)),'base_only_admitted':int(len(base_only)),'tight_only_admitted':int(len(tight_only)),
+                  'base_only_stats':subset_stats(B,base_only),'tight_only_stats':subset_stats(T,tight_only)}
+    # Exact parity must be strong before interpreting forensics.
+    parity_ok=all(v.get('maxdd_abs_diff_pp',99)<=0.10 and v.get('cagr_abs_diff_pp',99)<=0.10 for v in parity.values())
+    verdict=('MAXDD_FORENSICS__'+cls['classification']) if parity_ok else 'PATH_RECONSTRUCTION_PARITY_FAIL__DO_NOT_INTERPRET'
+    result={'version':'V8.45','build_id':V845_BUILD_ID,'verdict':verdict,'price_coverage_pct':cov,'price_errors':errs[:100],
+            'path_reconstruction_parity':parity,'parity_ok':bool(parity_ok),'maxdd_windows':wins,'tight_path_classification':cls,
+            'yearly_path':years,'admission_displacement':displacement,
+            'tight_worst_contributors':tightD.head(15).to_dict('records') if len(tightD) else [],
+            'base_worst_contributors':next((x.head(15).to_dict('records') for x in attrs if x is not None and len(x) and x.variant.iloc[0]=='BASE'),[]),
+            'hard_exclusions':['NO threshold tuning','NO tight-pivot mutation','NO new gate','NO admission/ranking change','NO entry/STOP/exit/sizing change','0 Tiingo','0 universe rescan'],
+            'interpretation':'This audit does not retry V8.44. It reconstructs the already-admitted account paths from frozen capital amounts, identifies exact peak-to-trough windows, and attributes the drawdown to overlapping trades/time concentration.',
+            'next':('If concentrated: inspect the exact cluster as a portfolio-risk/correlation problem before abandoning tight_pivot as a ranking feature. If broad/persistent: close tight_pivot as an admission gate and return to semantic reconstruction / ranking opportunity cost. Do not tune tightness threshold.'),
+            'elapsed_sec':round(time.time()-t0,1)}
+    V845_RESULT.write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
+    if len(allD):allD.to_csv(V845_TRADE_ATTR,index=False)
+    pd.concat([curves['BASE'],curves['TIGHT_PIVOT_SHADOW']],ignore_index=True).to_csv(V845_CURVES,index=False,compression='gzip')
+    _v845_write(status='done',phase='complete',message='Done · '+verdict,processed=4,total=4,errors=len(errs),elapsed_sec=result['elapsed_sec'],error=None);return result
+
+
+def _v845_worker():
+    global v845_thread
+    import traceback,time
+    t0=time.time()
+    try:_v845_run()
+    except Exception as ex:
+        _v845_write(status='error',phase='failed',message='V8.45 failed',error=f'{type(ex).__name__}: {ex}',errors=1,elapsed_sec=round(time.time()-t0,1))
+    finally:v845_thread=None
+
+
+@APP.route('/v845/preflight',methods=['GET','POST'])
+def v845_preflight_route():_v845_preflight();return redirect('/v845')
+
+@APP.route('/v845/run',methods=['GET','POST'])
+def v845_run_route():
+    global v845_thread
+    if not _v845_alive():
+        p=_v845_preflight()
+        if p.get('verdict')=='PASS':
+            _v845_write(status='starting',phase='queued',message='Frozen path-forensics accepted',processed=0,total=4,errors=0,error=None)
+            v845_thread=threading.Thread(target=_v845_worker,daemon=True);v845_thread.start()
+    return redirect('/v845')
+
+@APP.get('/api/v845/status')
+def v845_status_api():return jsonify(_v845_status())
+
+@APP.get('/v845/export/<name>')
+def v845_export(name):
+    mp={'trades':V845_TRADE_ATTR,'curves':V845_CURVES};p=mp.get(name)
+    if p is None or not p.exists():return ('not ready',404)
+    return send_file(p,as_attachment=True,download_name=p.name)
+
+@APP.get('/v845')
+def v845_page():
+    import html
+    e=lambda x:html.escape(str(x));P={};R={};S=_v845_status()
+    try:
+        if V845_PREFLIGHT.exists():P=json.loads(V845_PREFLIGHT.read_text(encoding='utf-8'))
+    except Exception:pass
+    try:
+        if V845_RESULT.exists():R=json.loads(V845_RESULT.read_text(encoding='utf-8'))
+    except Exception:pass
+    def n(v,d=2):
+        try:return f'{float(v):.{d}f}'
+        except:return '—'
+    W=R.get('maxdd_windows',{});TW=W.get('TIGHT_PIVOT_SHADOW',{});BW=W.get('BASE',{});C=R.get('tight_path_classification',{});D=R.get('admission_displacement',{});PAR=R.get('path_reconstruction_parity',{})
+    pr=''.join(f"<tr><td>{e(k)}</td><td>{n(v.get('v844_cagr_pct'))}%</td><td>{n(v.get('reconstructed_cagr_pct'))}%</td><td>{n(v.get('cagr_abs_diff_pp'),3)} pp</td><td>{n(v.get('v844_maxdd_pct'))}%</td><td>{n(v.get('reconstructed_maxdd_pct'))}%</td><td>{n(v.get('maxdd_abs_diff_pp'),3)} pp</td></tr>" for k,v in PAR.items())
+    yr=[]
+    by={x['year']:x for x in R.get('yearly_path',{}).get('BASE',[])};ty={x['year']:x for x in R.get('yearly_path',{}).get('TIGHT_PIVOT_SHADOW',[])}
+    for y in sorted(set(by)|set(ty)):
+        a=by.get(y,{});b=ty.get(y,{})
+        yr.append(f"<tr><td>{y}</td><td>{n(a.get('return_pct'))}%</td><td>{n(a.get('within_year_maxdd_pct'))}%</td><td>{n(b.get('return_pct'))}%</td><td>{n(b.get('within_year_maxdd_pct'))}%</td><td>{n(b.get('avg_open'))}</td></tr>")
+    wr=''.join(f"<tr><td>{e(x.get('listing_id'))}</td><td>{e(x.get('entry_date'))}</td><td>{e(x.get('exit_date'))}</td><td>{e(x.get('reason'))}</td><td>{n(x.get('trade_ret_pct'))}%</td><td>{n(x.get('peak_equity_contribution_pct'))}%</td></tr>" for x in R.get('tight_worst_contributors',[])[:12])
+    return f'''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f7fb;color:#0f172a}}.w{{max-width:1200px;margin:auto;padding:18px}}.c{{background:white;border-radius:22px;padding:24px;margin:16px 0}}.o{{border:2px solid #f59e0b;background:#fffbeb;border-radius:14px;padding:14px}}.g{{border:2px solid #10b981;background:#ecfdf5;border-radius:14px;padding:14px;font-weight:800;overflow-wrap:anywhere}}button{{background:#0f172a;color:#fff;border:0;border-radius:11px;padding:12px 16px;font-weight:800}}table{{width:100%;border-collapse:collapse;font-size:12px}}td,th{{padding:8px;border-bottom:1px solid #dbe3ef;text-align:left}}@media(max-width:800px){{.c{{padding:18px}}table{{font-size:10px}}}}</style></head><body><div class="w"><a href="/">← 首页</a>
+<div class="c"><h1>V8.45 Tight Pivot MaxDD Path Forensics</h1><div class="o"><b>只查 -92.78% MaxDD 是不是个别/集中情况。</b> 不重做 V8.44 admission；直接使用 V8.44B 已经实际 admitted 的 233 vs 198 笔和当时真实 capital，重建 MTM path。0 tuning · 0 Tiingo · 0 universe rescan。</div></div>
+<div class="c"><h2>Preflight: {e(P.get('verdict','NOT_RUN'))}</h2><p><b>Build:</b> {e(P.get('build_id',V845_BUILD_ID))} · <b>Error:</b> {e(P.get('error') or 'None')}</p><p>BASE ledger: <b>{e(P.get('base_ledger_rows','—'))}</b> · Tight ledger: <b>{e(P.get('tight_ledger_rows','—'))}</b> · Unique admitted listings: <b>{e(P.get('unique_price_listings','—'))}</b></p><form method="post" action="/v845/preflight"><button>A. Run V8.45 Preflight</button></form><br><form method="post" action="/v845/run"><button>B. Run MaxDD Path Forensics</button></form></div>
+<div class="c"><h2>Status</h2><p>{e(S.get('status'))} · {e(S.get('phase'))} · {e(S.get('message'))}</p><p>{e(S.get('processed'))}/{e(S.get('total'))} · Errors: {e(S.get('errors'))} · Runtime Error: {e(S.get('error') or 'None')}</p></div>
+<div class="c"><h2>Verdict</h2><div class="g">{e(R.get('verdict','—'))}</div><p><b>Path classification:</b> {e(C.get('classification','—'))} · Top-1 loss share: {n(C.get('top1_loss_share_pct'))}% · Top-5: {n(C.get('top5_loss_share_pct'))}% · Loss contributors: {e(C.get('loss_contributor_n','—'))}</p></div>
+<div class="c"><h2>Path Reconstruction Parity</h2><table><tr><th>Strategy</th><th>V8.44 CAGR</th><th>Recon CAGR</th><th>Diff</th><th>V8.44 MaxDD</th><th>Recon MaxDD</th><th>Diff</th></tr>{pr or '<tr><td colspan=7>Run first.</td></tr>'}</table></div>
+<div class="c"><h2>Exact MaxDD Window</h2><table><tr><th>Strategy</th><th>Peak</th><th>Trough</th><th>Recovery</th><th>Peak equity</th><th>Trough equity</th><th>MaxDD</th><th>Days</th></tr><tr><td>BASE</td><td>{e(BW.get('peak_date','—'))}</td><td>{e(BW.get('trough_date','—'))}</td><td>{e(BW.get('recovery_date','—'))}</td><td>{n(BW.get('peak_equity'),3)}</td><td>{n(BW.get('trough_equity'),3)}</td><td>{n(100*float(BW.get('maxdd',0)))}%</td><td>{e(BW.get('peak_to_trough_days','—'))}</td></tr><tr><td>TIGHT</td><td>{e(TW.get('peak_date','—'))}</td><td>{e(TW.get('trough_date','—'))}</td><td>{e(TW.get('recovery_date','—'))}</td><td>{n(TW.get('peak_equity'),3)}</td><td>{n(TW.get('trough_equity'),3)}</td><td>{n(100*float(TW.get('maxdd',0)))}%</td><td>{e(TW.get('peak_to_trough_days','—'))}</td></tr></table></div>
+<div class="c"><h2>Admission Displacement</h2><p>Common: <b>{e(D.get('common_admitted','—'))}</b> · BASE-only: <b>{e(D.get('base_only_admitted','—'))}</b> · Tight-only: <b>{e(D.get('tight_only_admitted','—'))}</b></p><p>BASE-only: avg {n(D.get('base_only_stats',{}).get('avg_ret_pct'))}% · STOP {n(D.get('base_only_stats',{}).get('stop_rate_pct'))}% · +20 {e(D.get('base_only_stats',{}).get('winner20','—'))}<br>Tight-only: avg {n(D.get('tight_only_stats',{}).get('avg_ret_pct'))}% · STOP {n(D.get('tight_only_stats',{}).get('stop_rate_pct'))}% · +20 {e(D.get('tight_only_stats',{}).get('winner20','—'))}</p></div>
+<div class="c"><h2>Tight MaxDD Worst Contributors</h2><table><tr><th>Listing</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Trade ret</th><th>Contribution vs peak equity</th></tr>{wr or '<tr><td colspan=6>Run first.</td></tr>'}</table></div>
+<div class="c"><h2>Year-by-Year Path</h2><div style="overflow:auto"><table><tr><th>Year</th><th>BASE return</th><th>BASE MaxDD</th><th>Tight return</th><th>Tight MaxDD</th><th>Tight avg open</th></tr>{''.join(yr) or '<tr><td colspan=6>Run first.</td></tr>'}</table></div></div>
+<div class="c"><div class="o"><b>Interpretation:</b> {e(R.get('interpretation','先跑 V8.45。'))}<br><br><b>Next:</b> {e(R.get('next','—'))}</div>{"<p><a href='/v845/export/trades'>Trade attribution CSV</a> · <a href='/v845/export/curves'>Equity curves CSV.GZ</a></p>" if R else ''}</div>
+</div></body></html>'''
+
+# Mandatory homepage card for V8.45.
+_v845_home_base = APP.view_functions.get('home') or APP.view_functions.get('index')
+if _v845_home_base is not None:
+    def _v845_home_wrap(*args,**kwargs):
+        resp=_v845_home_base(*args,**kwargs)
+        card="""<div id='v845-home-card-real' style='background:#fff7ed;border:7px solid #ea580c;border-radius:26px;padding:26px;margin:20px 0'><h2>🧪 V8.45 Tight Pivot MaxDD Path Forensics</h2><p>独立检查 V8.44B Tight 的 -92.78% MaxDD：是少数 trade/time cluster 造成，还是长期普遍路径问题。只读 admitted ledger + cached MTM；不调策略。</p><a href='/v845'><button style='background:#111827;color:white;border:0;border-radius:12px;padding:13px 18px;font-weight:900'>打开 V8.45</button></a></div>"""
+        if hasattr(resp,'get_data'):
+            body=resp.get_data(as_text=True)
+            if 'v845-home-card-real' not in body:
+                p=body.find('<body');gt=body.find('>',p) if p>=0 else -1;body=body[:gt+1]+card+body[gt+1:] if gt>=0 else card+body;resp.set_data(body)
+            return resp
+        return card+str(resp)
+    for ep,vf in list(APP.view_functions.items()):
+        if vf is _v845_home_base:APP.view_functions[ep]=_v845_home_wrap
